@@ -1,0 +1,17 @@
+[package]
+name = "meteor-ai"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "AI behavior systems"
+
+[dependencies]
+meteor-core = { path = "../meteor-core" }
+meteor-combat = { path = "../meteor-combat" }
+meteor-physics = { path = "../meteor-physics" }
+thiserror.workspace = true
+log.workspace = true
+
+[features]
+original-assets = []

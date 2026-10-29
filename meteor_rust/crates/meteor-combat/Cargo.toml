@@ -1,0 +1,18 @@
+[package]
+name = "meteor-combat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Combat rules, combos, and status effects"
+
+[dependencies]
+meteor-core = { path = "../meteor-core" }
+meteor-asset = { path = "../meteor-asset" }
+meteor-anim = { path = "../meteor-anim" }
+thiserror.workspace = true
+log.workspace = true
+serde.workspace = true
+
+[features]
+original-assets = []

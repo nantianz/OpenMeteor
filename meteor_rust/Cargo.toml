@@ -1,0 +1,100 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/meteor-core",
+    "crates/meteor-asset",
+    "crates/meteor-anim",
+    "crates/meteor-combat",
+    "crates/meteor-physics",
+    "crates/meteor-scene",
+    "crates/meteor-network",
+    "crates/meteor-server",
+    "crates/meteor-input",
+    "crates/meteor-ai",
+    "crates/meteor-app",
+    "crates/meteor-android",
+    "xtask",
+]
+
+
+
+exclude = ["crates/meteor-wasm", "vendor/bevy_dlss5"]
+
+
+
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = false
+strip = "symbols"
+
+
+
+[profile.fast]
+inherits = "release"
+lto = "off"
+codegen-units = 16
+incremental = true
+
+
+[profile.release-symbols]
+inherits = "release"
+debug = 1
+strip = "none"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+repository = "https://github.com/nantianz/OpenMeteor"
+
+[workspace.dependencies]
+
+bevy = { version = "0.19", default-features = false }
+bevy_ecs = "0.19"
+bevy_state = "0.19"
+bevy_asset = "0.19"
+bevy_reflect = "0.19"
+bevy_render = "0.19"
+bevy_image = "0.19"
+bevy_pbr = "0.19"
+
+
+prost = "0.14"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.30"
+futures-util = "0.3"
+
+
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = [
+    "Window", "Document", "HtmlCanvasElement", "Response", "Crypto", "SubtleCrypto", "Storage",
+    "Navigator", "Location", "MediaQueryList",
+    "WebSocket", "RtcPeerConnection", "RtcDataChannel",
+    "Event", "ErrorEvent", "CloseEvent", "MessageEvent", "BinaryType",
+] }
+console_error_panic_hook = "0.1"
+
+
+thiserror = "2"
+log = "0.4"
+
+
+
+
+
+
+
+[patch.crates-io]
+rodio = { git = "https://github.com/RustAudio/rodio.git", rev = "3ee9745862279ce1d18db593155016e7ce024aeb" }
+
+
+wgpu-hal = { path = "vendor/wgpu-hal" }
+bevy_render = { path = "vendor/bevy_render" }
+bevy_pbr = { path = "vendor/bevy_pbr" }

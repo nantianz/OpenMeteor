@@ -1,0 +1,216 @@
+use crate::{
+    render_asset::{AssetExtractionError, PrepareAssetError, RenderAsset, RenderAssetPlugin},
+    render_resource::{Buffer, BufferUsages},
+    renderer::{RenderDevice, RenderQueue},
+};
+use bevy_app::{App, Plugin};
+use bevy_asset::{Asset, AssetApp, AssetId, RenderAssetUsages};
+use bevy_ecs::system::{lifetimeless::SRes, SystemParamItem};
+use bevy_reflect::{prelude::ReflectDefault, Reflect};
+use bevy_utils::default;
+use encase::{internal::WriteInto, ShaderType};
+use wgpu::util::BufferInitDescriptor;
+
+#[derive(Default)]
+pub struct StoragePlugin;
+
+impl Plugin for StoragePlugin {
+    fn build(&self, app: &mut App) {
+        app.add_plugins(RenderAssetPlugin::<GpuShaderBuffer>::default())
+            .init_asset::<ShaderBuffer>()
+            .register_asset_reflect::<ShaderBuffer>();
+    }
+}
+
+#[derive(Asset, Reflect, Debug, Clone)]
+#[reflect(opaque)]
+#[reflect(Default, Debug, Clone)]
+pub struct ShaderBuffer {
+
+    pub data: Option<Vec<u8>>,
+
+    pub buffer_description: wgpu::BufferDescriptor<'static>,
+
+    pub asset_usage: RenderAssetUsages,
+
+    pub copy_on_resize: bool,
+}
+
+impl Default for ShaderBuffer {
+    fn default() -> Self {
+        Self {
+            data: None,
+            buffer_description: wgpu::BufferDescriptor {
+                label: None,
+                size: 0,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            },
+            asset_usage: RenderAssetUsages::default(),
+            copy_on_resize: false,
+        }
+    }
+}
+
+impl ShaderBuffer {
+
+    pub fn new(data: &[u8], asset_usage: RenderAssetUsages) -> Self {
+        let mut storage = ShaderBuffer {
+            data: Some(data.to_vec()),
+            ..default()
+        };
+        storage.asset_usage = asset_usage;
+        storage
+    }
+
+    pub fn with_size(size: usize, asset_usage: RenderAssetUsages) -> Self {
+        let mut storage = ShaderBuffer {
+            data: None,
+            ..default()
+        };
+        storage.buffer_description.size = size as u64;
+        storage.buffer_description.mapped_at_creation = false;
+        storage.asset_usage = asset_usage;
+        storage
+    }
+
+    pub fn set_data<T>(&mut self, value: T)
+    where
+        T: ShaderType + WriteInto,
+    {
+        let size = value.size().get() as usize;
+        let mut wrapper = encase::StorageBuffer::<Vec<u8>>::new(Vec::with_capacity(size));
+        wrapper.write(&value).unwrap();
+        self.data = Some(wrapper.into_inner());
+    }
+
+    pub fn resize(&mut self, size: u64) {
+        self.buffer_description.size = size;
+        if let Some(ref mut data) = self.data {
+            data.resize(size as usize, 0);
+        }
+    }
+
+    pub fn resize_in_place(&mut self, size: u64) {
+        self.buffer_description.size = size;
+        if let Some(ref mut data) = self.data {
+            data.resize(size as usize, 0);
+        } else {
+            self.copy_on_resize = true;
+        }
+    }
+}
+
+impl<T> From<T> for ShaderBuffer
+where
+    T: ShaderType + WriteInto,
+{
+    fn from(value: T) -> Self {
+        let size = value.size().get() as usize;
+        let mut wrapper = encase::StorageBuffer::<Vec<u8>>::new(Vec::with_capacity(size));
+        wrapper.write(&value).unwrap();
+        Self::new(wrapper.as_ref(), RenderAssetUsages::default())
+    }
+}
+
+pub struct GpuShaderBuffer {
+    pub buffer: Buffer,
+    pub buffer_descriptor: wgpu::BufferDescriptor<'static>,
+    pub had_data: bool,
+}
+
+impl RenderAsset for GpuShaderBuffer {
+    type SourceAsset = ShaderBuffer;
+    type Param = (SRes<RenderDevice>, SRes<RenderQueue>);
+
+    fn asset_usage(source_asset: &Self::SourceAsset) -> RenderAssetUsages {
+        source_asset.asset_usage
+    }
+
+    fn take_gpu_data(
+        source: &mut Self::SourceAsset,
+        previous_gpu_asset: Option<&Self>,
+    ) -> Result<Self::SourceAsset, AssetExtractionError> {
+        let data = source.data.take();
+
+        let valid_upload = data.is_some() || previous_gpu_asset.is_none_or(|prev| !prev.had_data);
+
+        valid_upload
+            .then(|| Self::SourceAsset {
+                data,
+                ..source.clone()
+            })
+            .ok_or(AssetExtractionError::AlreadyExtracted)
+    }
+
+    fn prepare_asset(
+        source_asset: Self::SourceAsset,
+        _: AssetId<Self::SourceAsset>,
+        (render_device, render_queue): &mut SystemParamItem<Self::Param>,
+        previous_asset: Option<&Self>,
+    ) -> Result<Self, PrepareAssetError<Self::SourceAsset>> {
+        let had_data = source_asset.data.is_some();
+
+        let actual_size = source_asset
+            .data
+            .as_ref()
+            .map(|d| d.len() as u64)
+            .unwrap_or(source_asset.buffer_description.size);
+
+        let buffer = if let Some(prev) = previous_asset
+            && prev.buffer_descriptor.size == actual_size
+            && prev.buffer_descriptor.usage == source_asset.buffer_description.usage
+            && prev.buffer_descriptor.label == source_asset.buffer_description.label
+            && (!had_data
+                || source_asset
+                    .buffer_description
+                    .usage
+                    .contains(BufferUsages::COPY_DST))
+        {
+            if let Some(ref data) = source_asset.data {
+                render_queue.write_buffer(&prev.buffer, 0, data);
+            }
+            prev.buffer.clone()
+        } else if let Some(ref data) = source_asset.data {
+            render_device.create_buffer_with_data(&BufferInitDescriptor {
+                label: source_asset.buffer_description.label,
+                contents: data,
+                usage: source_asset.buffer_description.usage,
+            })
+        } else {
+            let new_buffer = render_device.create_buffer(&source_asset.buffer_description);
+            if source_asset.copy_on_resize
+                && let Some(previous) = previous_asset
+                && previous
+                    .buffer_descriptor
+                    .usage
+                    .contains(BufferUsages::COPY_SRC)
+                && source_asset
+                    .buffer_description
+                    .usage
+                    .contains(BufferUsages::COPY_DST)
+            {
+                let copy_size = source_asset
+                    .buffer_description
+                    .size
+                    .min(previous.buffer_descriptor.size);
+                let mut encoder =
+                    render_device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("copy_buffer_on_resize"),
+                    });
+                encoder.copy_buffer_to_buffer(&previous.buffer, 0, &new_buffer, 0, copy_size);
+                render_queue.submit([encoder.finish()]);
+            }
+            new_buffer
+        };
+
+        Ok(GpuShaderBuffer {
+            buffer,
+            buffer_descriptor: wgpu::BufferDescriptor {
+                size: actual_size,
+                ..source_asset.buffer_description
+            },
+            had_data,
+        })
+    }
+}

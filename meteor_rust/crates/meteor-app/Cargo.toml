@@ -1,0 +1,128 @@
+[package]
+name = "meteor-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Bevy game client and desktop application"
+
+[lib]
+
+
+
+
+
+crate-type = ["rlib"]
+
+[[bin]]
+name = "meteor"
+path = "src/main.rs"
+
+[dependencies]
+meteor-core = { path = "../meteor-core" }
+meteor-asset = { path = "../meteor-asset" }
+meteor-anim = { path = "../meteor-anim" }
+meteor-combat = { path = "../meteor-combat" }
+meteor-physics = { path = "../meteor-physics" }
+meteor-scene = { path = "../meteor-scene" }
+meteor-network = { path = "../meteor-network" }
+meteor-input = { path = "../meteor-input" }
+meteor-ai = { path = "../meteor-ai" }
+
+bevy_ecs.workspace = true
+bevy_state.workspace = true
+
+bevy_asset.workspace = true
+bevy_reflect.workspace = true
+bevy_render.workspace = true
+bevy_image.workspace = true
+bevy_pbr.workspace = true
+
+encase = "0.12"
+bitflags = "2"
+
+encoding_rs = "0.8"
+serde_json.workspace = true
+serde.workspace = true
+
+wgpu = { version = "=29.0.4", default-features = false }
+
+rodio = { version = "0.22.2", default-features = false, features = ["playback", "mp3", "hound"] }
+
+
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+bevy = { workspace = true, features = ["default", "mp3", "wav"] }
+
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
+futures-util = { workspace = true }
+
+
+webrtc = "0.20.3"
+async-trait = "0.1"
+bytes = "1"
+
+
+
+
+[target.'cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))'.dependencies]
+bevy = { workspace = true, features = ["system_clipboard"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+
+sha2 = "0.10"
+
+
+
+cpal = { version = "0.18.2", features = ["realtime"] }
+
+
+icu_segmenter = { version = "2.3", features = ["auto"] }
+
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+bevy = { workspace = true, features = ["default", "mp3", "wav", "system_clipboard"] }
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { workspace = true }
+console_error_panic_hook = { workspace = true }
+
+
+
+getrandom = { version = "0.4", features = ["wasm_js"] }
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
+[dev-dependencies]
+
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+naga = { version = "29.0.4", features = ["wgsl-in"] }
+
+[build-dependencies]
+winresource = "0.1"
+
+[target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
+winit = { version = "0.30", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSResponder", "NSImage"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSData"] }
+
+[features]
+original-assets = []
+
+perf-diagnostics = []
+dlss5 = ["dep:bevy_dlss5"]
+
+
+angle-dx11 = ["dep:wgpu-hal", "wgpu/gles", "bevy_pbr/native-gles"]
+
+[target.'cfg(target_os = "windows")'.dependencies]
+wgpu-hal = { version = "=29.0.4", optional = true, default-features = false, features = ["windows-angle"] }
+
+[target.'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'.dependencies]
+bevy_dlss5 = { path = "../../vendor/bevy_dlss5", optional = true }

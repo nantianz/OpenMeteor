@@ -1,0 +1,303 @@
+syntax = "proto3";
+
+package meteor.network.v4;
+
+message Envelope {
+  uint32 protocol = 1;
+
+  oneof payload {
+    Input input = 10;
+    Snapshot snapshot = 11;
+    RelayHost relay_host = 12;
+    RelayPeer relay_peer = 13;
+    RelayFromHost relay_from_host = 14;
+    RelayFromPeer relay_from_peer = 15;
+    Control control = 16;
+
+    RoleSnapshot role_snapshot = 17;
+  }
+}
+
+message Control {
+  MessageKind kind = 1;
+  DynamicObject fields = 2;
+}
+
+enum MessageKind {
+  MESSAGE_KIND_UNSPECIFIED = 0;
+  MESSAGE_KIND_HELLO = 1;
+  MESSAGE_KIND_WELCOME = 2;
+  MESSAGE_KIND_ERROR = 3;
+  MESSAGE_KIND_PING = 4;
+  MESSAGE_KIND_PONG = 5;
+  MESSAGE_KIND_ROOM_CREATE = 10;
+  MESSAGE_KIND_ROOM_JOIN = 11;
+  MESSAGE_KIND_ROOM_LIST_REQUEST = 12;
+  MESSAGE_KIND_ROOM_LIST = 13;
+  MESSAGE_KIND_ROOM_LEAVE = 14;
+  MESSAGE_KIND_ROOM_LEFT = 15;
+  MESSAGE_KIND_ROOM_READY = 16;
+  MESSAGE_KIND_ROOM_PROFILE = 17;
+  MESSAGE_KIND_ROOM_SETTINGS = 18;
+  MESSAGE_KIND_ROOM_START = 19;
+  MESSAGE_KIND_ROOM_LATENCY = 20;
+  MESSAGE_KIND_ROOM_JOINED = 21;
+  MESSAGE_KIND_ROOM_STATE = 22;
+  MESSAGE_KIND_ROOM_PLAYER_LEFT = 23;
+  MESSAGE_KIND_CHAT_SEND = 30;
+  MESSAGE_KIND_CHAT_MESSAGE = 31;
+  MESSAGE_KIND_TEAM_SELECT = 32;
+  MESSAGE_KIND_MATCH_PREPARE = 40;
+  MESSAGE_KIND_MATCH_START = 41;
+  MESSAGE_KIND_MATCH_END = 42;
+  MESSAGE_KIND_MATCH_RESET = 43;
+  MESSAGE_KIND_ROUND_START = 44;
+  MESSAGE_KIND_ROUND_END = 45;
+  MESSAGE_KIND_MATCH_ASSET_PREPARE = 46;
+  MESSAGE_KIND_MATCH_ASSET_READY = 47;
+  MESSAGE_KIND_RTC_SIGNAL = 50;
+  MESSAGE_KIND_RTC_REPORT = 51;
+  MESSAGE_KIND_HOST_STATE = 52;
+  MESSAGE_KIND_SCENE_OPS = 60;
+  MESSAGE_KIND_ITEM_CLAIM = 61;
+  MESSAGE_KIND_ITEM_CLAIMED = 62;
+  MESSAGE_KIND_ITEM_RESPAWNED = 63;
+  MESSAGE_KIND_ITEM_EFFECT = 64;
+  MESSAGE_KIND_WEAPON_SWITCHED = 65;
+  MESSAGE_KIND_WEAPON_DROPPED = 66;
+  MESSAGE_KIND_OBJECTIVE_END = 67;
+  MESSAGE_KIND_WEAPON_DROP_REST = 68;
+  MESSAGE_KIND_COMBAT_HIT = 70;
+  MESSAGE_KIND_COMBAT_DEATH = 71;
+  MESSAGE_KIND_COMBAT_RESPAWN = 72;
+  MESSAGE_KIND_COMBAT_CURE = 73;
+  MESSAGE_KIND_ESCORT_TAKEN = 80;
+  MESSAGE_KIND_ESCORT_DROPPED = 81;
+  MESSAGE_KIND_ESCORT_DELIVERED = 82;
+  MESSAGE_KIND_ESCORT_RETURNED = 83;
+  MESSAGE_KIND_ROLE_RATE = 90;
+  MESSAGE_KIND_ROLE_POSE_CHAIN = 91;
+  MESSAGE_KIND_RTC_PING = 100;
+  MESSAGE_KIND_RTC_PONG = 101;
+}
+
+message DynamicObject {
+  repeated DynamicField fields = 1;
+}
+
+message DynamicField {
+  string key = 1;
+  DynamicValue value = 2;
+}
+
+message DynamicList {
+  repeated DynamicValue values = 1;
+}
+
+enum NullValue {
+  NULL_VALUE_UNSPECIFIED = 0;
+}
+
+message DynamicValue {
+  oneof kind {
+    double number_value = 1;
+    string string_value = 2;
+    bool bool_value = 3;
+    bytes bytes_value = 4;
+    DynamicObject object_value = 5;
+    DynamicList list_value = 6;
+    NullValue null_value = 7;
+  }
+}
+
+message Vec2 {
+  float x = 1;
+  float z = 2;
+}
+
+message Vec3 {
+  float x = 1;
+  float y = 2;
+  float z = 3;
+}
+
+message PackedObb {
+
+  repeated float values = 1 [packed = true];
+}
+
+message CombatJudge {
+  string kind = 1;
+  uint32 pose_id = 2;
+  uint32 attack_index = 3;
+  uint32 pose_instance_id = 4;
+  float frame = 5;
+  float cursor = 6;
+  repeated PackedObb boxes = 7;
+  string ranged_kind = 8;
+  Vec3 start = 9;
+  Vec3 end = 10;
+
+  repeated string target_ids = 11;
+}
+
+message InputVisual {
+  uint32 pose_id = 1;
+  float cursor = 2;
+  float lift = 3;
+  string character = 4;
+  string weapon = 5;
+  Vec3 world_position = 6;
+  bool carries_hurt_obbs = 7;
+  repeated PackedObb hurt_obbs = 8;
+  bool carries_hurt_whole_obb = 9;
+  PackedObb hurt_whole_obb = 10;
+}
+
+message Input {
+  uint32 seq = 1;
+  bytes role_state = 2;
+  optional uint32 role_rate_request = 3;
+  Vec2 move = 4;
+  float yaw = 5;
+  bool run = 6;
+  bool guard = 7;
+  repeated string actions = 8;
+  repeated CombatJudge combat = 9;
+  InputVisual visual = 10;
+
+  optional uint32 match_epoch = 11;
+  optional uint32 round_epoch = 12;
+}
+
+message WeaponSlot {
+  uint32 index = 1;
+  bool present = 2;
+  string weapon = 3;
+  optional uint32 weapon_id = 4;
+  optional string model = 5;
+  uint32 resource_class = 6;
+  uint32 variant = 7;
+  float attack_power = 8;
+  float defense_power = 9;
+}
+
+message ItemEffect {
+  string model = 1;
+  float remaining = 2;
+}
+
+message SnapshotPlayer {
+  string id = 1;
+  string name = 2;
+  string character = 3;
+  string weapon = 4;
+  optional string weapon_model = 5;
+  uint32 weapon_slot = 6;
+  optional uint32 team = 7;
+  bool is_leader = 8;
+  bool connected = 9;
+  bool ready = 10;
+  float health = 11;
+  optional float max_health = 12;
+  float anger = 13;
+  uint32 kills = 14;
+  uint32 round_kills = 15;
+  uint32 round_wins = 16;
+  uint32 deaths = 17;
+  bool guard = 18;
+  bool alive = 19;
+  uint32 pose_id = 20;
+  float pose_cursor = 21;
+  float lift = 22;
+  bytes role_state = 23;
+  Vec3 position = 24;
+  optional float yaw = 25;
+  repeated WeaponSlot weapon_slots = 26;
+  repeated ItemEffect item_effects = 27;
+
+  repeated ItemEffect worn_effects = 28;
+}
+
+message SnapshotNpc {
+  string id = 1;
+  string kind = 2;
+  string name = 3;
+  string character = 4;
+  string weapon = 5;
+  optional uint32 team = 6;
+  bool vip = 7;
+  Vec3 position = 8;
+  float yaw = 9;
+  float health = 10;
+  float max_health = 11;
+  uint32 kills = 12;
+  uint32 deaths = 13;
+  bool alive = 14;
+  uint32 pose_id = 15;
+  float pose_cursor = 16;
+
+  bytes role_state = 17;
+}
+
+message SnapshotDrop {
+  string ref = 1;
+  string model = 2;
+  Vec3 position = 3;
+  bool settled = 4;
+}
+
+message Snapshot {
+  string room_id = 1;
+  uint32 tick = 2;
+  double server_time = 3;
+  repeated SnapshotPlayer players = 4;
+  repeated SnapshotNpc npcs = 5;
+  repeated SnapshotDrop drops = 6;
+  DynamicObject flag = 7;
+  DynamicObject match = 8;
+  optional uint32 match_epoch = 9;
+  optional uint32 round_epoch = 10;
+}
+
+message RoleStateRecord {
+  string id = 1;
+  bytes role_state = 2;
+}
+
+message RoleSnapshot {
+  string room_id = 1;
+  uint32 tick = 2;
+  double server_time = 3;
+  repeated RoleStateRecord roles = 4;
+  optional uint32 match_epoch = 5;
+  optional uint32 round_epoch = 6;
+}
+
+message RelayHost {
+  bytes payload = 1;
+  optional uint32 match_epoch = 2;
+  optional uint32 round_epoch = 3;
+}
+
+message RelayPeer {
+  repeated string player_ids = 1;
+  bytes payload = 2;
+  optional uint32 match_epoch = 3;
+  optional uint32 round_epoch = 4;
+}
+
+message RelayFromHost {
+  string room_id = 1;
+  bytes payload = 2;
+  optional uint32 match_epoch = 3;
+  optional uint32 round_epoch = 4;
+}
+
+message RelayFromPeer {
+  string room_id = 1;
+  string player_id = 2;
+  bytes payload = 3;
+  optional uint32 match_epoch = 4;
+  optional uint32 round_epoch = 5;
+}

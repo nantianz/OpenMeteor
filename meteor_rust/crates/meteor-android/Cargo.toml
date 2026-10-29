@@ -1,0 +1,19 @@
+[package]
+name = "meteor-android"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Android entry crate"
+publish = false
+
+[lib]
+name = "meteor_android"
+crate-type = ["cdylib"]
+
+[dependencies]
+meteor-app = { path = "../meteor-app" }
+bevy = { workspace = true, features = ["android-game-activity"] }
+
+[features]
+original-assets = []

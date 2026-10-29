@@ -1,0 +1,6094 @@
+{
+  "sources": [
+    {
+      "path": "analysis\\sn13-ramp-capture\\motion-hook-20260922-230237.jsonl",
+      "sha256": "9d22a9fe169d57177f49b8855958b4c2bbd2c7d21218b1d31f8bdcf8923e929e"
+    },
+    {
+      "path": "analysis\\sn13-slope-capture\\motion-hook-20260922-220903.jsonl",
+      "sha256": "f74321921c3ebbd19ecc72cb075ee5cde38a336bfacdc7d904c42f7053a1b741"
+    }
+  ],
+  "center": [
+    -551.8373839999999,
+    -420.41288799999995
+  ],
+  "cases": [
+    {
+      "source": 0,
+      "t": 10.0087998046875,
+      "before": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c0656600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000039c008c3",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -136.75086975097656,
+          136.27005004882812,
+          -61.1425666809082
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 46,
+          "state": 3,
+          "frame": 662.0018310546875,
+          "integerFrame": 662,
+          "rate": 1,
+          "morphFrom": 662,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 0,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1352.924072265625,
+          408.0862731933594,
+          70.01332092285156
+        ]
+      },
+      "after": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c065660000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007a7208c3",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -136.44717407226562,
+          135.96742248535156,
+          -75.70152282714844
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 46,
+          "state": 3,
+          "frame": 662.0018310546875,
+          "integerFrame": 662,
+          "rate": 1,
+          "morphFrom": 662,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1355.19873046875,
+          410.3529052734375,
+          68.75135040283203
+        ]
+      },
+      "enter": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c065660000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007a7208c3",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -136.44717407226562,
+          135.96742248535156,
+          -75.70152282714844
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 46,
+          "state": 3,
+          "frame": 662.0018310546875,
+          "integerFrame": 662,
+          "rate": 1,
+          "morphFrom": 662,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1352.924072265625,
+          408.0862731933594,
+          70.01332092285156
+        ]
+      },
+      "dt": 0.01667029969394207,
+      "yaw": -2.408880451748543,
+      "result": 0
+    },
+    {
+      "source": 0,
+      "t": 10.1105986328125,
+      "before": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "0000000011c785c22cac944200000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c0656600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004360cc3",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -140.21099853515625,
+          140.3181610107422,
+          -148.19955444335938
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          -66.88880157470703,
+          74.33627319335938,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 46,
+          "state": 3,
+          "frame": 662.0018310546875,
+          "integerFrame": 662,
+          "rate": 1,
+          "morphFrom": 662,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1366.7403564453125,
+          421.8791198730469,
+          58.79050064086914
+        ]
+      },
+      "after": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "0000000010c785c22cac944200000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c065660000000000000000000000000000000000010000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004c4f0dc3",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 1,
+        "support360": 1,
+        "velocitySource": [
+          -141.30975341796875,
+          141.57432556152344,
+          0
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          -66.8887939453125,
+          74.33627319335938,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 46,
+          "state": 3,
+          "frame": 662.0018310546875,
+          "integerFrame": 662,
+          "rate": 1,
+          "morphFrom": 662,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1369.321044921875,
+          424.464599609375,
+          54.93283462524414
+        ]
+      },
+      "enter": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "0000000010c785c22cac944200000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c065660000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004c4f0dc3",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -141.30975341796875,
+          141.57432556152344,
+          -163.9591064453125
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          -66.8887939453125,
+          74.33627319335938,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 46,
+          "state": 3,
+          "frame": 662.0018310546875,
+          "integerFrame": 662,
+          "rate": 1,
+          "morphFrom": 662,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1366.7403564453125,
+          421.8791198730469,
+          58.79050064086914
+        ]
+      },
+      "dt": 0.01826239936053753,
+      "yaw": -2.408880451748543,
+      "result": 32
+    },
+    {
+      "source": 0,
+      "t": 12.2782666015625,
+      "before": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "00000000be028cc268d18e4200000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c065660000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002c161cc3",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -156.08660888671875,
+          159.21629333496094,
+          -60.17190933227539
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          -70.00535583496094,
+          71.40899658203125,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 53,
+          "state": 3,
+          "frame": 665.001220703125,
+          "integerFrame": 665,
+          "rate": 1,
+          "morphFrom": 665,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 0,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1511.5625,
+          570.9557495117188,
+          154.1476593017578
+        ]
+      },
+      "after": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "00000000bd028cc268d18e4200000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c0656600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000058261dc3",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -157.1497802734375,
+          160.30078125,
+          -74.73363494873047
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          -70.0053482055664,
+          71.40899658203125,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 53,
+          "state": 3,
+          "frame": 665.001220703125,
+          "integerFrame": 665,
+          "rate": 1,
+          "morphFrom": 665,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1514.1812744140625,
+          573.6270141601562,
+          152.9022979736328
+        ]
+      },
+      "enter": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "00000000bd028cc268d18e4200000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c0656600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000058261dc3",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -157.1497802734375,
+          160.30078125,
+          -74.73363494873047
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          -70.0053482055664,
+          71.40899658203125,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 53,
+          "state": 3,
+          "frame": 665.001220703125,
+          "integerFrame": 665,
+          "rate": 1,
+          "morphFrom": 665,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1511.5625,
+          570.9557495117188,
+          154.1476593017578
+        ]
+      },
+      "dt": 0.01666410081088543,
+      "yaw": -2.3661198953419564,
+      "result": 0
+    },
+    {
+      "source": 0,
+      "t": 12.4790634765625,
+      "before": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "00000000b6028cc260d18e4200000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c06566000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000019928c3",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -168.59767150878906,
+          171.9781494140625,
+          -233.7372283935547
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          -70.00529479980469,
+          71.408935546875,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 53,
+          "state": 0,
+          "frame": 671.4998779296875,
+          "integerFrame": 671,
+          "rate": 1,
+          "morphFrom": 671,
+          "morphTo": 672,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1544.272705078125,
+          604.32177734375,
+          123.12445831298828
+        ]
+      },
+      "after": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "00000000b5028cc25fd18e4200000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c06566000000000000000000000000000000000001000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e99929c3",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 1,
+        "support360": 1,
+        "velocitySource": [
+          -169.60121154785156,
+          173.00181579589844,
+          0
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          -70.00528717041016,
+          71.40892791748047,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 53,
+          "state": 0,
+          "frame": 672.0000610351562,
+          "integerFrame": 672,
+          "rate": 1,
+          "morphFrom": 672,
+          "morphTo": 673,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1547.1005859375,
+          607.206298828125,
+          119.28546905517578
+        ]
+      },
+      "enter": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "00000000b5028cc25fd18e4200000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c06566000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e99929c3",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -169.60121154785156,
+          173.00181579589844,
+          -247.97166442871094
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          -70.00528717041016,
+          71.40892791748047,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 53,
+          "state": 0,
+          "frame": 672.0000610351562,
+          "integerFrame": 672,
+          "rate": 1,
+          "morphFrom": 672,
+          "morphTo": 673,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1544.272705078125,
+          604.32177734375,
+          123.12445831298828
+        ]
+      },
+      "dt": 0.01667349971830845,
+      "yaw": -2.3661198953419564,
+      "result": 32
+    },
+    {
+      "source": 0,
+      "t": 13.062962890625,
+      "before": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "00000000b69a8ec2743a8c4200000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c06566000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000a8eb1cc3",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -156.9205322265625,
+          157.88417053222656,
+          -61.397796630859375
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          -71.30216979980469,
+          70.11416625976562,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 56,
+          "state": 3,
+          "frame": 662.0093383789062,
+          "integerFrame": 662,
+          "rate": 1,
+          "morphFrom": 662,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 0,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1625.6138916015625,
+          686.6165771484375,
+          167.31288146972656
+        ]
+      },
+      "after": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "00000000bdbe8dc2c9188d4200000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c06566000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000a0fe1dc3",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -157.99462890625,
+          158.94984436035156,
+          -75.90061950683594
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          -70.8725357055664,
+          70.54840850830078,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 56,
+          "state": 3,
+          "frame": 662.0093383789062,
+          "integerFrame": 662,
+          "rate": 1,
+          "morphFrom": 662,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1628.236572265625,
+          689.2550659179688,
+          166.05296325683594
+        ]
+      },
+      "enter": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "00000000bdbe8dc2c9188d4200000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c06566000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000a0fe1dc3",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -157.99462890625,
+          158.94984436035156,
+          -75.90061950683594
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          -70.8725357055664,
+          70.54840850830078,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 56,
+          "state": 3,
+          "frame": 662.0093383789062,
+          "integerFrame": 662,
+          "rate": 1,
+          "morphFrom": 662,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1625.6138916015625,
+          686.6165771484375,
+          167.31288146972656
+        ]
+      },
+      "dt": 0.01659959927201271,
+      "yaw": -2.3539025855713214,
+      "result": 0
+    },
+    {
+      "source": 0,
+      "t": 13.1630654296875,
+      "before": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "00000000eedd84c2a97c954200000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c06566000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000750823c3",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -163.0330352783203,
+          164.53965759277344,
+          -148.4215087890625
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          -66.43345642089844,
+          74.74347686767578,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 56,
+          "state": 3,
+          "frame": 662.0093383789062,
+          "integerFrame": 662,
+          "rate": 1,
+          "morphFrom": 662,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1641.6854248046875,
+          702.8059692382812,
+          156.0769500732422
+        ]
+      },
+      "after": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "00000000eddd84c2a87c954200000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c06566000000000000000000000000000000000001000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c8ff23c3",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 1,
+        "support360": 1,
+        "velocitySource": [
+          -163.9991455078125,
+          165.66441345214844,
+          0
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          -66.4334487915039,
+          74.74346923828125,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 56,
+          "state": 3,
+          "frame": 662.0093383789062,
+          "integerFrame": 662,
+          "rate": 1,
+          "morphFrom": 662,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1644.418701171875,
+          705.5670166015625,
+          154.21273803710938
+        ]
+      },
+      "enter": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "00000000eddd84c2a87c954200000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c06566000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c8ff23c3",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -163.9991455078125,
+          165.66441345214844,
+          -162.81280517578125
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          -66.4334487915039,
+          74.74346923828125,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 56,
+          "state": 3,
+          "frame": 662.0093383789062,
+          "integerFrame": 662,
+          "rate": 1,
+          "morphFrom": 662,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1641.6854248046875,
+          702.8059692382812,
+          156.0769500732422
+        ]
+      },
+      "dt": 0.016666600480675697,
+      "yaw": -2.4149890854266376,
+      "result": 40
+    },
+    {
+      "source": 0,
+      "t": 13.64650390625,
+      "before": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "00000000efdd84c2aa7c954200000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c0656600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000076ca20c3",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -160.79086303710938,
+          175.40126037597656,
+          -61.068172454833984
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          -66.43346405029297,
+          74.74348449707031,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 59,
+          "state": 3,
+          "frame": 661.9990844726562,
+          "integerFrame": 661,
+          "rate": 1,
+          "morphFrom": 661,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 0,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1712.8338623046875,
+          779.5526733398438,
+          198.1011962890625
+        ]
+      },
+      "after": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "00000000efdd84c2aa7c954200000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c065660000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001ac921c3",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -161.78555297851562,
+          176.53175354003906,
+          -75.6943359375
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          -66.43346405029297,
+          74.74348449707031,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 59,
+          "state": 3,
+          "frame": 661.9990844726562,
+          "integerFrame": 661,
+          "rate": 1,
+          "morphFrom": 661,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1715.541748046875,
+          782.5073852539062,
+          196.83425903320312
+        ]
+      },
+      "enter": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "00000000efdd84c2aa7c954200000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c065660000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001ac921c3",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -161.78555297851562,
+          176.53175354003906,
+          -75.6943359375
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          -66.43346405029297,
+          74.74348449707031,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 59,
+          "state": 3,
+          "frame": 661.9990844726562,
+          "integerFrame": 661,
+          "rate": 1,
+          "morphFrom": 661,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1712.8338623046875,
+          779.5526733398438,
+          198.1011962890625
+        ]
+      },
+      "dt": 0.016737500205636024,
+      "yaw": -2.4149890854266376,
+      "result": 0
+    },
+    {
+      "source": 0,
+      "t": 13.73001953125,
+      "before": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "0000000010c785c22aac944200000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c0656600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000039c225c3",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -165.75868225097656,
+          181.0097198486328,
+          -134.10829162597656
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          -66.8887939453125,
+          74.33625793457031,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 59,
+          "state": 3,
+          "frame": 661.9990844726562,
+          "integerFrame": 661,
+          "rate": 1,
+          "morphFrom": 661,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1726.57763671875,
+          794.5556030273438,
+          189.2938690185547
+        ]
+      },
+      "after": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "000000000fc785c22aac944200000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c065660000000000000000000000000000000000010000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004ab826c3",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 1,
+        "support360": 1,
+        "velocitySource": [
+          -166.71987915039062,
+          182.08419799804688,
+          0
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          -66.88878631591797,
+          74.33625793457031,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 59,
+          "state": 3,
+          "frame": 661.9990844726562,
+          "integerFrame": 661,
+          "rate": 1,
+          "morphFrom": 661,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1729.3048095703125,
+          797.5341186523438,
+          185.78590393066406
+        ]
+      },
+      "enter": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "000000000fc785c22aac944200000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c065660000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004ab826c3",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -166.71987915039062,
+          182.08419799804688,
+          -148.2624969482422
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          -66.88878631591797,
+          74.33625793457031,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 59,
+          "state": 3,
+          "frame": 661.9990844726562,
+          "integerFrame": 661,
+          "rate": 1,
+          "morphFrom": 661,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1726.57763671875,
+          794.5556030273438,
+          189.2938690185547
+        ]
+      },
+      "dt": 0.016357900574803352,
+      "yaw": -2.4088804384314284,
+      "result": 32
+    },
+    {
+      "source": 0,
+      "t": 14.2468984375,
+      "before": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "00000000000000800000000000000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c0656600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000094fe38c3",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -184.99444580078125,
+          197.67022705078125,
+          -60.05968475341797
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 62,
+          "state": 3,
+          "frame": 664.997314453125,
+          "integerFrame": 664,
+          "rate": 1,
+          "morphFrom": 664,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 0,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1821.2584228515625,
+          896.7362060546875,
+          259.3103942871094
+        ]
+      },
+      "after": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "00000000000000800000000000000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c0656600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000041a038c3",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -184.62599182128906,
+          197.27651977539062,
+          -74.71282196044922
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 62,
+          "state": 3,
+          "frame": 664.997314453125,
+          "integerFrame": 664,
+          "rate": 1,
+          "morphFrom": 664,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1824.3531494140625,
+          900.0430297851562,
+          258.05804443359375
+        ]
+      },
+      "enter": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "00000000000000800000000000000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c0656600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000041a038c3",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -184.62599182128906,
+          197.27651977539062,
+          -74.71282196044922
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 62,
+          "state": 3,
+          "frame": 664.997314453125,
+          "integerFrame": 664,
+          "rate": 1,
+          "morphFrom": 664,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1821.2584228515625,
+          896.7362060546875,
+          259.3103942871094
+        ]
+      },
+      "dt": 0.016762299463152885,
+      "yaw": -0.5396328477121405,
+      "result": 0
+    },
+    {
+      "source": 0,
+      "t": 14.5301494140625,
+      "before": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "000000004cc06642975da3c200000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c0656600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          0,
+          0,
+          -303.9352111816406
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          57.68778991699219,
+          -81.68279266357422,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 180,
+          "wirePose": 180,
+          "sequence": 62,
+          "state": 3,
+          "frame": 674.0001220703125,
+          "integerFrame": 673,
+          "rate": 1,
+          "morphFrom": 673,
+          "morphTo": 811,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 0,
+          "playbackBit0": 1,
+          "playbackBit1": 2,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1869.477783203125,
+          947.1094970703125,
+          205.51226806640625
+        ]
+      },
+      "after": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "0000000052aa6e42857fa0c200000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c06566000000000000000000000000000000000001000000010000000000000005000000000000000000000000000000000000000000000000000000000000000000000000000000373d7f3f",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 1,
+        "support360": 1,
+        "velocitySource": [
+          0.9970278143882751,
+          -1.3409664630889893,
+          0
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          59.66632843017578,
+          -80.24906158447266,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 180,
+          "wirePose": 180,
+          "sequence": 62,
+          "state": 3,
+          "frame": 674.0001220703125,
+          "integerFrame": 673,
+          "rate": 1,
+          "morphFrom": 673,
+          "morphTo": 811,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 2,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1869.4610595703125,
+          947.0870971679688,
+          199.88259887695312
+        ]
+      },
+      "enter": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "0000000052aa6e42857fa0c200000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c06566000000000000000000000000000000000000000000000000000000000005000000000000000000000000000000000000000000000000000000000000000000000000000000373d7f3f",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          0.9970278143882751,
+          -1.3409664630889893,
+          -318.069580078125
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          59.66632843017578,
+          -80.24906158447266,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 180,
+          "wirePose": 180,
+          "sequence": 62,
+          "state": 3,
+          "frame": 674.0001220703125,
+          "integerFrame": 673,
+          "rate": 1,
+          "morphFrom": 673,
+          "morphTo": 811,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 2,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1869.477783203125,
+          947.1094970703125,
+          205.51226806640625
+        ]
+      },
+      "dt": 0.016724899411201477,
+      "yaw": 0.6393373197363991,
+      "result": 32
+    },
+    {
+      "source": 0,
+      "t": 30.2826484375,
+      "before": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "00000000b86c8642431694c2c7bca33c000000000000000000805cc400000000",
+        "raw340": "0000000001000000c065660000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004d792943",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          169.4738311767578,
+          -165.35479736328125,
+          -357.4283752441406
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          67.21234130859375,
+          -74.0434799194336,
+          0.019987476989626884
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 180,
+          "wirePose": 180,
+          "sequence": 70,
+          "state": 3,
+          "frame": 674.1492309570312,
+          "integerFrame": 673,
+          "rate": 1,
+          "morphFrom": 673,
+          "morphTo": 811,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 2,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1624.183837890625,
+          697.6331176757812,
+          153.0569305419922
+        ]
+      },
+      "after": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "00000000b76c8642421694c2c4bca33c000000000000000000805cc400000000",
+        "raw340": "0000000001000000c065660000000000000000000000000000000000010000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000009fe82943",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 1,
+        "support360": 1,
+        "velocitySource": [
+          169.90867614746094,
+          -165.8541717529297,
+          0
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          67.21233367919922,
+          -74.04347229003906,
+          0.019987471401691437
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 180,
+          "wirePose": 180,
+          "sequence": 70,
+          "state": 3,
+          "frame": 674.1492309570312,
+          "integerFrame": 673,
+          "rate": 1,
+          "morphFrom": 673,
+          "morphTo": 811,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 2,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1622.825439453125,
+          696.3070678710938,
+          148.7181854248047
+        ]
+      },
+      "enter": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "00000000b76c8642421694c2c4bca33c000000000000000000805cc400000000",
+        "raw340": "0000000001000000c065660000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000009fe82943",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          169.90867614746094,
+          -165.8541717529297,
+          -364.1354675292969
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          67.21233367919922,
+          -74.04347229003906,
+          0.019987471401691437
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 180,
+          "wirePose": 180,
+          "sequence": 70,
+          "state": 3,
+          "frame": 674.1492309570312,
+          "integerFrame": 673,
+          "rate": 1,
+          "morphFrom": 673,
+          "morphTo": 811,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 2,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1624.183837890625,
+          697.6331176757812,
+          153.0569305419922
+        ]
+      },
+      "dt": 0.007995200343430042,
+      "yaw": 0.7370757551858066,
+      "result": 32
+    },
+    {
+      "source": 0,
+      "t": 41.0590234375,
+      "before": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "00000000729d99c261128042cebfa1bc000000000000000000805cc400000000",
+        "raw340": "0000000001000000c06566000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000721c2fc3",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -175.11111450195312,
+          169.99887084960938,
+          -121.0995101928711
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          -76.80751037597656,
+          64.03589630126953,
+          -0.01974477991461754
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 116,
+          "state": 3,
+          "frame": 662.20947265625,
+          "integerFrame": 662,
+          "rate": 1,
+          "morphFrom": 662,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1314.52880859375,
+          326.9830627441406,
+          29.827669143676758
+        ]
+      },
+      "after": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "00000000729d99c261128042cebfa1bc000000000000000000805cc400000000",
+        "raw340": "0000000001000000c0656600000000000000000000000000000000000100000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008ab2fc3",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 1,
+        "support360": 1,
+        "velocitySource": [
+          -175.6680908203125,
+          170.44029235839844,
+          0
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          -76.80751037597656,
+          64.03589630126953,
+          -0.01974477991461754
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 116,
+          "state": 3,
+          "frame": 662.20947265625,
+          "integerFrame": 662,
+          "rate": 1,
+          "morphFrom": 662,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1315.9349365234375,
+          328.347412109375,
+          28.205490112304688
+        ]
+      },
+      "enter": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "00000000729d99c261128042cebfa1bc000000000000000000805cc400000000",
+        "raw340": "0000000001000000c0656600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008ab2fc3",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -175.6680908203125,
+          170.44029235839844,
+          -128.0415496826172
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          -76.80751037597656,
+          64.03589630126953,
+          -0.01974477991461754
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 116,
+          "state": 3,
+          "frame": 662.20947265625,
+          "integerFrame": 662,
+          "rate": 1,
+          "morphFrom": 662,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1314.52880859375,
+          326.9830627441406,
+          29.827669143676758
+        ]
+      },
+      "dt": 0.008004800416529179,
+      "yaw": -2.265762283977492,
+      "result": 42
+    },
+    {
+      "source": 0,
+      "t": 43.125359375,
+      "before": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "00000000d9c3c4422d4c8fc1ed29803c000000000000000000805cc400000000",
+        "raw340": "0000000001000000c065660000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001e88dfc2",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -111.76585388183594,
+          337.9335632324219,
+          -57.551429748535156
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          98.38251495361328,
+          -17.912195205688477,
+          0.015644991770386696
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 127,
+          "state": 3,
+          "frame": 662.2974853515625,
+          "integerFrame": 662,
+          "rate": 1,
+          "morphFrom": 662,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1810.13134765625,
+          1000.3873291015625,
+          240.60772705078125
+        ]
+      },
+      "after": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "00000000c40dc342bbcfb0c19267843c000000000000000000805cc400000000",
+        "raw340": "0000000001000000c06566000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000bdc7ddc2",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -110.8901138305664,
+          0,
+          -64.49128723144531
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          97.52688598632812,
+          -22.101430892944336,
+          0.01616266742348671
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 127,
+          "state": 3,
+          "frame": 662.2974853515625,
+          "integerFrame": 662,
+          "rate": 1,
+          "morphFrom": 662,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1811.010986328125,
+          1000.3873291015625,
+          240.09617614746094
+        ]
+      },
+      "enter": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "00000000c40dc342bbcfb0c19267843c000000000000000000805cc400000000",
+        "raw340": "0000000001000000c06566000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000bdc7ddc2",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -110.8901138305664,
+          337.4483642578125,
+          -64.49128723144531
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          97.52688598632812,
+          -22.101430892944336,
+          0.01616266742348671
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 127,
+          "state": 3,
+          "frame": 662.2974853515625,
+          "integerFrame": 662,
+          "rate": 1,
+          "morphFrom": 662,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1810.13134765625,
+          1000.3873291015625,
+          240.60772705078125
+        ]
+      },
+      "dt": 0.00793210044503212,
+      "yaw": 1.3479415627919713,
+      "result": 4
+    },
+    {
+      "source": 0,
+      "t": 43.18393359375,
+      "before": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "00000000779fbc42b5fc04c2b1ac8e3c000000000000000000805cc400000000",
+        "raw340": "0000000001000000c065660000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000009d48d2c2",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -105.1418228149414,
+          -1.5189104080200195,
+          -108.35891723632812
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          94.31145477294922,
+          -33.24678421020508,
+          0.01741633005440235
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 127,
+          "state": 3,
+          "frame": 662.2974853515625,
+          "integerFrame": 662,
+          "rate": 1,
+          "morphFrom": 662,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1816.4453125,
+          1000.3443603515625,
+          235.5389862060547
+        ]
+      },
+      "after": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "000000009536bc42034a07c2bb298f3c000000000000000000805cc400000000",
+        "raw340": "0000000001000000c0656600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          0,
+          -1.7873809337615967,
+          -115.27276611328125
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          94.10660552978516,
+          -33.8222770690918,
+          0.017475953325629234
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 127,
+          "state": 3,
+          "frame": 662.2974853515625,
+          "integerFrame": 662,
+          "rate": 1,
+          "morphFrom": 662,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1816.4453125,
+          1000.330078125,
+          234.61724853515625
+        ]
+      },
+      "enter": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "000000009536bc42034a07c2bb298f3c000000000000000000805cc400000000",
+        "raw340": "0000000001000000c065660000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004283d0c2",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -104.25636291503906,
+          -1.7873809337615967,
+          -115.27276611328125
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          94.10660552978516,
+          -33.8222770690918,
+          0.017475953325629234
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 127,
+          "state": 3,
+          "frame": 662.2974853515625,
+          "integerFrame": 662,
+          "rate": 1,
+          "morphFrom": 662,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1816.4453125,
+          1000.3443603515625,
+          235.5389862060547
+        ]
+      },
+      "dt": 0.007996199652552605,
+      "yaw": 1.225768571460753,
+      "result": 1
+    },
+    {
+      "source": 0,
+      "t": 50.7305703125,
+      "before": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "000000007a2a86c2345294420ebea3bc000000000000000000805cc400000000",
+        "raw340": "0000000001000000c065660000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005c9496c3",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -301.1590576171875,
+          326.7306213378906,
+          -133.0031280517578
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          -67.08296203613281,
+          74.16055297851562,
+          -0.019988086074590683
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 158,
+          "wirePose": 158,
+          "sequence": 156,
+          "state": 3,
+          "frame": 797.881591796875,
+          "integerFrame": 797,
+          "rate": 1,
+          "morphFrom": 797,
+          "morphTo": 805,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1705.0052490234375,
+          786.8294067382812,
+          181.59091186523438
+        ]
+      },
+      "after": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "00000000792a86c2325294420cbea3bc000000000000000000805cc400000000",
+        "raw340": "0000000001000000c06566000000000000000000000000000000000001000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000d7c096c3",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 1,
+        "support360": 1,
+        "velocitySource": [
+          -301.5065612792969,
+          327.12078857421875,
+          0
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          -67.08295440673828,
+          74.16053771972656,
+          -0.019988082349300385
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 158,
+          "wirePose": 158,
+          "sequence": 156,
+          "state": 3,
+          "frame": 797.881591796875,
+          "integerFrame": 797,
+          "rate": 1,
+          "morphFrom": 797,
+          "morphTo": 805,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1707.4146728515625,
+          789.4434814453125,
+          180.44854736328125
+        ]
+      },
+      "enter": {
+        "object": "0x1471fb10",
+        "ownerLink": "0x158e28d4",
+        "lock": "0x0",
+        "rawC0": "00000000792a86c2325294420cbea3bc000000000000000000805cc400000000",
+        "raw340": "0000000001000000c06566000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000d7c096c3",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -301.5065612792969,
+          327.12078857421875,
+          -139.91864013671875
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          0,
+          0,
+          0
+        ],
+        "externalSource": [
+          -67.08295440673828,
+          74.16053771972656,
+          -0.019988082349300385
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x158e2278",
+          "pose": 158,
+          "wirePose": 158,
+          "sequence": 156,
+          "state": 3,
+          "frame": 797.881591796875,
+          "integerFrame": 797,
+          "rate": 1,
+          "morphFrom": 797,
+          "morphTo": 805,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1705.0052490234375,
+          786.8294067382812,
+          181.59091186523438
+        ]
+      },
+      "dt": 0.00799109973013401,
+      "yaw": -2.4062617332178773,
+      "result": 42
+    },
+    {
+      "source": 1,
+      "t": 3.060107666015625,
+      "before": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c065660000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001c3dde40",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          6.94495964050293,
+          11.48566722869873,
+          -61.1943359375
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          1.4299857298283314e-07,
+          17.89276885986328,
+          -1.9618316888809204
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 102,
+          "state": 3,
+          "frame": 871.5181884765625,
+          "integerFrame": 871,
+          "rate": 1,
+          "morphFrom": 871,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 0,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1558.6298828125,
+          1058.53369140625,
+          346.5638427734375
+        ]
+      },
+      "after": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c065660000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008904dd40",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          6.906803607940674,
+          11.422564506530762,
+          -75.45311737060547
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          1.4299857298283314e-07,
+          17.89276885986328,
+          -1.9618316888809204
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 102,
+          "state": 3,
+          "frame": 871.5181884765625,
+          "integerFrame": 871,
+          "rate": 1,
+          "morphFrom": 871,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1558.515625,
+          1058.7227783203125,
+          345.31500244140625
+        ]
+      },
+      "enter": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c065660000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008904dd40",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          6.906803607940674,
+          11.422564506530762,
+          -75.45311737060547
+        ],
+        "carrySource": [
+          0,
+          0,
+          0
+        ],
+        "wallProbeSource": [
+          1.4299857298283314e-07,
+          17.89276885986328,
+          -1.9618316888809204
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 102,
+          "state": 3,
+          "frame": 871.5181884765625,
+          "integerFrame": 871,
+          "rate": 1,
+          "morphFrom": 871,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1558.6298828125,
+          1058.53369140625,
+          346.5638427734375
+        ]
+      },
+      "dt": 0.016551099717617035,
+      "yaw": 3.075270606396007,
+      "result": 0
+    },
+    {
+      "source": 1,
+      "t": 4.71037646484375,
+      "before": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c06566000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c6df4340",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          3.060533046722412,
+          -0.026565980166196823,
+          -82.41769409179688
+        ],
+        "carrySource": [
+          5.049930095672607,
+          0,
+          -14.71590518951416
+        ],
+        "wallProbeSource": [
+          1.4299857298283314e-07,
+          17.89276885986328,
+          -1.9618316888809204
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 106,
+          "state": 3,
+          "frame": 8897,
+          "integerFrame": 8897,
+          "rate": 1,
+          "morphFrom": 8897,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 0,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1549.0318603515625,
+          1062.236328125,
+          295.1719665527344
+        ]
+      },
+      "after": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c065660000000000000000000000000001000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000009f074340",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 1,
+        "velocitySource": [
+          3.047340154647827,
+          -0.026451462879776955,
+          0
+        ],
+        "carrySource": [
+          5.049930095672607,
+          0,
+          -14.71590518951416
+        ],
+        "wallProbeSource": [
+          1.4299857298283314e-07,
+          17.89276885986328,
+          -1.9618316888809204
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          -2.724729313285934e-07,
+          -34.0932502746582,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 106,
+          "state": 3,
+          "frame": 8897,
+          "integerFrame": 8897,
+          "rate": 1,
+          "morphFrom": 8897,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1548.9810791015625,
+          1062.23583984375,
+          295.1719665527344
+        ]
+      },
+      "enter": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c065660000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000009f074340",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          3.047340154647827,
+          -0.026451462879776955,
+          -96.76228332519531
+        ],
+        "carrySource": [
+          5.049930095672607,
+          0,
+          -14.71590518951416
+        ],
+        "wallProbeSource": [
+          1.4299857298283314e-07,
+          17.89276885986328,
+          -1.9618316888809204
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 106,
+          "state": 3,
+          "frame": 8897,
+          "integerFrame": 8897,
+          "rate": 1,
+          "morphFrom": 8897,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1549.0318603515625,
+          1062.236328125,
+          295.1719665527344
+        ]
+      },
+      "dt": 0.01667100004851818,
+      "yaw": 3.0935965614711423,
+      "result": 16
+    },
+    {
+      "source": 1,
+      "t": 4.7937392578125,
+      "before": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c0656600000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000073738db4",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -2.6347296966378053e-07,
+          -32.967124938964844,
+          -58.00397491455078
+        ],
+        "carrySource": [
+          5.049930095672607,
+          0,
+          -14.71590518951416
+        ],
+        "wallProbeSource": [
+          1.4299857298283314e-07,
+          17.89276885986328,
+          -1.9618316888809204
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 108,
+          "state": 3,
+          "frame": 8897,
+          "integerFrame": 8897,
+          "rate": 1,
+          "morphFrom": 8897,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 0,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1548.9810791015625,
+          1060.01416015625,
+          292.7515869140625
+        ]
+      },
+      "after": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c0656600000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000094b68cb4",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -2.6209875159111107e-07,
+          -32.79517364501953,
+          -72.39795684814453
+        ],
+        "carrySource": [
+          5.049930095672607,
+          0,
+          -14.71590518951416
+        ],
+        "wallProbeSource": [
+          1.4299857298283314e-07,
+          17.89276885986328,
+          -1.9618316888809204
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 108,
+          "state": 3,
+          "frame": 8897,
+          "integerFrame": 8897,
+          "rate": 1,
+          "morphFrom": 8897,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1548.9810791015625,
+          1059.467529296875,
+          291.54498291015625
+        ]
+      },
+      "enter": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c0656600000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000094b68cb4",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -2.6209875159111107e-07,
+          -32.79517364501953,
+          -72.39795684814453
+        ],
+        "carrySource": [
+          5.049930095672607,
+          0,
+          -14.71590518951416
+        ],
+        "wallProbeSource": [
+          1.4299857298283314e-07,
+          17.89276885986328,
+          -1.9618316888809204
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 108,
+          "state": 3,
+          "frame": 8897,
+          "integerFrame": 8897,
+          "rate": 1,
+          "morphFrom": 8897,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1548.9810791015625,
+          1060.01416015625,
+          292.7515869140625
+        ]
+      },
+      "dt": 0.01666639931499958,
+      "yaw": 3.099705210054653,
+      "result": 0
+    },
+    {
+      "source": 1,
+      "t": 4.993794921875,
+      "before": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c06566000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000173c88b4",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -2.5375695145157806e-07,
+          -31.751405715942383,
+          -229.81927490234375
+        ],
+        "carrySource": [
+          5.049930095672607,
+          0,
+          -14.71590518951416
+        ],
+        "wallProbeSource": [
+          1.4299857298283314e-07,
+          17.89276885986328,
+          -1.9618316888809204
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 108,
+          "state": 0,
+          "frame": 671.5037231445312,
+          "integerFrame": 671,
+          "rate": 1,
+          "morphFrom": 671,
+          "morphTo": 672,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1548.9810791015625,
+          1053.568115234375,
+          262.48193359375
+        ]
+      },
+      "after": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c06566000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000aef287b4",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -2.532228222662525e-07,
+          -31.684574127197266,
+          -243.9238739013672
+        ],
+        "carrySource": [
+          5.049930095672607,
+          0,
+          -14.71590518951416
+        ],
+        "wallProbeSource": [
+          1.4299857298283314e-07,
+          17.89276885986328,
+          -1.9618316888809204
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 108,
+          "state": 0,
+          "frame": 672.000244140625,
+          "integerFrame": 672,
+          "rate": 1,
+          "morphFrom": 672,
+          "morphTo": 673,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1548.9810791015625,
+          1053.043701171875,
+          258.4446716308594
+        ]
+      },
+      "enter": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c06566000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000aef287b4",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -2.532228222662525e-07,
+          -31.684574127197266,
+          -243.9238739013672
+        ],
+        "carrySource": [
+          5.049930095672607,
+          0,
+          -14.71590518951416
+        ],
+        "wallProbeSource": [
+          1.4299857298283314e-07,
+          17.89276885986328,
+          -1.9618316888809204
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 108,
+          "state": 0,
+          "frame": 672.000244140625,
+          "integerFrame": 672,
+          "rate": 1,
+          "morphFrom": 672,
+          "morphTo": 673,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1548.9810791015625,
+          1053.568115234375,
+          262.48193359375
+        ]
+      },
+      "dt": 0.016551300883293152,
+      "yaw": 3.1119225120304232,
+      "result": 0
+    },
+    {
+      "source": 1,
+      "t": 5.177177734375,
+      "before": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c06566000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ba4285b4",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -2.4821730448820745e-07,
+          -31.058259963989258,
+          -384.6688232421875
+        ],
+        "carrySource": [
+          5.049930095672607,
+          0,
+          -14.71590518951416
+        ],
+        "wallProbeSource": [
+          1.4299857298283314e-07,
+          17.89276885986328,
+          -1.9618316888809204
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 180,
+          "wirePose": 180,
+          "sequence": 108,
+          "state": 3,
+          "frame": 674.500244140625,
+          "integerFrame": 673,
+          "rate": 1,
+          "morphFrom": 673,
+          "morphTo": 811,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 2,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1548.9810791015625,
+          1047.8212890625,
+          204.85560607910156
+        ]
+      },
+      "after": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c0656600000000000000000000000000010000000100000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000061ff84b4",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 1,
+        "support360": 1,
+        "velocitySource": [
+          -2.4772728579591785e-07,
+          -30.996946334838867,
+          0
+        ],
+        "carrySource": [
+          5.049930095672607,
+          0,
+          -14.71590518951416
+        ],
+        "wallProbeSource": [
+          1.4299857298283314e-07,
+          17.89276885986328,
+          -1.9618316888809204
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 180,
+          "wirePose": 180,
+          "sequence": 108,
+          "state": 3,
+          "frame": 674.500244140625,
+          "integerFrame": 673,
+          "rate": 1,
+          "morphFrom": 673,
+          "morphTo": 811,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 2,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1548.9810791015625,
+          1047.3048095703125,
+          199.8197784423828
+        ]
+      },
+      "enter": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c0656600000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000061ff84b4",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -2.4772728579591785e-07,
+          -30.996946334838867,
+          -398.5898742675781
+        ],
+        "carrySource": [
+          5.049930095672607,
+          0,
+          -14.71590518951416
+        ],
+        "wallProbeSource": [
+          1.4299857298283314e-07,
+          17.89276885986328,
+          -1.9618316888809204
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 180,
+          "wirePose": 180,
+          "sequence": 108,
+          "state": 3,
+          "frame": 674.500244140625,
+          "integerFrame": 673,
+          "rate": 1,
+          "morphFrom": 673,
+          "morphTo": 811,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 2,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1548.9810791015625,
+          1047.8212890625,
+          204.85560607910156
+        ]
+      },
+      "dt": 0.016662999987602234,
+      "yaw": 3.124139815596798,
+      "result": 32
+    },
+    {
+      "source": 1,
+      "t": 6.36046533203125,
+      "before": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c06566000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000d7220341",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          8.196005821228027,
+          15.787871360778809,
+          -62.50226593017578
+        ],
+        "carrySource": [
+          5.049930095672607,
+          0,
+          -14.71590518951416
+        ],
+        "wallProbeSource": [
+          1.4299857298283314e-07,
+          17.89276885986328,
+          -1.9618316888809204
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 114,
+          "state": 3,
+          "frame": 880.9992065429688,
+          "integerFrame": 880,
+          "rate": 1,
+          "morphFrom": 880,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 0,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1542.4190673828125,
+          1056.6522216796875,
+          320.2748718261719
+        ]
+      },
+      "after": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c06566000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000556f0241",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          8.152180671691895,
+          15.703451156616211,
+          -76.86407470703125
+        ],
+        "carrySource": [
+          5.049930095672607,
+          0,
+          -14.71590518951416
+        ],
+        "wallProbeSource": [
+          1.4299857298283314e-07,
+          17.89276885986328,
+          -1.9618316888809204
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 114,
+          "state": 3,
+          "frame": 880.9992065429688,
+          "integerFrame": 880,
+          "rate": 1,
+          "morphFrom": 880,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1542.283203125,
+          1056.9139404296875,
+          318.9938659667969
+        ]
+      },
+      "enter": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c06566000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000556f0241",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          8.152180671691895,
+          15.703451156616211,
+          -76.86407470703125
+        ],
+        "carrySource": [
+          5.049930095672607,
+          0,
+          -14.71590518951416
+        ],
+        "wallProbeSource": [
+          1.4299857298283314e-07,
+          17.89276885986328,
+          -1.9618316888809204
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 114,
+          "state": 3,
+          "frame": 880.9992065429688,
+          "integerFrame": 880,
+          "rate": 1,
+          "morphFrom": 880,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1542.4190673828125,
+          1056.6522216796875,
+          320.2748718261719
+        ]
+      },
+      "dt": 0.016665799543261528,
+      "yaw": 3.0447273775685284,
+      "result": 0
+    },
+    {
+      "source": 1,
+      "t": 6.56061279296875,
+      "before": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c06566000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000a699fc40",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          7.893755912780762,
+          15.205647468566895,
+          -234.20933532714844
+        ],
+        "carrySource": [
+          5.049930095672607,
+          0,
+          -14.71590518951416
+        ],
+        "wallProbeSource": [
+          1.4299857298283314e-07,
+          17.89276885986328,
+          -1.9618316888809204
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 114,
+          "state": 0,
+          "frame": 671.5,
+          "integerFrame": 671,
+          "rate": 1,
+          "morphFrom": 671,
+          "morphTo": 672,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1540.8162841796875,
+          1059.739501953125,
+          289.113037109375
+        ]
+      },
+      "after": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c065660000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003611fc40",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          7.877100944519043,
+          15.173564910888672,
+          -248.40028381347656
+        ],
+        "carrySource": [
+          5.049930095672607,
+          0,
+          -14.71590518951416
+        ],
+        "wallProbeSource": [
+          1.4299857298283314e-07,
+          17.89276885986328,
+          -1.9618316888809204
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 114,
+          "state": 0,
+          "frame": 671.9998168945312,
+          "integerFrame": 671,
+          "rate": 1,
+          "morphFrom": 671,
+          "morphTo": 672,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1540.68505859375,
+          1059.9923095703125,
+          284.974365234375
+        ]
+      },
+      "enter": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c065660000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003611fc40",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          7.877100944519043,
+          15.173564910888672,
+          -248.40028381347656
+        ],
+        "carrySource": [
+          5.049930095672607,
+          0,
+          -14.71590518951416
+        ],
+        "wallProbeSource": [
+          1.4299857298283314e-07,
+          17.89276885986328,
+          -1.9618316888809204
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 114,
+          "state": 0,
+          "frame": 671.9998168945312,
+          "integerFrame": 671,
+          "rate": 1,
+          "morphFrom": 671,
+          "morphTo": 672,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1540.8162841796875,
+          1059.739501953125,
+          289.113037109375
+        ]
+      },
+      "dt": 0.016661299392580986,
+      "yaw": 3.0447273775685284,
+      "result": 0
+    },
+    {
+      "source": 1,
+      "t": 6.59409033203125,
+      "before": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c06566000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ae8bfb40",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          7.860800743103027,
+          15.142165184020996,
+          -262.57635498046875
+        ],
+        "carrySource": [
+          5.049930095672607,
+          0,
+          -14.71590518951416
+        ],
+        "wallProbeSource": [
+          1.4299857298283314e-07,
+          17.89276885986328,
+          -1.9618316888809204
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 114,
+          "state": 0,
+          "frame": 672.4998168945312,
+          "integerFrame": 672,
+          "rate": 1,
+          "morphFrom": 672,
+          "morphTo": 673,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1540.5540771484375,
+          1060.2447509765625,
+          280.59783935546875
+        ]
+      },
+      "after": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c065660000000000000000000000000001000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007708fb40",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 1,
+        "velocitySource": [
+          7.844783306121826,
+          15.111310958862305,
+          0
+        ],
+        "carrySource": [
+          5.049930095672607,
+          0,
+          -14.71590518951416
+        ],
+        "wallProbeSource": [
+          1.4299857298283314e-07,
+          17.89276885986328,
+          -1.9618316888809204
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          -5.841449137733434e-07,
+          -73.0914306640625,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 114,
+          "state": 0,
+          "frame": 673.0000610351562,
+          "integerFrame": 673,
+          "rate": 1,
+          "morphFrom": 673,
+          "morphTo": 674,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1540.4232177734375,
+          1060.4967041015625,
+          280.59783935546875
+        ]
+      },
+      "enter": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c065660000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007708fb40",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          7.844783306121826,
+          15.111310958862305,
+          -276.7372741699219
+        ],
+        "carrySource": [
+          5.049930095672607,
+          0,
+          -14.71590518951416
+        ],
+        "wallProbeSource": [
+          1.4299857298283314e-07,
+          17.89276885986328,
+          -1.9618316888809204
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 114,
+          "state": 0,
+          "frame": 673.0000610351562,
+          "integerFrame": 673,
+          "rate": 1,
+          "morphFrom": 673,
+          "morphTo": 674,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1540.5540771484375,
+          1060.2447509765625,
+          280.59783935546875
+        ]
+      },
+      "dt": 0.01667490042746067,
+      "yaw": 3.0447273775685284,
+      "result": 16
+    },
+    {
+      "source": 1,
+      "t": 10.028453125,
+      "before": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c065660000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001c630a41",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          8.64919662475586,
+          -93.84272766113281,
+          -592.552734375
+        ],
+        "carrySource": [
+          -1.8165236781442218e-07,
+          -22.729354858398438,
+          0
+        ],
+        "wallProbeSource": [
+          1.4299857298283314e-07,
+          17.89276885986328,
+          -1.9618316888809204
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 180,
+          "wirePose": 180,
+          "sequence": 121,
+          "state": 0,
+          "frame": 811,
+          "integerFrame": 811,
+          "rate": 1,
+          "morphFrom": 811,
+          "morphTo": 812,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 2,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1493.86572265625,
+          821.066650390625,
+          5.189883232116699
+        ]
+      },
+      "after": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c06566000000000000000000000000000100000001000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000611b0741",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 1,
+        "support360": 1,
+        "velocitySource": [
+          8.444184303283691,
+          -91.61837005615234,
+          0
+        ],
+        "carrySource": [
+          -1.8165236781442218e-07,
+          -22.729354858398438,
+          0
+        ],
+        "wallProbeSource": [
+          1.4299857298283314e-07,
+          17.89276885986328,
+          -1.9618316888809204
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 180,
+          "wirePose": 180,
+          "sequence": 121,
+          "state": 0,
+          "frame": 811,
+          "integerFrame": 811,
+          "rate": 1,
+          "morphFrom": 811,
+          "morphTo": 812,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 2,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1493.724609375,
+          819.5357666015625,
+          0.20000028610229492
+        ]
+      },
+      "enter": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c06566000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000d0120a41",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          8.629592895507812,
+          -93.6300277709961,
+          -605.9219970703125
+        ],
+        "carrySource": [
+          -1.8165236781442218e-07,
+          -22.729354858398438,
+          0
+        ],
+        "wallProbeSource": [
+          1.4299857298283314e-07,
+          17.89276885986328,
+          -1.9618316888809204
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 180,
+          "wirePose": 180,
+          "sequence": 121,
+          "state": 0,
+          "frame": 811,
+          "integerFrame": 811,
+          "rate": 1,
+          "morphFrom": 811,
+          "morphTo": 812,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 2,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1493.86572265625,
+          821.066650390625,
+          5.189883232116699
+        ]
+      },
+      "dt": 0.01670919917523861,
+      "yaw": -3.0246550635529728,
+      "result": 32
+    },
+    {
+      "source": 1,
+      "t": 21.420171875,
+      "before": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "0000000049263742accdb14200000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c0656600000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000019374542",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          49.30380630493164,
+          93.00675964355469,
+          -130.3075714111328
+        ],
+        "carrySource": [
+          0.0007838057354092598,
+          0.0003218996280338615,
+          0
+        ],
+        "wallProbeSource": [
+          12.72793197631836,
+          12.727911949157715,
+          -1.5233090380206704e-05
+        ],
+        "externalSource": [
+          45.78738784790039,
+          88.90170288085938,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 137,
+          "state": 3,
+          "frame": 50318,
+          "integerFrame": 50318,
+          "rate": 1,
+          "morphFrom": 50318,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1493.237548828125,
+          434.12054443359375,
+          82.85853576660156
+        ]
+      },
+      "after": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "0000000049263742accdb14200000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c0656600000000000000000000000000010000000100000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000039284842",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 1,
+        "support360": 1,
+        "velocitySource": [
+          50.03927993774414,
+          94.44153594970703,
+          0
+        ],
+        "carrySource": [
+          0.0007838057354092598,
+          0.0003218996280338615,
+          0
+        ],
+        "wallProbeSource": [
+          12.72793197631836,
+          12.727911949157715,
+          -1.5233090380206704e-05
+        ],
+        "externalSource": [
+          45.78738784790039,
+          88.90170288085938,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 137,
+          "state": 3,
+          "frame": 50318,
+          "integerFrame": 50318,
+          "rate": 1,
+          "morphFrom": 50318,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1492.404052734375,
+          435.69366455078125,
+          78.79290771484375
+        ]
+      },
+      "enter": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "0000000049263742accdb14200000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c0656600000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000039284842",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          50.03927993774414,
+          94.44153594970703,
+          -144.66775512695312
+        ],
+        "carrySource": [
+          0.0007838057354092598,
+          0.0003218996280338615,
+          0
+        ],
+        "wallProbeSource": [
+          12.72793197631836,
+          12.727911949157715,
+          -1.5233090380206704e-05
+        ],
+        "externalSource": [
+          45.78738784790039,
+          88.90170288085938,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 137,
+          "state": 3,
+          "frame": 50318,
+          "integerFrame": 50318,
+          "rate": 1,
+          "morphFrom": 50318,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1493.237548828125,
+          434.12054443359375,
+          82.85853576660156
+        ]
+      },
+      "dt": 0.01665719971060753,
+      "yaw": 2.6659904213131065,
+      "result": 32
+    },
+    {
+      "source": 1,
+      "t": 22.28726953125,
+      "before": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000fc9b6fc26e25a04200000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c06566000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000d5d00fc3",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -143.8157501220703,
+          176.4215545654297,
+          -148.2635955810547
+        ],
+        "carrySource": [
+          0.0007838057354092598,
+          0.0003218996280338615,
+          0
+        ],
+        "wallProbeSource": [
+          12.72793197631836,
+          12.727911949157715,
+          -1.5233090380206704e-05
+        ],
+        "externalSource": [
+          -59.90232849121094,
+          80.07310485839844,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 140,
+          "state": 3,
+          "frame": 661.9981689453125,
+          "integerFrame": 661,
+          "rate": 1,
+          "morphFrom": 661,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1561.25634765625,
+          560.1334228515625,
+          116.81900787353516
+        ]
+      },
+      "after": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000fc9b6fc26d25a04200000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c0656600000000000000000000000000010000000100000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004b110c3",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 1,
+        "support360": 1,
+        "velocitySource": [
+          -144.69146728515625,
+          177.62388610839844,
+          0
+        ],
+        "carrySource": [
+          0.0007838057354092598,
+          0.0003218996280338615,
+          0
+        ],
+        "wallProbeSource": [
+          12.72793197631836,
+          12.727911949157715,
+          -1.5233090380206704e-05
+        ],
+        "externalSource": [
+          -59.90232849121094,
+          80.0730972290039,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 140,
+          "state": 3,
+          "frame": 661.9981689453125,
+          "integerFrame": 661,
+          "rate": 1,
+          "morphFrom": 661,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1563.667236328125,
+          563.093017578125,
+          114.30793762207031
+        ]
+      },
+      "enter": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000fc9b6fc26d25a04200000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c0656600000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004b110c3",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -144.69146728515625,
+          177.62388610839844,
+          -162.65057373046875
+        ],
+        "carrySource": [
+          0.0007838057354092598,
+          0.0003218996280338615,
+          0
+        ],
+        "wallProbeSource": [
+          12.72793197631836,
+          12.727911949157715,
+          -1.5233090380206704e-05
+        ],
+        "externalSource": [
+          -59.90232849121094,
+          80.0730972290039,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 140,
+          "state": 3,
+          "frame": 661.9981689453125,
+          "integerFrame": 661,
+          "rate": 1,
+          "morphFrom": 661,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1561.25634765625,
+          560.1334228515625,
+          116.81900787353516
+        ]
+      },
+      "dt": 0.016662100329995155,
+      "yaw": -2.49931153293311,
+      "result": 32
+    },
+    {
+      "source": 1,
+      "t": 22.82101171875,
+      "before": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000f99b6fc26c25a04200000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c06566000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000b53b20c3",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -160.2332305908203,
+          206.75631713867188,
+          -133.7493438720703
+        ],
+        "carrySource": [
+          0.0007838057354092598,
+          0.0003218996280338615,
+          0
+        ],
+        "wallProbeSource": [
+          12.72793197631836,
+          12.727911949157715,
+          -1.5233090380206704e-05
+        ],
+        "externalSource": [
+          -59.90231704711914,
+          80.07308959960938,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 143,
+          "state": 3,
+          "frame": 662.0046997070312,
+          "integerFrame": 662,
+          "rate": 1,
+          "morphFrom": 662,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1639.107421875,
+          659.859375,
+          147.9929962158203
+        ]
+      },
+      "after": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000f99b6fc26b25a04200000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c06566000000000000000000000000000100000001000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000b41721c3",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 1,
+        "support360": 1,
+        "velocitySource": [
+          -161.09259033203125,
+          207.91969299316406,
+          0
+        ],
+        "carrySource": [
+          0.0007838057354092598,
+          0.0003218996280338615,
+          0
+        ],
+        "wallProbeSource": [
+          12.72793197631836,
+          12.727911949157715,
+          -1.5233090380206704e-05
+        ],
+        "externalSource": [
+          -59.90231704711914,
+          80.07308197021484,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 143,
+          "state": 3,
+          "frame": 662.0046997070312,
+          "integerFrame": 662,
+          "rate": 1,
+          "morphFrom": 662,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1641.7933349609375,
+          663.3260498046875,
+          146.16494750976562
+        ]
+      },
+      "enter": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000f99b6fc26b25a04200000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c06566000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000b41721c3",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -161.09259033203125,
+          207.91969299316406,
+          -148.17869567871094
+        ],
+        "carrySource": [
+          0.0007838057354092598,
+          0.0003218996280338615,
+          0
+        ],
+        "wallProbeSource": [
+          12.72793197631836,
+          12.727911949157715,
+          -1.5233090380206704e-05
+        ],
+        "externalSource": [
+          -59.90231704711914,
+          80.07308197021484,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 143,
+          "state": 3,
+          "frame": 662.0046997070312,
+          "integerFrame": 662,
+          "rate": 1,
+          "morphFrom": 662,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1639.107421875,
+          659.859375,
+          147.9929962158203
+        ]
+      },
+      "dt": 0.016673099249601364,
+      "yaw": -2.49931153293311,
+      "result": 40
+    },
+    {
+      "source": 1,
+      "t": 23.28761328125,
+      "before": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "0000000065aecbc1b468c14200000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c06566000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000479a33c3",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -179.60264587402344,
+          251.52835083007812,
+          -104.64907836914062
+        ],
+        "carrySource": [
+          0.0007838057354092598,
+          0.0003218996280338615,
+          0
+        ],
+        "wallProbeSource": [
+          12.72793197631836,
+          12.727911949157715,
+          -1.5233090380206704e-05
+        ],
+        "externalSource": [
+          -25.460153579711914,
+          96.70449829101562,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 146,
+          "state": 3,
+          "frame": 661.999755859375,
+          "integerFrame": 661,
+          "rate": 1,
+          "morphFrom": 661,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1719.7254638671875,
+          768.0391845703125,
+          182.7849884033203
+        ]
+      },
+      "after": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "0000000003b8b8c16898c24200000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c0656600000000000000000000000000010000000100000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000062b433c3",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 1,
+        "support360": 1,
+        "velocitySource": [
+          -179.70462036132812,
+          252.93406677246094,
+          0
+        ],
+        "carrySource": [
+          0.0007838057354092598,
+          0.0003218996280338615,
+          0
+        ],
+        "wallProbeSource": [
+          12.72793197631836,
+          12.727911949157715,
+          -1.5233090380206704e-05
+        ],
+        "externalSource": [
+          -23.0898494720459,
+          97.29766845703125,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 146,
+          "state": 3,
+          "frame": 661.999755859375,
+          "integerFrame": 661,
+          "rate": 1,
+          "morphFrom": 661,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1722.700439453125,
+          772.2265014648438,
+          180.07127380371094
+        ]
+      },
+      "enter": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "0000000003b8b8c16898c24200000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c0656600000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000062b433c3",
+        "motionSchema": 1,
+        "inputAxes": [
+          1,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -179.70462036132812,
+          252.93406677246094,
+          -119.03496551513672
+        ],
+        "carrySource": [
+          0.0007838057354092598,
+          0.0003218996280338615,
+          0
+        ],
+        "wallProbeSource": [
+          12.72793197631836,
+          12.727911949157715,
+          -1.5233090380206704e-05
+        ],
+        "externalSource": [
+          -23.0898494720459,
+          97.29766845703125,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 152,
+          "wirePose": 152,
+          "sequence": 146,
+          "state": 3,
+          "frame": 661.999755859375,
+          "integerFrame": 661,
+          "rate": 1,
+          "morphFrom": 661,
+          "morphTo": 670,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 0,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1719.7254638671875,
+          768.0391845703125,
+          182.7849884033203
+        ]
+      },
+      "dt": 0.016554899513721466,
+      "yaw": -2.9085913363803173,
+      "result": 32
+    },
+    {
+      "source": 1,
+      "t": 28.3606015625,
+      "before": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c065660000000000000000000000000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000009fd66eb4",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -2.2243555974910123e-07,
+          -27.832319259643555,
+          -495.1197509765625
+        ],
+        "carrySource": [
+          -11.67525863647461,
+          0,
+          -14.696590423583984
+        ],
+        "wallProbeSource": [
+          1.4299884298907273e-07,
+          17.89276885986328,
+          -1.961835265159607
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 180,
+          "wirePose": 180,
+          "sequence": 157,
+          "state": 0,
+          "frame": 811,
+          "integerFrame": 811,
+          "rate": 1,
+          "morphFrom": 811,
+          "morphTo": 812,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 2,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1691.9661865234375,
+          1057.5860595703125,
+          256.36181640625
+        ]
+      },
+      "after": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c06566000000000000000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000f2566eb4",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 1,
+        "velocitySource": [
+          -2.2197107796273485e-07,
+          -27.774198532104492,
+          0
+        ],
+        "carrySource": [
+          -11.67525863647461,
+          0,
+          -14.696590423583984
+        ],
+        "wallProbeSource": [
+          1.4299884298907273e-07,
+          17.89276885986328,
+          -1.961835265159607
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          -9.859312513071927e-07,
+          -123.36515808105469,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 180,
+          "wirePose": 180,
+          "sequence": 157,
+          "state": 0,
+          "frame": 811,
+          "integerFrame": 811,
+          "rate": 1,
+          "morphFrom": 811,
+          "morphTo": 812,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 2,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1691.9661865234375,
+          1057.123291015625,
+          256.36181640625
+        ]
+      },
+      "enter": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c06566000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000f2566eb4",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -2.2197107796273485e-07,
+          -27.774198532104492,
+          -508.7624816894531
+        ],
+        "carrySource": [
+          -11.67525863647461,
+          0,
+          -14.696590423583984
+        ],
+        "wallProbeSource": [
+          1.4299884298907273e-07,
+          17.89276885986328,
+          -1.961835265159607
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 180,
+          "wirePose": 180,
+          "sequence": 157,
+          "state": 0,
+          "frame": 811,
+          "integerFrame": 811,
+          "rate": 1,
+          "morphFrom": 811,
+          "morphTo": 812,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 2,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1691.9661865234375,
+          1057.5860595703125,
+          256.36181640625
+        ]
+      },
+      "dt": 0.016663800925016403,
+      "yaw": 2.885901834797538,
+      "result": 16
+    },
+    {
+      "source": 1,
+      "t": 30.4778359375,
+      "before": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c0656600000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000036805b43",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          219.50082397460938,
+          10.786316871643066,
+          -302.0799255371094
+        ],
+        "carrySource": [
+          -11.67525863647461,
+          0,
+          -14.696590423583984
+        ],
+        "wallProbeSource": [
+          1.4299857298283314e-07,
+          17.89276885986328,
+          -1.9618316888809204
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 180,
+          "wirePose": 180,
+          "sequence": 163,
+          "state": 3,
+          "frame": 674.0054321289062,
+          "integerFrame": 673,
+          "rate": 1,
+          "morphFrom": 673,
+          "morphTo": 811,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 0,
+          "playbackBit0": 1,
+          "playbackBit1": 2,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1396.3824462890625,
+          1061.499755859375,
+          294.2280578613281
+        ]
+      },
+      "after": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c0656600000000000000000000000000010000000000000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000056125b43",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 1,
+        "velocitySource": [
+          219.07162475585938,
+          10.765225410461426,
+          0
+        ],
+        "carrySource": [
+          -11.67525863647461,
+          0,
+          -14.696590423583984
+        ],
+        "wallProbeSource": [
+          1.4299857298283314e-07,
+          17.89276885986328,
+          -1.9618316888809204
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          -6.522712396872521e-07,
+          -81.61576843261719,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 180,
+          "wirePose": 180,
+          "sequence": 163,
+          "state": 3,
+          "frame": 674.0054321289062,
+          "integerFrame": 673,
+          "rate": 1,
+          "morphFrom": 673,
+          "morphTo": 811,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 2,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1392.7423095703125,
+          1061.6785888671875,
+          294.2280578613281
+        ]
+      },
+      "enter": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000000000000000000000000805cc400000000",
+        "raw340": "0000000001000000c0656600000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000056125b43",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          219.07162475585938,
+          10.765225410461426,
+          -316.1291809082031
+        ],
+        "carrySource": [
+          -11.67525863647461,
+          0,
+          -14.696590423583984
+        ],
+        "wallProbeSource": [
+          1.4299857298283314e-07,
+          17.89276885986328,
+          -1.9618316888809204
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 180,
+          "wirePose": 180,
+          "sequence": 163,
+          "state": 3,
+          "frame": 674.0054321289062,
+          "integerFrame": 673,
+          "rate": 1,
+          "morphFrom": 673,
+          "morphTo": 811,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 2,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1396.3824462890625,
+          1061.499755859375,
+          294.2280578613281
+        ]
+      },
+      "dt": 0.016616299748420715,
+      "yaw": 2.9225537559444805,
+      "result": 16
+    },
+    {
+      "source": 1,
+      "t": 34.84492578125,
+      "before": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c06566000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006581c0",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -4.0435791015625,
+          8.357935905456543,
+          -327.8978576660156
+        ],
+        "carrySource": [
+          -11.67525863647461,
+          0,
+          -14.696590423583984
+        ],
+        "wallProbeSource": [
+          1.4299857298283314e-07,
+          17.89276885986328,
+          -1.9618316888809204
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 180,
+          "wirePose": 180,
+          "sequence": 177,
+          "state": 3,
+          "frame": 674.5,
+          "integerFrame": 673,
+          "rate": 1,
+          "morphFrom": 673,
+          "morphTo": 811,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 2,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1305.0802001953125,
+          1062.0394287109375,
+          295.61370849609375
+        ]
+      },
+      "after": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c06566000000000000000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e82381c0",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 1,
+        "velocitySource": [
+          -4.035633087158203,
+          8.341510772705078,
+          0
+        ],
+        "carrySource": [
+          -11.67525863647461,
+          0,
+          -14.696590423583984
+        ],
+        "wallProbeSource": [
+          1.4299857298283314e-07,
+          17.89276885986328,
+          -1.9618316888809204
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          -6.970183790144802e-07,
+          -87.21461486816406,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 180,
+          "wirePose": 180,
+          "sequence": 177,
+          "state": 3,
+          "frame": 674.5,
+          "integerFrame": 673,
+          "rate": 1,
+          "morphFrom": 673,
+          "morphTo": 811,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 2,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1305.1474609375,
+          1062.1783447265625,
+          295.61370849609375
+        ]
+      },
+      "enter": {
+        "object": "0x147a4870",
+        "ownerLink": "0x156c2d7c",
+        "lock": "0x0",
+        "rawC0": "00000000000000000000000000000080000000000000000000805cc400000000",
+        "raw340": "0000000001000000c06566000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e82381c0",
+        "motionSchema": 1,
+        "inputAxes": [
+          0,
+          0
+        ],
+        "rawDc": 0,
+        "support35c": 0,
+        "support360": 0,
+        "velocitySource": [
+          -4.035633087158203,
+          8.341510772705078,
+          -341.9312744140625
+        ],
+        "carrySource": [
+          -11.67525863647461,
+          0,
+          -14.696590423583984
+        ],
+        "wallProbeSource": [
+          1.4299857298283314e-07,
+          17.89276885986328,
+          -1.9618316888809204
+        ],
+        "externalSource": [
+          0,
+          0,
+          0
+        ],
+        "groundExternalSource": [
+          0,
+          0,
+          0
+        ],
+        "model": {
+          "controller": "0x156c2720",
+          "pose": 180,
+          "wirePose": 180,
+          "sequence": 177,
+          "state": 3,
+          "frame": 674.5,
+          "integerFrame": 673,
+          "rate": 1,
+          "morphFrom": 673,
+          "morphTo": 811,
+          "morphSeconds": 0.11999999731779099,
+          "morphStarted": 1,
+          "playbackBit0": 1,
+          "playbackBit1": 2,
+          "entryFlags": 1,
+          "queuedPose": -1
+        },
+        "positionSource": [
+          -1305.0802001953125,
+          1062.0394287109375,
+          295.61370849609375
+        ]
+      },
+      "dt": 0.016657300293445587,
+      "yaw": -3.1223940290956027,
+      "result": 16
+    }
+  ]
+}

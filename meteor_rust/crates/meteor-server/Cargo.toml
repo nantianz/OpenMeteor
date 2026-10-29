@@ -1,0 +1,24 @@
+[package]
+name = "meteor-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Dedicated multiplayer server"
+
+[[bin]]
+name = "meteor-server"
+path = "src/main.rs"
+
+[dependencies]
+meteor-asset = { path = "../meteor-asset" }
+meteor-network = { path = "../meteor-network" }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+serde_json.workspace = true
+futures-util = "0.3"
+log.workspace = true
+env_logger = "0.11"
+
+[features]
+original-assets = []

@@ -1,0 +1,31 @@
+[package]
+name = "meteor-network"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Multiplayer protocols and networking"
+
+[dependencies]
+meteor-scene = { path = "../meteor-scene" }
+meteor-core = { path = "../meteor-core" }
+meteor-asset = { path = "../meteor-asset" }
+meteor-combat = { path = "../meteor-combat" }
+prost.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+log.workspace = true
+encoding_rs = "0.8"
+rand = "0.8"
+
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = { workspace = true }
+web-sys = { workspace = true }
+
+[features]
+original-assets = []

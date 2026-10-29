@@ -1,0 +1,16 @@
+[package]
+name = "meteor-input"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Input actions and mapping"
+
+[dependencies]
+meteor-core = { path = "../meteor-core" }
+serde.workspace = true
+thiserror.workspace = true
+log.workspace = true
+
+[features]
+original-assets = []

@@ -1,0 +1,1 @@
+#define_import_path bevy_pbr::meshlet_visibility_buffer_resolve
