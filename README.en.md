@@ -66,9 +66,11 @@ cargo build --locked -p meteor-app --bin meteor --release
 ## Resources and desktop usage
 
 The desktop client accepts a read-only original installation or compatible MPK
-resource packs. Neither is distributed here. The bundled launcher uses a Bevy
-fallback font and transparent artwork placeholders; complete launcher visuals
-and Chinese glyph coverage require suitable replacement UI assets and fonts.
+resource packs. Neither is distributed here. The startup logo, menu title and
+background, campaign map, and halo are provided with the source and embedded in
+the desktop original-directory client. Standard source builds use the Bevy
+fallback font; an external `fonts/ui.ttf` in the original directory can provide
+Chinese glyph coverage. Windows release ZIPs already include a Chinese font.
 
 ```sh
 cargo run --locked -p meteor-app --bin meteor -- --help
@@ -133,6 +135,10 @@ DLSS/ANGLE runtimes are not included. The original executable and game resources
 can remain in place. The build downloads a pinned font from its public upstream
 and verifies its SHA-256; it does not use local font files.
 
+All five UI images are embedded in `OpenMeteor.exe`; no separate image directory
+is needed. Packaging checks image dimensions and the actual EXE contents,
+rejecting missing images or 1x1 placeholders before publication.
+
 ## Tests
 
 From the repository root:
@@ -146,7 +152,7 @@ Tests that require original game files or separate reference captures are gated
 behind `original-assets`. Enabling this feature requires providing the matching
 resources and fixtures locally; they are excluded from this source distribution.
 
-This update passed the workspace build and default tests on macOS with Rust
+The preceding source baseline passed the workspace build and default tests on macOS with Rust
 1.97.1 (1146 passed, 2 ignored), plus a compilation check of the separate
 WebAssembly crate:
 

@@ -59,7 +59,7 @@ cargo build --locked -p meteor-app --bin meteor --release
 
 ## 资源与桌面运行
 
-桌面客户端支持只读加载原版游戏安装目录，或加载兼容的 MPK 资源包；这两类资源均未随仓库分发。启动界面使用 Bevy 后备字体和透明图片占位内容，完整的界面效果与中文字符显示需要适用的 UI 素材和字体。
+桌面客户端支持只读加载原版游戏安装目录，或加载兼容的 MPK 资源包；这两类资源均未随仓库分发。启动 Logo、主界面标题与背景、战役地图和光晕随源码提供，并嵌入桌面原版目录客户端。常规源码构建使用 Bevy 后备字体，可通过原版目录中的 `fonts/ui.ttf` 提供中文字体；Windows 发布包已附带中文字体。
 
 ```sh
 cargo run --locked -p meteor-app --bin meteor -- --help
@@ -100,6 +100,8 @@ Windows 发布构建启用 `original-directory-default`。将 ZIP 完整解压�
 
 ZIP 包含 `OpenMeteor.exe`、`config/` 配置、`fonts/ui.ttf` 中文字体和许可说明，不包含原版游戏资源或可选 DLSS/ANGLE 运行库。原版程序和资源文件可以继续保留。中文字体在构建时从公开上游下载固定版本并校验 SHA-256，不依赖本机字体文件。
 
+五张界面图片内置在 `OpenMeteor.exe`，不需要额外图片目录。打包时检查每张图片的尺寸和实际 EXE 内容，缺图或仍使用 1×1 占位图时停止发布。
+
 ## 测试
 
 在仓库根目录运行：
@@ -111,7 +113,7 @@ cargo test --workspace --locked
 
 依赖原版游戏文件或独立参考采集数据的测试由 `original-assets` feature 控制。启用该功能前，需要在本地准备匹配的资源与测试数据；这些文件未随源码分发。
 
-本次更新已在 macOS 上使用 Rust 1.97.1 通过工作区编译与默认测试（1146 项通过、2 项忽略），并通过独立 WebAssembly crate 的编译检查：
+此前源码基线已在 macOS 上使用 Rust 1.97.1 通过工作区编译与默认测试（1146 项通过、2 项忽略），并通过独立 WebAssembly crate 的编译检查：
 
 ```sh
 rustup target add wasm32-unknown-unknown

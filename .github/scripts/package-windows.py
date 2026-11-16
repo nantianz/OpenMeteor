@@ -10,6 +10,13 @@ from windows_font import verify_font
 
 
 ROOT = Path(__file__).resolve().parents[2]
+UI_IMAGES = (
+    "studio-logo.png",
+    "cinematic-title-reborn-matte.png",
+    "cinematic-fortress.png",
+    "campaign-map.png",
+    "campaign-halo.png",
+)
 INSTRUCTIONS = """OpenMeteor Windows
 
 Extract the complete ZIP into a compatible original game directory, keeping
@@ -18,6 +25,8 @@ No command-line arguments, launcher script, or MPK packs are required.
 This package does not include original game resources.
 For shortcuts, set the working directory to the original game directory.
 The Chinese font is included as fonts/ui.ttf, with its license in licenses/.
+The startup logo, menu title and background, campaign map, and halo are embedded
+in OpenMeteor.exe. No separate UI image download is needed.
 The package does not enable optional DLSS or ANGLE backends.
 
 将 ZIP 完整解压到原版游戏目录，保留 config/ 和 fonts/ 的目录结构，
@@ -25,7 +34,24 @@ The package does not enable optional DLSS or ANGLE backends.
 本包不包含原版游戏资源；原版程序和资源文件可以继续保留。
 使用快捷方式时，将“起始位置”设为原版游戏目录。
 包内已附带 fonts/ui.ttf 中文字体及 licenses/ 中的字体许可。
+启动 Logo、主界面标题与背景、战役地图和光晕已内置于 OpenMeteor.exe，
+不需要另行下载界面图片。
 """
+
+
+def verify_embedded_ui(binary):
+    data = binary.read_bytes()
+    for name in UI_IMAGES:
+        path = ROOT / "meteor_rust/crates/meteor-app/assets/ui" / name
+        if not path.is_file() or path.is_symlink():
+            raise ValueError(f"missing or invalid UI image: {name}")
+        image = path.read_bytes()
+        if (len(image) < 33 or image[:8] != b"\x89PNG\r\n\x1a\n"
+                or image[12:16] != b"IHDR"
+                or min(struct.unpack_from(">II", image, 16)) <= 1):
+            raise ValueError(f"invalid or placeholder UI image: {name}")
+        if image not in data:
+            raise ValueError(f"UI image is not embedded in the executable: {name}")
 
 
 def package(binary, architecture, version, commit, font, output):
@@ -45,6 +71,7 @@ def package(binary, architecture, version, commit, font, output):
             or struct.unpack_from("<H", header, 4)[0] != machine
             or struct.unpack_from("<H", header, 24)[0] != magic):
         raise ValueError("executable architecture mismatch")
+    verify_embedded_ui(binary)
     files = {
         "OpenMeteor.exe": binary,
         "LICENSE": ROOT / "LICENSE",
