@@ -155,6 +155,27 @@ impl<M: MeshCollider> CollisionSystem<M> {
         probe: Point3,
         dt: f32,
     ) -> WallMove {
+        self.resolve_mover(pos, velocity, probe, dt, true)
+    }
+
+    pub fn resolve_ordinary_motion(&self, pos: Point3, velocity: Point3, dt: f32) -> WallMove {
+        self.resolve_mover(
+            pos,
+            velocity,
+            Point3::new(0.0, FOOT_PROBE_UP, 0.0),
+            dt,
+            false,
+        )
+    }
+
+    fn resolve_mover(
+        &self,
+        pos: Point3,
+        velocity: Point3,
+        probe: Point3,
+        dt: f32,
+        wall_probe: bool,
+    ) -> WallMove {
         let mut p = [pos.x, pos.y, pos.z];
         let mut v = [velocity.x, velocity.y, velocity.z];
         let speed = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
@@ -165,10 +186,10 @@ impl<M: MeshCollider> CollisionSystem<M> {
         }
         let mut result = WallMove {
             position: pos,
-            velocity,
+            velocity: Point3::new(v[0], v[1], v[2]),
             flags: 0,
             vertical_surface: None,
-            vertical_speed_before_contact: velocity.y,
+            vertical_speed_before_contact: v[1],
         };
         if self.blocks_motion_sweep(pos, Point3::new(v[0] * dt, v[1] * dt, v[2] * dt)) {
             result.velocity = Point3::ZERO;
@@ -196,14 +217,34 @@ impl<M: MeshCollider> CollisionSystem<M> {
                 candidate[1] + probe.y,
                 candidate[2] + probe.z,
             );
-            let end = Point3::new(candidate[0], candidate[1], candidate[2]);
+            let end = Point3::new(
+                candidate[0],
+                candidate[1] - if wall_probe { 0.0 } else { FOOT_PROBE_DOWN },
+                candidate[2],
+            );
             let mut flags = 0;
             if let Some(hit) = self.segment_hit(q, end) {
-                let length = (probe.x * probe.x + probe.y * probe.y + probe.z * probe.z).sqrt();
+                let direction = [end.x - q.x, end.y - q.y, end.z - q.z];
+                let length = if wall_probe {
+                    (probe.x * probe.x + probe.y * probe.y + probe.z * probe.z).sqrt()
+                } else {
+                    (direction[0] * direction[0]
+                        + direction[1] * direction[1]
+                        + direction[2] * direction[2])
+                        .sqrt()
+                };
                 if length > 0.0 {
-                    candidate[0] -= probe.x * hit.t / length;
-                    candidate[1] -= probe.y * hit.t / length;
-                    candidate[2] -= probe.z * hit.t / length;
+                    if wall_probe {
+                        candidate[0] -= probe.x * hit.t / length;
+                        candidate[1] -= probe.y * hit.t / length;
+                        candidate[2] -= probe.z * hit.t / length;
+                    } else {
+                        candidate = [
+                            q.x + direction[0] * hit.t / length,
+                            q.y + direction[1] * hit.t / length,
+                            q.z + direction[2] * hit.t / length,
+                        ];
+                    }
                     normal = FootHit {
                         y: candidate[1],
                         nx: hit.nx,
@@ -237,7 +278,7 @@ impl<M: MeshCollider> CollisionSystem<M> {
         if swept && length > 0.0 {
             let n = [probe.x / length, probe.y / length, probe.z / length];
             let dot = v[0] * n[0] + v[1] * n[1] + v[2] * n[2];
-            if dot > 0.0 {
+            if (wall_probe && dot > 0.0) || (!wall_probe && dot < 0.0) {
                 for i in 0..3 {
                     v[i] -= n[i] * dot;
                 }
@@ -867,6 +908,57 @@ mod tests {
         ) -> Option<RayHit> {
             None
         }
+    }
+
+    #[test]
+    fn ordinary_mover_uses_short_probe_and_preserves_contact_flags() {
+        let mut sys = CollisionSystem::<NullMesh>::new(0.96, 3.84);
+        sys.add_box([-100.0, -1.0, -100.0], [100.0, 0.0, 100.0]);
+        let high = sys.resolve_ordinary_motion(
+            Point3::new(0.0, 0.5, 0.0),
+            Point3::new(0.0, -1.0, 0.0),
+            0.01,
+        );
+        assert_eq!(
+            high.flags, 0,
+            "a floor inside the old 1.4 ray is not contact"
+        );
+        assert!((high.position.y - 0.49).abs() < 1e-6);
+        let low = sys.resolve_ordinary_motion(
+            Point3::new(0.0, 0.2, 0.0),
+            Point3::new(0.0, -1.0, 0.0),
+            0.01,
+        );
+        assert_eq!(low.flags, 0x20);
+        assert!(low.position.y.abs() < 1e-6);
+        assert_eq!(low.velocity.y, 0.0);
+        let swept = sys.resolve_ordinary_motion(
+            Point3::new(0.0, 1.0, 0.0),
+            Point3::new(0.0, -100.0, 0.0),
+            0.05,
+        );
+        assert_eq!(
+            swept.flags, 0x15,
+            "coarse rejection remains visible to the controller"
+        );
+        assert_eq!(swept.position.y, 1.0);
+        assert_eq!(swept.velocity, Point3::ZERO);
+    }
+
+    #[test]
+    fn ordinary_mover_rejects_the_whole_body_axis_and_keeps_tangential_velocity() {
+        let mut sys = CollisionSystem::<NullMesh>::new(0.96, 3.84);
+        sys.add_box([1.1, 0.0, -10.0], [2.0, 15.0, 10.0]);
+        let result = sys.resolve_ordinary_motion(
+            Point3::new(0.0, 5.0, 0.0),
+            Point3::new(20.0, 0.0, 10.0),
+            0.01,
+        );
+        assert_eq!(result.flags, 1);
+        assert_eq!(result.position.x, 0.0);
+        assert_eq!(result.velocity.x, 0.0);
+        assert!((result.position.z - 0.1).abs() < 1e-6);
+        assert_eq!(result.velocity.z, 10.0);
     }
 
     struct FlatMesh;

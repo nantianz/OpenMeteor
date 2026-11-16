@@ -83,6 +83,21 @@ cargo run --locked -p meteor-server
 
 原生 WebRTC 默认使用公共 STUN 服务。需要 TURN 中继时，可在运行时设置 `METEOR_TURN_URLS`、`METEOR_TURN_USERNAME` 和 `METEOR_TURN_PASSWORD`，多个 URL 使用逗号分隔。请将凭据保留在版本控制之外。可选的构建期路由候选地址通过 `METEOR_PRIMARY_WS` 和 `METEOR_SECONDARY_WS` 设置。
 
+## Windows 自动发布
+
+在 OpenMeteor 仓库推送 `v*` 标签后，`Windows release` workflow 会依次编译 x64 和 x86 客户端，并将两个 ZIP 和 SHA-256 校验文件发布到对应的 GitHub Release。例如：
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+两个架构全部编译、打包成功后才发布；带 `-` 的版本标签标记为预发布。同一版本已完整发布时跳过编译并保留现有文件。Actions 页面也可手动运行，选择 x64、x86 或两者；手动运行只生成保留一天的下载产物，不创建 Release。
+
+流水线只编译客户端、打包和发布，不运行单元测试。一个 Windows job 顺序处理架构，最多两个编译进程；保留优化构建，关闭 LTO、调试信息和增量编译。只缓存依赖下载，每个架构打包后删除其编译目录，整个任务最长五小时。
+
+ZIP 包含 `OpenMeteor.exe`、配置、启动脚本和许可说明，不包含原版资源或可选 DLSS/ANGLE 运行库。完整解压后，将原版资源目录拖到 `Start-OpenMeteor.cmd`，或使用 `--original-dir` 启动。中文字体可自行放到原版资源目录的 `fonts/ui.ttf`。
+
 ## 测试
 
 在仓库根目录运行：
@@ -94,7 +109,7 @@ cargo test --workspace --locked
 
 依赖原版游戏文件或独立参考采集数据的测试由 `original-assets` feature 控制。启用该功能前，需要在本地准备匹配的资源与测试数据；这些文件未随源码分发。
 
-本次更新已在 macOS 上使用 Rust 1.97.1 通过工作区编译与默认测试（1139 项通过、2 项忽略），并通过独立 WebAssembly crate 的编译检查：
+本次更新已在 macOS 上使用 Rust 1.97.1 通过工作区编译与默认测试（1146 项通过、2 项忽略），并通过独立 WebAssembly crate 的编译检查：
 
 ```sh
 rustup target add wasm32-unknown-unknown

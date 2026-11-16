@@ -100,6 +100,34 @@ configured at runtime with `METEOR_TURN_URLS`, `METEOR_TURN_USERNAME`, and
 control. Optional build-time route candidates use `METEOR_PRIMARY_WS` and
 `METEOR_SECONDARY_WS`.
 
+## Windows releases
+
+Pushing a `v*` tag in the OpenMeteor repository starts the `Windows release`
+workflow. It builds x64 and x86 clients sequentially and publishes both ZIPs and
+their SHA-256 checksums to the matching GitHub Release. For example:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Publication waits for both architectures to build and package successfully. Tags
+containing `-` are prereleases; a complete published version skips compilation
+and keeps its existing files. Manual runs can select x64, x86, or both and produce artifacts retained for
+one day, without creating a Release.
+
+The workflow only compiles, packages, and publishes the client; it does not run
+unit tests. One Windows job builds sequentially with two compiler processes,
+optimizations enabled, and LTO, debug information, and incremental compilation
+disabled. Only dependency downloads are cached. Each target directory is removed
+after packaging, and the job has a five-hour timeout.
+
+ZIPs contain `OpenMeteor.exe`, configuration, a launcher, and license notices.
+Original game resources and optional DLSS/ANGLE runtimes are not included.
+Extract the complete ZIP and drag an original game directory onto
+`Start-OpenMeteor.cmd`, or launch with `--original-dir`. A suitable Chinese font
+can be provided as `fonts/ui.ttf` in the original game directory.
+
 ## Tests
 
 From the repository root:
@@ -114,7 +142,7 @@ behind `original-assets`. Enabling this feature requires providing the matching
 resources and fixtures locally; they are excluded from this source distribution.
 
 This update passed the workspace build and default tests on macOS with Rust
-1.97.1 (1139 passed, 2 ignored), plus a compilation check of the separate
+1.97.1 (1146 passed, 2 ignored), plus a compilation check of the separate
 WebAssembly crate:
 
 ```sh

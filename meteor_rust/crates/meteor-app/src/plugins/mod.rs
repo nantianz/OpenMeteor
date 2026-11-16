@@ -44,6 +44,9 @@ pub(crate) struct FrameClock {
     target_fps: u32,
     pub(crate) measured_wall_step: f64,
 
+    play_elapsed_seconds: Option<f64>,
+    play_frame_seconds: f64,
+
     pub(crate) substep: Option<ControllerSubstep>,
 }
 
@@ -68,6 +71,8 @@ impl Default for FrameClock {
             pending_wall: 0.0,
             target_fps: 0,
             measured_wall_step: 0.0,
+            play_elapsed_seconds: None,
+            play_frame_seconds: 0.0,
             substep: None,
         }
     }
@@ -80,6 +85,10 @@ fn advance_frame_clock(clock: &mut FrameClock, raw_wall_dt: f32, target_fps: u32
 
 fn advance_frame_clock_seconds(clock: &mut FrameClock, raw_wall_dt: f64, target_fps: u32) {
     let raw = raw_wall_dt.max(0.0);
+    clock.play_frame_seconds = raw;
+    if let Some(elapsed) = &mut clock.play_elapsed_seconds {
+        *elapsed += raw;
+    }
     clock.substep = None;
     clock.wall_dt = raw as f32;
     clock.pending_wall += raw;
@@ -128,7 +137,7 @@ fn begin_frame_clock(
 
     if let Some(debug_sim) = debug_sim.as_deref() {
         if debug_sim.paused {
-            clock.sim_dt = 0.0;
+            suspend_clock_frame(&mut clock);
         } else {
             clock.sim_dt = (clock.sim_dt * debug_sim.time_scale).max(0.0);
         }
@@ -138,11 +147,7 @@ fn begin_frame_clock(
             .as_deref()
             .is_some_and(|player| player.active && player.paused)
     {
-        clock.sim_dt = 0.0;
-        clock.wall_dt = 0.0;
-        clock.wall_step = 0.0;
-        clock.pending_wall = 0.0;
-        clock.accumulator = 0.0;
+        suspend_clock_frame(&mut clock);
     }
 }
 
@@ -166,6 +171,26 @@ pub(crate) fn simulation_now(clock: Option<&FrameClock>, fallback: f64) -> f64 {
     clock
         .and_then(|clock| clock.substep)
         .map_or(fallback, |step| step.now_seconds)
+}
+
+pub(crate) fn simulation_play_now(clock: Option<&FrameClock>, fallback: f64) -> f64 {
+    clock
+        .and_then(|clock| {
+            clock
+                .play_elapsed_seconds
+                .map(|elapsed| elapsed - simulation_remaining_wall(Some(clock)))
+        })
+        .unwrap_or_else(|| simulation_now(clock, fallback))
+}
+
+fn suspend_clock_frame(clock: &mut FrameClock) {
+    let play_elapsed_seconds = clock
+        .play_elapsed_seconds
+        .map(|elapsed| (elapsed - clock.play_frame_seconds).max(0.0));
+    *clock = FrameClock {
+        play_elapsed_seconds,
+        ..Default::default()
+    };
 }
 
 pub(crate) fn first_simulation_substep(clock: Option<&FrameClock>) -> bool {
@@ -195,13 +220,17 @@ fn suspend_offline_frame_clock(
     let suspended =
         state.is_some_and(|state| matches!(state.get(), AppState::Paused | AppState::Settings));
     if suspended && !network_room {
-        *clock = FrameClock::default();
+        suspend_clock_frame(&mut clock);
     }
 }
 
 pub(crate) fn install_frame_clock(app: &mut App) {
-    app.init_resource::<FrameClock>()
-        .insert_resource(FrameClockInstalled)
+    app.init_resource::<FrameClock>();
+    app.world_mut()
+        .resource_mut::<FrameClock>()
+        .play_elapsed_seconds
+        .get_or_insert(0.0);
+    app.insert_resource(FrameClockInstalled)
         .add_systems(First, begin_frame_clock.after(bevy::time::TimeSystems))
         .add_systems(
             bevy::state::state::StateTransition,
@@ -478,6 +507,74 @@ mod tests {
         advance_frame_clock(&mut clock, 0.01, 0);
         assert!((clock.sim_dt - 0.03).abs() < 1e-6);
         assert!((clock.wall_step - 0.03).abs() < 1e-6);
+    }
+
+    #[test]
+    fn installed_gameplay_wall_clock_freezes_offline_pause_but_not_lan_menu() {
+        use bevy::prelude::Time;
+        use bevy::state::app::AppExtStates;
+        let mut app = App::new();
+        app.add_plugins(bevy::state::app::StatesPlugin)
+            .init_state::<AppState>()
+            .init_resource::<Time<bevy::time::Real>>()
+            .init_resource::<crate::app_state::Settings>()
+            .init_resource::<network_plugin::NetState>();
+        install_frame_clock(&mut app);
+        fn step(app: &mut App, seconds: f64, state: Option<AppState>) -> f64 {
+            if let Some(state) = state {
+                app.world_mut()
+                    .resource_mut::<bevy::state::state::NextState<AppState>>()
+                    .set(state);
+            }
+            app.world_mut()
+                .resource_mut::<Time<bevy::time::Real>>()
+                .advance_by(std::time::Duration::from_secs_f64(seconds));
+            app.update();
+            simulation_play_now(Some(app.world().resource::<FrameClock>()), -1.0)
+        }
+        assert!((step(&mut app, 0.5, Some(AppState::Playing)) - 0.5).abs() < 1e-9);
+        assert!((step(&mut app, 0.25, Some(AppState::Paused)) - 0.5).abs() < 1e-9);
+        assert!((step(&mut app, 2.0, None) - 0.5).abs() < 1e-9);
+        assert!((step(&mut app, 0.01, Some(AppState::Playing)) - 0.51).abs() < 1e-9);
+        app.world_mut()
+            .resource_mut::<network_plugin::NetState>()
+            .status = network_plugin::NetStatus::InRoom;
+        assert!((step(&mut app, 1.0, Some(AppState::Paused)) - 1.51).abs() < 1e-9);
+    }
+
+    #[test]
+    fn gameplay_wall_clock_includes_stalls_and_uses_substep_time_without_double_spending() {
+        let mut clock = FrameClock {
+            play_elapsed_seconds: Some(0.0),
+            ..Default::default()
+        };
+        for frame in 1..=4 {
+            advance_frame_clock_seconds(&mut clock, 1.0 / 120.0, 30);
+            assert!(
+                (simulation_play_now(Some(&clock), -1.0) - f64::from(frame) / 120.0).abs() < 1e-9
+            );
+        }
+        clock.substep = Some(ControllerSubstep {
+            now_seconds: 100.0,
+            first: true,
+            last: false,
+            remaining_wall_seconds: 3.0 / 120.0,
+        });
+        assert!((simulation_play_now(Some(&clock), -1.0) - 1.0 / 120.0).abs() < 1e-9);
+        advance_frame_clock_seconds(&mut clock, 0.5, 30);
+        assert_eq!(clock.sim_dt, meteor_core::MAX_FRAME_DT);
+        assert!((simulation_play_now(Some(&clock), -1.0) - (0.5 + 4.0 / 120.0)).abs() < 1e-9);
+        suspend_clock_frame(&mut clock);
+        suspend_clock_frame(&mut clock);
+        assert!(
+            (simulation_play_now(Some(&clock), -1.0) - 4.0 / 120.0).abs() < 1e-9,
+            "two suspension gates may undo this display interval only once"
+        );
+        assert_eq!(
+            simulation_play_now(Some(&FrameClock::default()), 7.0),
+            7.0,
+            "manual fixtures keep their caller's time domain"
+        );
     }
 
     #[test]

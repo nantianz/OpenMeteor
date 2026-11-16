@@ -771,6 +771,36 @@ pub(crate) fn resolve_fighter_xz_with_contacts<M: MeshCollider>(
     )
 }
 
+pub(crate) fn resolve_fighter_ordinary_motion<M: MeshCollider>(
+    frame: Option<&mut CharacterContactFrame>,
+    entity: Entity,
+    stage: &CollisionSystem<M>,
+    pos: Point3,
+    velocity: Point3,
+    dt: f32,
+) -> meteor_physics::collision::WallMove {
+    let result = stage.resolve_ordinary_motion(pos, velocity, dt);
+    if let Some(frame) = frame {
+        frame
+            .last_mover_scene_contacts
+            .insert(entity, result.flags & 5 != 0);
+        #[cfg(test)]
+        if let Some(moves) = frame.audit_moves.get_mut(&entity) {
+            moves.push(serde_json::json!({
+            "kind":"primary", "before":[pos.x,pos.y,pos.z],
+            "requested":[velocity.x*dt,velocity.y*dt,velocity.z*dt],
+            "stage":[result.position.x-pos.x,result.position.y-pos.y,result.position.z-pos.z],
+            "accepted":[result.position.x-pos.x,result.position.y-pos.y,result.position.z-pos.z],
+            "authored":frame.indices.get(&entity).is_some_and(|&i| frame.views[i].authored_motion)}));
+        }
+        frame.commit_position(
+            entity,
+            Vec3::new(result.position.x, result.position.y, result.position.z),
+        );
+    }
+    result
+}
+
 pub(crate) fn resolve_fighter_wall_motion<M: MeshCollider>(
     frame: Option<&mut CharacterContactFrame>,
     entity: Entity,

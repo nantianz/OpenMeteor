@@ -211,6 +211,7 @@ impl ItemBuffs {
         self.max_hp_remaining = 0.0;
         self.speed_factor = 1.0;
         self.speed_remaining = 0.0;
+        let mut speed_property = 100_i32;
         for buff in &self.stat_buffs {
             self.attack_bonus += buff.attack;
             self.defense_bonus += buff.defense;
@@ -222,11 +223,15 @@ impl ItemBuffs {
                 self.max_hp_remaining = self.max_hp_remaining.max(buff.remaining);
             }
 
-            self.speed_factor += buff.speed - 1.0;
+            let percent = (buff.speed * 100.0).round() as i32;
+            speed_property =
+                speed_property.wrapping_add(meteor_asset::res::prop5_percent_delta(percent));
             if buff.speed != 1.0 {
                 self.speed_remaining = self.speed_remaining.max(buff.remaining);
             }
         }
+
+        self.speed_factor = speed_property as f32 / 100.0;
     }
 }
 
@@ -2251,6 +2256,28 @@ mod tests {
         assert_eq!((buffs.attack_bonus, buffs.defense_bonus), (25, 0));
         buffs.tick_stats(20.0);
         assert_eq!((buffs.attack_bonus, buffs.defense_bonus), (0, 0));
+    }
+
+    #[test]
+    fn prop5_item_segments_convert_before_sum_and_keep_unclamped_property() {
+        let buff = |model: &str, speed| TimedItemBuff {
+            model: model.into(),
+            attack: 0,
+            defense: 0,
+            max_hp: 0,
+            speed,
+            remaining: 10.0,
+        };
+        let mut buffs = ItemBuffs::default();
+        buffs.stat_buffs = vec![buff("first", 1.2), buff("second", 1.2)];
+        buffs.project_stats();
+        assert!((buffs.speed_factor - 1.38).abs() < 1e-6);
+        buffs.stat_buffs = vec![buff("first", 0.0), buff("second", 0.5)];
+        buffs.project_stats();
+        assert_eq!(
+            buffs.speed_factor, -0.5,
+            "weapon/status aggregation owns the final clamp"
+        );
     }
 
     #[test]

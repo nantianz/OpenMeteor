@@ -399,14 +399,16 @@ impl<F: FighterView> StateMachine<F> {
                 true
             }
             Action::Jump => {
-                if self.is_attacking() {
+                if self.is_attacking() || self.current == FighterState::Guard {
                     return false;
                 }
                 if self.fighter.weapon_action_vetoed() {
                     return false;
                 }
 
-                if self.fighter.is_airborne() {
+                if self.fighter.is_airborne()
+                    && !matches!(self.current, FighterState::Down | FighterState::Fake)
+                {
                     return false;
                 }
                 self.transition(FighterState::Jump);
@@ -881,6 +883,31 @@ mod tests {
     }
 
     #[test]
+    fn guard_rejects_jump_until_release_in_event_order() {
+        let mut sm = StateMachine::new(StubFighter::new());
+        assert!(sm.handle_input(Action::Guard));
+        assert!(!sm.handle_input(Action::Jump));
+        assert_eq!(sm.current, FighterState::Guard);
+        assert!(sm.handle_input(Action::GuardRelease));
+        assert!(sm.handle_input(Action::Jump));
+        assert_eq!(sm.current, FighterState::Jump);
+
+        for recovery in [FighterState::Fake, FighterState::Down] {
+            for airborne in [false, true] {
+                let mut fighter = StubFighter::new();
+                fighter.airborne = airborne;
+                fighter.ground_contact = Some(!airborne);
+                let mut sm = StateMachine::new(fighter);
+                sm.transition(recovery);
+                assert!(
+                    sm.handle_input(Action::Jump),
+                    "mode11 recovery {recovery:?} air={airborne}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn guard_attack_order_changes_the_committed_state() {
         let mut guard_first = StateMachine::new(StubFighter::new());
         assert!(guard_first.handle_input(Action::Guard));
@@ -1059,14 +1086,14 @@ mod tests {
     }
 
     #[test]
-    fn guard_accepts_ground_jump_interrupt() {
+    fn guard_rejects_ground_jump_interrupt() {
         let mut sm = StateMachine::new(StubFighter::new());
         assert!(sm.handle_input(Action::Guard));
         assert_eq!(sm.current, FighterState::Guard);
 
-        assert!(sm.handle_input(Action::Jump));
-        assert_eq!(sm.current, FighterState::Jump);
-        assert_eq!(sm.previous, FighterState::Guard);
+        assert!(!sm.handle_input(Action::Jump));
+        assert_eq!(sm.current, FighterState::Guard);
+        assert_eq!(sm.previous, FighterState::Name);
     }
 
     #[test]

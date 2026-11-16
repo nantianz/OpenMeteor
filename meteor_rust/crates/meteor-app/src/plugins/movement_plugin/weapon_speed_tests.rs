@@ -38,7 +38,7 @@ fn weapon_speed_uses_every_original_variant_and_adds_item_status_deltas() {
             }
             fighter.weapon = weapon;
             fighter.weapon_variant = variant as u8;
-            let expected = percent as f32 / 100.0;
+            let expected = (100 + meteor_asset::res::prop5_percent_delta(percent)) as f32 / 100.0;
             for (item, status, delta) in [
                 (1.0, None, 0.0),
                 (1.5, None, 0.5),

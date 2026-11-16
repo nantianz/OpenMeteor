@@ -1,0 +1,177 @@
+name: Windows release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      architecture:
+        description: Windows architecture to compile
+        type: choice
+        default: x64
+        options:
+          - x64
+          - x86
+          - both
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-release
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    if: ${{ github.event_name == 'workflow_dispatch' || !github.event.deleted }}
+    runs-on: windows-2022
+    timeout-minutes: 300
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      RUST_TOOLCHAIN: 1.97.1-x86_64-pc-windows-msvc
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_RELEASE_LTO: 'off'
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+      CARGO_PROFILE_RELEASE_DEBUG: '0'
+      CARGO_PROFILE_RELEASE_STRIP: symbols
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Select build
+        id: build
+        env:
+          REQUESTED_ARCHITECTURE: ${{ inputs.architecture }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $publish = $env:GITHUB_EVENT_NAME -eq 'push' -and $env:GITHUB_REF_TYPE -eq 'tag'
+          $version = if ($publish) { $env:GITHUB_REF_NAME } else { 'dev-' + $env:GITHUB_SHA.Substring(0, 12) }
+          if ($version -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$') { throw 'Unsupported version tag.' }
+          $architecture = if ($publish) { 'both' } else { $env:REQUESTED_ARCHITECTURE }
+          if ($architecture -notin @('x64', 'x86', 'both')) { throw 'Unsupported architecture.' }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "architecture=$architecture" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "METEOR_BUILD_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CARGO_HOME=$(Join-Path $env:RUNNER_TEMP 'openmeteor-cargo')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CARGO_TARGET_DIR=$(Join-Path $env:RUNNER_TEMP 'openmeteor-target')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Skip versions already published
+        id: release
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $tag = $env:METEOR_BUILD_VERSION
+          $existing = gh release view $tag --json isDraft,assets 2>$null
+          if ($LASTEXITCODE -ne 0) { exit 0 }
+          $release = $existing | ConvertFrom-Json
+          if ($release.isDraft) { exit 0 }
+          $expected = @('x64', 'x86') | ForEach-Object {
+            "OpenMeteor-$tag-windows-$_.zip"
+            "OpenMeteor-$tag-windows-$_.zip.sha256"
+          }
+          $missing = @($expected | Where-Object { $_ -notin $release.assets.name })
+          if ($missing.Count -gt 0) { throw 'The published release is incomplete. Use a new version tag.' }
+          'skip=true' | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host 'This version is already published; compilation is skipped.'
+
+      - name: Cache dependency downloads
+        if: steps.release.outputs.skip != 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ${{ runner.temp }}/openmeteor-cargo/registry/cache
+            ${{ runner.temp }}/openmeteor-cargo/registry/index
+            ${{ runner.temp }}/openmeteor-cargo/git/db
+          key: windows-cargo-downloads-v1-${{ hashFiles('meteor_rust/Cargo.lock') }}
+          restore-keys: windows-cargo-downloads-v1-
+
+      - name: Install Rust
+        if: steps.release.outputs.skip != 'true'
+        run: |
+          rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal --no-self-update
+          if ($LASTEXITCODE -ne 0) { throw 'Rust installation failed.' }
+
+      - name: Compile and package sequentially
+        if: steps.release.outputs.skip != 'true'
+        env:
+          BUILD_ARCHITECTURE: ${{ steps.build.outputs.architecture }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $targets = @(
+            @{ Architecture = 'x64'; Triple = 'x86_64-pc-windows-msvc' },
+            @{ Architecture = 'x86'; Triple = 'i686-pc-windows-msvc' }
+          )
+          $flags = '-C target-feature=+crt-static --remap-path-prefix=' + $env:GITHUB_WORKSPACE + '=/OpenMeteor'
+          $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = $flags
+          $env:CARGO_TARGET_I686_PC_WINDOWS_MSVC_RUSTFLAGS = $flags
+          foreach ($target in $targets) {
+            if ($env:BUILD_ARCHITECTURE -ne 'both' -and $env:BUILD_ARCHITECTURE -ne $target.Architecture) { continue }
+            rustup target add $target.Triple --toolchain $env:RUST_TOOLCHAIN
+            if ($LASTEXITCODE -ne 0) { throw 'Rust target installation failed.' }
+            cargo "+$env:RUST_TOOLCHAIN" build --manifest-path meteor_rust/Cargo.toml --locked --release --package meteor-app --bin meteor --target $target.Triple
+            if ($LASTEXITCODE -ne 0) { throw "Compilation failed for $($target.Architecture)." }
+            $binary = Join-Path $env:CARGO_TARGET_DIR "$($target.Triple)/release/meteor.exe"
+            python .github/scripts/package-windows.py --binary $binary --architecture $target.Architecture --version $env:METEOR_BUILD_VERSION --commit $env:GITHUB_SHA --output dist
+            if ($LASTEXITCODE -ne 0) { throw 'Packaging failed.' }
+            Remove-Item -LiteralPath (Join-Path $env:CARGO_TARGET_DIR $target.Triple) -Recurse -Force
+          }
+
+      - name: Publish tag release
+        if: github.event_name == 'push' && github.ref_type == 'tag' && steps.release.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = $env:METEOR_BUILD_VERSION
+          $expected = @('x64', 'x86') | ForEach-Object {
+            "OpenMeteor-$tag-windows-$_.zip"
+            "OpenMeteor-$tag-windows-$_.zip.sha256"
+          }
+          $assets = @($expected | ForEach-Object { (Resolve-Path -LiteralPath "dist/$_").Path })
+          $existing = gh release view $tag --json isDraft,assets 2>$null
+          $found = $LASTEXITCODE -eq 0
+          if ($found) {
+            $release = $existing | ConvertFrom-Json
+            if (-not $release.isDraft) {
+              $missing = @($expected | Where-Object { $_ -notin $release.assets.name })
+              if ($missing.Count -gt 0) { throw 'The published release is incomplete. Use a new version tag.' }
+              Write-Host 'This version is already published.'
+              exit 0
+            }
+            gh release upload $tag @assets --clobber
+            if ($LASTEXITCODE -ne 0) { throw 'Release asset upload failed.' }
+          } else {
+            $arguments = @('release', 'create', $tag, '--verify-tag', '--draft', '--title', "OpenMeteor $tag", '--notes', 'Windows x64 and x86 builds. Game resources are not included. Extract the complete ZIP and read README.txt. SHA-256 checksums are provided.') + $assets
+            if ($tag.Contains('-')) { $arguments += '--prerelease' }
+            gh @arguments
+            if ($LASTEXITCODE -ne 0) { throw 'Draft release creation failed.' }
+          }
+          $prerelease = if ($tag.Contains('-')) { 'true' } else { 'false' }
+          gh release edit $tag --draft=false "--prerelease=$prerelease"
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed.' }
+
+      - name: Keep manual or failed-publication packages briefly
+        if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || failure()) }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: OpenMeteor-windows-${{ steps.build.outputs.version }}
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: warn
+          retention-days: 1
+          compression-level: 0

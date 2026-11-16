@@ -72,8 +72,12 @@ fn production_held_forward_fake_roll_passes_opponent_at_60_and_120_fps() {
                     break;
                 }
             }
-            let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../../analysis/fake-forward-roll-20260928");
+            let out = std::env::var_os("METEOR_MOVEMENT_TRACE_DIR")
+                .map(|path| std::path::PathBuf::from(path).join("fake-forward-roll"))
+                .unwrap_or_else(|| {
+                    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("../../../analysis/fake-forward-roll-20260928")
+                });
             std::fs::create_dir_all(&out).unwrap();
             std::fs::write(
                 out.join(format!("production-{fps}-{locked}-{remote}.json")),

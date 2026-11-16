@@ -96,15 +96,18 @@ impl HitStatusEffects {
         (delta, damaging)
     }
 
+    pub fn speed_property(&self, base: i32) -> i32 {
+        self.active
+            .iter()
+            .filter_map(|effect| effect.definition.speed_percent)
+            .fold(base, |value, percent| {
+                value.wrapping_add(meteor_asset::res::prop5_percent_delta(percent))
+            })
+            .max(0)
+    }
+
     pub fn speed_factor(&self, item_factor: f32) -> f32 {
-        (item_factor
-            + self
-                .active
-                .iter()
-                .filter_map(|effect| effect.definition.speed_percent)
-                .map(|percent| percent as f32 / 100.0 - 1.0)
-                .sum::<f32>())
-        .max(0.0)
+        self.speed_property((item_factor * 100.0).round() as i32) as f32 / 100.0
     }
 }
 

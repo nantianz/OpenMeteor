@@ -320,6 +320,10 @@ fn obstacle_production_ballistic_landing_restores_turn_and_walk_state() {
                     .unwrap()
                     .movement_mode = meteor_core::MovementMode::Run;
                 app.world_mut().get_mut::<AiIntent>(npc).unwrap().move_dir = Vec2::Y;
+                app.world_mut()
+                    .get_mut::<AiIntent>(npc)
+                    .unwrap()
+                    .locomotion_input = Vec2::Y;
                 let before = app.world().get::<Transform>(npc).unwrap().translation;
                 app.update();
                 assert!(

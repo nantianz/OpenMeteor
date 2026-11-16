@@ -11,17 +11,14 @@ use crate::components::fighter::{
     AiIntent, CombatState, EntryBlend, Fighter, FighterHitReaction, Health, MotionState,
     PoseRuntime, RangedFireGate, SmState,
 };
-use crate::plugins::character_contact_plugin::{
-    commit_fighter_position, resolve_fighter_xz, CharacterContactFrame,
-};
+use crate::plugins::character_contact_plugin::CharacterContactFrame;
 use crate::plugins::character_plugin::CharacterAssetsSet;
 use crate::plugins::combat_plugin::{fighter_speed_factor, CombatResourceData, NpcFighter};
 use crate::plugins::item_plugin::{npc_getitem_model, StageProp};
 use crate::plugins::movement_plugin::{
-    accepted_motion_velocity, apply_dodge_pose_now, clamp_air_motion_step, enter_dodge_state,
-    finish_air_landing_state, ordinary_locomotion_allowed, project_air_velocity_on_surface,
-    project_planar_air_velocity_on_contact, sample_air_ground, update_ground_external_motion,
-    wheel_vetoes_dodge_action, FighterAir, FighterDodge, COLLIDER_HEIGHT, COLLIDER_RADIUS,
+    apply_dodge_pose_now, enter_dodge_state, finish_air_landing_state, ordinary_locomotion_allowed,
+    wheel_vetoes_dodge_action, FighterAir, FighterAttackMotion, FighterDodge, COLLIDER_HEIGHT,
+    COLLIDER_RADIUS,
 };
 use crate::plugins::network_plugin::RemoteFighter;
 use crate::plugins::stage_collider::{StageCollider, StageMeshCollider};
@@ -34,9 +31,10 @@ use meteor_ai::behavior::BehaviorMode;
 #[cfg(test)]
 use meteor_ai::behavior::{find_waypoint_path, Waypoint};
 use meteor_core::FighterState;
-use meteor_physics::jump::{RUN_SPEED, WALK_SPEED};
+#[cfg(test)]
+use meteor_physics::collision::FootHit;
 use meteor_physics::{
-    collision::{CollisionSystem, FootHit, MeshCollider, Point3},
+    collision::{CollisionSystem, MeshCollider, Point3},
     jump,
 };
 use meteor_scene::stage_loader::WaypointGraph;
@@ -1149,183 +1147,83 @@ fn resolve_behavior_actor_ref(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn advance_npc_motion<M: MeshCollider>(
     entity: Entity,
-    mut contacts: Option<&mut CharacterContactFrame>,
+    contacts: Option<&mut CharacterContactFrame>,
     mover: &CollisionSystem<M>,
     transform: &mut Transform,
     motion: &mut MotionState,
     air: &mut FighterAir,
-    desired_velocity: Vec3,
+    driven_velocity: Vec3,
     dt: f32,
-    defer_ledge_fall: bool,
+    _defer_ledge_fall: bool,
 ) {
-    if dt <= 0.0 {
+    if dt <= 0.0 || !dt.is_finite() {
         return;
     }
-    if air.air.airborne {
-        let pos = Point3::new(
+    let was_airborne = air.air.airborne;
+    let entry_ground_mode = air.recovery_ground_mode.unwrap_or(!was_airborne);
+    let saved_v = air.locomotion_pose_sample.map_or_else(
+        || {
+            if was_airborne {
+                air.air.vertical_speed
+            } else {
+                motion.velocity.y
+            }
+        },
+        |(_, vertical_speed)| vertical_speed,
+    );
+    let velocity = if entry_ground_mode {
+        driven_velocity
+    } else {
+        super::movement_plugin::consume_descent_slide(air);
+        air.air.tick_vertical(dt, false);
+        Vec3::new(air.air.planar_x, air.air.vertical_speed, air.air.planar_z)
+    };
+    let result = super::character_contact_plugin::resolve_fighter_ordinary_motion(
+        contacts,
+        entity,
+        mover,
+        Point3::new(
             transform.translation.x,
             transform.translation.y,
             transform.translation.z,
-        );
-        let tick_ground = sample_air_ground(air, mover, pos);
-        let ground_y = tick_ground.map_or(f32::NEG_INFINITY, |hit| hit.y);
-        let vertical_speed_before = air.air.vertical_speed;
-        super::movement_plugin::consume_descent_slide(air);
-        let vertical_step = air.air.tick_vertical(dt, false);
-        let (vx, vy, vz, vertical_step) = clamp_air_motion_step(
-            air.air.planar_x,
-            air.air.vertical_speed,
-            air.air.planar_z,
-            vertical_step,
-        );
-        air.air.planar_x = vx;
-        air.air.vertical_speed = vy;
-        air.air.planar_z = vz;
-        let requested_x = vx * dt;
-        let requested_z = vz * dt;
-        let (rx, rz, ry, planar_surface) =
-            super::character_contact_plugin::resolve_fighter_xz_with_surface(
-                contacts.as_deref_mut(),
-                entity,
-                mover,
-                pos,
-                requested_x,
-                requested_z,
-                false,
-            );
-        project_planar_air_velocity_on_contact(&mut air.air, requested_x, requested_z, rx, rz);
-        transform.translation.x += rx;
-        transform.translation.z += rz;
-        let vertical_origin = Point3::new(
-            transform.translation.x,
-            transform.translation.y + ry,
-            transform.translation.z,
-        );
-        let (dy, foot, surface, blocked) = if vertical_step >= 0.0 {
-            let (dy, hit, blocked) = mover.resolve_y(vertical_origin, vertical_step);
-            (
-                dy,
-                None::<FootHit>,
-                hit.map(|hit| (hit.nx, hit.ny, hit.nz)),
-                blocked,
-            )
-        } else {
-            let (dy, hit, blocked) =
-                mover.resolve_descent_with_surface(vertical_origin, vertical_step, planar_surface);
-            (dy, hit, hit.map(|hit| (hit.nx, hit.ny, hit.nz)), blocked)
-        };
-        super::movement_plugin::update_descent_slide(air, foot, air.air.vertical_speed, dt);
-        super::movement_plugin::record_carry_support(
-            air,
-            vertical_step,
-            surface,
-            planar_surface.is_some()
-                || (rx - requested_x).abs() > 1e-5
-                || (rz - requested_z).abs() > 1e-5,
-        );
-        if let Some((nx, ny, nz)) = surface {
-            project_air_velocity_on_surface(&mut air.air, nx, ny, nz);
-        }
-        if blocked {
-            air.air.vertical_speed = 0.0;
-        }
-        transform.translation.y += ry + dy;
-        transform.translation.y = transform.translation.y.max(ground_y);
-        motion.velocity = accepted_motion_velocity(rx, transform.translation.y - pos.y, rz, dt);
+        ),
+        Point3::new(velocity.x, velocity.y, velocity.z),
+        dt,
+    );
+    transform.translation = Vec3::new(result.position.x, result.position.y, result.position.z);
+    motion.velocity = Vec3::new(result.velocity.x, result.velocity.y, result.velocity.z);
+    super::movement_plugin::record_scene_mover_result(air, &result, dt);
 
-        let floor_contact =
-            vertical_step < 0.0 && meteor_physics::collision::descent_has_support(foot, blocked);
-        let near_ground = transform.translation.y <= ground_y + jump::LAND_EPS || floor_contact;
-        air.peak_lift = air
-            .peak_lift
-            .max((transform.translation.y - air.ground_y).max(0.0));
-        air.ground_contact = near_ground;
-        let can_land = near_ground && jump::lands_on_contact(vertical_speed_before);
-        let timed_out = air.air.air_time >= jump::MAX_AIR_TIME
-            && (near_ground || air.air.motion_mode != jump::AirMotionMode::Ballistic);
-        if can_land || timed_out {
-            if transform.translation.y <= ground_y + jump::LAND_EPS {
-                transform.translation.y = ground_y;
-            }
+    if air.mover_vertical_contact {
+        air.air.cling_armed = false;
+    }
+    let next_ground_mode =
+        result.flags & 0x30 != 0 && (entry_ground_mode || jump::lands_on_contact(saved_v));
+    air.recovery_ground_mode = Some(next_ground_mode);
+    air.pending_ledge_fall = false;
+    if next_ground_mode && air.ground_contact {
+        air.ground_y = result.position.y;
+        if was_airborne {
             finish_air_landing_state(air);
             air.ground_entry_blend_pending = true;
             motion.movement_mode = meteor_core::MovementMode::Idle;
+
+            air.air.planar_x = result.velocity.x;
+            air.air.vertical_speed = result.velocity.y;
+            air.air.planar_z = result.velocity.z;
         }
-        commit_fighter_position(contacts, entity, transform.translation);
-        return;
-    }
-
-    let pos = Point3::new(
-        transform.translation.x,
-        transform.translation.y,
-        transform.translation.z,
-    );
-    let external = update_ground_external_motion(air, mover, pos, dt);
-    let (vx, _, vz, _) = meteor_physics::carry_velocity::clamp_composed_velocity_3d(
-        desired_velocity.x + external.x,
-        0.0,
-        desired_velocity.z + external.z,
-        meteor_physics::carry_velocity::CARRY_MAX_SPEED,
-    );
-    let requested = Vec3::new(vx, 0.0, vz) * dt;
-    let (rx, rz, ry) = resolve_fighter_xz(
-        contacts.as_deref_mut(),
-        entity,
-        mover,
-        pos,
-        requested.x,
-        requested.z,
-        false,
-    );
-    transform.translation.x += rx;
-    transform.translation.z += rz;
-    transform.translation.y += ry;
-    let mut accepted_x = rx / dt;
-    let mut accepted_z = rz / dt;
-    if rx.abs() < requested.x.abs() * 0.5 {
-        accepted_x = 0.0;
-    }
-    if rz.abs() < requested.z.abs() * 0.5 {
-        accepted_z = 0.0;
-    }
-    motion.velocity = Vec3::new(accepted_x, 0.0, accepted_z);
-
-    let settled = Point3::new(
-        transform.translation.x,
-        transform.translation.y,
-        transform.translation.z,
-    );
-    let ground = mover.sample_ground_hit(settled.x, settled.z, settled.y);
-    if let Some(hit) = ground {
-        air.ground_y = hit.y;
-    }
-    let gap = settled.y - air.ground_y;
-    if ground.is_some_and(|hit| {
-        settled.y - hit.y <= jump::STEP_DOWN
-            && mover.can_occupy(Point3::new(settled.x, hit.y, settled.z))
-    }) {
-        transform.translation.y = ground.expect("checked support").y;
-        commit_fighter_position(contacts, entity, transform.translation);
-        return;
-    }
-    let (dy, foot, blocked) = mover.resolve_descent(settled, -jump::STEP_DOWN);
-    let walkable = meteor_physics::collision::descent_has_support(foot, blocked);
-    if walkable {
-        transform.translation.y += dy.min(0.0);
-        air.pending_ledge_fall = false;
-    } else if defer_ledge_fall {
-        air.pending_ledge_fall = true;
+        air.air.airborne = false;
     } else {
-        air.air.start_fall(motion.velocity.x, motion.velocity.z);
-        if let Some(hit) = ground {
-            air.ground_y = hit.y;
+        air.air.airborne = true;
+        air.air.motion_mode = jump::AirMotionMode::Ballistic;
+        if entry_ground_mode && !next_ground_mode {
+            air.ledge_fall = true;
         }
-        air.ground_contact = false;
-        air.ledge_fall = true;
-        air.peak_lift = gap.max(0.0);
+        air.peak_lift = air
+            .peak_lift
+            .max((result.position.y - air.ground_y).max(0.0));
         motion.movement_mode = meteor_core::MovementMode::Airborne;
     }
-    commit_fighter_position(contacts, entity, transform.translation);
 }
 
 type NpcBallisticAirQuery<'w, 's> = Query<
@@ -1342,6 +1240,9 @@ type NpcBallisticAirQuery<'w, 's> = Query<
         Option<&'static crate::components::fighter::FighterStatusEffects>,
         &'static mut SmState,
         &'static mut CombatState,
+        Option<&'static FighterAttackMotion>,
+        Option<&'static RangedFireGate>,
+        Option<&'static crate::components::fighter::GunAimState>,
     ),
     (
         With<NpcFighter>,
@@ -1382,29 +1283,24 @@ pub(crate) fn npc_ballistic_air_root_motion(
         status,
         mut sm,
         mut combat,
+        authored_motion,
+        ranged_gate,
+        gun_aim,
     ) in &mut npcs
     {
         if !super::fighter_frame::accepts(active_fighter.as_deref(), entity) {
             continue;
         }
-        if air.dodge_owns_motion_tick || hit_reaction.current.is_some() {
+        if air.dodge_owns_motion_tick
+            || hit_reaction.current.is_some()
+            || authored_motion.is_some_and(|motion| motion.ground_step_consumed)
+        {
             continue;
         }
-        if air.pending_ledge_fall && !air.air.airborne {
-            let ground = mover.sample_ground_hit(
-                transform.translation.x,
-                transform.translation.z,
-                transform.translation.y,
-            );
-            air.air.start_fall(motion.velocity.x, motion.velocity.z);
-            if let Some(hit) = ground {
-                air.ground_y = hit.y;
-            }
-            air.pending_ledge_fall = false;
-            air.ground_contact = false;
-            air.ledge_fall = true;
-            air.peak_lift = (transform.translation.y - air.ground_y).max(0.0);
-            motion.movement_mode = meteor_core::MovementMode::Airborne;
+        if air
+            .locomotion_pose_sample
+            .is_some_and(|(ground_mode, _)| ground_mode)
+        {
             continue;
         }
         if !air.air.airborne {
@@ -1413,17 +1309,18 @@ pub(crate) fn npc_ballistic_air_root_motion(
         if crate::plugins::movement_plugin::air_curve_motion_owned(air.air.motion_mode, false) {
             continue;
         }
-        if let Some(intent) = intent.filter(|intent| intent.locomotion_input != Vec2::ZERO) {
-            super::movement_plugin::tick_air_input_drive(
-                &mut air,
-                dt,
-                Vec3::new(intent.locomotion_input.x, 0.0, intent.locomotion_input.y),
-                motion.facing,
-                false,
-                fighter_speed_factor(combat_resources.as_deref(), fighter, 1.0, status),
-                false,
-            );
-        }
+        let input = intent.map_or(Vec2::ZERO, |intent| intent.locomotion_input);
+        air.locomotion_pose_sample = Some((false, air.air.vertical_speed));
+
+        super::movement_plugin::tick_air_input_drive(
+            &mut air,
+            dt,
+            Vec3::new(input.x, 0.0, input.y),
+            motion.facing,
+            gun_aim.is_some_and(|aim| aim.aiming),
+            fighter_speed_factor(combat_resources.as_deref(), fighter, 1.0, status),
+            ranged_gate.is_some_and(|gate| gate.wheel_out),
+        );
         advance_npc_motion(
             entity,
             contacts.as_deref_mut(),
@@ -1435,7 +1332,7 @@ pub(crate) fn npc_ballistic_air_root_motion(
             dt,
             false,
         );
-        if !air.air.airborne {
+        if air.recovery_ground_mode == Some(true) {
             super::movement_plugin::land_jump_state(&mut sm, &mut combat);
         }
     }
@@ -1443,6 +1340,44 @@ pub(crate) fn npc_ballistic_air_root_motion(
 
 fn npc_ordinary_locomotion_allowed(sm: Option<&SmState>) -> bool {
     sm.is_none_or(|state| ordinary_locomotion_allowed(state, false))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn npc_ground_drive_velocity(
+    motion: &MotionState,
+    air: &mut FighterAir,
+    input: Vec2,
+    crouching: bool,
+    speed_factor: f32,
+    action_vetoed: bool,
+    dt: f32,
+) -> Vec3 {
+    if !air.recovery_ground_mode.unwrap_or(!air.air.airborne) {
+        return Vec3::ZERO;
+    }
+    let axes = meteor_physics::locomotion::compose_loco_axes(
+        input.x,
+        input.y,
+        if crouching { 1.0 } else { 0.2 },
+    );
+    let direction =
+        decision_space::world_input(Vec2::new(axes.local_x, axes.local_z), motion.facing);
+    let params = meteor_physics::planar_drive::DriveParams {
+        dt,
+        speed_factor,
+        forward: input.y > 0.0 && !crouching,
+        ground_support: air.ground_contact && !air.carry_decay_steep,
+        air_mode0: false,
+        action_vetoed,
+    };
+    let external = std::mem::take(&mut air.ground_external_velocity);
+    Vec3::from_array(meteor_physics::planar_drive::integrate_velocity(
+        motion.velocity.to_array(),
+        [direction.x, 0.0, direction.y],
+        [0.0, jump::GRAVITY, 0.0],
+        external.to_array(),
+        &params,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3685,6 +3620,7 @@ type NpcMoveQuery<'w, 's> = Query<
             &'static crate::components::fighter::FighterStatusEffects,
             Option<&'static mut NpcPerformance>,
             &'static mut FighterHitReaction,
+            Option<&'static crate::components::fighter::GunAimState>,
         ),
     ),
     (
@@ -3730,12 +3666,13 @@ pub(crate) fn move_npc_fighters(
         mut blend,
         mut sm,
         mut combat,
-        (ranged_gate, status_effects, performance, mut hit_reaction),
+        (ranged_gate, status_effects, performance, mut hit_reaction, gun_aim),
     ) in &mut npcs
     {
         if !super::fighter_frame::accepts(active_fighter.as_deref(), entity) {
             continue;
         }
+        air.locomotion_pose_sample = None;
         if let Some(burst) = intent.dodge_burst.take() {
             if !wheel_vetoes_dodge_action(ranged_gate.wheel_out, burst) {
                 let down_roll = matches!(pose.pose_id, 112 | 113 | 117);
@@ -3812,26 +3749,32 @@ pub(crate) fn move_npc_fighters(
         if dodge.state.active {
             continue;
         }
-        if air.air.airborne {
+        let ground_mode = air.recovery_ground_mode.unwrap_or(!air.air.airborne);
+        if !ground_mode {
             motion.movement_mode = meteor_core::MovementMode::Airborne;
             continue;
         }
-        let action_owned =
-            !npc_ordinary_locomotion_allowed(Some(&sm)) && sm.current != FighterState::Guard;
-        if action_owned && !air.air.airborne {
+        if !npc_ordinary_locomotion_allowed(Some(&sm)) {
             continue;
         }
-        let speed = if air.air.airborne {
-            0.0
-        } else {
-            match motion.movement_mode {
-                meteor_core::MovementMode::Run => RUN_SPEED,
-                meteor_core::MovementMode::Walk => WALK_SPEED,
-                meteor_core::MovementMode::Crouch => WALK_SPEED,
-                _ => 0.0,
-            }
-        };
-        let dir = Vec3::new(intent.move_dir.x, 0.0, intent.move_dir.y);
+        let crouch_drive = motion.movement_mode == meteor_core::MovementMode::Crouch
+            || gun_aim.is_some_and(|aim| aim.aiming);
+        let input = intent.locomotion_input;
+        air.locomotion_pose_sample = Some((true, motion.velocity.y));
+        let driven = npc_ground_drive_velocity(
+            &motion,
+            &mut air,
+            input,
+            crouch_drive,
+            fighter_speed_factor(
+                combat_resources.as_deref(),
+                fighter,
+                1.0,
+                Some(status_effects),
+            ),
+            ranged_gate.wheel_out,
+            dt,
+        );
         advance_npc_motion(
             entity,
             contacts.as_deref_mut(),
@@ -3839,16 +3782,13 @@ pub(crate) fn move_npc_fighters(
             &mut transform,
             &mut motion,
             &mut air,
-            dir * speed
-                * fighter_speed_factor(
-                    combat_resources.as_deref(),
-                    fighter,
-                    1.0,
-                    Some(status_effects),
-                ),
+            driven,
             dt,
-            true,
+            false,
         );
+        if air.recovery_ground_mode == Some(true) {
+            super::movement_plugin::land_jump_state(&mut sm, &mut combat);
+        }
     }
 }
 
@@ -3864,6 +3804,7 @@ mod tests {
     include!("ai_plugin/peace_tests.rs");
     include!("ai_plugin/review_r5_tests.rs");
     include!("ai_plugin/obstacle_integration_tests.rs");
+    include!("ai_plugin/planar_drive_tests.rs");
     use super::*;
     use meteor_scene::stage_loader::parse_waypoint_graph;
 
@@ -3910,6 +3851,24 @@ mod tests {
 
     struct NpcSteepMesh;
 
+    fn npc_test_foot_segment(
+        mesh: &impl MeshCollider,
+        start: Point3,
+        end: Point3,
+    ) -> Option<meteor_physics::collision::RayHit> {
+        if start.x != end.x || start.z != end.z || start.y <= end.y {
+            return None;
+        }
+        let hit = mesh.sweep_foot_segment(start.x, start.y, start.z, end.y)?;
+        Some(meteor_physics::collision::RayHit {
+            t: start.y - hit.y,
+            y: hit.y,
+            nx: hit.nx,
+            ny: hit.ny,
+            nz: hit.nz,
+        })
+    }
+
     struct NpcVisionMesh(Option<f32>);
 
     impl MeshCollider for NpcVisionMesh {
@@ -3944,6 +3903,14 @@ mod tests {
     }
 
     impl MeshCollider for NpcSteepMesh {
+        fn segment_hit(
+            &self,
+            start: Point3,
+            end: Point3,
+        ) -> Option<meteor_physics::collision::RayHit> {
+            npc_test_foot_segment(self, start, end)
+        }
+
         fn sweep_foot_segment(
             &self,
             _x: f32,
@@ -3989,6 +3956,14 @@ mod tests {
     }
 
     impl MeshCollider for NpcTestMesh {
+        fn segment_hit(
+            &self,
+            start: Point3,
+            end: Point3,
+        ) -> Option<meteor_physics::collision::RayHit> {
+            npc_test_foot_segment(self, start, end)
+        }
+
         fn sweep_foot_segment(
             &self,
             x: f32,
@@ -4222,6 +4197,7 @@ mod tests {
         .unwrap();
         let mut app = App::new();
         app.init_resource::<Time>()
+            .insert_resource(npc_planar_test_floor())
             .insert_resource(CharacterAssetsSet(std::collections::HashMap::from([(
                 "p1".into(),
                 character,
@@ -4448,7 +4424,7 @@ mod tests {
             &mut transform,
             &mut motion,
             &mut air,
-            Vec3::new(12.0, 0.0, 0.0),
+            Vec3::new(12.0, jump::GRAVITY * 0.1, 0.0),
             0.1,
             false,
         );
@@ -4458,7 +4434,7 @@ mod tests {
         );
         assert!(
             motion.velocity.x < 12.0,
-            "velocity reports accepted displacement"
+            "the rejected axis clears persistent velocity"
         );
         assert_eq!(transform.translation.y, 0.0);
         assert!(!air.air.airborne);
@@ -4483,13 +4459,40 @@ mod tests {
             &mut transform,
             &mut motion,
             &mut air,
-            Vec3::ZERO,
+            Vec3::new(0.0, jump::GRAVITY / 30.0, 0.0),
             1.0 / 30.0,
             false,
         );
 
         assert!(air.carry_decay_steep);
         assert!(air.ground_external_velocity.x > 0.0);
+        assert_eq!(
+            transform.translation.x, 0.0,
+            "the new contact impulse belongs to the next solve"
+        );
+        let external = std::mem::take(&mut air.ground_external_velocity);
+        let driven = meteor_physics::planar_drive::integrate_velocity(
+            motion.velocity.to_array(),
+            [0.0; 3],
+            [0.0, jump::GRAVITY, 0.0],
+            external.to_array(),
+            &meteor_physics::planar_drive::DriveParams {
+                dt: 1.0 / 30.0,
+                speed_factor: 1.0,
+                ..default()
+            },
+        );
+        advance_npc_motion(
+            Entity::PLACEHOLDER,
+            None,
+            &mover,
+            &mut transform,
+            &mut motion,
+            &mut air,
+            Vec3::from_array(driven),
+            1.0 / 30.0,
+            false,
+        );
         assert!(transform.translation.x > 0.0);
         assert!(motion.velocity.x > 0.0);
     }
@@ -4683,7 +4686,7 @@ mod tests {
     }
 
     #[test]
-    fn production_npc_ledge_fall_commits_after_hit_judge_without_gravity() {
+    fn production_npc_ledge_fall_integrates_before_hit_judge_without_second_air_tick() {
         let mut app = App::new();
         crate::plugins::configure_fighter_frame_sets(&mut app);
         app.init_resource::<Time>()
@@ -4738,13 +4741,15 @@ mod tests {
 
         app.update();
 
-        assert_eq!(
-            app.world().resource::<NpcHitJudgeSnapshot>().0,
-            Some((start, false))
+        let solved = app.world().get::<Transform>(npc).unwrap().translation;
+        assert!(
+            solved.y < start.y,
+            "mode1 already integrates gravity before HitJudge"
         );
         assert_eq!(
-            app.world().get::<Transform>(npc).unwrap().translation,
-            start
+            app.world().resource::<NpcHitJudgeSnapshot>().0,
+            Some((solved, true)),
+            "the later root phase must not integrate the new mode0 a second time"
         );
         let air = app.world().get::<FighterAir>(npc).unwrap();
         assert!(air.air.airborne);
@@ -4794,7 +4799,7 @@ mod tests {
                 &mut transform,
                 &mut motion,
                 &mut air,
-                Vec3::ZERO,
+                Vec3::new(0.0, jump::GRAVITY / 60.0, 0.0),
                 1.0 / 60.0,
                 false,
             );

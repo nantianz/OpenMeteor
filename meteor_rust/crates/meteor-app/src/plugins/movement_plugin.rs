@@ -332,11 +332,7 @@ fn update_jump_charge(
 }
 
 fn jump_charge_key_down_allowed(state: FighterState, ordinary_locomotion: bool) -> bool {
-    ordinary_locomotion
-        || matches!(
-            state,
-            FighterState::Guard | FighterState::Fake | FighterState::Down
-        )
+    ordinary_locomotion || matches!(state, FighterState::Fake | FighterState::Down)
 }
 
 fn jump_release_reaches_motion(
@@ -371,7 +367,28 @@ pub struct FighterWall {
 
     pub remaining: f64,
 
+    pub(crate) deadline: Option<f64>,
+
     pub external_accel: Vec3,
+}
+
+impl FighterWall {
+    fn begin_cling_clock(&mut self, now: f64) {
+        self.remaining = 1.8;
+        self.deadline = Some(now + self.remaining);
+    }
+
+    fn sample_cling_clock(&mut self, now: f64, elapsed_fallback: f64) {
+        if !self.cling_active {
+            self.deadline = None;
+            return;
+        }
+
+        let deadline = *self
+            .deadline
+            .get_or_insert(now + self.remaining - elapsed_fallback);
+        self.remaining = deadline - now;
+    }
 }
 
 #[derive(Component, Default)]
@@ -485,6 +502,31 @@ fn ordinary_mover_support(
     } else {
         planar_contact && previous
     }
+}
+
+pub(crate) fn record_scene_mover_result(
+    air: &mut FighterAir,
+    result: &meteor_physics::collision::WallMove,
+    dt: f32,
+) {
+    air.air.planar_x = result.velocity.x;
+    air.air.vertical_speed = result.velocity.y;
+    air.air.planar_z = result.velocity.z;
+    air.mover_vertical_contact = result.flags & 0x30 != 0;
+    if let Some(surface) = result.vertical_surface {
+        air.ground_contact = surface.ny >= WALKABLE_SURFACE_NY;
+        air.carry_decay_steep = !air.ground_contact;
+        air.carry_no_support = false;
+    } else if result.flags == 0 {
+        air.ground_contact = false;
+        air.carry_no_support = true;
+    }
+    update_descent_slide(
+        air,
+        result.vertical_surface,
+        result.vertical_speed_before_contact,
+        dt,
+    );
 }
 
 pub(crate) fn project_planar_air_velocity_on_contact(
@@ -771,6 +813,7 @@ impl Plugin for MovementPlugin {
                 actor_schedule,
                 (
                     attack_root_motion,
+                    guard_root_motion,
                     weapon_switch_root_motion,
                     dodge_root_motion,
                     fake_root_motion,
@@ -1106,6 +1149,11 @@ pub(crate) fn attack_root_motion(
 
         am.air_step_pending = false;
         am.ground_step_consumed = false;
+        if sm.current == FighterState::Guard {
+            am.active = false;
+            am.stopping = false;
+            continue;
+        }
         if air.air_attack_recovery_pose == Some(pose.pose_id) && pose.finished() {
             continue;
         }
@@ -1296,6 +1344,139 @@ pub(crate) fn attack_root_motion(
         if am.stopping {
             am.active = false;
             am.stopping = false;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn guard_root_motion(
+    active_fighter: Option<Res<super::fighter_frame::ActiveFighter>>,
+    time: Res<Time>,
+    frame_clock: Option<Res<crate::plugins::FrameClock>>,
+    assets: Option<Res<crate::plugins::character_plugin::CharacterAssetsSet>>,
+    common: Option<Res<crate::plugins::character_plugin::CommonAmb>>,
+    collider: Res<StageCollider>,
+    mut contacts: Option<ResMut<CharacterContactFrame>>,
+    mut query: Query<
+        (
+            Entity,
+            &Fighter,
+            &mut Transform,
+            &mut MotionState,
+            &mut FighterAir,
+            &PoseRuntime,
+            &EntryBlend,
+            &mut FighterAttackMotion,
+            &mut SmState,
+            &mut CombatState,
+            &FighterHitReaction,
+        ),
+        Without<RemoteFighter>,
+    >,
+) {
+    let dt = crate::plugins::simulation_dt(frame_clock.as_deref(), time.delta_secs());
+    if dt <= 0.0 {
+        return;
+    }
+    let (Some(assets), Some(common), Some(mesh)) = (assets, common, collider.mesh.as_ref()) else {
+        return;
+    };
+    let mut mover = CollisionSystem::new(COLLIDER_RADIUS, COLLIDER_HEIGHT);
+    mover.set_mesh_collider(mesh);
+    for (
+        entity,
+        fighter,
+        mut transform,
+        mut motion,
+        mut air,
+        pose,
+        blend,
+        mut carry,
+        mut sm,
+        mut combat,
+        reaction,
+    ) in &mut query
+    {
+        if !super::fighter_frame::accepts(active_fighter.as_deref(), entity)
+            || sm.current != FighterState::Guard
+            || reaction.current.is_some()
+        {
+            continue;
+        }
+        let Some(character) = assets.0.get(&format!("p{}", fighter.character_id)) else {
+            continue;
+        };
+        let step = if blend.retains_root_delta() {
+            let (delta, yaw) = blend.last_root_sample.unwrap_or(([0.0; 3], motion.facing));
+            if blend.preserve_sample_once {
+                motion.facing = yaw;
+            }
+            Vec3::from_array(delta)
+        } else if blend.is_active_for(pose.pose_id) {
+            Vec3::ZERO
+        } else {
+            let [x, y, z] = character.authored_root_step(&common.0, pose, dt);
+            let (x, z_world) =
+                meteor_anim::root_motion::root_delta_to_world_xz(x, y, motion.facing, 1.0);
+            Vec3::new(x, z * MODEL_SCALE, z_world)
+        };
+        let (cx, cz, dx, dz) = advance_attack_planar_step(
+            Vec2::new(step.x, step.z),
+            Vec2::new(carry.carry_x, carry.carry_z),
+            Vec2::new(
+                air.ground_external_velocity.x,
+                air.ground_external_velocity.z,
+            ),
+            action_carry_decay(&air),
+            dt,
+        );
+        carry.carry_x = cx;
+        carry.carry_z = cz;
+        carry.carry_banked = false;
+        carry.ground_step_consumed = true;
+        air.recovery_ground_mode = None;
+        let vy = if (step.y / (dt * MODEL_SCALE)).abs() >= 1.0 {
+            step.y / dt
+        } else {
+            air.air.vertical_speed + jump::GRAVITY * dt
+        };
+        let pos = Point3::new(
+            transform.translation.x,
+            transform.translation.y,
+            transform.translation.z,
+        );
+        let result = super::character_contact_plugin::resolve_fighter_ordinary_motion(
+            contacts.as_deref_mut(),
+            entity,
+            &mover,
+            pos,
+            Point3::new(dx / dt, vy, dz / dt),
+            dt,
+        );
+        transform.translation = Vec3::new(result.position.x, result.position.y, result.position.z);
+        record_scene_mover_result(&mut air, &result, dt);
+        if result.velocity.x == 0.0 {
+            carry.carry_x = 0.0;
+        }
+        if result.velocity.z == 0.0 {
+            carry.carry_z = 0.0;
+        }
+        motion.velocity = Vec3::new(result.velocity.x, result.velocity.y, result.velocity.z);
+        air.air.airborne = !air.mover_vertical_contact;
+        motion.movement_mode = if air.air.airborne {
+            MovementMode::Airborne
+        } else {
+            MovementMode::Idle
+        };
+        if result.velocity.y < AirState::CURVE_EXIT_SPEED {
+            sm.previous = sm.current;
+            sm.current = FighterState::Name;
+            sm.time_in_state = 0.0;
+            sm.locked = false;
+            combat.state = FighterState::Name;
+            air.air.motion_mode = AirMotionMode::Ballistic;
+            air.recovery_ground_mode = Some(false);
+            air.ledge_fall = true;
         }
     }
 }
@@ -1508,6 +1689,7 @@ pub(crate) fn start_scripted_jump(
         carry_x: motion.velocity.x,
         carry_z: motion.velocity.z,
     });
+    air.recovery_ground_mode = None;
     start_jump_with_velocity_transfer(&mut air.air, motion, strong, impulse);
 
     air.ledge_fall = false;
@@ -1619,6 +1801,7 @@ fn finish_air_landing(air: &mut FighterAir, wall: &mut FighterWall) {
     wall.contact_seen = false;
     wall.external_accel = Vec3::ZERO;
     wall.remaining = 0.0;
+    wall.deadline = None;
 }
 
 fn displayed_motion_root(
@@ -1863,6 +2046,7 @@ type LocalBallisticAirQuery<'w, 's> = Query<
         (
             Option<&'static RangedFireGate>,
             &'static crate::components::fighter::FighterStatusEffects,
+            Option<&'static FighterAttackMotion>,
         ),
     ),
     With<LocalFighter>,
@@ -1911,53 +2095,30 @@ fn local_ballistic_air_root_motion(
         mut combat,
         hit_reaction,
         weapon_switch,
-        (ranged_gate, status_effects),
+        (ranged_gate, status_effects, authored_motion),
     ) in &mut query
     {
         if air.held_jump_mover_deferred {
             continue;
         }
-        if dodge.state.active || air.dodge_owns_motion_tick || hit_reaction.current.is_some() {
+        if dodge.state.active
+            || air.dodge_owns_motion_tick
+            || hit_reaction.current.is_some()
+            || authored_motion.is_some_and(|motion| motion.ground_step_consumed)
+        {
+            continue;
+        }
+        if sm.current == FighterState::Guard {
             continue;
         }
         if !air.air.airborne && air.recovery_ground_mode.is_none() {
-            let pos = Point3::new(
-                transform.translation.x,
-                transform.translation.y,
-                transform.translation.z,
-            );
-            let ground = mover.sample_ground_hit(pos.x, pos.z, pos.y);
-            if let Some(hit) = ground {
-                air.ground_y = hit.y;
-            }
-            if ground.is_some_and(|hit| {
-                pos.y - hit.y <= jump::STEP_DOWN
-                    && mover.can_occupy(Point3::new(pos.x, hit.y, pos.z))
-            }) {
-                air.pending_ledge_fall = false;
+            if !ordinary_locomotion_allowed(&sm, weapon_switch.is_some()) {
                 continue;
             }
-            let (dy, foot, blocked) = mover.resolve_descent(pos, -jump::STEP_DOWN);
-            let walkable = meteor_physics::collision::descent_has_support(foot, blocked);
-            if walkable {
-                transform.translation.y += dy.min(0.0);
-                air.pending_ledge_fall = false;
-                commit_fighter_position(contacts.as_deref_mut(), entity, transform.translation);
-                continue;
-            }
-            air.air.start_fall(motion.velocity.x, motion.velocity.z);
-            air.pending_ledge_fall = false;
-            air.ground_contact = false;
-            air.ledge_fall = true;
-            air.peak_lift = (pos.y - air.ground_y).max(0.0);
-            motion.movement_mode = MovementMode::Airborne;
-            air.motion_root_pin = Some([
-                air.stand_motion_root_x,
-                air.stand_motion_root_y,
-                air.pin_root_z,
-            ]);
-            air.motion_root_pin_pose_id = pose.pose_id;
-            continue;
+            air.recovery_ground_mode = Some(true);
+            air.air.planar_x = motion.velocity.x;
+            air.air.vertical_speed = motion.velocity.y;
+            air.air.planar_z = motion.velocity.z;
         }
         let switching_weapon_air =
             weapon_switch.is_some() && pose.pose_id == WEAPON_SWITCH_POSE_AIR;
@@ -1998,7 +2159,7 @@ fn local_ballistic_air_root_motion(
             &mover,
             Point3::new(tick_start.x, tick_start.y, tick_start.z),
         );
-        let tick_ground_y = tick_ground.map_or(f32::NEG_INFINITY, |hit| hit.y);
+        let _ = tick_ground;
 
         if wall.cling_active {
             air.air.air_time += dt;
@@ -2091,162 +2252,56 @@ fn local_ballistic_air_root_motion(
             );
             consume_descent_slide(&mut air);
         }
-        let world_disp = if recovery_mode.is_some() {
-            air.air.vertical_speed * dt
-        } else {
-            air.air.tick_vertical(dt, false)
-        };
-        let (px, vy, pz, world_disp) = clamp_air_motion_step(
-            air.air.planar_x,
-            air.air.vertical_speed,
-            air.air.planar_z,
-            world_disp,
-        );
-        air.air.planar_x = px;
-        air.air.vertical_speed = vy;
-        air.air.planar_z = pz;
-
+        if recovery_mode.is_none() {
+            air.air.tick_vertical(dt, false);
+        }
         let pos = Point3::new(
             transform.translation.x,
             transform.translation.y,
             transform.translation.z,
         );
-        let requested_x = px * dt;
-        let requested_z = pz * dt;
-        let (rx, rz, ry, planar_surface, blocked_axes, character_changed) =
-            super::character_contact_plugin::resolve_fighter_xz_with_contacts(
-                contacts.as_deref_mut(),
-                entity,
-                &mover,
-                pos,
-                requested_x,
-                requested_z,
-                false,
-            );
-        apply_ordinary_planar_contacts(
-            &mut air.air,
-            [requested_x, requested_z],
-            [rx, rz],
-            blocked_axes,
-            character_changed,
+        let result = super::character_contact_plugin::resolve_fighter_ordinary_motion(
+            contacts.as_deref_mut(),
+            entity,
+            &mover,
+            pos,
+            Point3::new(air.air.planar_x, air.air.vertical_speed, air.air.planar_z),
+            dt,
         );
-        transform.translation.x += rx;
-        transform.translation.z += rz;
-        let vertical_origin = Point3::new(
-            transform.translation.x,
-            transform.translation.y + ry,
-            transform.translation.z,
-        );
-        let (dy, foot, surface, blocked) = if world_disp >= 0.0 {
-            let (dy, hit, blocked) = mover.resolve_ascent_with_surface(vertical_origin, world_disp);
-            (
-                dy,
-                None::<FootHit>,
-                hit.map(|hit| (hit.nx, hit.ny, hit.nz)),
-                blocked,
-            )
-        } else {
-            let (dy, hit, blocked) =
-                mover.resolve_descent_with_surface(vertical_origin, world_disp, planar_surface);
-            (dy, hit, hit.map(|hit| (hit.nx, hit.ny, hit.nz)), blocked)
-        };
-        air.mover_vertical_contact = surface.is_some() || blocked;
+        transform.translation = Vec3::new(result.position.x, result.position.y, result.position.z);
+        record_scene_mover_result(&mut air, &result, dt);
 
         if air.mover_vertical_contact {
             air.air.cling_armed = false;
         }
-        let contact_speed = air.air.vertical_speed;
-        update_descent_slide(&mut air, foot, contact_speed, dt);
-        record_carry_support(
-            &mut air,
-            world_disp,
-            surface,
-            planar_surface.is_some()
-                || (rx - requested_x).abs() > 1e-5
-                || (rz - requested_z).abs() > 1e-5,
-        );
+        let next_ground_mode = air.mover_vertical_contact
+            && (ground_mode || jump::lands_on_contact(vertical_speed_before));
+        let supported = air.ground_contact;
+        if next_ground_mode && supported && !ground_mode {
+            finish_air_landing(&mut air, &mut wall);
 
-        if surface.is_some() || (recovery_mode.is_some() && planar_surface.is_some()) {
-            air.air.vertical_speed = air.air.vertical_speed.max(0.0);
+            air.air.planar_x = result.velocity.x;
+            air.air.vertical_speed = result.velocity.y;
+            air.air.planar_z = result.velocity.z;
+            air.ground_entry_blend_pending = true;
         }
-        if blocked {
-            air.air.vertical_speed = 0.0;
+        air.recovery_ground_mode = Some(next_ground_mode);
+        air.air.airborne = !(next_ground_mode && supported);
+        air.ground_contact = supported;
+        if next_ground_mode {
+            land_jump_state(&mut sm, &mut combat);
+            if supported {
+                air.ground_y = transform.translation.y;
+            }
+        } else if ground_mode {
+            air.ledge_fall = true;
         }
-        transform.translation.y += ry + dy;
-        if recovery_mode.is_none() {
-            transform.translation.y = transform.translation.y.max(tick_ground_y);
-        }
-        commit_fighter_position(contacts.as_deref_mut(), entity, transform.translation);
-
-        let ground_y = tick_ground_y;
-        let mover_floor_contact =
-            world_disp < 0.0 && meteor_physics::collision::descent_has_support(foot, blocked);
-        let near_ground =
-            transform.translation.y <= ground_y + jump::LAND_EPS || mover_floor_contact;
         air.peak_lift = air
             .peak_lift
             .max((transform.translation.y - air.ground_y).max(0.0));
-        air.ground_contact = ordinary_mover_support(
-            air.ground_contact,
-            planar_surface.is_some()
-                || (rx - requested_x).abs() > 1e-5
-                || (rz - requested_z).abs() > 1e-5,
-            surface,
-            blocked,
-        );
         let character_assets = assets
             .as_ref()
             .and_then(|assets| assets.0.get(&format!("p{}", fighter.character_id)));
-        let authored_link = character_assets
-            .and_then(|assets| assets.poses.get(&pose.pose_id))
-            .and_then(|pose| pose.link);
-        let owns_landing = attack_clip_owns_landing(
-            attacking,
-            pose.is_fall_hold(),
-            authored_link,
-            authored_link.is_some_and(|link| {
-                character_assets.is_some_and(|assets| assets.poses.contains_key(&link))
-            }),
-        );
-        let can_land =
-            near_ground && jump::lands_on_contact(vertical_speed_before) && !owns_landing;
-        let timed_out = air.air.air_time >= jump::MAX_AIR_TIME && near_ground && !owns_landing;
-
-        let contacted_ordinary_mode = recovery_mode.or_else(|| {
-            (air.mover_vertical_contact
-                && !mover_floor_contact
-                && jump::lands_on_contact(vertical_speed_before))
-            .then_some(false)
-        });
-        if let Some(was_ground_mode) = contacted_ordinary_mode {
-            let vertical_contact = air.mover_vertical_contact;
-            let next_ground_mode = vertical_contact
-                && (was_ground_mode || jump::lands_on_contact(vertical_speed_before));
-            air.recovery_ground_mode = Some(next_ground_mode);
-            if was_ground_mode && !next_ground_mode {
-                air.ledge_fall = true;
-            }
-
-            air.air.airborne = !(next_ground_mode && mover_floor_contact);
-            if next_ground_mode {
-                land_jump_state(&mut sm, &mut combat);
-            }
-        } else if can_land || timed_out {
-            if transform.translation.y <= ground_y + jump::LAND_EPS {
-                transform.translation.y = ground_y;
-            }
-            finish_air_landing(&mut air, &mut wall);
-
-            if mover_floor_contact && transform.translation.y > ground_y + jump::STEP_DOWN {
-                air.recovery_ground_mode = Some(true);
-                air.air.planar_x = air.landed_planar.x;
-                air.air.planar_z = air.landed_planar.y;
-            }
-            air.ground_entry_blend_pending = true;
-            land_jump_state(&mut sm, &mut combat);
-        } else if near_ground {
-            air.air.cling_armed = false;
-        }
 
         if air.air.airborne
             && ordinary_locomotion
@@ -2298,7 +2353,10 @@ fn local_ballistic_air_root_motion(
                 wall.wall_normal = contact.normal;
                 wall.contact_seen = false;
                 wall.kick_pose = 0;
-                wall.remaining = 1.8;
+                wall.begin_cling_clock(crate::plugins::simulation_play_now(
+                    frame_clock.as_deref(),
+                    time.elapsed_secs_f64(),
+                ));
                 wall.external_accel = Vec3::new(external.x, external.y, external.z);
                 air.air.cling_armed = false;
                 air.air.motion_mode = AirMotionMode::Wall;
@@ -2367,14 +2425,7 @@ fn local_ballistic_air_root_motion(
             air.motion_root_pin = None;
             air.jump_root_xy_started = false;
         }
-        let accepted = transform.translation - tick_start;
-        motion.velocity = if contacted_ordinary_mode.is_some() {
-            Vec3::new(air.air.planar_x, air.air.vertical_speed, air.air.planar_z)
-        } else if air.air.airborne {
-            accepted_motion_velocity(accepted.x, accepted.y, accepted.z, dt)
-        } else {
-            Vec3::new(air.landed_planar.x, 0.0, air.landed_planar.y)
-        };
+        motion.velocity = Vec3::new(air.air.planar_x, air.air.vertical_speed, air.air.planar_z);
 
         air.ground_lock_facing_pending = ground_mode;
         commit_fighter_position(contacts.as_deref_mut(), entity, transform.translation);
@@ -2474,7 +2525,7 @@ fn air_curve_root_motion(
             &mover,
             Point3::new(tick_start.x, tick_start.y, tick_start.z),
         );
-        let tick_ground_y = tick_ground.map_or(f32::NEG_INFINITY, |hit| hit.y);
+        let _ = tick_ground;
         let switching_weapon_air = switch.is_some() && pose.pose_id == WEAPON_SWITCH_POSE_AIR;
         if !air_curve_motion_owned(air.air.motion_mode, switching_weapon_air) {
             continue;
@@ -2693,17 +2744,12 @@ fn air_curve_root_motion(
             air.air.vertical_speed = 0.0;
         }
         transform.translation.y += ry + dy;
-        transform.translation.y = transform.translation.y.max(tick_ground_y);
 
-        let ground_y = tick_ground_y;
-        let mover_floor_contact =
+        air.ground_contact =
             world_disp < 0.0 && meteor_physics::collision::descent_has_support(foot, blocked);
-        let near_ground =
-            transform.translation.y <= ground_y + jump::LAND_EPS || mover_floor_contact;
         air.peak_lift = air
             .peak_lift
             .max((transform.translation.y - air.ground_y).max(0.0));
-        air.ground_contact = near_ground;
         let authored_link = character_assets
             .poses
             .get(&pose.pose_id)
@@ -2714,21 +2760,12 @@ fn air_curve_root_motion(
             authored_link,
             authored_link.is_some_and(|link| character_assets.poses.contains_key(&link)),
         );
-        let can_land = near_ground
+        let can_land = air.mover_vertical_contact
             && air.air_attack_recovery_pose != Some(pose.pose_id)
             && !launching
             && jump::lands_on_contact(vertical_speed_before)
             && !owns_landing;
-        let timed_out = air.air.air_time >= jump::MAX_AIR_TIME
-            && air.air_attack_recovery_pose != Some(pose.pose_id)
-            && (!launching || air.air.launch_lifted)
-            && near_ground
-            && !owns_landing;
-
-        if can_land || timed_out {
-            if transform.translation.y <= ground_y + jump::LAND_EPS {
-                transform.translation.y = ground_y;
-            }
+        if can_land {
             finish_air_landing_state(&mut air);
             air.ground_entry_blend_pending = !attacking;
             if switching_weapon_air {
@@ -2762,9 +2799,6 @@ fn air_curve_root_motion(
                 motion.movement_mode = MovementMode::Idle;
             }
         } else {
-            if near_ground {
-                air.air.cling_armed = false;
-            }
             if air.air.motion_mode == AirMotionMode::CurveExit
                 && air.air.vertical_speed < AirState::CURVE_EXIT_SPEED
             {
@@ -3130,9 +3164,10 @@ pub(crate) fn move_local_fighter(
         air.ground_lock_facing_pending = false;
         air.locomotion_pose_sample = None;
         air.held_jump_mover_deferred = false;
-        if wall.cling_active {
-            wall.remaining -= f64::from(jump_wall_dt);
-        }
+        wall.sample_cling_clock(
+            crate::plugins::simulation_play_now(frame_clock.as_deref(), time.elapsed_secs_f64()),
+            f64::from(jump_wall_dt),
+        );
         if dodge.state.active || hit_reaction.current.is_some() || weapon_switch.is_some() {
             air.recovery_ground_mode = None;
         }
@@ -3154,7 +3189,6 @@ pub(crate) fn move_local_fighter(
         if matches!(sm.current, FighterState::Fake | FighterState::Down)
             && raw_input.length_squared() > 0.01
             && !dodge.state.active
-            && !air.air.airborne
             && !wheel_vetoes_dodge_action(ranged_gate.wheel_out, false)
         {
             let dodge_pose = dodge_pose_for_axes(
@@ -3266,9 +3300,15 @@ pub(crate) fn move_local_fighter(
         let jump_released_edge = jump_released_edge && input_step;
         let jump_action_accepted = jump_action_accepted && input_step;
 
-        let jump_mode_accepts_key_down = (!reaction_owns_motion
-            || sm.current == FighterState::Down)
-            && jump_charge_key_down_allowed(sm.current, ordinary_locomotion);
+        let jump_mode_accepts_key_down = aux_input
+            .jump_input
+            .as_deref()
+            .and_then(|input| input.press_accepted)
+            .unwrap_or_else(|| {
+                (!reaction_owns_motion
+                    || matches!(sm.current, FighterState::Down | FighterState::Fake))
+                    && jump_charge_key_down_allowed(sm.current, ordinary_locomotion)
+            });
         let can_pay_buffered_jump =
             !input_blocked && !ranged_gate.wheel_out && sm.current == FighterState::Name;
         let mut jump_hold = air.jump_hold;
@@ -3286,6 +3326,29 @@ pub(crate) fn move_local_fighter(
             observed_jump_hold,
             jump_wall_dt,
         );
+        if input_step
+            && aux_input
+                .jump_input
+                .as_deref()
+                .is_some_and(|input| input.charge_canceled)
+        {
+            jump_charge_active = false;
+            jump_hold = 0.0;
+            exe_ground_mode_ticks = 0;
+            jump_request = JumpChargeRequest::None;
+        }
+
+        if jump_action_accepted {
+            jump_request = JumpChargeRequest::Released;
+            jump_charge_active = false;
+            if let Some(accepted_hold) = aux_input
+                .jump_input
+                .as_deref()
+                .and_then(|input| input.accepted_release_hold_seconds)
+            {
+                jump_hold = accepted_hold;
+            }
+        }
 
         if jump_request == JumpChargeRequest::None
             && dt > 0.0
@@ -3317,6 +3380,16 @@ pub(crate) fn move_local_fighter(
         let buffered_ground_jump = jump_request == JumpChargeRequest::BufferedGroundMode;
 
         if reaction_owns_motion {
+            motion.movement_mode = if air.air.airborne {
+                MovementMode::Airborne
+            } else {
+                MovementMode::Idle
+            };
+            continue;
+        }
+
+        if sm.current == FighterState::Guard {
+            air.recovery_ground_mode = None;
             motion.movement_mode = if air.air.airborne {
                 MovementMode::Airborne
             } else {
@@ -3401,7 +3474,7 @@ pub(crate) fn move_local_fighter(
         }
 
         if deferred_air_root_motion
-            && ordinary_locomotion
+            && ordinary_locomotion_allowed(&sm, weapon_switch.is_some())
             && !air.air.airborne
             && air.recovery_ground_mode.is_none()
             && !dodge.state.active
@@ -3419,6 +3492,7 @@ pub(crate) fn move_local_fighter(
             }
         }
         if !air.air.airborne
+            && !deferred_air_root_motion
             && air.recovery_ground_mode.is_none()
             && !replay_pose_frame
             && !dodge.state.active
@@ -3454,9 +3528,16 @@ pub(crate) fn move_local_fighter(
             transform.translation.z,
         );
         let on_ground = !air.air.airborne || air.recovery_ground_mode == Some(true);
+        let mode11_recovery_jump = jump_action_accepted
+            && aux_input
+                .jump_input
+                .as_deref()
+                .is_some_and(|input| input.mode11_accepted);
         let mut took_off_this_tick = false;
 
-        if ((jump_release && on_ground) || buffered_ground_jump) && !dodge.state.active {
+        if ((jump_release && (on_ground || mode11_recovery_jump)) || buffered_ground_jump)
+            && !dodge.state.active
+        {
             let preserve_post_jump_action =
                 preserve_post_jump_action(jump_action_accepted, sm.current);
             let strong = air.jump_hold >= STRONG_JUMP_HOLD;
@@ -3979,7 +4060,10 @@ pub(crate) fn move_local_fighter(
                     wall.wall_normal = contact.normal;
                     wall.contact_seen = false;
                     wall.kick_pose = 0;
-                    wall.remaining = 1.8;
+                    wall.begin_cling_clock(crate::plugins::simulation_play_now(
+                        frame_clock.as_deref(),
+                        time.elapsed_secs_f64(),
+                    ));
                     wall.external_accel = Vec3::new(external.x, external.y, external.z);
                     air.air.cling_armed = false;
                     air.air.motion_mode = AirMotionMode::Wall;
@@ -5051,7 +5135,9 @@ mod tests {
         let air = app.world().get::<FighterAir>(fighter).unwrap();
         assert!((air.air.air_time - dt).abs() < 1e-6, "exactly one air tick");
         let motion = app.world().get::<MotionState>(fighter).unwrap();
-        assert!((motion.velocity.y - (transform.translation.y - start.y) / dt).abs() < 1e-5);
+        assert_eq!(motion.velocity.y, air.air.vertical_speed);
+
+        assert!((transform.translation.y - (start.y + motion.velocity.y * dt)).abs() < 1e-6);
     }
 
     #[test]
@@ -5587,8 +5673,8 @@ mod tests {
     }
 
     #[test]
-    fn guard_can_begin_jump_charge_but_locked_actions_cannot() {
-        assert!(jump_charge_key_down_allowed(FighterState::Guard, false));
+    fn jump_charge_accepts_mode11_but_rejects_guard_and_locked_actions() {
+        assert!(!jump_charge_key_down_allowed(FighterState::Guard, false));
         assert!(jump_charge_key_down_allowed(FighterState::Fake, false));
         assert!(jump_charge_key_down_allowed(FighterState::Down, false));
         assert!(jump_charge_key_down_allowed(FighterState::Jump, true));

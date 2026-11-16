@@ -986,6 +986,7 @@ type LockPlayerQuery<'w, 's> = Query<
         &'static Transform,
         &'static mut HeadTrackState,
         Option<&'static FighterAir>,
+        Option<&'static FighterHitReaction>,
         Option<&'static WeaponSwitchActive>,
     ),
     With<LocalFighter>,
@@ -1093,16 +1094,16 @@ fn npc_lock_on_tick(
 fn head_track_turn_limit(
     state: FighterState,
     air: Option<&FighterAir>,
-    switching_weapon: bool,
+    reaction_or_switch_owns_head: bool,
 ) -> Option<f32> {
-    if switching_weapon {
+    if reaction_or_switch_owns_head {
         return None;
     }
     let ballistic =
         air.is_some_and(|air| air.air.airborne && air.air.motion_mode == AirMotionMode::Ballistic);
     let curve_exit =
         air.is_some_and(|air| air.air.airborne && air.air.motion_mode == AirMotionMode::CurveExit);
-    if curve_exit {
+    if state == FighterState::Guard || curve_exit {
         Some(TRACK_CURVE_EXIT_TURN_LIMIT)
     } else if state == FighterState::Name || ballistic {
         Some(TRACK_TURN_LIMIT)
@@ -1155,6 +1156,7 @@ fn lock_on_tick(
         player_transform,
         mut head_state,
         player_air,
+        player_reaction,
         switching_weapon,
     )) = player.single_mut()
     else {
@@ -1276,9 +1278,15 @@ fn lock_on_tick(
         .map(Entity::from_bits)
         .and_then(|entity| targets.get(entity).ok())
         .map(|t| (t.translation.x, t.translation.z));
-    if let Some(turn_limit) =
-        head_track_turn_limit(player_sm.current, player_air, switching_weapon.is_some())
-    {
+
+    let guard_reacting = player_reaction
+        .and_then(|reaction| reaction.current.as_ref())
+        .is_some_and(|reaction| reaction.kind == meteor_combat::hit_reaction::HitReactKind::Guard);
+    if let Some(turn_limit) = head_track_turn_limit(
+        player_sm.current,
+        player_air,
+        switching_weapon.is_some() || guard_reacting,
+    ) {
         if let Some(next) = tracked_head_yaw(
             p.x,
             p.z,
@@ -3188,11 +3196,17 @@ pub(crate) fn fighter_speed_factor(
     item_factor: f32,
     status: Option<&crate::components::fighter::FighterStatusEffects>,
 ) -> f32 {
-    let weapon_percent = resources
+    let weapon_delta = resources
         .and_then(|resources| combat_weapon_stats(&resources.0, fighter))
-        .map_or(100, |stats| stats.speed_percent);
-    let base = item_factor + (weapon_percent - 100) as f32 / 100.0;
-    status.map_or_else(|| base.max(0.0), |status| status.effects.speed_factor(base))
+        .map_or(0, |stats| stats.speed_delta);
+    let base = ((item_factor * 100.0).round() as i32).wrapping_add(weapon_delta);
+    let property = status.map_or_else(|| base.max(0), |status| status.effects.speed_property(base));
+
+    if property == 0 {
+        1.0
+    } else {
+        property as f32 / 100.0
+    }
 }
 
 fn scene_on_attack_args(
@@ -3650,8 +3664,10 @@ fn combat_tick(
                 |jump| jump.released,
             );
 
-        let jump_has_charge = air.jump_charge_active
-            || network.jump_input.as_deref().map_or_else(
+        let mut jump_has_charge = air.jump_charge_active;
+        let jump_pressed = accept_local_input
+            && !saw_raw_binding(keymap.jump)
+            && network.jump_input.as_deref().map_or_else(
                 || keymap.jump.just_pressed(&keys, &mouse),
                 |jump| jump.pressed,
             );
@@ -3709,7 +3725,14 @@ fn combat_tick(
             air,
             assets: character_assets,
             weapon: fighter.weapon,
-            guard_held_input: guard_held,
+            guard_held_input: if is_local && has_ordered_input {
+                network
+                    .guard_input
+                    .as_deref()
+                    .map_or(guard_held, |guard| guard.held_before_input())
+            } else {
+                guard_held
+            },
             in_guard_hit_reaction: hit_reaction
                 .current
                 .as_ref()
@@ -3764,7 +3787,6 @@ fn combat_tick(
                         }
                         LocalCombatInputEdge::DoubleTap(direction)
                         | LocalCombatInputEdge::Dodge { direction, .. } => {
-                            let ordinary = matches!(edge, LocalCombatInputEdge::DoubleTap(_));
                             let burst =
                                 matches!(edge, LocalCombatInputEdge::Dodge { burst: true, .. });
                             if !accept_local_input
@@ -3772,8 +3794,9 @@ fn combat_tick(
                                 || switch_started
                                 || hit_reaction.current.is_some()
                                 || matches!(sm.current, FighterState::BeHit | FighterState::Down)
-                                || ordinary && !crate::plugins::input_plugin::ordinary_direction_dodge_allowed(
-                                    sm.current, motion.movement_mode,
+                                || !crate::plugins::input_plugin::ordinary_direction_dodge_allowed(
+                                    sm.current,
+                                    motion.movement_mode,
                                 )
                             {
                                 continue;
@@ -3801,6 +3824,10 @@ fn combat_tick(
                                 || switch_started
                                 || hit_reaction.current.is_some()
                                 || matches!(sm.current, FighterState::BeHit | FighterState::Down)
+                                || !crate::plugins::input_plugin::ordinary_direction_dodge_allowed(
+                                    sm.current,
+                                    motion.movement_mode,
+                                )
                             {
                                 continue;
                             }
@@ -3868,6 +3895,9 @@ fn combat_tick(
                             }
                         }
                         LocalCombatInputEdge::GuardPress => {
+                            if !input_blocked {
+                                sm.fighter_mut().guard_held_input = true;
+                            }
                             if !input_blocked
                                 && !(matches!(sm.current, FighterState::Down | FighterState::Fake)
                                     && down_has_direction)
@@ -3876,6 +3906,7 @@ fn combat_tick(
                             }
                         }
                         LocalCombatInputEdge::GuardRelease => {
+                            sm.fighter_mut().guard_held_input = false;
                             let guard_reaction_active = hit_reaction
                                 .current
                                 .as_ref()
@@ -3922,14 +3953,41 @@ fn combat_tick(
                                 sm.handle_input(Action::Fake);
                             }
                         }
+                        LocalCombatInputEdge::JumpPress => {
+                            let accepted = accept_local_input
+                                && !weapon_action_vetoed
+                                && crate::plugins::input_plugin::jump_charge_key_down_allowed(
+                                    sm.current,
+                                    hit_reaction.current.is_some(),
+                                    switch_active || switch_started,
+                                );
+                            jump_has_charge = accepted;
+                            if let Some(jump) = network.jump_input.as_deref_mut() {
+                                jump.press_accepted = Some(accepted);
+                            }
+                        }
+                        LocalCombatInputEdge::JumpCancel => {
+                            jump_has_charge = false;
+                            if let Some(jump) = network.jump_input.as_deref_mut() {
+                                jump.press_accepted = Some(false);
+                            }
+                        }
                         LocalCombatInputEdge::Jump => {
+                            let release_hold_seconds = network
+                                .jump_input
+                                .as_deref_mut()
+                                .map(|jump| jump.consume_release_hold_seconds());
                             if accept_local_input && !switch_active && !switch_started {
+                                let mode11 =
+                                    matches!(sm.current, FighterState::Down | FighterState::Fake);
                                 let accepted = jump_has_charge
                                     && !sm.fighter_mut().in_guard_hit_reaction
                                     && sm.handle_input(Action::Jump);
                                 if accepted {
                                     if let Some(jump) = network.jump_input.as_deref_mut() {
                                         jump.action_accepted = true;
+                                        jump.accepted_release_hold_seconds = release_hold_seconds;
+                                        jump.mode11_accepted |= mode11;
                                     }
                                 }
                                 let _ = release_reaction_after_accepted_jump(
@@ -3938,6 +3996,8 @@ fn combat_tick(
                                     sm.current,
                                 );
                             }
+
+                            jump_has_charge = false;
                         }
                         LocalCombatInputEdge::Cure => {
                             if accept_local_input
@@ -3954,6 +4014,9 @@ fn combat_tick(
                 }
             }
 
+            if !saw_raw_binding(keymap.guard) {
+                sm.fighter_mut().guard_held_input = guard_held;
+            }
             let fallback_switch_pose = weapon_switch_context_pose(
                 sm.current,
                 sm.linked_recovery_pose_id.is_some(),
@@ -4050,13 +4113,32 @@ fn combat_tick(
                 if fake_pressed {
                     sm.handle_input(Action::Fake);
                 }
+                if jump_pressed {
+                    let accepted = !weapon_action_vetoed
+                        && crate::plugins::input_plugin::jump_charge_key_down_allowed(
+                            sm.current,
+                            hit_reaction.current.is_some(),
+                            false,
+                        );
+                    jump_has_charge = accepted;
+                    if let Some(jump) = network.jump_input.as_deref_mut() {
+                        jump.press_accepted = Some(accepted);
+                    }
+                }
                 if jump_released {
+                    let release_hold_seconds = network
+                        .jump_input
+                        .as_deref_mut()
+                        .map(|jump| jump.consume_release_hold_seconds());
+                    let mode11 = matches!(sm.current, FighterState::Down | FighterState::Fake);
                     let accepted = jump_has_charge
                         && !sm.fighter_mut().in_guard_hit_reaction
                         && sm.handle_input(Action::Jump);
                     if accepted {
                         if let Some(jump) = network.jump_input.as_deref_mut() {
                             jump.action_accepted = true;
+                            jump.accepted_release_hold_seconds = release_hold_seconds;
+                            jump.mode11_accepted |= mode11;
                         }
                     }
 
@@ -7561,6 +7643,9 @@ mod tests {
     mod sn03_lightfoot_tests {
         include!("combat_plugin/sn03_lightfoot_tests.rs");
     }
+    mod r7_movement_tests {
+        include!("movement_plugin/r7_regressions.rs");
+    }
     mod lock_height_tests {
         include!("combat_plugin/lock_height_tests.rs");
     }
@@ -8852,7 +8937,7 @@ mod tests {
     }
 
     #[test]
-    fn track_head_uses_web_motion_ownership_and_turn_limits() {
+    fn track_head_uses_native_motion_ownership_and_turn_limits() {
         let grounded = FighterAir::default();
         assert_eq!(
             head_track_turn_limit(FighterState::Name, Some(&grounded), false),
@@ -8862,6 +8947,16 @@ mod tests {
             head_track_turn_limit(FighterState::Attack1, Some(&grounded), false),
             None,
             "a grounded attack must preserve the sampled head override"
+        );
+        assert_eq!(
+            head_track_turn_limit(FighterState::Guard, Some(&grounded), false),
+            Some(meteor_combat::lock_on::TRACK_CURVE_EXIT_TURN_LIMIT),
+            "ordinary Guard owns native mode5, including its smaller head turn"
+        );
+        assert_eq!(
+            head_track_turn_limit(FighterState::Guard, Some(&grounded), true),
+            None,
+            "weapon-switch mode supersedes Guard's head ownership"
         );
         assert_eq!(
             head_track_turn_limit(FighterState::Name, Some(&grounded), true),
@@ -8893,6 +8988,111 @@ mod tests {
             head_track_turn_limit(FighterState::Jump, Some(&ballistic), false),
             None
         );
+    }
+
+    #[test]
+    fn production_guard_track_head_uses_mode5_limit_and_recentres_after_target_loss() {
+        for fps in [30.0_f32, 60.0, 120.0] {
+            for side in [-1.0_f32, 1.0] {
+                let dt = 1.0 / fps;
+                let mut time: Time = Time::default();
+                time.advance_by(std::time::Duration::from_secs_f32(dt));
+                let mut net = NetState {
+                    status: NetStatus::InRoom,
+                    player_id: "local".into(),
+                    ..default()
+                };
+                for (player_id, team) in [("local", 1), ("peer", 2)] {
+                    net.remote_actor_teams.insert(player_id.into(), team);
+                }
+                let mut app = App::new();
+                app.insert_resource(time)
+                    .insert_resource(net)
+                    .init_resource::<LockOnController>()
+                    .add_systems(Update, lock_on_tick);
+                let fighter = Fighter {
+                    character_id: 0,
+                    player_slot: 0,
+                    weapon: 6,
+                    weapon_slots: [6, 5],
+                    weapon_slot: 0,
+                    weapon_slot_variants: [0, 0],
+                    weapon_variant: 0,
+                };
+                let local = app
+                    .world_mut()
+                    .spawn((
+                        LocalFighter,
+                        fighter.clone(),
+                        Health::default(),
+                        SmState {
+                            current: FighterState::Guard,
+                            ..default()
+                        },
+                        PoseRuntime::default(),
+                        EntryBlend::default(),
+                        MotionState {
+                            movement_mode: meteor_core::MovementMode::Idle,
+                            velocity: Vec3::ZERO,
+                            facing: 0.0,
+                        },
+                        Transform::default(),
+                        HeadTrackState::default(),
+                        FighterAir::default(),
+                    ))
+                    .id();
+                let remote = app
+                    .world_mut()
+                    .spawn((
+                        RemoteFighter {
+                            player_id: "peer".into(),
+                        },
+                        fighter,
+                        Health::default(),
+                        Transform::from_xyz(side * 3.0, 0.0, 0.1),
+                    ))
+                    .id();
+
+                app.update();
+                assert_eq!(
+                    app.world().resource::<LockOnController>().track_entity,
+                    Some(remote)
+                );
+                let expected = side * 0.3 * 20.0 * dt;
+                let actual = app.world().get::<HeadTrackState>(local).unwrap().current;
+                assert!((actual - expected).abs() < 1e-6, "fps={fps}, side={side}");
+                assert_eq!(app.world().get::<MotionState>(local).unwrap().facing, 0.0);
+
+                let mut guard_reaction = getup_reaction_for_pose(81, 0, 10);
+                guard_reaction.kind = meteor_combat::hit_reaction::HitReactKind::Guard;
+                app.world_mut()
+                    .get_mut::<FighterHitReaction>(local)
+                    .unwrap()
+                    .current = Some(guard_reaction);
+                app.update();
+                assert_eq!(
+                    app.world().get::<HeadTrackState>(local).unwrap().current,
+                    actual
+                );
+                app.world_mut()
+                    .get_mut::<FighterHitReaction>(local)
+                    .unwrap()
+                    .clear();
+
+                app.world_mut().despawn(remote);
+                app.update();
+                assert_eq!(
+                    app.world().resource::<LockOnController>().track_entity,
+                    None
+                );
+                assert!(
+                    (app.world().get::<HeadTrackState>(local).unwrap().current
+                        - expected * (1.0 - 20.0 * dt))
+                        .abs()
+                        < 1e-6
+                );
+            }
+        }
     }
 
     #[test]
@@ -9635,6 +9835,7 @@ mod tests {
                 attack: 95,
                 defense: 7,
                 speed_percent: 120,
+                speed_delta: 19,
             })
         );
     }
@@ -15660,6 +15861,11 @@ mod tests {
                         .move_dir = Vec2::Y;
                     h.app
                         .world_mut()
+                        .get_mut::<AiIntent>(h.fighter)
+                        .unwrap()
+                        .locomotion_input = Vec2::Y;
+                    h.app
+                        .world_mut()
                         .get_mut::<MotionState>(h.fighter)
                         .unwrap()
                         .movement_mode = meteor_core::MovementMode::Run;
@@ -16254,7 +16460,7 @@ mod tests {
         }
         let mut h = spawn_gameplay_harness(6).unwrap();
         h.press_binding(crate::app_state::Keymap::default().move_up);
-        for (factor, expected) in [(0.699, L::SLOW_WALK), (0.7, L::RUN_F), (1.0, L::RUN_F)] {
+        for (factor, expected) in [(0.69, L::SLOW_WALK), (0.7, L::RUN_F), (1.0, L::RUN_F)] {
             h.app
                 .world_mut()
                 .resource_mut::<crate::plugins::item_plugin::ItemBuffs>()
@@ -17474,8 +17680,13 @@ mod tests {
         use crate::plugins::effect_plugin as fx;
         use bevy::ecs::system::RunSystemOnce;
         let origin = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
-        let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../analysis/mrc-moves-20260928");
+        let output = std::env::var_os("METEOR_MOVEMENT_TRACE_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../../analysis/mrc-moves-20260928")
+            });
+        std::fs::create_dir_all(&output).unwrap();
         #[derive(Resource, Default)]
         struct HammerBeforeCombat(Option<serde_json::Value>);
         let bypass_primary_contact = std::env::var_os("METEOR_AUDIT_HAMMER_CONTACT").is_some();
@@ -20853,20 +21064,16 @@ mod tests {
                         h.step_dt(dt);
                         h.release_binding(keys.jump);
                         h.step_dt(dt);
-                        assert!(h.airborne(), "guard must still allow jumping");
-                        for _ in 0..fps * 5 {
-                            h.step_dt(dt);
-                            if !h.airborne() {
-                                break;
-                            }
-                            assert_ne!(h.state(), FighterState::Guard);
-                        }
-                        assert!(!h.airborne());
-                        h.step_dt(dt);
+                        assert!(!h.airborne(), "Guard must reject jump until released");
                         assert_eq!(h.state(), FighterState::Guard);
                         h.release_binding(keys.guard);
                         h.step_dt(dt);
                         assert_eq!(h.state(), FighterState::Name);
+                        h.press_binding(keys.jump);
+                        h.step_dt(dt);
+                        h.release_binding(keys.jump);
+                        h.step_dt(dt);
+                        assert!(h.airborne(), "a fresh charge after GuardRelease is valid");
                     }
                 }
             }
@@ -21076,7 +21283,7 @@ mod tests {
     }
 
     #[test]
-    fn production_ordinary_double_tap_preserves_crouch_roll_and_explicit_guard_burst() {
+    fn production_ordinary_double_tap_preserves_crouch_roll_and_rejects_guard_shortcut() {
         for fps in [30, 60, 120] {
             let dt = 1.0 / fps as f32;
             let keys = crate::app_state::Keymap::default();
@@ -21098,10 +21305,21 @@ mod tests {
             h.step_dt(dt);
             assert_eq!(
                 h.state(),
-                FighterState::Burst,
-                "explicit force path fps={fps}"
+                FighterState::Guard,
+                "V shares native mode1/11 eligibility fps={fps}"
             );
-            assert_eq!(h.pose_id(), 176);
+            h.release_binding(keys.dodge);
+            h.release_binding(keys.guard);
+            h.step_dt(dt);
+            h.press_binding(keys.dodge);
+            h.step_dt(dt);
+            assert_eq!(
+                h.state(),
+                FighterState::Dodge,
+                "shortcut still works after GuardRelease fps={fps}"
+            );
+
+            assert_eq!(h.pose_id(), 166);
         }
     }
 
@@ -21409,6 +21627,7 @@ mod tests {
     include!("combat_plugin/sn11_bridge_tests.rs");
     include!("combat_tests/stock_impact_feedback.rs");
     include!("combat_tests/down_jump.rs");
+    include!("combat_tests/r7_input.rs");
     include!("combat_tests/fake_forward_roll.rs");
     include!("combat_tests/npc_recovery_chase.rs");
     include!("combat_tests/npc_pursuit_recovery.rs");
@@ -21418,6 +21637,7 @@ mod tests {
     include!("combat_tests/dagger_clock_replay.rs");
     include!("combat_tests/effect_substep_clock.rs");
     include!("combat_tests/stock_request_fields.rs");
+    include!("combat_tests/prop5_speed.rs");
     include!("combat_tests/dagger_double_stomp.rs");
     include!("combat_tests/authored_motion_audit.rs");
     include!("combat_tests/mrc_small_jump.rs");
@@ -22463,11 +22683,9 @@ mod tests {
                     "key_up" => h.release_binding(keymap.move_up),
                     "opposed_keys" => h.press_binding(keymap.move_down),
                     _ => {
-                        h.app
-                            .world_mut()
-                            .get_mut::<FighterWall>(h.fighter)
-                            .unwrap()
-                            .remaining = f64::from(dt) * 0.5
+                        let mut wall = h.app.world_mut().get_mut::<FighterWall>(h.fighter).unwrap();
+                        wall.remaining = f64::from(dt) * 0.5;
+                        wall.deadline = None;
                     }
                 }
                 let before = h.position();
@@ -22541,7 +22759,9 @@ mod tests {
         for fps in [30, 60, 120] {
             for slope in [0.0, 0.25] {
                 for degrees in [0.0_f32, 30.0, 45.0] {
-                    let mut h = spawn_gameplay_harness(DAGGER).unwrap();
+                    let mut h = spawn_gameplay_harness_with_order(DAGGER, true).unwrap();
+                    crate::plugins::install_frame_clock(&mut h.app);
+                    install_guard_test_animation(&mut h);
                     let mut mesh = harness_ground();
                     mesh.append_world_triangles(
                         &[
@@ -22966,15 +23186,23 @@ mod tests {
                 );
             }
         }
-        std::fs::write(
-            repo.join(if wall_route {
-                "analysis/wall-route-capture/rust-replay.csv"
-            } else {
-                "analysis/sn01-motion-capture/rust-replay.csv"
-            }),
-            output,
-        )
-        .unwrap();
+        let output_path = std::env::var_os("METEOR_MOVEMENT_TRACE_DIR")
+            .map(|dir| {
+                std::path::PathBuf::from(dir).join(if wall_route {
+                    "wall-route-replay.csv"
+                } else {
+                    "sn01-replay.csv"
+                })
+            })
+            .unwrap_or_else(|| {
+                repo.join(if wall_route {
+                    "analysis/wall-route-capture/rust-replay.csv"
+                } else {
+                    "analysis/sn01-motion-capture/rust-replay.csv"
+                })
+            });
+        std::fs::create_dir_all(output_path.parent().unwrap()).unwrap();
+        std::fs::write(output_path, output).unwrap();
     }
 
     #[test]
@@ -23322,6 +23550,15 @@ mod tests {
             movement_mode: meteor_core::MovementMode::Idle,
         };
         let mut air = FighterAir::default();
+        let driven = crate::plugins::ai_plugin::npc_ground_drive_velocity(
+            &motion,
+            &mut air,
+            Vec2::ZERO,
+            false,
+            1.0,
+            false,
+            HARNESS_DT,
+        );
         crate::plugins::ai_plugin::advance_npc_motion(
             Entity::PLACEHOLDER,
             None,
@@ -23329,7 +23566,7 @@ mod tests {
             &mut transform,
             &mut motion,
             &mut air,
-            Vec3::ZERO,
+            driven,
             HARNESS_DT,
             false,
         );
@@ -23431,6 +23668,15 @@ mod tests {
             };
             let mut air = FighterAir::default();
             for _ in 0..fps * 2 {
+                let driven = crate::plugins::ai_plugin::npc_ground_drive_velocity(
+                    &motion,
+                    &mut air,
+                    Vec2::Y,
+                    false,
+                    1.0,
+                    false,
+                    dt,
+                );
                 crate::plugins::ai_plugin::advance_npc_motion(
                     Entity::PLACEHOLDER,
                     None,
@@ -23438,7 +23684,7 @@ mod tests {
                     &mut transform,
                     &mut motion,
                     &mut air,
-                    Vec3::new(0.0, 0.0, 12.0),
+                    driven,
                     dt,
                     false,
                 );
@@ -23717,6 +23963,15 @@ mod tests {
             let angle = 7.0 * std::f32::consts::FRAC_PI_4;
             air.air.start_fall(12.0 * angle.sin(), 12.0 * angle.cos());
             for _ in 0..fps * 6 {
+                let driven = crate::plugins::ai_plugin::npc_ground_drive_velocity(
+                    &motion,
+                    &mut air,
+                    Vec2::ZERO,
+                    false,
+                    1.0,
+                    false,
+                    dt,
+                );
                 crate::plugins::ai_plugin::advance_npc_motion(
                     Entity::PLACEHOLDER,
                     None,
@@ -23724,7 +23979,7 @@ mod tests {
                     &mut transform,
                     &mut motion,
                     &mut air,
-                    Vec3::ZERO,
+                    driven,
                     dt,
                     false,
                 );
@@ -23873,6 +24128,15 @@ mod tests {
             };
             let mut air = FighterAir::default();
             for _ in 0..fps {
+                let driven = crate::plugins::ai_plugin::npc_ground_drive_velocity(
+                    &motion,
+                    &mut air,
+                    Vec2::ZERO,
+                    false,
+                    1.0,
+                    false,
+                    dt,
+                );
                 crate::plugins::ai_plugin::advance_npc_motion(
                     Entity::PLACEHOLDER,
                     None,
@@ -23880,7 +24144,7 @@ mod tests {
                     &mut transform,
                     &mut motion,
                     &mut air,
-                    Vec3::ZERO,
+                    driven,
                     dt,
                     false,
                 );
@@ -24418,6 +24682,15 @@ mod tests {
         let mut air = FighterAir::default();
         air.air.start_fall(0.0, 0.0);
         for _ in 0..180 {
+            let driven = crate::plugins::ai_plugin::npc_ground_drive_velocity(
+                &motion,
+                &mut air,
+                Vec2::ZERO,
+                false,
+                1.0,
+                false,
+                HARNESS_DT,
+            );
             crate::plugins::ai_plugin::advance_npc_motion(
                 Entity::PLACEHOLDER,
                 None,
@@ -24425,7 +24698,7 @@ mod tests {
                 &mut transform,
                 &mut motion,
                 &mut air,
-                Vec3::ZERO,
+                driven,
                 HARNESS_DT,
                 false,
             );
@@ -24435,10 +24708,10 @@ mod tests {
 
     #[test]
     fn production_wall_kick_separates_then_allows_a_new_ground_jump() {
-        let Some(mut harness) = spawn_gameplay_harness(DAGGER) else {
-            eprintln!("origin_res missing, skipping");
-            return;
-        };
+        let mut harness =
+            spawn_gameplay_harness_with_order(DAGGER, true).expect("original P1 resources");
+        crate::plugins::install_frame_clock(&mut harness.app);
+        install_guard_test_animation(&mut harness);
         harness.replace_stage_mesh(harness_ground_with_front_wall(2.0));
         let keymap = crate::app_state::Keymap::default();
 
@@ -24752,10 +25025,10 @@ mod tests {
 
     #[test]
     fn production_wall_kick_rearms_and_reclings_across_a_corridor() {
-        let Some(mut harness) = spawn_gameplay_harness(DAGGER) else {
-            eprintln!("origin_res missing, skipping");
-            return;
-        };
+        let mut harness =
+            spawn_gameplay_harness_with_order(DAGGER, true).expect("original P1 resources");
+        crate::plugins::install_frame_clock(&mut harness.app);
+        install_guard_test_animation(&mut harness);
         harness.replace_stage_mesh(harness_ground_with_side_corridor(2.0));
         let keymap = crate::app_state::Keymap::default();
 

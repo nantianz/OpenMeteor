@@ -101,6 +101,70 @@ fn production_free_follow_keeps_heading_after_root_turn_and_large_pointer_batche
 }
 
 #[test]
+fn production_mouse_pitch_uses_native_half_yaw_sensitivity_and_input_gates() {
+    use meteor_core::FighterState;
+
+    for fps in [30.0, 60.0, 120.0] {
+        for mouse_speed in [0.0, 49.0, 99.0] {
+            for reverse in [false, true] {
+                for state in [FighterState::Name, FighterState::Attack1] {
+                    for locked in [false, true] {
+                        let (mut app, fighter, camera) = follow_app(fps);
+                        app.world_mut().get_mut::<SmState>(fighter).unwrap().current = state;
+                        {
+                            let mut settings = app.world_mut().resource_mut::<Settings>();
+                            settings.mouse_speed = mouse_speed;
+                            settings.reverse_mouse = reverse;
+                        }
+                        if locked {
+                            let target = app
+                                .world_mut()
+                                .spawn(Transform::from_xyz(20.0, 8.0, -5.0))
+                                .id();
+                            app.world_mut()
+                                .resource_mut::<LockOnController>()
+                                .lock_entity = Some(target);
+                        }
+                        app.update();
+                        let initial_pitch =
+                            app.world().get::<ThirdPersonState>(camera).unwrap().pitch;
+                        let initial_facing =
+                            app.world().get::<MotionState>(fighter).unwrap().facing;
+
+                        pointer_event(&mut app, Vec2::splat(28.0));
+                        app.update();
+                        let pitch = app.world().get::<ThirdPersonState>(camera).unwrap().pitch;
+                        let expected_pitch = initial_pitch
+                            + if locked {
+                                0.0
+                            } else {
+                                (mouse_speed + 1.0) * 0.1 * DEG * if reverse { -1.0 } else { 1.0 }
+                            };
+                        assert!(
+                            (pitch - expected_pitch).abs() < 2e-6,
+                            "pitch fps={fps}, speed={mouse_speed}, reverse={reverse}, state={state:?}, lock={locked}"
+                        );
+                        let facing = app.world().get::<MotionState>(fighter).unwrap().facing;
+                        let expected_facing = initial_facing
+                            - if locked || state != FighterState::Name {
+                                0.0
+                            } else {
+                                (mouse_speed + 1.0) * 0.2 * DEG
+                            };
+                        assert!((facing - expected_facing).abs() < 2e-6);
+                        app.update();
+                        assert_eq!(
+                            app.world().get::<ThirdPersonState>(camera).unwrap().pitch,
+                            pitch
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn production_transfer_rebases_height_and_preserves_pitch_and_zoom() {
     for fps in [30.0, 60.0, 120.0] {
         let (mut app, fighter, camera) = follow_app(fps);

@@ -170,8 +170,6 @@ fn production_guard_hit_rejects_jump_tap_and_preexisting_charge() {
                     let mut h = recovery_timing_harness(serial);
                     let keys = crate::app_state::Keymap::default();
                     let dt = 1.0 / fps as f32;
-                    h.press_binding(keys.guard);
-                    h.step_dt(dt);
                     if precharged {
                         if mobile {
                             h.mobile_binding(
@@ -191,6 +189,8 @@ fn production_guard_hit_rejects_jump_tap_and_preexisting_charge() {
                                 .jump_charge_active
                         );
                     }
+                    h.press_binding(keys.guard);
+                    h.step_dt(dt);
                     install_timing_reaction(&mut h, 60, HitReactKind::Guard, 0.4);
                     h.app
                         .world_mut()

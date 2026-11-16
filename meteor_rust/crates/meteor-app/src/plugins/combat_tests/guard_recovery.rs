@@ -120,12 +120,17 @@ fn production_weapon_guard_eligibility_after_dodge_and_burst() {
                     let context =
                         format!("weapon={weapon} burst={burst} serial={serial} fps={fps}");
                     if burst {
-                        h.press_binding(keys.guard);
-                        h.step_dt(dt);
+                        h.app
+                            .world_mut()
+                            .resource_mut::<SyntheticInputStream>()
+                            .push_dodge(meteor_input::command_parser::Dir::Up, true);
+                    } else {
+                        h.press_binding(keys.dodge);
                     }
-                    h.press_binding(keys.dodge);
                     h.step_dt(dt);
-                    h.release_binding(keys.dodge);
+                    if !burst {
+                        h.release_binding(keys.dodge);
+                    }
                     let action = if burst {
                         FighterState::Burst
                     } else {
@@ -140,9 +145,7 @@ fn production_weapon_guard_eligibility_after_dodge_and_burst() {
                             .state
                             .active
                     );
-                    if !burst {
-                        h.press_binding(keys.guard);
-                    }
+                    h.press_binding(keys.guard);
                     for _ in 0..fps * 3 {
                         h.step_dt(dt);
                         if !h

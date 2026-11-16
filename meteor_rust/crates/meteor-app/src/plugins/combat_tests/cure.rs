@@ -20,6 +20,9 @@ fn cure_harness(network: bool) -> (GameplayHarness, Entity) {
         net.status = NetStatus::InRoom;
         net.mode = "assassin".into();
         net.round_active = true;
+
+        net.player_id = "local-vip".into();
+        net.stock_vips[0] = Some(net.player_id.clone());
     }
     let position = h.position() + Vec3::X;
     let ally = offline_cure::tests::dead_npc(&mut h.app, 1, 1, position, true);

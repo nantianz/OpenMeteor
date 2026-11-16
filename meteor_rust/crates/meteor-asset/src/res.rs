@@ -8,6 +8,13 @@ const MAX_RECORD_LIST_LEN: usize = 4096;
 const SEED_SIZE: usize = 12;
 const SEGMENT_SIZE: usize = 40;
 
+pub fn prop5_percent_delta(percent: i32) -> i32 {
+    let scaled = (f64::from(percent as u32) * f64::from(f32::from_bits(0x3c23_d70a))) as f32;
+    let difference = scaled - 1.0_f32;
+    let delta = difference * 100.0_f32;
+    (delta as i64) as i32
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MeteorResError {
     HeaderTooShort,
@@ -93,6 +100,8 @@ pub struct WeaponCombatStats {
     pub defense: i32,
 
     pub speed_percent: i32,
+
+    pub speed_delta: i32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -285,10 +294,22 @@ impl MeteorRes {
                             })
                             .map(|segment| segment.value() - 100)
                             .sum::<i32>();
+                    let speed_delta = record
+                        .segments
+                        .iter()
+                        .filter(|segment| segment.active_for_combat() && segment.property() == 5)
+                        .fold(0_i32, |sum, segment| {
+                            sum.wrapping_add(match segment.operation() {
+                                0 => segment.value(),
+                                1 => prop5_percent_delta(segment.value()),
+                                _ => 0,
+                            })
+                        });
                     let stats = WeaponCombatStats {
                         attack,
                         defense,
                         speed_percent,
+                        speed_delta,
                     };
                     table.weapon_stats_by_id.insert(weapon_id, stats);
                     if !record.name.is_empty() {
@@ -450,6 +471,52 @@ mod tests {
     use super::*;
 
     #[test]
+    fn prop5_percent_matches_original_pc24_instruction_oracle() {
+        let oracle: serde_json::Value =
+            serde_json::from_str(include_str!("fixtures/prop5-oracle.json")).unwrap();
+        let mut checked = 0;
+        for row in oracle["rows"].as_array().unwrap() {
+            if row["base"].as_i64() != Some(100) {
+                continue;
+            }
+            let percent = row["percent"].as_i64().unwrap() as i32;
+            assert_eq!(
+                prop5_percent_delta(percent),
+                row["pc24"].as_i64().unwrap() as i32,
+                "percent={percent}"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 14);
+    }
+
+    #[test]
+    fn prop5_weapon_segments_convert_before_integer_addition() {
+        let resource = MeteorRes {
+            records: vec![MeteorResRecord {
+                category: 1,
+                id: 6,
+                name: "W0_0".into(),
+                prop_seeds: vec![],
+                segments: [120, 120]
+                    .map(|percent| MeteorResSegment {
+                        words: [2, 0, 5, 0, -1, 1, percent, 1, 0, 0],
+                    })
+                    .into(),
+            }],
+        };
+        let stats = resource.combat_table().weapon_stats(6).unwrap();
+        assert_eq!(
+            stats.speed_percent, 140,
+            "nominal resource percentages remain inspectable"
+        );
+        assert_eq!(
+            stats.speed_delta, 38,
+            "two independently truncated native contributions"
+        );
+    }
+
+    #[test]
     fn rejects_short_headers() {
         assert!(matches!(
             parse_meteor_res(&[0; HEADER_SIZE - 1]),
@@ -526,6 +593,7 @@ mod tests {
                 attack: 95,
                 defense: 7,
                 speed_percent: 120,
+                speed_delta: 19,
             })
         );
 

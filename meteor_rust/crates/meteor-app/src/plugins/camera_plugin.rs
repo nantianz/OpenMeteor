@@ -845,13 +845,15 @@ fn apply_follow_camera_input(
         .single()
         .is_ok_and(|cursor| cursor.grab_mode != CursorGrabMode::None);
     let looking = pointer_locked || mouse.pressed(MouseButton::Left) || mobile_delta != Vec2::ZERO;
-    let deg_per_count = (settings.mouse_speed + 1.0) / 140.0;
+    let yaw_deg_per_count = (settings.mouse_speed + 1.0) / 140.0;
+
+    let pitch_deg_per_count = (settings.mouse_speed + 1.0) / 280.0;
     let reverse_y = if settings.reverse_mouse { -1.0 } else { 1.0 };
     let mut pointer_yaw_deg = 0.0;
     if looking {
         for event in mouse_motion.read() {
             let dx_deg = if horizontal_look {
-                event.delta.x * deg_per_count
+                event.delta.x * yaw_deg_per_count
             } else {
                 0.0
             };
@@ -860,7 +862,7 @@ fn apply_follow_camera_input(
                 &mut cam,
                 lock_active,
                 dx_deg,
-                event.delta.y * deg_per_count * reverse_y,
+                event.delta.y * pitch_deg_per_count * reverse_y,
                 view,
             );
         }

@@ -197,16 +197,21 @@ fn npc_weapon_drop_consumer_handles_reversed_slots_and_rejects_stale_requests() 
 }
 
 #[test]
-fn production_sn10_npc_drops_real_spare_then_picks_selected_weapon() {
-    sn10_replacement_contact_case(true);
+fn production_sn10_far_side_goal_allows_reacquiring_landed_spare() {
+    sn10_replacement_contact_case(true, true);
 }
 
 #[test]
-fn production_sn10_near_side_goal_jitter_can_return_before_item_contact() {
-    sn10_replacement_contact_case(false);
+fn production_sn10_near_side_goal_allows_reacquiring_landed_spare() {
+    sn10_replacement_contact_case(false, true);
 }
 
-fn sn10_replacement_contact_case(expect_pickup: bool) {
+#[test]
+fn production_sn10_empty_spare_picks_selected_weapon() {
+    sn10_replacement_contact_case(true, false);
+}
+
+fn sn10_replacement_contact_case(far_side_goal: bool, initially_has_spare: bool) {
     use crate::components::fighter::{Concealment, FighterStatusEffects, Qi, WornEffect};
     use crate::plugins::item_plugin::{item_pickup, ItemBuffs};
     use crate::plugins::render_plugin::{install_npc_drop_test_systems, DynamicWeaponDrop};
@@ -226,7 +231,7 @@ fn sn10_replacement_contact_case(expect_pickup: bool) {
         fighter.character_id = definition.model as u8;
         fighter.weapon = primary.0;
         fighter.weapon_variant = primary.1;
-        fighter.weapon_slots = [primary.0, spare.0];
+        fighter.weapon_slots = [primary.0, if initially_has_spare { spare.0 } else { 0 }];
         fighter.weapon_slot_variants = [primary.1, spare.1];
         drop(fighter);
         {
@@ -282,6 +287,7 @@ fn sn10_replacement_contact_case(expect_pickup: bool) {
         let mut saw_selected = false;
         let mut picked = false;
         let mut returned = false;
+        let mut reacquired_spare = false;
         for _ in 0..fps * 12 {
             app.world_mut()
                 .resource_mut::<Time>()
@@ -298,10 +304,11 @@ fn sn10_replacement_contact_case(expect_pickup: bool) {
             if patrol.getitem_entity == Some(item) {
                 saw_selected = true;
             }
-            if saw_selected && patrol.getitem_entity.is_none() && fighter.weapon_slots[1] == 0 {
+            if saw_selected && patrol.getitem_entity.is_none() {
                 returned = true;
             }
-            if fighter.weapon_slots[1] == 0 && !saw_drop {
+            reacquired_spare |= saw_drop && fighter.weapon_slots[1] == spare.0;
+            if initially_has_spare && fighter.weapon_slots[1] == 0 && !saw_drop {
                 saw_drop = true;
                 assert_eq!(
                     patrol.getitem_entity,
@@ -335,7 +342,7 @@ fn sn10_replacement_contact_case(expect_pickup: bool) {
                     "original weapon must be rendered"
                 );
             }
-            if first_selected && expect_pickup {
+            if first_selected && far_side_goal {
                 let seed = (1..100_000)
                     .find(|seed| {
                         let mut rng = *seed;
@@ -346,9 +353,6 @@ fn sn10_replacement_contact_case(expect_pickup: bool) {
                     .unwrap();
                 app.world_mut().get_mut::<NpcPatrol>(npc).unwrap().rng = seed;
             }
-            if !expect_pickup && returned {
-                break;
-            }
             if app.world().get::<Fighter>(npc).unwrap().weapon_slots[1] == 5 {
                 picked = true;
                 assert_eq!(
@@ -357,11 +361,24 @@ fn sn10_replacement_contact_case(expect_pickup: bool) {
                 );
                 break;
             }
+            if returned {
+                break;
+            }
         }
+
+        let correct_inventory = if initially_has_spare {
+            reacquired_spare && !picked && returned
+        } else {
+            picked
+        };
         assert!(
-            saw_selected && saw_drop && picked == expect_pickup && (expect_pickup || returned),
-            "fps={fps} selected={saw_selected} dropped={saw_drop} picked={picked} expected={expect_pickup} returned={returned} pos={:?}",
-            app.world().get::<Transform>(npc)
+            saw_selected && saw_drop == initially_has_spare && correct_inventory,
+            "fps={fps} far_side={far_side_goal} spare={initially_has_spare} selected={saw_selected} dropped={saw_drop} picked={picked} reacquired={reacquired_spare} returned={returned} pos={:?} fighter={:?} intent={:?} patrol={:?} air={:?}",
+            app.world().get::<Transform>(npc), app.world().get::<Fighter>(npc),
+            app.world().get::<AiIntent>(npc), app.world().get::<NpcPatrol>(npc),
+            app.world().get::<FighterAir>(npc).map(|air| (
+                air.air.airborne, air.recovery_ground_mode, air.ground_contact,
+                air.air.planar_x, air.air.vertical_speed, air.air.planar_z))
         );
     }
 }

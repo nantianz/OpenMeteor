@@ -33,6 +33,10 @@ pub(crate) struct LocalGuardInput {
 }
 
 impl LocalGuardInput {
+    pub(crate) fn held_before_input(&self) -> bool {
+        self.frame_start_held
+    }
+
     pub(crate) fn held_for_step(&self, clock: Option<&super::FrameClock>) -> bool {
         if super::input_simulation_substep(clock) {
             self.held
@@ -146,6 +150,8 @@ pub(crate) enum LocalCombatInputEdge {
     WeaponSwitch,
     QiBurst,
     Fake,
+    JumpPress,
+    JumpCancel,
     Jump,
     Cure,
     DropWeapon,
@@ -352,12 +358,21 @@ pub(crate) struct LocalJumpInput {
     pub pressed: bool,
     pub released: bool,
 
+    pub press_accepted: Option<bool>,
+
+    pub charge_canceled: bool,
+
     pub action_accepted: bool,
+
+    pub accepted_release_hold_seconds: Option<f32>,
+
+    pub mode11_accepted: bool,
     pub held: bool,
     pub hold_seconds: f32,
     pressed_at: Option<f64>,
     frame_start_pressed_at: Option<f64>,
     frame_time_seconds: f64,
+    release_hold_seconds: std::collections::VecDeque<f32>,
 }
 
 impl LocalJumpInput {
@@ -366,7 +381,12 @@ impl LocalJumpInput {
         self.frame_start_pressed_at = self.pressed_at;
         self.pressed = false;
         self.released = false;
+        self.press_accepted = None;
+        self.charge_canceled = false;
         self.action_accepted = false;
+        self.accepted_release_hold_seconds = None;
+        self.mode11_accepted = false;
+        self.release_hold_seconds.clear();
         if let Some(start) = self.pressed_at {
             self.hold_seconds = (now - start).max(0.0) as f32;
         } else if !self.held {
@@ -376,6 +396,7 @@ impl LocalJumpInput {
 
     fn press(&mut self, now: f64) {
         self.pressed = true;
+        self.charge_canceled = false;
         self.held = true;
         self.hold_seconds = 0.0;
         self.pressed_at = Some(now);
@@ -388,7 +409,21 @@ impl LocalJumpInput {
         self.released = true;
         self.held = false;
         self.hold_seconds = (now - start).max(0.0) as f32;
+        self.release_hold_seconds.push_back(self.hold_seconds);
         true
+    }
+
+    pub(crate) fn consume_release_hold_seconds(&mut self) -> f32 {
+        self.release_hold_seconds
+            .pop_front()
+            .unwrap_or(self.hold_seconds)
+    }
+
+    fn cancel_hold(&mut self) {
+        self.charge_canceled = true;
+        self.held = false;
+        self.hold_seconds = 0.0;
+        self.pressed_at = None;
     }
 
     pub(crate) fn sample_for_step(&self, clock: Option<&super::FrameClock>) -> (bool, f32) {
@@ -421,6 +456,26 @@ impl LocalJumpInput {
     fn clear(&mut self) {
         *self = Self::default();
     }
+}
+
+pub(crate) fn jump_charge_key_down_allowed(
+    state: FighterState,
+    reaction_owns_motion: bool,
+    switching: bool,
+) -> bool {
+    !switching
+        && (matches!(state, FighterState::Down | FighterState::Fake)
+            || (!reaction_owns_motion
+                && matches!(
+                    state,
+                    FighterState::Name
+                        | FighterState::Think
+                        | FighterState::View
+                        | FighterState::Look
+                        | FighterState::GetItem
+                        | FighterState::Spawn
+                        | FighterState::Jump
+                )))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -878,6 +933,7 @@ where
                     }
                     SyntheticAction::Jump if pressed => {
                         jump.press(edge_seconds);
+                        combat.edges.push(LocalCombatInputEdge::JumpPress);
                         jump_seen = true;
                     }
                     SyntheticAction::Jump => {
@@ -936,7 +992,8 @@ where
                     }
                 }
                 if binding == keymap.jump {
-                    jump.clear();
+                    jump.cancel_hold();
+                    combat.edges.push(LocalCombatInputEdge::JumpCancel);
                     jump_seen = true;
                 }
                 continue;
@@ -1030,6 +1087,7 @@ where
             }
             if edge.pressed {
                 jump.press(edge_seconds);
+                combat.edges.push(LocalCombatInputEdge::JumpPress);
             } else if jump.release(edge_seconds) {
                 combat.edges.push(LocalCombatInputEdge::Jump);
             }
@@ -1039,7 +1097,7 @@ where
             if edge.pressed && !edge.repeat {
                 combat
                     .edges
-                    .push(LocalCombatInputEdge::DirectDodge { burst: guard_held });
+                    .push(LocalCombatInputEdge::DirectDodge { burst: false });
             }
             continue;
         }
@@ -1270,15 +1328,17 @@ pub(crate) fn capture_local_command_input(
         if input.keymap.jump.just_released(&input.keys, &input.mouse) {
             state.jump.release(now_seconds);
         } else if state.jump.held && !input.keymap.jump.pressed(&input.keys, &input.mouse) {
-            state.jump.clear();
+            state.jump.cancel_hold();
+            state.combat.edges.push(LocalCombatInputEdge::JumpCancel);
         }
     }
     if !state.combat.raw_bindings.contains(&input.keymap.dodge)
         && input.keymap.dodge.just_pressed(&input.keys, &input.mouse)
     {
-        state.combat.edges.push(LocalCombatInputEdge::DirectDodge {
-            burst: input.keymap.guard.pressed(&input.keys, &input.mouse),
-        });
+        state
+            .combat
+            .edges
+            .push(LocalCombatInputEdge::DirectDodge { burst: false });
     }
     if state.combat.raw_bindings.is_empty() {
         update_desktop_dodge_input_skipping(
@@ -2319,7 +2379,14 @@ mod tests {
             OrderedInputInitial::default(),
         );
 
-        assert!(combat.edges.is_empty());
+        assert_eq!(
+            combat.edges,
+            vec![
+                LocalCombatInputEdge::JumpPress,
+                LocalCombatInputEdge::JumpCancel
+            ]
+        );
+        assert!(jump.charge_canceled);
         assert!(!jump.held);
         assert!(!jump.released);
     }
@@ -2344,7 +2411,10 @@ mod tests {
             OrderedInputInitial::default(),
         );
 
-        assert_eq!(combat.edges, vec![LocalCombatInputEdge::Jump]);
+        assert_eq!(
+            combat.edges,
+            vec![LocalCombatInputEdge::JumpPress, LocalCombatInputEdge::Jump]
+        );
         assert!(jump.released);
         assert!((jump.hold_seconds - 0.18).abs() < 1e-5);
     }
@@ -2375,7 +2445,7 @@ mod tests {
 
         assert_eq!(
             combat.edges,
-            vec![LocalCombatInputEdge::DirectDodge { burst: true }]
+            vec![LocalCombatInputEdge::DirectDodge { burst: false }]
         );
     }
 
