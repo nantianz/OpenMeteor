@@ -96,7 +96,9 @@ git push origin v0.1.0
 
 流水线只编译客户端、打包和发布，不运行单元测试。一个 Windows job 顺序处理架构，最多两个编译进程；保留优化构建，关闭 LTO、调试信息和增量编译。只缓存依赖下载，每个架构打包后删除其编译目录，整个任务最长五小时。
 
-ZIP 包含 `OpenMeteor.exe`、配置、启动脚本和许可说明，不包含原版资源或可选 DLSS/ANGLE 运行库。完整解压后，将原版资源目录拖到 `Start-OpenMeteor.cmd`，或使用 `--original-dir` 启动。中文字体可自行放到原版资源目录的 `fonts/ui.ttf`。
+Windows 发布构建启用 `original-directory-default`。将 ZIP 完整解压到原版游戏目录，直接双击 `OpenMeteor.exe` 即可，无需参数、启动脚本或 MPK。使用快捷方式时，将“起始位置”设为原版游戏目录。
+
+ZIP 包含 `OpenMeteor.exe`、`config/` 配置、`fonts/ui.ttf` 中文字体和许可说明，不包含原版游戏资源或可选 DLSS/ANGLE 运行库。原版程序和资源文件可以继续保留。中文字体在构建时从公开上游下载固定版本并校验 SHA-256，不依赖本机字体文件。
 
 ## 测试
 

@@ -9,6 +9,7 @@ retain their own licenses and copyright notices.
 | wgpu-hal patch | https://github.com/gfx-rs/wgpu | MIT OR Apache-2.0 |
 | bevy_dlss5 | https://github.com/AlrikOlson/bevy_dlss5 | MIT OR Apache-2.0 |
 | Bevy default font | Distributed by the Bevy text dependency | SIL Open Font License 1.1 |
+| Noto Sans SC, Windows release font | https://github.com/google/fonts/tree/a85815a42757630ce188fdad368c2dfc444d4773/ofl/notosanssc | SIL Open Font License 1.1 |
 | Protocol compatibility fixture, @bufbuild/protobuf | https://github.com/bufbuild/protobuf-es | Apache-2.0 |
 
 Vendored license texts are included beside their source. Other dependencies are
@@ -20,6 +21,7 @@ Additional shader copyright and license notices are preserved in
 [bevy_pbr/NOTICE](meteor_rust/vendor/bevy_pbr/NOTICE).
 
 Font license: [FiraMono OFL-1.1](licenses/FiraMono-OFL-1.1.txt).
+Windows Chinese font license: [Noto Sans SC OFL-1.1](licenses/NotoSansSC-OFL-1.1.txt).
 Protocol fixture license: [Apache-2.0](meteor_rust/crates/meteor-network/tests/fixtures/LICENSE-APACHE).
 
 Vendored code carries local rendering adaptations and has had source comments

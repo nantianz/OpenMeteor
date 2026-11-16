@@ -122,11 +122,16 @@ optimizations enabled, and LTO, debug information, and incremental compilation
 disabled. Only dependency downloads are cached. Each target directory is removed
 after packaging, and the job has a five-hour timeout.
 
-ZIPs contain `OpenMeteor.exe`, configuration, a launcher, and license notices.
-Original game resources and optional DLSS/ANGLE runtimes are not included.
-Extract the complete ZIP and drag an original game directory onto
-`Start-OpenMeteor.cmd`, or launch with `--original-dir`. A suitable Chinese font
-can be provided as `fonts/ui.ttf` in the original game directory.
+Windows releases enable `original-directory-default`. Extract the complete ZIP
+into the original game directory and double-click `OpenMeteor.exe`. No launch
+arguments, launcher script, or MPK packs are required. For shortcuts, set the
+working directory to the original game directory.
+
+ZIPs contain `OpenMeteor.exe`, configuration in `config/`, a Chinese font in
+`fonts/ui.ttf`, and license notices. Original game resources and optional
+DLSS/ANGLE runtimes are not included. The original executable and game resources
+can remain in place. The build downloads a pinned font from its public upstream
+and verifies its SHA-256; it does not use local font files.
 
 ## Tests
 

@@ -98,6 +98,12 @@ jobs:
           key: windows-cargo-downloads-v1-${{ hashFiles('meteor_rust/Cargo.lock') }}
           restore-keys: windows-cargo-downloads-v1-
 
+      - name: Prepare Chinese font
+        if: steps.release.outputs.skip != 'true'
+        run: |
+          python .github/scripts/windows_font.py (Join-Path $env:RUNNER_TEMP 'openmeteor-font/ui.ttf')
+          if ($LASTEXITCODE -ne 0) { throw 'Chinese font preparation failed.' }
+
       - name: Install Rust
         if: steps.release.outputs.skip != 'true'
         run: |
@@ -117,14 +123,15 @@ jobs:
           $flags = '-C target-feature=+crt-static --remap-path-prefix=' + $env:GITHUB_WORKSPACE + '=/OpenMeteor'
           $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = $flags
           $env:CARGO_TARGET_I686_PC_WINDOWS_MSVC_RUSTFLAGS = $flags
+          $font = Join-Path $env:RUNNER_TEMP 'openmeteor-font/ui.ttf'
           foreach ($target in $targets) {
             if ($env:BUILD_ARCHITECTURE -ne 'both' -and $env:BUILD_ARCHITECTURE -ne $target.Architecture) { continue }
             rustup target add $target.Triple --toolchain $env:RUST_TOOLCHAIN
             if ($LASTEXITCODE -ne 0) { throw 'Rust target installation failed.' }
-            cargo "+$env:RUST_TOOLCHAIN" build --manifest-path meteor_rust/Cargo.toml --locked --release --package meteor-app --bin meteor --target $target.Triple
+            cargo "+$env:RUST_TOOLCHAIN" build --manifest-path meteor_rust/Cargo.toml --locked --release --package meteor-app --bin meteor --features original-directory-default --target $target.Triple
             if ($LASTEXITCODE -ne 0) { throw "Compilation failed for $($target.Architecture)." }
             $binary = Join-Path $env:CARGO_TARGET_DIR "$($target.Triple)/release/meteor.exe"
-            python .github/scripts/package-windows.py --binary $binary --architecture $target.Architecture --version $env:METEOR_BUILD_VERSION --commit $env:GITHUB_SHA --output dist
+            python .github/scripts/package-windows.py --binary $binary --architecture $target.Architecture --version $env:METEOR_BUILD_VERSION --commit $env:GITHUB_SHA --font $font --output dist
             if ($LASTEXITCODE -ne 0) { throw 'Packaging failed.' }
             Remove-Item -LiteralPath (Join-Path $env:CARGO_TARGET_DIR $target.Triple) -Recurse -Force
           }
@@ -155,7 +162,7 @@ jobs:
             gh release upload $tag @assets --clobber
             if ($LASTEXITCODE -ne 0) { throw 'Release asset upload failed.' }
           } else {
-            $arguments = @('release', 'create', $tag, '--verify-tag', '--draft', '--title', "OpenMeteor $tag", '--notes', 'Windows x64 and x86 builds. Game resources are not included. Extract the complete ZIP and read README.txt. SHA-256 checksums are provided.') + $assets
+            $arguments = @('release', 'create', $tag, '--verify-tag', '--draft', '--title', "OpenMeteor $tag", '--notes', 'Windows x64 and x86 builds. Extract the complete ZIP into the original game directory and double-click OpenMeteor.exe. No launch arguments or MPK packs are required. A Chinese font is included. Game resources are not included. SHA-256 checksums are provided.') + $assets
             if ($tag.Contains('-')) { $arguments += '--prerelease' }
             gh @arguments
             if ($LASTEXITCODE -ne 0) { throw 'Draft release creation failed.' }
