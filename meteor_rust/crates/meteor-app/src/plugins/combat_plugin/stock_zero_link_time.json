@@ -1,0 +1,146 @@
+{
+  "boundary": "Actual 372->373 natural Link + following ticks, original controller/root sampler.\nSupply original AMB/POS frame lookup, wall clock and final render callback only.\nrootDelta starts with a sentinel to distinguish retention from clearing.\n",
+  "exe_sha256": "baebb6d59e6da61e03660c57c31f842f8a3ec157f07d1e2f9bf8d78373a58619",
+  "samples": [
+    {
+      "seconds": 0.0,
+      "tick": 0,
+      "pose": 373,
+      "state": 3,
+      "timer_ms": 0,
+      "integer_frame": 5299,
+      "frame": 5300.10009765625,
+      "delta": [
+        7.0,
+        8.0,
+        9.0
+      ]
+    },
+    {
+      "seconds": 0.0,
+      "tick": 1,
+      "pose": 373,
+      "state": 3,
+      "timer_ms": 0,
+      "integer_frame": 5301,
+      "frame": 5301.0,
+      "delta": [
+        7.0,
+        8.0,
+        9.0
+      ]
+    },
+    {
+      "seconds": 0.0,
+      "tick": 2,
+      "pose": 373,
+      "state": 1,
+      "timer_ms": 0,
+      "integer_frame": 5301,
+      "frame": 5301.0,
+      "delta": [
+        7.0,
+        8.0,
+        9.0
+      ]
+    },
+    {
+      "seconds": 0.0,
+      "tick": 3,
+      "pose": 373,
+      "state": 1,
+      "timer_ms": 0,
+      "integer_frame": 5301,
+      "frame": 5301.60009765625,
+      "delta": [
+        0.12821149826049805,
+        -0.5429725646972656,
+        0.0
+      ]
+    },
+    {
+      "seconds": 0.0,
+      "tick": 4,
+      "pose": 373,
+      "state": 1,
+      "timer_ms": 0,
+      "integer_frame": 5302,
+      "frame": 5302.2001953125,
+      "delta": [
+        0.12821197509765625,
+        -0.5429744720458984,
+        0.0
+      ]
+    },
+    {
+      "seconds": 0.12,
+      "tick": 0,
+      "pose": 373,
+      "state": 3,
+      "timer_ms": 119,
+      "integer_frame": 5299,
+      "frame": 5300.10009765625,
+      "delta": [
+        7.0,
+        8.0,
+        9.0
+      ]
+    },
+    {
+      "seconds": 0.12,
+      "tick": 1,
+      "pose": 373,
+      "state": 3,
+      "timer_ms": 119,
+      "integer_frame": 5299,
+      "frame": 5300.10009765625,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "seconds": 0.12,
+      "tick": 2,
+      "pose": 373,
+      "state": 3,
+      "timer_ms": 119,
+      "integer_frame": 5299,
+      "frame": 5300.10009765625,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "seconds": 0.12,
+      "tick": 3,
+      "pose": 373,
+      "state": 3,
+      "timer_ms": 119,
+      "integer_frame": 5299,
+      "frame": 5300.10009765625,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "seconds": 0.12,
+      "tick": 4,
+      "pose": 373,
+      "state": 3,
+      "timer_ms": 119,
+      "integer_frame": 5299,
+      "frame": 5300.10009765625,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    }
+  ]
+}

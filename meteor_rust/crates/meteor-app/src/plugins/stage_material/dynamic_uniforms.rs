@@ -1,3 +1,4 @@
+use super::water::interaction::LiquidContacts;
 use super::*;
 use bevy::ecs::system::SystemParamItem;
 use bevy::render::render_resource::{
@@ -8,12 +9,17 @@ use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderSystems};
 use std::collections::{HashMap, HashSet};
 
-type ParamKey = [u32; 10];
+type ParamKey = [u32; 38];
 
 #[derive(Resource, Default, Clone)]
 pub(crate) struct FrameUniforms {
     pub camera: CameraOcclusionParams,
     pub seconds: f64,
+    pub scene_normal_maps: bool,
+    pub water_enhance: bool,
+    pub liquid_contacts: LiquidContacts,
+
+    pub lighting: Vec4,
 }
 
 pub(crate) fn split_time(seconds: f64) -> Vec2 {
@@ -25,6 +31,13 @@ pub(crate) fn split_time(seconds: f64) -> Vec2 {
 struct GpuParams {
     base: GmdlMaterialParams,
     scroll: Vec4,
+    detail: Vec4,
+    body_glow: Vec4,
+    body_style: Vec4,
+    water: Vec4,
+    water_bounds: Vec4,
+    first_person_clip: Vec4,
+    water_dynamics_bounds: Vec4,
 }
 
 impl GmdlMaterial {
@@ -41,6 +54,34 @@ impl GmdlMaterial {
             self.uv_scroll.y.to_bits(),
             self.uv_scroll.z.to_bits(),
             self.uv_scroll.w.to_bits(),
+            self.normal_texture.is_some() as u32,
+            self.normal_strength.to_bits(),
+            self.normal_contrast.to_bits(),
+            self.body_glow.x.to_bits(),
+            self.body_glow.y.to_bits(),
+            self.body_glow.z.to_bits(),
+            self.body_glow.w.to_bits(),
+            self.body_style.x.to_bits(),
+            self.body_style.y.to_bits(),
+            self.body_style.z.to_bits(),
+            self.body_style.w.to_bits(),
+            self.water.x.to_bits(),
+            self.water.y.to_bits(),
+            self.water.z.to_bits(),
+            self.water.w.to_bits(),
+            self.water_bounds.x.to_bits(),
+            self.water_bounds.y.to_bits(),
+            self.water_bounds.z.to_bits(),
+            self.water_bounds.w.to_bits(),
+            self.water_live_reflection as u32,
+            self.first_person_clip.x.to_bits(),
+            self.first_person_clip.y.to_bits(),
+            self.first_person_clip.z.to_bits(),
+            self.first_person_clip.w.to_bits(),
+            self.water_dynamics_bounds.x.to_bits(),
+            self.water_dynamics_bounds.y.to_bits(),
+            self.water_dynamics_bounds.z.to_bits(),
+            self.water_dynamics_bounds.w.to_bits(),
         ]
     }
 }
@@ -53,6 +94,8 @@ pub struct SharedBuffers {
     camera: UniformBuffer<CameraOcclusionParams>,
     disabled: UniformBuffer<CameraOcclusionParams>,
     clock: UniformBuffer<Vec4>,
+    lighting: UniformBuffer<Vec4>,
+    liquid_contacts: UniformBuffer<LiquidContacts>,
 }
 
 #[derive(Resource, Default)]
@@ -72,6 +115,26 @@ impl ParamBuffers {
                 let mut uniform = UniformBuffer::from(GpuParams {
                     base: material.params.clone(),
                     scroll: material.uv_scroll,
+                    body_glow: material.body_glow,
+                    body_style: material.body_style,
+                    water: material.water,
+                    water_bounds: material.water_bounds,
+                    first_person_clip: material.first_person_clip,
+                    water_dynamics_bounds: material.water_dynamics_bounds,
+                    detail: Vec4::new(
+                        if material.normal_texture.is_some() {
+                            1.0
+                        } else {
+                            0.0
+                        },
+                        if material.water_live_reflection {
+                            1.0
+                        } else {
+                            0.0
+                        },
+                        material.normal_strength,
+                        material.normal_contrast,
+                    ),
                 });
                 uniform.write_buffer(device, queue);
                 #[cfg(all(feature = "perf-diagnostics", not(target_arch = "wasm32")))]
@@ -87,6 +150,21 @@ pub struct Textures {
     #[texture(1)]
     #[sampler(2)]
     texture: Option<Handle<Image>>,
+    #[texture(6)]
+    #[sampler(7)]
+    normal_texture: Option<Handle<Image>>,
+    #[texture(8)]
+    #[sampler(9)]
+    water_reflection: Option<Handle<Image>>,
+    #[texture(10)]
+    #[sampler(11)]
+    water_depth: Option<Handle<Image>>,
+    #[texture(12)]
+    #[sampler(13)]
+    water_normal: Option<Handle<Image>>,
+    #[texture(15)]
+    #[sampler(16)]
+    water_dynamics: Option<Handle<Image>>,
 }
 
 impl AsBindGroup for GmdlMaterial {
@@ -126,10 +204,28 @@ impl AsBindGroup for GmdlMaterial {
             .buffer()
             .ok_or(AsBindGroupError::RetryNextUpdate)?
             .clone();
+        let lighting = shared
+            .lighting
+            .buffer()
+            .ok_or(AsBindGroupError::RetryNextUpdate)?
+            .clone();
+        let liquid_contacts = shared
+            .liquid_contacts
+            .buffer()
+            .ok_or(AsBindGroupError::RetryNextUpdate)?
+            .clone();
         let mut result = Textures {
             texture: self.texture.clone(),
+            normal_texture: self.normal_texture.clone(),
+            water_reflection: self.water_reflection.clone(),
+            water_depth: self.water_depth.clone(),
+            water_normal: self.water_normal.clone(),
+            water_dynamics: self.water_dynamics.clone(),
         }
         .unprepared_bind_group(layout, device, textures, force_no_bindless)?;
+        result
+            .bindings
+            .push((14, OwnedBindingResource::Buffer(liquid_contacts)));
         let buffer = cache.get_buffer(self, device, queue);
         result
             .bindings
@@ -140,6 +236,9 @@ impl AsBindGroup for GmdlMaterial {
         result
             .bindings
             .push((4, OwnedBindingResource::Buffer(clock)));
+        result
+            .bindings
+            .push((5, OwnedBindingResource::Buffer(lighting)));
         #[cfg(all(feature = "perf-diagnostics", not(target_arch = "wasm32")))]
         super::super::perf_plugin::count_event(0);
         Ok(result)
@@ -153,6 +252,8 @@ impl AsBindGroup for GmdlMaterial {
         entries
             .push(uniform_buffer::<CameraOcclusionParams>(false).build(3, ShaderStages::FRAGMENT));
         entries.push(uniform_buffer::<Vec4>(false).build(4, ShaderStages::FRAGMENT));
+        entries.push(uniform_buffer::<Vec4>(false).build(5, ShaderStages::FRAGMENT));
+        entries.push(uniform_buffer::<LiquidContacts>(false).build(14, ShaderStages::FRAGMENT));
         entries
     }
 }
@@ -208,7 +309,19 @@ fn upload_frame(
         #[cfg(all(feature = "perf-diagnostics", not(target_arch = "wasm32")))]
         super::super::perf_plugin::count_event(1);
     }
-    let clock = split_time(frame.seconds).extend(0.0).extend(0.0);
+    if shared.lighting.buffer().is_none() || *shared.lighting.get() != frame.lighting {
+        shared.lighting.set(frame.lighting);
+        shared.lighting.write_buffer(&device, &queue);
+    }
+    if shared.liquid_contacts.buffer().is_none()
+        || *shared.liquid_contacts.get() != frame.liquid_contacts
+    {
+        shared.liquid_contacts.set(frame.liquid_contacts);
+        shared.liquid_contacts.write_buffer(&device, &queue);
+    }
+    let clock = split_time(frame.seconds)
+        .extend(if frame.scene_normal_maps { 1.0 } else { 0.0 })
+        .extend(if frame.water_enhance { 1.0 } else { 0.0 });
     if shared.clock.buffer().is_none() || *shared.clock.get() != clock {
         #[cfg(all(feature = "perf-diagnostics", not(target_arch = "wasm32")))]
         if shared.clock.buffer().is_none() {
@@ -255,6 +368,7 @@ mod tests {
                 shared.camera.buffer().unwrap().id(),
                 shared.disabled.buffer().unwrap().id(),
                 shared.clock.buffer().unwrap().id(),
+                shared.liquid_contacts.buffer().unwrap().id(),
             )
         };
         let original = ids(&app);
@@ -262,6 +376,8 @@ mod tests {
             let mut frame = app.world_mut().resource_mut::<FrameUniforms>();
             frame.camera.eye = Vec4::new(i as f32, 2.0, 3.0, 0.8);
             frame.seconds = f64::from(i) / 60.0;
+            frame.liquid_contacts.counts.x = 1.0;
+            frame.liquid_contacts.positions[0].w = i as f32 / 60.0;
             drop(frame);
             app.update();
             assert_eq!(
@@ -293,6 +409,38 @@ mod tests {
             initial
         );
         assert_eq!(cache.0.len(), 1);
+        let mut glowing = material.clone();
+        glowing.body_glow = Vec4::new(1.0, 0.035, 0.015, 0.9);
+        assert_ne!(cache.get_buffer(&glowing, &device, &queue).id(), initial);
+        let mut styled = material.clone();
+        styled.body_style = Vec4::new(1.3, 4.0, 3.0, 1.7);
+        let styled_id = cache.get_buffer(&styled, &device, &queue).id();
+        assert_ne!(styled_id, initial);
+        assert_ne!(
+            styled_id,
+            cache.get_buffer(&glowing, &device, &queue).id(),
+            "style changes must select their own parameter buffer"
+        );
+        assert_eq!(cache.0.len(), 3);
+        let mut water = material.clone();
+        water.water = Vec4::new(1.0, 12.0, 0.0, 0.0);
+        let water_id = cache.get_buffer(&water, &device, &queue).id();
+        assert_ne!(water_id, initial);
+        water.water_bounds = Vec4::new(-2.0, 3.0, 10.0, 12.0);
+        assert_ne!(cache.get_buffer(&water, &device, &queue).id(), water_id);
+        let mut relief = material.clone();
+        relief.normal_strength = 1.8;
+        let relief_id = cache.get_buffer(&relief, &device, &queue).id();
+        assert_ne!(relief_id, initial);
+        relief.normal_contrast = 1.5;
+        assert_ne!(cache.get_buffer(&relief, &device, &queue).id(), relief_id);
+        let mut first_person = material.clone();
+        first_person.first_person_clip.w = 0.9;
+        assert_ne!(
+            cache.get_buffer(&first_person, &device, &queue).id(),
+            initial,
+            "self-occlusion radius must select its own GPU parameter buffer"
+        );
         drop(cache);
         app.world_mut()
             .resource_mut::<LiveParams>()
@@ -315,14 +463,11 @@ mod tests {
         );
 
         let entries = GmdlMaterial::bind_group_layout_entries(&device, false);
-        assert_eq!(entries.len(), 5);
+
+        assert_eq!(entries.len(), 17);
 
         use bevy::render::render_resource::*;
-        let source = include_str!("../gmdl_material.wgsl")
-            .replace("#import bevy_pbr::forward_io::VertexOutput;", "struct VertexOutput { @builtin(position) position: vec4<f32>, @location(0) world_position: vec4<f32>, @location(2) uv: vec2<f32>, @location(5) color: vec4<f32>, };")
-            .replace("#import bevy_pbr::mesh_view_bindings::view;", "struct TestView { world_position: vec3<f32>, }; @group(0) @binding(0) var<uniform> view: TestView;")
-            .replace("#{MATERIAL_BIND_GROUP}", "3")
-            .replace("#ifdef VERTEX_COLORS", "").replace("#endif", "")
+        let source = super::super::standalone_shader_source(true)
             + "\n@vertex fn test_vertex() -> VertexOutput { var o: VertexOutput; o.position=vec4<f32>(0.0,0.0,0.0,1.0); o.world_position=o.position; o.uv=vec2<f32>(0.0); o.color=vec4<f32>(1.0); return o; }";
         let shader = device.create_and_validate_shader_module(ShaderModuleDescriptor {
             label: None,

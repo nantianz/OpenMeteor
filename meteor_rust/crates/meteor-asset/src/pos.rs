@@ -416,7 +416,8 @@ fn parse_next_pose_block(body: &str) -> NextPoseBlock {
     NextPoseBlock {
         start: num_or(&f, "start"),
         end: num_or(&f, "end"),
-        time: num_or_f32(&f, "time").unwrap_or(0.0),
+
+        time: num_or_f32(&f, "time").unwrap_or(0.12),
     }
 }
 
@@ -609,6 +610,18 @@ mod tests {
         assert_eq!(np.start, Some(40));
         assert_eq!(np.end, Some(55));
         assert!((np.time - 0.15).abs() < 0.001);
+    }
+
+    #[test]
+    fn next_pose_time_preserves_stock_default_and_explicit_zero() {
+        for (fields, expected) in [("", 0.12), ("Time 0", 0.0), ("Time 0.15", 0.15)] {
+            let text = format!("Pose 5\n{{\n Start 0\n End 60\n NextPose {{\n Start 40\n End 55\n {fields}\n }}\n}}\n");
+            let poses = parse_poses(&text);
+            assert_eq!(poses[0].next_pose.as_ref().unwrap().time, expected);
+        }
+        assert!(parse_poses("Pose 5\n{\n Start 0\n End 60\n}\n")[0]
+            .next_pose
+            .is_none());
     }
 
     #[test]

@@ -48,6 +48,7 @@ fn air_refraction_preserves_flat_color_and_displaces_pattern_without_dark_faces(
             .disable::<bevy::audio::AudioPlugin>(),
     );
     app.init_state::<crate::app_state::AppState>();
+    app.init_resource::<crate::app_state::Settings>();
     app.add_plugins(crate::plugins::stage_material::GmdlMaterialPlugin);
     app.add_plugins(MaterialPlugin::<BladeRippleMaterial>::default());
     app.world_mut()

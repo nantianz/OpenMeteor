@@ -1,0 +1,172 @@
+{
+  "schema_version": 1,
+  "geometry": {
+    "subdivisions": 24,
+    "max_vertices": 24000,
+    "shore_fade": 2.0
+  },
+  "wind_waves": [
+    {
+      "direction": [
+        0.91,
+        0.41
+      ],
+      "wavelength": 29,
+      "amplitude": 0.15,
+      "speed": 0.72,
+      "warp": [
+        0.047,
+        -0.029
+      ],
+      "phase": 0.3
+    },
+    {
+      "direction": [
+        -0.36,
+        0.93
+      ],
+      "wavelength": 41,
+      "amplitude": 0.09,
+      "speed": -0.48,
+      "warp": [
+        -0.026,
+        0.044
+      ],
+      "phase": 2.1
+    },
+    {
+      "direction": [
+        0.63,
+        -0.78
+      ],
+      "wavelength": 18,
+      "amplitude": 0.045,
+      "speed": 1.07,
+      "warp": [
+        0.061,
+        0.018
+      ],
+      "phase": 4.3
+    }
+  ],
+  "simulation": {
+    "max_side": 512,
+    "min_spacing": 0.4,
+    "speed": 6.0,
+    "damping": 0.8,
+    "impulse_gain": 6.5,
+    "foam_gain": 0.6,
+    "foam_decay": 1.2
+  },
+  "interaction": {
+    "max_distance": 60.0,
+    "max_actors": 8,
+    "step_distance": 0.9,
+    "step_interval": 0.18,
+    "entry_interval": 0.22,
+    "foot_radius": 0.7,
+    "strength_scale": 1.0,
+    "splash_scale": 1.0
+  },
+  "surfaces": [
+    {
+      "stage": "sn06",
+      "object": "Cylinder01",
+      "texture": "sn06w.jpg",
+      "max_depth": 12.0,
+      "kind": 1,
+      "extinction": 1.5,
+      "enabled": true,
+      "reflection_face": 64,
+      "blend_mode": "src-alpha"
+    },
+    {
+      "stage": "sn09",
+      "object": "Plane37",
+      "texture": "sn914.jpg",
+      "max_depth": 6.0,
+      "kind": 1,
+      "extinction": 1.5,
+      "enabled": true,
+      "reflection_face": 64,
+      "blend_mode": "src-alpha"
+    },
+    {
+      "stage": "sn13",
+      "object": "Plane02",
+      "texture": "sn13w01.jpg",
+      "reflection_face": 128,
+      "max_depth": 12.0,
+      "kind": 1,
+      "extinction": 1.5,
+      "enabled": true,
+      "blend_mode": "src-alpha"
+    },
+    {
+      "stage": "sn08",
+      "object": "Plane03",
+      "texture": "sn08du.jpg",
+      "max_depth": 6.0,
+      "kind": 2,
+      "extinction": 1.8,
+      "enabled": true,
+      "reflection_face": 64,
+      "blend_mode": "src-alpha"
+    },
+    {
+      "stage": "sn10",
+      "object": "Virus02",
+      "texture": "sn1009.JPG",
+      "max_depth": 4.0,
+      "kind": 2,
+      "extinction": 1.8,
+      "blend_mode": "src-color-one",
+      "enabled": true,
+      "reflection_face": 64
+    },
+    {
+      "stage": "sn14",
+      "object": "Plane38",
+      "texture": "asn14012.jpg",
+      "max_depth": 1.0,
+      "kind": 3,
+      "extinction": 0.0,
+      "enabled": true,
+      "reflection_face": 64,
+      "blend_mode": "src-alpha"
+    },
+    {
+      "stage": "sn14",
+      "object": "Object02",
+      "texture": "asn14012.jpg",
+      "max_depth": 1.0,
+      "kind": 3,
+      "extinction": 0.0,
+      "enabled": true,
+      "reflection_face": 64,
+      "blend_mode": "src-alpha"
+    },
+    {
+      "stage": "sn14",
+      "object": "Object03",
+      "texture": "asn14012.jpg",
+      "max_depth": 1.0,
+      "kind": 3,
+      "extinction": 0.0,
+      "enabled": true,
+      "reflection_face": 64,
+      "blend_mode": "src-alpha"
+    },
+    {
+      "stage": "sn14",
+      "object": "Object06",
+      "texture": "asn14012.jpg",
+      "max_depth": 1.0,
+      "kind": 3,
+      "extinction": 0.0,
+      "enabled": true,
+      "reflection_face": 64,
+      "blend_mode": "src-alpha"
+    }
+  ]
+}

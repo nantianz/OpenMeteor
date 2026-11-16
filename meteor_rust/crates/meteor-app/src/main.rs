@@ -13,6 +13,10 @@ fn main() {
     });
     if let Err(error) = run() {
         eprintln!("meteor: {error}");
+        #[cfg(target_os = "windows")]
+        if !std::env::args_os().any(|arg| arg == "--check-resources") {
+            desktop_console::report_startup_error(&error);
+        }
         std::process::exit(1);
     }
 }
@@ -20,12 +24,32 @@ fn main() {
 fn run() -> Result<(), String> {
     let args = desktop_args::DesktopArgs::parse(std::env::args_os().skip(1))?;
     if args.help {
-        println!("Usage: meteor [--original-dir <directory>] [--check-resources]\n\n  --original-dir     Read an original Meteor installation (read-only; no MPK required)\n  --check-resources  Validate resources without opening a game window\n  --help, -h         Show this help\n\nWithout --original-dir, use METEOR_PACKS_DIR or packs/ beside the executable.");
+        println!("Usage: meteor [--original-dir <directory>] [--check-resources]\n\n  --original-dir     Read an original Meteor installation (read-only; no MPK required)\n  --check-resources  Validate resources without opening a game window\n  --help, -h         Show this help");
+        println!(
+            "\n{}",
+            if cfg!(feature = "original-directory-default") {
+                "Default: read original assets and fonts/ui.ttf from the current working directory; no MPK required."
+            } else {
+                "Without --original-dir, use METEOR_PACKS_DIR or packs/ beside the executable."
+            }
+        );
         return Ok(());
     }
-    if let Some(root) = args.original_dir {
+    if let Some(root) = args.resource_directory() {
         let source =
             meteor_asset::original_directory::OriginalDirectory::open(&root, original_ui::ASSETS)?;
+        if source
+            .read("fonts/ui.ttf")
+            .map_err(|error| {
+                format!(
+                    "Required font {}/fonts/ui.ttf: {error}",
+                    source.root().display()
+                )
+            })?
+            .is_empty()
+        {
+            return Err("Required font fonts/ui.ttf is empty".into());
+        }
         if args.check_resources {
             source.verify_all()?;
             println!("Original resources verified: {}", source.root().display());

@@ -24,9 +24,13 @@ pub fn initialize() -> io::Result<File> {
 }
 
 pub fn report_error(error: &io::Error) {
-    let text: Vec<u16> = format!("Cannot open console.log beside the executable: {error}\0")
-        .encode_utf16()
-        .collect();
+    report_startup_error(&format!(
+        "Cannot open console.log beside the executable: {error}"
+    ));
+}
+
+pub fn report_startup_error(error: &str) {
+    let text: Vec<u16> = format!("{error}\0").encode_utf16().collect();
     let caption: Vec<u16> = "Meteor\0".encode_utf16().collect();
 
     unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), caption.as_ptr(), 0x10) };

@@ -23,18 +23,20 @@ impl RoomTarget {
                     "局域网",
                     room.info.server_name.clone(),
                     format!(
-                        "{}\n{} · {} · 版本 {}.{:02}",
+                        "{} · {}\n{} · {} · {} ms · 版本 {}.{:02}",
                         room_metadata(
                             mode,
                             room.info.resolved_stage_id().as_deref(),
                             Some([room.info.field_0e as usize, room.info.field_0f as usize])
                         ),
+                        rebalance_label(room.info.rebalance_enabled),
                         room.endpoint,
                         if room.info.fields_0_to_6[6] != 0 {
                             "有密码"
                         } else {
                             "无密码"
                         },
+                        room.round_trip_ms,
                         room.info.fields_0_to_6[0],
                         room.info.fields_0_to_6[1]
                     ),
@@ -46,12 +48,13 @@ impl RoomTarget {
             }
             Self::Web(room) => {
                 let detail = format!(
-                    "{}\n{} · {}",
+                    "{} · {}\n{} · {}",
                     room_metadata(
                         room.mode.as_deref(),
                         room.stage_id.as_deref(),
                         room.team_counts
                     ),
+                    rebalance_label(room.battle_rules.as_ref().map(|rules| rules.enabled())),
                     room.owner_name.as_deref().unwrap_or("房主未知"),
                     web_room_unavailable(room).unwrap_or(if room.state == "running" {
                         "对战中 · 可加入"
@@ -79,6 +82,14 @@ impl RoomTarget {
     fn label(&self) -> String {
         let (source, title, detail, count) = self.presentation();
         format!("[{source}] {title} · {count}\n{detail}")
+    }
+}
+
+fn rebalance_label(rules: Option<bool>) -> &'static str {
+    match rules {
+        Some(true) => "再平衡：开启",
+        Some(_) => "再平衡：关闭",
+        None => "再平衡：未提供",
     }
 }
 
@@ -211,7 +222,8 @@ fn poll(
 ) {
     let active = *current.get() == AppState::Menu
         && *screen == MenuScreen::Network
-        && net.status == NetStatus::Disconnected;
+        && net.status == NetStatus::Disconnected
+        && !crate::plugins::server_route::address(route.as_deref()).is_empty();
     if !active {
         if browser.active {
             browser.stop();
@@ -388,12 +400,21 @@ fn render(
         |at| format!("{:.0} 秒前", (time.elapsed_secs_f64() - at).max(0.0)),
     );
     let action = net.error.clone().unwrap_or_else(|| match net.status {
+        NetStatus::Disconnected if default_web_address().is_empty() => {
+            "点击房间加入；刷新搜索局域网房间".into()
+        }
         NetStatus::Disconnected => "点击房间加入；刷新同时更新局域网和 Web 列表".into(),
         NetStatus::Connecting => format!("正在加入：{}", net.address),
         NetStatus::InRoom => format!("已加入：{} · {} 人", net.room_id, net.members.len()),
     });
     for (mut text, summary) in &mut texts {
-        let value = if summary.is_some() {
+        let value = if default_web_address().is_empty() {
+            if summary.is_some() {
+                format!("共 {} 个局域网房间", entries.len())
+            } else {
+                format!("{lan_status}\n{action}")
+            }
+        } else if summary.is_some() {
             format!("共 {} 个房间 · Web 更新：{updated}", entries.len())
         } else {
             format!(
@@ -420,6 +441,7 @@ pub(crate) fn install_capture_fixture(app: &mut App) {
         .into_iter()
         .enumerate()
         .map(|(i, name)| RoomSummary {
+            battle_rules: None,
             room_id: format!("web-{i}"),
             name: name.into(),
             mode: Some("deathmatch".into()),
@@ -442,6 +464,7 @@ pub(crate) fn install_capture_fixture(app: &mut App) {
             "192.168.1.8",
         ),
         last_seen_ms: 0,
+        round_trip_ms: 0,
     });
     app.insert_resource(browser)
         .insert_resource(lan)
@@ -451,8 +474,37 @@ pub(crate) fn install_capture_fixture(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn empty_server_build_does_not_connect_or_retry_room_browser() {
+        if !env!("METEOR_BUILD_WS").is_empty() {
+            return;
+        }
+        let mut app = App::new();
+        app.insert_resource(State::new(AppState::Menu))
+            .insert_resource(MenuScreen::Network)
+            .init_resource::<NetState>()
+            .init_resource::<LaunchRequest>()
+            .init_resource::<Time>()
+            .init_resource::<RoomBrowser>()
+            .add_systems(Update, poll);
+        app.world_mut()
+            .spawn((MenuStockRefreshButton, Interaction::Pressed));
+        for _ in 0..3 {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs(10));
+            app.update();
+        }
+        let browser = app.world().resource::<RoomBrowser>();
+        assert!(browser.last_attempt.is_none());
+        assert!(browser.native.handle.is_none());
+        assert!(browser.net.error.is_none());
+        assert!(!browser.active);
+    }
     fn room(id: usize) -> RoomSummary {
         RoomSummary {
+            battle_rules: None,
             room_id: format!("room-{id}"),
             name: format!("房间 {id}"),
             mode: Some("deathmatch".into()),
@@ -480,13 +532,46 @@ mod tests {
             endpoint: "127.0.0.1:5230".parse().unwrap(),
             info,
             last_seen_ms: 0,
+            round_trip_ms: 42,
         });
         let (_, _, detail, count) = target.presentation();
         assert!(detail.contains("四方阵"));
         assert!(detail.contains("流星 1 人 / 蝴蝶 0 人"));
         assert!(detail.contains("有密码"));
         assert!(detail.contains("9.07"));
+        assert!(detail.contains("42 ms"));
         assert_eq!(count, "1 / 16");
+    }
+
+    #[test]
+    fn json_rules_list_distinguishes_on_off_and_unknown() {
+        use meteor_combat::battle_rules::BattleRules;
+        let mut entry = room(1);
+        for (rules, expected) in [
+            (None, "再平衡：未提供"),
+            (Some(BattleRules::ORIGINAL), "再平衡：关闭"),
+            (Some(BattleRules::BALANCED), "再平衡：开启"),
+        ] {
+            entry.battle_rules = rules.clone();
+            assert!(RoomTarget::Web(entry.clone()).label().contains(expected));
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let mut info = meteor_network::stock_udp::StockDiscoveryInfo::default_room(
+                    5230,
+                    "room",
+                    "127.0.0.1",
+                );
+                info.rebalance_enabled = rules.map(|rules| rules.enabled());
+                assert!(RoomTarget::Lan(StockDiscoveredRoom {
+                    endpoint: "127.0.0.1:5230".parse().unwrap(),
+                    info,
+                    last_seen_ms: 0,
+                    round_trip_ms: 0
+                })
+                .label()
+                .contains(expected));
+            }
+        }
     }
 
     #[test]
@@ -513,6 +598,7 @@ mod tests {
         browser.tx.begin_connect(sender);
         browser.message(
             Message::Welcome {
+                balance_revision: meteor_combat::battle_rules::RULES_CAPABILITY,
                 player_id: "browser".into(),
                 room_id: String::new(),
                 members: vec![],
@@ -557,6 +643,7 @@ mod tests {
         let mut pending = PendingNetActions::default();
         for message in [
             Message::Welcome {
+                balance_revision: meteor_combat::battle_rules::RULES_CAPABILITY,
                 player_id: "player".into(),
                 room_id: String::new(),
                 members: vec![],
@@ -647,6 +734,7 @@ mod tests {
                 "127.0.0.1",
             ),
             last_seen_ms: 0,
+            round_trip_ms: 0,
         };
         let mut lan = StockLanDiscoveryState::default();
         lan.rooms.push(lan_room);

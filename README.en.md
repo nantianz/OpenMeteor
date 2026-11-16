@@ -79,6 +79,10 @@ cargo run --locked -p meteor-app --bin meteor -- --original-dir /path/to/game
 For existing resource packs, set `METEOR_PACKS_DIR` to a directory containing
 `packs.json` and its pack files, or place `packs/` beside the executable.
 
+Precomputed scene normals and water textures are not bundled. The desktop client
+can generate water data at runtime from the scene resources you provide. HD
+normal maps require a separate compatible resource pack.
+
 ## Multiplayer
 
 The native client defaults to `ws://127.0.0.1:9001`. Run your own server:
@@ -109,9 +113,17 @@ Tests that require original game files or separate reference captures are gated
 behind `original-assets`. Enabling this feature requires providing the matching
 resources and fixtures locally; they are excluded from this source distribution.
 
-The publication was validated on macOS with Rust 1.97.1. Android, WebAssembly,
-and optional Windows rendering backends have separate platform requirements and
-were not validated as part of this release.
+This update passed the workspace build and default tests on macOS with Rust
+1.97.1 (1132 passed, 2 ignored), plus a compilation check of the separate
+WebAssembly crate:
+
+```sh
+rustup target add wasm32-unknown-unknown
+cargo check --manifest-path crates/meteor-wasm/Cargo.toml --target wasm32-unknown-unknown --locked
+```
+
+These checks do not establish full gameplay parity. Android, Windows, and browser
+runtime behavior still need validation on their respective platforms.
 
 ## Workspace
 

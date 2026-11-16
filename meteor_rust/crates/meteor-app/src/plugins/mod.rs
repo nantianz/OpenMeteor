@@ -1,3 +1,4 @@
+pub mod mrc_file_picker;
 pub(crate) mod server_route;
 pub(crate) mod studio_splash;
 
@@ -5,6 +6,11 @@ pub(crate) mod studio_splash;
 mod combat_trace;
 pub(crate) mod fighter_frame;
 pub(crate) mod frame_work;
+#[cfg(not(target_arch = "wasm32"))]
+mod jump_trace;
+#[cfg(not(target_arch = "wasm32"))]
+mod landing_trace;
+pub(crate) mod rebalance_plugin;
 pub(crate) mod status_plugin;
 
 use bevy::prelude::{
@@ -59,23 +65,22 @@ fn advance_frame_clock(clock: &mut FrameClock, raw_wall_dt: f32, target_fps: u32
         clock.target_fps = target_fps;
         clock.accumulator = 0.0;
     }
-    let clamped = raw.min(meteor_core::MAX_FRAME_DT);
-    clock.sim_dt = if target_fps == 0 {
-        clamped
+    clock.accumulator += raw;
+    let interval = 1.0 / target_fps.clamp(1, 240) as f32;
+    clock.sim_dt = if target_fps == 0 || clock.accumulator >= interval {
+        clock.accumulator = if target_fps == 0 {
+            0.0
+        } else {
+            clock.accumulator % interval
+        };
+        clock.pending_wall.min(meteor_core::MAX_FRAME_DT)
     } else {
-        let step = 1.0 / target_fps.clamp(1, 240) as f32;
-        clock.accumulator += clamped;
-        let mut dt = 0.0;
-        let mut steps = 0;
-        while clock.accumulator >= step && steps < 4 {
-            clock.accumulator -= step;
-            dt += step;
-            steps += 1;
-        }
-        dt
+        0.0
     };
     if clock.sim_dt > 0.0 {
         clock.wall_step = std::mem::take(&mut clock.pending_wall);
+
+        clock.sim_dt = clock.wall_step.min(meteor_core::MAX_FRAME_DT);
     } else {
         clock.wall_step = 0.0;
     }
@@ -88,6 +93,8 @@ fn begin_frame_clock(
     debug_sim: Option<Res<crate::plugins::debug_plugin::DebugSimControl>>,
     mut clock: ResMut<FrameClock>,
     loading: Option<Res<loading_ui::LoadingPresentation>>,
+    mrc: Option<Res<replay_plugin::MrcPlayback>>,
+    player: Option<Res<replay_plugin::ReplayPlayer>>,
 ) {
     advance_frame_clock(&mut clock, time.delta_secs(), settings.target_fps);
     if loading.is_some_and(|loading| loading.active) {
@@ -101,6 +108,17 @@ fn begin_frame_clock(
         } else {
             clock.sim_dt = (clock.sim_dt * debug_sim.time_scale).max(0.0);
         }
+    }
+    if mrc.as_deref().is_some_and(|mrc| mrc.active && mrc.paused)
+        || player
+            .as_deref()
+            .is_some_and(|player| player.active && player.paused)
+    {
+        clock.sim_dt = 0.0;
+        clock.wall_dt = 0.0;
+        clock.wall_step = 0.0;
+        clock.pending_wall = 0.0;
+        clock.accumulator = 0.0;
     }
 }
 
@@ -120,9 +138,27 @@ pub(crate) fn simulation_wall_step(clock: Option<&FrameClock>, fallback: f32) ->
         .unwrap_or_else(|| fallback.max(0.0))
 }
 
+fn suspend_offline_frame_clock(
+    state: Option<Res<State<AppState>>>,
+    net: Option<Res<network_plugin::NetState>>,
+    mut clock: ResMut<FrameClock>,
+) {
+    let network_room = net.is_some_and(|net| net.status == network_plugin::NetStatus::InRoom);
+    let suspended =
+        state.is_some_and(|state| matches!(state.get(), AppState::Paused | AppState::Settings));
+    if suspended && !network_room {
+        *clock = FrameClock::default();
+    }
+}
+
 pub(crate) fn install_frame_clock(app: &mut App) {
     app.init_resource::<FrameClock>()
-        .add_systems(First, begin_frame_clock.after(bevy::time::TimeSystems));
+        .add_systems(First, begin_frame_clock.after(bevy::time::TimeSystems))
+        .add_systems(
+            bevy::state::state::StateTransition,
+            suspend_offline_frame_clock
+                .after(bevy::state::state::StateTransitionSystems::EnterSchedules),
+        );
 }
 
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -317,7 +353,7 @@ mod tests {
     }
 
     #[test]
-    fn target_fps_matches_web_accumulator_and_wall_step() {
+    fn target_fps_gates_measured_intervals_and_preserves_wall_step() {
         let mut clock = FrameClock::default();
         advance_frame_clock(&mut clock, 1.0 / 120.0, 30);
         assert_eq!(clock.sim_dt, 0.0);
@@ -330,6 +366,107 @@ mod tests {
         advance_frame_clock(&mut clock, 0.2, 0);
         assert_eq!(clock.sim_dt, meteor_core::MAX_FRAME_DT);
         assert!((clock.wall_step - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn irregular_render_frames_are_not_quantized_or_replayed_after_stalls() {
+        let mut clock = FrameClock::default();
+        advance_frame_clock(&mut clock, 0.02, 30);
+        assert_eq!(clock.sim_dt, 0.0);
+        advance_frame_clock(&mut clock, 0.02, 30);
+        assert!((clock.sim_dt - 0.04).abs() < 1e-6);
+        assert!((clock.wall_step - 0.04).abs() < 1e-6);
+
+        advance_frame_clock(&mut clock, 1.0, 30);
+        assert_eq!(clock.sim_dt, 0.2);
+        assert_eq!(clock.wall_step, 1.0);
+        advance_frame_clock(&mut clock, 0.01, 30);
+        assert_eq!(clock.sim_dt, 0.0, "a stall must not leave catch-up steps");
+        advance_frame_clock(&mut clock, 0.03, 30);
+        assert!((clock.sim_dt - 0.04).abs() < 1e-6);
+    }
+
+    #[test]
+    fn low_frame_rates_keep_elapsed_time_up_to_the_original_point_two_cap() {
+        for fps in [0, 10, 30, 60, 120] {
+            let mut clock = FrameClock::default();
+            advance_frame_clock(&mut clock, 0.1, fps);
+            assert!((clock.sim_dt - 0.1).abs() < 1e-6, "fps={fps}");
+            advance_frame_clock(&mut clock, 0.3, fps);
+            assert_eq!(clock.sim_dt, 0.2, "fps={fps}");
+        }
+    }
+
+    #[test]
+    fn capped_clock_jitter_preserves_elapsed_time_and_stall_cap() {
+        for fps in [30, 60, 120, 144, 240] {
+            let mut clock = FrameClock::default();
+            let mut wall = 0.0_f64;
+            let mut simulated = 0.0_f64;
+            for index in 0..1000 {
+                let dt = [0.0037, 0.0041, 0.0063, 0.0039][index % 4];
+                wall += f64::from(dt);
+                advance_frame_clock(&mut clock, dt, fps);
+                if clock.sim_dt > 0.0 {
+                    assert_eq!(clock.sim_dt, clock.wall_step);
+                    simulated += f64::from(clock.sim_dt);
+                    assert!((simulated - wall).abs() < 0.00001, "fps={fps}");
+                } else {
+                    assert_eq!(clock.wall_step, 0.0);
+                }
+            }
+            advance_frame_clock(&mut clock, 0.2, fps);
+            assert_eq!(clock.sim_dt, meteor_core::MAX_FRAME_DT);
+            assert!(clock.wall_step >= 0.2);
+        }
+    }
+
+    #[test]
+    fn changing_fps_does_not_drop_time_since_the_last_simulation_update() {
+        let mut clock = FrameClock::default();
+        advance_frame_clock(&mut clock, 0.02, 30);
+        assert_eq!(clock.sim_dt, 0.0);
+        advance_frame_clock(&mut clock, 0.01, 0);
+        assert!((clock.sim_dt - 0.03).abs() < 1e-6);
+        assert!((clock.wall_step - 0.03).abs() < 1e-6);
+    }
+
+    #[test]
+    fn paused_mrc_freezes_simulation_without_accumulating_catch_up_time() {
+        let mut app = App::new();
+        app.init_resource::<bevy::time::Time<bevy::time::Real>>()
+            .init_resource::<crate::app_state::Settings>()
+            .init_resource::<FrameClock>()
+            .insert_resource(replay_plugin::MrcPlayback {
+                active: true,
+                paused: true,
+                ..Default::default()
+            })
+            .add_systems(Update, begin_frame_clock);
+        app.world_mut()
+            .resource_mut::<bevy::time::Time<bevy::time::Real>>()
+            .advance_by(std::time::Duration::from_millis(16));
+        app.update();
+        let clock = app.world().resource::<FrameClock>();
+        assert_eq!(
+            (
+                clock.sim_dt,
+                clock.wall_dt,
+                clock.wall_step,
+                clock.pending_wall
+            ),
+            (0.0, 0.0, 0.0, 0.0)
+        );
+        app.world_mut()
+            .resource_mut::<replay_plugin::MrcPlayback>()
+            .paused = false;
+        app.world_mut()
+            .resource_mut::<bevy::time::Time<bevy::time::Real>>()
+            .advance_by(std::time::Duration::from_millis(16));
+        app.update();
+        let clock = app.world().resource::<FrameClock>();
+        assert!(clock.sim_dt > 0.0);
+        assert!(clock.wall_step <= 0.0161);
     }
 
     #[test]
@@ -373,9 +510,11 @@ pub mod character_contact_plugin;
 pub mod character_plugin;
 mod combat_hud_layout;
 pub mod combat_plugin;
+pub(crate) mod countdown_hud;
 pub mod debug_plugin;
 pub(crate) mod dialogue_portrait;
 pub mod display_settings_plugin;
+pub mod dynamic_shadows_plugin;
 pub mod editor_plugin;
 pub mod effect_plugin;
 pub(crate) mod escort_assets;
@@ -402,6 +541,7 @@ pub mod settings_ui;
 pub mod stage_collider;
 pub mod stage_material;
 pub mod stage_plugin;
+pub(crate) mod system_notice;
 pub mod ui_components;
 pub mod ui_plugin;
 pub mod ui_scale_plugin;
@@ -418,6 +558,7 @@ pub use character_plugin::CharacterPlugin;
 pub use combat_plugin::CombatPlugin;
 pub use debug_plugin::DebugPlugin;
 pub use display_settings_plugin::DisplaySettingsPlugin;
+pub use dynamic_shadows_plugin::DynamicShadowsPlugin;
 pub use effect_plugin::EffectPlugin;
 pub use ifl_plugin::IflPlugin;
 pub use impact_fx_plugin::ImpactFxPlugin;

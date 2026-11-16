@@ -2,8 +2,11 @@ use crate::escort::{
     character_capsule_intersects_flag, position_inside_safe_zone, SN03, STOCK_ESCORT_CATEGORY,
     STOCK_ESCORT_ITEM_ID, STOCK_ESCORT_SCENE_OBJECT_ID,
 };
-use crate::modes::{can_respawn, is_siege_stage};
+use crate::modes::can_respawn;
 use crate::role_state::{RoleState, RoleVec3, ROLE_DOWNLINK_HZ, ROLE_UPLINK_HZ};
+use crate::stock_file_transfer::{
+    Frame as FileFrame, Receiver as FileReceiver, Sender as FileSender,
+};
 use crate::stock_protocol::{
     decode_role_state_event, decode_role_state_request, decode_stock_roster,
     encode_role_state_event, encode_role_state_request, stock_base_weapon_item_id,
@@ -11,22 +14,24 @@ use crate::stock_protocol::{
     StockEnterRoleRequest, StockEquipWeaponRequest, StockFlagRemovedEvent, StockFlagReturnedEvent,
     StockHitReactionEvent, StockHitRequest, StockKillEvent, StockProtocolError, StockRespawnEvent,
     StockRoleEnteredEvent, StockRoleLeftEvent, StockRoleRate, StockRoleStateRecord,
-    StockSceneFrame, StockSceneItemRecord, StockSceneItemSpawnRequest, StockSceneOpsEvent,
-    StockSceneTakenEvent, StockStageConfigEvent, StockTeamScoreEvent, StockVipEvent,
-    StockVitalsEvent, StockWeaponEquippedEvent, StockWeaponObjectRequest,
-    STOCK_DISCRETE_RELIABLE_FLAGS, STOCK_EVENT_BE_HIT, STOCK_EVENT_DEATH, STOCK_EVENT_DROP_ITEM,
-    STOCK_EVENT_DROP_ITEM_FLAGS, STOCK_EVENT_ENVIRONMENT_DEATH, STOCK_EVENT_FLAG_REMOVED,
-    STOCK_EVENT_FLAG_RETURNED, STOCK_EVENT_GUARD_HIT, STOCK_EVENT_HIT_FLAGS, STOCK_EVENT_KILL,
-    STOCK_EVENT_MATCH_END, STOCK_EVENT_RESPAWN, STOCK_EVENT_ROLE_ENTERED, STOCK_EVENT_ROLE_LEFT,
-    STOCK_EVENT_ROLE_RATE, STOCK_EVENT_ROLE_STATE, STOCK_EVENT_ROLE_STATE_FLAGS,
-    STOCK_EVENT_ROSTER, STOCK_EVENT_ROUND_RESTART, STOCK_EVENT_SCENE_OPS,
-    STOCK_EVENT_SCENE_SNAPSHOT, STOCK_EVENT_SCENE_SPAWN, STOCK_EVENT_SCENE_TAKEN,
-    STOCK_EVENT_STAGE_CONFIG, STOCK_EVENT_TEAM_SCORE, STOCK_EVENT_VIP, STOCK_EVENT_VITALS,
-    STOCK_EVENT_WEAPON_EQUIPPED, STOCK_EVENT_WEAPON_OBJECT, STOCK_EVENT_WEAPON_OBJECT_FLAGS,
-    STOCK_REQUEST_CURE, STOCK_REQUEST_DROP_ITEM, STOCK_REQUEST_ENTER_ROLE,
-    STOCK_REQUEST_EQUIP_WEAPON, STOCK_REQUEST_HIT, STOCK_REQUEST_HIT_FLAGS, STOCK_REQUEST_READY,
-    STOCK_REQUEST_ROLE_RATE, STOCK_REQUEST_ROLE_STATE, STOCK_REQUEST_ROLE_STATE_FLAGS,
-    STOCK_REQUEST_SPAWN_SCENE_ITEM, STOCK_REQUEST_WEAPON_OBJECT, STOCK_SCENE_OPS_PER_PACKET,
+    StockSceneFrame, StockSceneItemRecord, StockSceneItemSpawnRequest, StockSceneOperation,
+    StockSceneOpsEvent, StockSceneStateEvent, StockSceneTakenEvent, StockSceneTransferEvent,
+    StockStageConfigEvent, StockTeamScoreEvent, StockVipEvent, StockVitalsEvent,
+    StockWeaponEquippedEvent, StockWeaponObjectRequest, STOCK_DISCRETE_RELIABLE_FLAGS,
+    STOCK_EVENT_BE_HIT, STOCK_EVENT_DEATH, STOCK_EVENT_DROP_ITEM, STOCK_EVENT_DROP_ITEM_FLAGS,
+    STOCK_EVENT_ENVIRONMENT_DEATH, STOCK_EVENT_FLAG_REMOVED, STOCK_EVENT_FLAG_RETURNED,
+    STOCK_EVENT_GUARD_HIT, STOCK_EVENT_HIT_FLAGS, STOCK_EVENT_KILL, STOCK_EVENT_MATCH_END,
+    STOCK_EVENT_RESPAWN, STOCK_EVENT_ROLE_ENTERED, STOCK_EVENT_ROLE_LEFT, STOCK_EVENT_ROLE_RATE,
+    STOCK_EVENT_ROLE_STATE, STOCK_EVENT_ROLE_STATE_FLAGS, STOCK_EVENT_ROSTER,
+    STOCK_EVENT_ROUND_RESTART, STOCK_EVENT_ROUND_TIMER, STOCK_EVENT_SCENE_OPS,
+    STOCK_EVENT_SCENE_SNAPSHOT, STOCK_EVENT_SCENE_SPAWN, STOCK_EVENT_SCENE_STATE,
+    STOCK_EVENT_SCENE_TAKEN, STOCK_EVENT_SCENE_TRANSFER, STOCK_EVENT_STAGE_CONFIG,
+    STOCK_EVENT_TEAM_SCORE, STOCK_EVENT_VIP, STOCK_EVENT_VITALS, STOCK_EVENT_WEAPON_EQUIPPED,
+    STOCK_EVENT_WEAPON_OBJECT, STOCK_EVENT_WEAPON_OBJECT_FLAGS, STOCK_REQUEST_CURE,
+    STOCK_REQUEST_DROP_ITEM, STOCK_REQUEST_ENTER_ROLE, STOCK_REQUEST_EQUIP_WEAPON,
+    STOCK_REQUEST_HIT, STOCK_REQUEST_HIT_FLAGS, STOCK_REQUEST_READY, STOCK_REQUEST_ROLE_RATE,
+    STOCK_REQUEST_ROLE_STATE, STOCK_REQUEST_ROLE_STATE_FLAGS, STOCK_REQUEST_SPAWN_SCENE_ITEM,
+    STOCK_REQUEST_WEAPON_OBJECT, STOCK_SCENE_OPS_PER_PACKET, STOCK_SCENE_OP_EFFECT,
 };
 use crate::stock_protocol::{
     StockAngerSpend, STOCK_REQUEST_ANGER_COST, STOCK_REQUEST_ANGER_FULL, STOCK_REQUEST_QI_BURST,
@@ -38,19 +43,23 @@ use crate::stock_protocol::{
 use crate::stock_session::{
     StockClientTransport, StockServerTransport, StockSessionEvent, StockTransportError,
 };
+use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
 
 fn stock_sequence_reached(ack: u16, sequence: u16) -> bool {
     let modulus = u32::from(crate::stock_udp::STOCK_SEQUENCE_MAX);
     ack != 0 && (u32::from(ack) + modulus - u32::from(sequence)) % modulus < modulus / 2
 }
 use meteor_asset::pos::AttackBlock;
-use meteor_asset::res::CombatResourceTable;
-use meteor_combat::hit_resolve::{resolve_hit, CombatStats, HitOptions};
+use meteor_asset::res::{CombatResourceTable, MeteorRes};
+use meteor_combat::hit_resolve::{CombatStats, HitOptions};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs;
-use std::io;
+use std::io::{self, Read, Write};
 use std::net::SocketAddr;
 use std::path::Path;
+
+#[path = "stock_game/runtime_sync.rs"]
+mod runtime_sync;
 
 pub const STOCK_HERO_COUNT: usize = 20;
 
@@ -93,9 +102,28 @@ pub fn stock_max_health_for_life_adjust(percent: u32) -> f32 {
 pub const STOCK_CURE_RANGE: f32 = 80.0 * crate::role_state::ROLE_WORLD_SCALE;
 pub const STOCK_CURE_RECOVERY_MS: u64 = 3_034;
 pub const STOCK_SCENE_PICKUP_RADIUS: f32 = 16.0 * crate::role_state::ROLE_WORLD_SCALE;
-pub const STOCK_SCENE_PICKUP_HEIGHT: f32 = 1.8;
+pub const STOCK_SCENE_PICKUP_HEIGHT: f32 = meteor_core::constants::CHARACTER_CONTACT_HEIGHT;
 pub const STOCK_SCENE_RECORDS_PER_PACKET: usize = 58;
 pub const STOCK_WEAPON_THROW_TIMEOUT_MS: u64 = 5_000;
+pub const STOCK_DYNAMIC_ITEM_LIFETIME_MS: u64 = 30_000;
+
+fn retain_scene_write(state: &mut Vec<StockSceneOperation>, operation: StockSceneOperation) {
+    if !(1..STOCK_SCENE_OP_EFFECT).contains(&operation.kind) {
+        return;
+    }
+    if operation.kind == crate::stock_protocol::STOCK_SCENE_OP_POSE {
+        state.retain(|previous| {
+            previous.reference != operation.reference
+                || previous.kind != crate::stock_protocol::STOCK_SCENE_OP_FRAME
+        });
+    }
+    if let Some(index) = state.iter().position(|previous| {
+        previous.reference == operation.reference && previous.kind == operation.kind
+    }) {
+        state.remove(index);
+    }
+    state.push(operation);
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StockRoomItemGroup {
@@ -134,11 +162,33 @@ impl StockRoomItemRules {
             None => true,
         }
     }
+
+    fn scene_option_bits(self) -> u32 {
+        [
+            self.health_item,
+            self.update_item,
+            self.special_item,
+            self.hide_item,
+        ]
+        .into_iter()
+        .enumerate()
+        .filter(|(_, enabled)| *enabled)
+        .filter_map(|(key, _)| crate::stock_protocol::stock_scene_item_option_bit(key as i32))
+        .fold(0, |flags, bit| flags | bit)
+    }
 }
 
 pub fn stock_room_item_group(category: u32, item_id: u32) -> Option<StockRoomItemGroup> {
     match category {
-        1 if stock_weapon_from_item_id(item_id).is_some() => Some(StockRoomItemGroup::Hide),
+        1 => match stock_weapon_from_item_id(item_id)
+            .map(|(weapon, _)| meteor_combat::weapon_strategy::weapon_to_strategy(weapon))
+        {
+            Some(0) => Some(StockRoomItemGroup::Health),
+            Some(1) => Some(StockRoomItemGroup::Update),
+            Some(2) => Some(StockRoomItemGroup::Special),
+            Some(3) => Some(StockRoomItemGroup::Hide),
+            _ => None,
+        },
         2 => match item_id {
             1 | 9 | 16..=18 | 23..=27 => Some(StockRoomItemGroup::Health),
             2..=5 | 28..=33 | 39 => Some(StockRoomItemGroup::Update),
@@ -158,6 +208,8 @@ pub struct StockAuthoredSceneItem {
     pub respawn_ms: Option<u64>,
 
     pub scene_reference: Option<u32>,
+
+    pub repeat_on_xstar: bool,
 
     pub active: bool,
     pub interactive: bool,
@@ -229,6 +281,44 @@ impl StockHeroCatalog {
     }
 }
 
+const REQUEST_BATTLE_RULES: u16 = 0x7f06;
+const EVENT_BATTLE_RULES: u16 = 0x7f07;
+const ACK_BATTLE_RULES: u16 = 0x7f08;
+const BATTLE_RULES_V7: &[u8; 4] = b"MBR7";
+const BATTLE_RULES_TRANSFER_ID: u32 = 1;
+const BATTLE_RULES_ZLIB_KIND: u16 = 2;
+
+const MAX_RULES_COMPRESSED_BYTES: u64 =
+    meteor_combat::battle_rules::MAX_RULES_JSON_BYTES as u64 + 64 * 1024;
+
+fn compress_battle_rules(rules: meteor_combat::battle_rules::BattleRules) -> Vec<u8> {
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
+    encoder
+        .write_all(rules.to_json().as_bytes())
+        .expect("Vec writer cannot fail");
+    encoder.finish().expect("Vec writer cannot fail")
+}
+
+fn decode_battle_rules(compressed: &[u8]) -> Option<meteor_combat::battle_rules::BattleRules> {
+    if compressed.len() as u64 > MAX_RULES_COMPRESSED_BYTES {
+        return None;
+    }
+    let mut decoder = ZlibDecoder::new(compressed);
+    let mut json = String::new();
+    decoder
+        .by_ref()
+        .take((meteor_combat::battle_rules::MAX_RULES_JSON_BYTES + 1) as u64)
+        .read_to_string(&mut json)
+        .ok()?;
+    if json.len() > meteor_combat::battle_rules::MAX_RULES_JSON_BYTES
+        || decoder.total_in() != compressed.len() as u64
+    {
+        return None;
+    }
+    let rules = meteor_combat::battle_rules::BattleRules::from_json(&json).ok()?;
+    (rules.to_json() == json).then_some(rules)
+}
+
 const REQUEST_PLAYER_NAMES: u16 = 0x7f02;
 const EVENT_PLAYER_NAME: u16 = 0x7f03;
 const PLAYER_NAMES_V1: &[u8; 4] = b"MRN1";
@@ -251,11 +341,13 @@ fn decode_player_name(payload: &[u8]) -> Option<StockGameEvent> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum StockGameEvent {
+    BattleRules(meteor_combat::battle_rules::BattleRules),
     PlayerName {
         actor_id: u32,
         name: String,
     },
     RemoteVitals(crate::stock_remote_vitals::RemoteVitals),
+    Runtime(crate::runtime_sync::RuntimePacket),
     Latencies(Vec<(u32, u32)>),
     PropertyEffect(crate::stock_protocol::StockPropertyEffectEvent),
     PoseChain(crate::stock_protocol::StockPoseChainEvent),
@@ -295,19 +387,30 @@ pub enum StockGameEvent {
         event: StockSceneTakenEvent,
         record: Option<StockSceneItemRecord>,
     },
+
+    SceneItemRemoved(crate::stock_protocol::StockSceneItemRemovedEvent),
     WeaponThrown(StockWeaponThrowEvent),
     WeaponSettled {
         throw_id: u32,
         record_id: u32,
     },
     SceneOps(StockSceneOpsEvent),
+    SceneState(StockSceneStateEvent),
+    SceneTransfer(StockSceneTransferEvent),
 
     RoundEnd,
     RoundRestart,
     MatchEnd,
+
+    RoundTimer {
+        remaining_seconds: u32,
+        ended: bool,
+    },
     LocalDeath,
 
     LocalRespawn,
+
+    SpawnPad(Option<crate::spawn::SpawnPad>),
     Vitals(StockVitalsEvent),
     Respawn(StockRespawnEvent),
     PeerDisconnected {
@@ -330,6 +433,10 @@ struct PendingLocalWeaponDrop {
 
 pub struct StockGameClient {
     last_latency_request_ms: Option<u64>,
+    rules_transfer: Option<FileReceiver<Vec<u8>>>,
+    rules_received: Option<u64>,
+    runtime_enabled: bool,
+    runtime_generation: Option<u32>,
     remote_vitals_enabled: bool,
     player_names_enabled: bool,
     remote_vitals_revisions: HashMap<u32, u32>,
@@ -355,6 +462,7 @@ pub struct StockGameClient {
     next_weapon_throw_id: u32,
     dead_actors: HashSet<u32>,
     round_restart_at_ms: Option<u64>,
+    pending_spawn_pads: Vec<Option<crate::spawn::SpawnPad>>,
     vips: [Option<u32>; 2],
     role_rate: u32,
     role_rate_sample_ms: Option<u64>,
@@ -372,6 +480,10 @@ impl StockGameClient {
             sent_anger_keys: VecDeque::new(),
             last_vitals_sequence: None,
             last_latency_request_ms: None,
+            rules_transfer: None,
+            rules_received: None,
+            runtime_enabled: false,
+            runtime_generation: None,
             remote_vitals_enabled: true,
             player_names_enabled: true,
             remote_vitals_revisions: HashMap::new(),
@@ -394,6 +506,7 @@ impl StockGameClient {
             next_weapon_throw_id: 1,
             dead_actors: HashSet::new(),
             round_restart_at_ms: None,
+            pending_spawn_pads: Vec::new(),
             vips: [None, None],
             role_rate: ROLE_UPLINK_HZ,
             role_rate_sample_ms: None,
@@ -463,6 +576,28 @@ impl StockGameClient {
         self.role_rate
     }
 
+    pub fn set_runtime_sync_enabled(&mut self, enabled: bool) {
+        self.runtime_enabled = enabled;
+    }
+    pub fn runtime_generation(&self) -> Option<u32> {
+        self.runtime_generation
+    }
+    pub fn send_runtime(
+        &mut self,
+        packet: crate::runtime_sync::RuntimePacket,
+        now: u64,
+    ) -> Result<(), StockGameError> {
+        if self.runtime_generation.is_some() {
+            self.transport.send_application(
+                crate::runtime_sync::REQUEST,
+                packet.encode(),
+                STOCK_DISCRETE_RELIABLE_FLAGS,
+                now,
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn set_remote_vitals_enabled(&mut self, enabled: bool) {
         self.remote_vitals_enabled = enabled;
     }
@@ -500,13 +635,35 @@ impl StockGameClient {
             self.pending_weapon_drops.clear();
             self.observed_weapon_throws.clear();
             events.push(StockGameEvent::RoundRestart);
+            events.extend(
+                self.pending_spawn_pads
+                    .drain(..)
+                    .map(StockGameEvent::SpawnPad),
+            );
         }
         for event in session_events {
             match event {
                 StockSessionEvent::Connected { peer, transport_id } => {
                     self.transport_id = Some(transport_id);
+                    self.rules_transfer = None;
+                    self.rules_received = None;
+                    self.transport.send_application(
+                        REQUEST_BATTLE_RULES,
+                        BATTLE_RULES_V7.to_vec(),
+                        STOCK_DISCRETE_RELIABLE_FLAGS,
+                        now_ms,
+                    )?;
 
                     self.last_latency_request_ms = Some(now_ms);
+                    self.runtime_generation = None;
+                    if self.runtime_enabled {
+                        self.transport.send_application(
+                            crate::runtime_sync::REQUEST,
+                            crate::runtime_sync::RuntimePacket::Hello.encode(),
+                            STOCK_DISCRETE_RELIABLE_FLAGS,
+                            now_ms,
+                        )?;
+                    }
                     if self.remote_vitals_enabled {
                         self.transport.send_application(
                             crate::stock_remote_vitals::REQUEST_REMOTE_VITALS,
@@ -538,9 +695,105 @@ impl StockGameClient {
                     events.push(StockGameEvent::TransportConnected { peer, transport_id });
                 }
                 StockSessionEvent::Application { peer, packet } => match packet.opcode {
+                    EVENT_BATTLE_RULES => {
+                        if self.transport.state()
+                            != crate::stock_session::StockClientState::Connected
+                        {
+                            continue;
+                        }
+                        let frame = match FileFrame::decode(&packet.payload) {
+                            Ok(frame) if frame.id() == BATTLE_RULES_TRANSFER_ID => frame,
+                            _ => {
+                                self.transport.disconnect(0x80)?;
+                                continue;
+                            }
+                        };
+                        if let Some(len) = self.rules_received {
+                            self.transport.send_application(
+                                ACK_BATTLE_RULES,
+                                FileFrame::Ack {
+                                    id: BATTLE_RULES_TRANSFER_ID,
+                                    next: len,
+                                }
+                                .encode(),
+                                STOCK_DISCRETE_RELIABLE_FLAGS,
+                                now_ms,
+                            )?;
+                            continue;
+                        }
+                        if let FileFrame::Offer {
+                            kind: BATTLE_RULES_ZLIB_KIND,
+                            ..
+                        } = &frame
+                        {
+                            if self.rules_transfer.is_none() {
+                                self.rules_transfer = FileReceiver::new(
+                                    &frame,
+                                    Vec::new(),
+                                    MAX_RULES_COMPRESSED_BYTES,
+                                )
+                                .ok();
+                            }
+                            let Some(receiver) = &self.rules_transfer else {
+                                self.transport.disconnect(0x80)?;
+                                continue;
+                            };
+                            self.transport.send_application(
+                                ACK_BATTLE_RULES,
+                                receiver.ack().encode(),
+                                STOCK_DISCRETE_RELIABLE_FLAGS,
+                                now_ms,
+                            )?;
+                            continue;
+                        }
+                        let Some(receiver) = &mut self.rules_transfer else {
+                            self.transport.disconnect(0x80)?;
+                            continue;
+                        };
+                        let ack = match receiver.receive(&frame) {
+                            Ok(ack) => ack,
+                            Err(_) => {
+                                self.transport.disconnect(0x80)?;
+                                continue;
+                            }
+                        };
+                        if receiver.complete() {
+                            let full = self
+                                .rules_transfer
+                                .take()
+                                .expect("completed transfer exists")
+                                .into_inner();
+                            let rules = decode_battle_rules(&full);
+                            let Some(rules) = rules else {
+                                self.transport.disconnect(0x80)?;
+                                continue;
+                            };
+                            self.rules_received = Some(full.len() as u64);
+                            events.push(StockGameEvent::BattleRules(rules));
+                        }
+                        self.transport.send_application(
+                            ACK_BATTLE_RULES,
+                            ack.encode(),
+                            STOCK_DISCRETE_RELIABLE_FLAGS,
+                            now_ms,
+                        )?;
+                    }
                     crate::stock_latency::EVENT => {
                         if let Some(samples) = crate::stock_latency::decode(&packet.payload) {
                             events.push(StockGameEvent::Latencies(samples));
+                        }
+                    }
+                    crate::runtime_sync::EVENT if self.runtime_enabled => {
+                        if let Some(packet) =
+                            crate::runtime_sync::RuntimePacket::decode(&packet.payload)
+                        {
+                            if let crate::runtime_sync::RuntimePacket::Welcome {
+                                generation, ..
+                            } = &packet
+                            {
+                                self.runtime_generation = Some(*generation);
+                            }
+                            events.push(StockGameEvent::Runtime(packet));
                         }
                     }
                     EVENT_PLAYER_NAME if self.player_names_enabled => {
@@ -561,6 +814,11 @@ impl StockGameClient {
                                 events.push(StockGameEvent::RemoteVitals(sample));
                             }
                         }
+                    }
+                    0 => {
+                        let (actor_id, name) =
+                            crate::stock_protocol::decode_stock_member_joined(&packet.payload)?;
+                        events.push(StockGameEvent::PlayerName { actor_id, name });
                     }
                     STOCK_EVENT_ROSTER => {
                         for member in decode_stock_roster(&packet.payload)? {
@@ -749,6 +1007,13 @@ impl StockGameClient {
                             events.push(StockGameEvent::SceneItemTaken { event, record });
                         }
                     }
+                    crate::stock_protocol::STOCK_EVENT_SCENE_ITEM_REMOVED => {
+                        let event = crate::stock_protocol::StockSceneItemRemovedEvent::decode(
+                            &packet.payload,
+                        )?;
+                        self.scene_items.remove(&event.record_id);
+                        events.push(StockGameEvent::SceneItemRemoved(event));
+                    }
                     STOCK_EVENT_FLAG_RETURNED => {
                         let event = StockFlagReturnedEvent::decode(&packet.payload)?;
                         if is_stock_escort_key(event.category, event.item_id) {
@@ -765,9 +1030,18 @@ impl StockGameClient {
                             events.push(StockGameEvent::WeaponThrown(event));
                         }
                     }
+                    STOCK_EVENT_SCENE_TRANSFER => events.push(StockGameEvent::SceneTransfer(
+                        StockSceneTransferEvent::decode(&packet.payload)?,
+                    )),
                     STOCK_EVENT_SCENE_OPS => events.push(StockGameEvent::SceneOps(
                         StockSceneOpsEvent::decode(&packet.payload)?,
                     )),
+                    STOCK_EVENT_SCENE_STATE => {
+                        let state = StockSceneStateEvent::decode(&packet.payload)?;
+                        if !state.objects.is_empty() {
+                            events.push(StockGameEvent::SceneState(state));
+                        }
+                    }
                     STOCK_EVENT_ROUND_RESTART => {
                         require_empty_stock_payload(&packet.payload)?;
                         if self.round_restart_at_ms.is_none() {
@@ -779,6 +1053,7 @@ impl StockGameClient {
                     STOCK_EVENT_MATCH_END => {
                         require_empty_stock_payload(&packet.payload)?;
                         self.round_restart_at_ms = None;
+                        self.pending_spawn_pads.clear();
                         events.push(StockGameEvent::MatchEnd);
                     }
                     STOCK_EVENT_DEATH => events.push(StockGameEvent::LocalDeath),
@@ -799,6 +1074,31 @@ impl StockGameClient {
                                     spend.remaining(anger)
                                 }) as u16;
                             events.push(StockGameEvent::Vitals(vitals));
+                        }
+                    }
+                    STOCK_EVENT_ROUND_TIMER => {
+                        if packet.payload.len() < 8 {
+                            return Err(StockProtocolError::InvalidLength {
+                                expected: 8,
+                                actual: packet.payload.len(),
+                            }
+                            .into());
+                        }
+                        let remaining_seconds =
+                            u32::from_le_bytes(packet.payload[0..4].try_into().unwrap());
+                        let ended =
+                            u32::from_le_bytes(packet.payload[4..8].try_into().unwrap()) != 0;
+                        events.push(StockGameEvent::RoundTimer {
+                            remaining_seconds,
+                            ended,
+                        });
+                    }
+                    crate::stock_protocol::STOCK_EVENT_SPAWN_PAD => {
+                        let pad = crate::stock_protocol::decode_spawn_pad(&packet.payload)?;
+                        if self.round_restart_at_ms.is_some() {
+                            self.pending_spawn_pads.push(pad);
+                        } else {
+                            events.push(StockGameEvent::SpawnPad(pad));
                         }
                     }
                     crate::stock_protocol::STOCK_EVENT_LOCAL_RESPAWN => {
@@ -1090,9 +1390,13 @@ impl StockGameClient {
                 item_id,
             });
         }
+
         self.transport.send_application(
-            STOCK_REQUEST_WEAPON_OBJECT,
-            [],
+            STOCK_REQUEST_EQUIP_WEAPON,
+            StockEquipWeaponRequest {
+                weapon_item_id: item_id,
+            }
+            .encode(),
             STOCK_DISCRETE_RELIABLE_FLAGS,
             now_ms,
         )?;
@@ -1281,9 +1585,19 @@ fn role_can_take_scene_item(role: &StockHostedRole, item: &StockHostedSceneItem)
 
 fn role_touches_scene_item(position: RoleVec3, item: &StockHostedSceneItem) -> bool {
     let center = item.seed.position;
+    if !item.authored {
+        let delta = [
+            position.x - center.x,
+            position.y - center.y,
+            position.z - center.z,
+        ];
+        return delta.iter().map(|axis| axis * axis).sum::<f32>()
+            < STOCK_SCENE_PICKUP_RADIUS * STOCK_SCENE_PICKUP_RADIUS;
+    }
     let [half_x, half_y, half_z] = item.seed.half_extents;
     (position.x - center.x).abs() <= half_x + STOCK_SCENE_PICKUP_RADIUS
-        && (position.y - center.y).abs() <= half_y + STOCK_SCENE_PICKUP_HEIGHT
+        && position.y + STOCK_SCENE_PICKUP_HEIGHT >= center.y - half_y
+        && position.y <= center.y + half_y + STOCK_SCENE_PICKUP_RADIUS
         && (position.z - center.z).abs() <= half_z + STOCK_SCENE_PICKUP_RADIUS
 }
 
@@ -1359,8 +1673,15 @@ fn stock_item_effect(item_id: u32) -> Option<StockItemEffect> {
             effect.attack = 125;
             effect.duration_ms = 9_999_900;
         }
-        32 => effect.health = 50,
-        33 => effect.anger = 1,
+        32 | 33 => {
+            effect.duration_ms = 9_999_900;
+            effect.tick_ms = 200;
+            if item_id == 32 {
+                effect.periodic_health = 50;
+            } else {
+                effect.periodic_anger = 1;
+            }
+        }
         39 => {
             effect.duration_ms = 9_999_900;
             effect.periodic_anger = 1;
@@ -1414,8 +1735,11 @@ fn apply_stock_item_effect(role: &mut StockHostedRole, item_id: u32, now_ms: u64
     if effect.duration_ms == 0 {
         return;
     }
-    let already_active = role.active_item_effects.contains_key(&item_id);
-    if effect.max_health != 0 && !already_active {
+    if let Some(active) = role.active_item_effects.get_mut(&item_id) {
+        active.expires_at_ms = now_ms.saturating_add(effect.duration_ms);
+        return;
+    }
+    if effect.max_health != 0 {
         role.max_health = (role.max_health + effect.max_health as f32).max(1.0);
         role.health = role.health.min(role.max_health);
     }
@@ -1431,6 +1755,7 @@ fn apply_stock_item_effect(role: &mut StockHostedRole, item_id: u32, now_ms: u64
 
 #[derive(Debug, Clone)]
 struct StockHostedRole {
+    defensive_effects: meteor_combat::rebalance_effects::DefensiveEffects,
     pending_self_health: i32,
     hit_status_effects: meteor_combat::status_effects::HitStatusEffects,
     actor_id: u32,
@@ -1453,6 +1778,13 @@ struct StockHostedRole {
 }
 
 impl StockHostedRole {
+    fn equipped_item_id(&self) -> u8 {
+        self.weapon_item_id
+            .filter(|&item_id| stock_weapon_from_item_id(item_id).is_some())
+            .and_then(|item_id| u8::try_from(item_id).ok())
+            .unwrap_or(6)
+    }
+
     fn entered_event(&self) -> StockRoleEnteredEvent {
         StockRoleEnteredEvent {
             actor_id: self.actor_id,
@@ -1488,6 +1820,14 @@ impl StockHostedRole {
 }
 
 impl CombatStats for StockHostedRole {
+    fn try_spend_anger(&mut self, cost: f32) -> bool {
+        if cost.is_finite() && cost >= 0.0 && self.anger >= cost {
+            self.anger -= cost;
+            true
+        } else {
+            false
+        }
+    }
     fn hp(&self) -> f32 {
         self.health
     }
@@ -1556,16 +1896,19 @@ struct StockHostedSceneItem {
     script_active: bool,
     interactive: bool,
     respawn_at_ms: Option<u64>,
+
+    expires_at_ms: Option<u64>,
     authored: bool,
 }
 
 impl StockHostedSceneItem {
-    fn record(self) -> StockSceneItemRecord {
+    fn record(self, frame: Option<StockSceneFrame>) -> StockSceneItemRecord {
+        let position = self.seed.position;
         StockSceneItemRecord::from_role_position(
             self.record_id,
             self.seed.item_id,
             self.seed.category,
-            self.seed.position,
+            frame.map_or(position, |frame| frame.position_to_stock(position)),
         )
     }
 }
@@ -1591,6 +1934,12 @@ impl StockEscortState {
 }
 
 pub struct StockGameServer {
+    battle_rules: meteor_combat::battle_rules::BattleRules,
+    rules_waiting: HashMap<SocketAddr, u64>,
+    rules_transfers: HashMap<SocketAddr, FileSender<std::io::Cursor<Vec<u8>>>>,
+    rules_verified: HashSet<SocketAddr>,
+    pending_rule_entry: HashMap<SocketAddr, Vec<u8>>,
+    pending_rule_ready: HashSet<SocketAddr>,
     scene_frame: Option<StockSceneFrame>,
     hazards: meteor_scene::hazards::StageHazards,
     hazard_tick_ms: Option<u64>,
@@ -1600,6 +1949,7 @@ pub struct StockGameServer {
     combat_resources: CombatResourceTable,
     rule: i32,
     stage_id: Option<String>,
+    spawn_pad_counts: [usize; 3],
     round_limit: u32,
     round_time_minutes: u32,
     base_max_health: f32,
@@ -1610,7 +1960,12 @@ pub struct StockGameServer {
     escort: Option<StockEscortState>,
     escort_definition: Option<std::sync::Arc<crate::escort_definition::EscortDefinition>>,
     scene_items: BTreeMap<u32, StockHostedSceneItem>,
+
+    scene_state: Vec<StockSceneOperation>,
+    runtime: runtime_sync::HostState,
+    last_xstar: Option<(SocketAddr, u32, u64)>,
     item_rules: StockRoomItemRules,
+    scene_item_option_bits: BTreeMap<(u32, u32), Option<u32>>,
     next_scene_record_id: u32,
     round_ended: bool,
     round_restart_at_ms: Option<u64>,
@@ -1676,14 +2031,21 @@ impl StockGameServer {
         combat_resources: CombatResourceTable,
     ) -> Self {
         Self {
+            battle_rules: Default::default(),
+            rules_waiting: HashMap::new(),
+            rules_transfers: HashMap::new(),
+            rules_verified: HashSet::new(),
+            pending_rule_entry: HashMap::new(),
+            pending_rule_ready: HashSet::new(),
             scene_frame: None,
             hazards: Default::default(),
             hazard_tick_ms: None,
             transport,
             heroes,
             combat_resources,
-            rule: rule.clamp(1, 5),
+            rule,
             stage_id: None,
+            spawn_pad_counts: [0; 3],
             round_limit: STOCK_DEFAULT_GAME_NUM,
             round_time_minutes: STOCK_DEFAULT_GAME_TIME_MINUTES,
             base_max_health: STOCK_DEFAULT_MAX_HEALTH,
@@ -1694,7 +2056,11 @@ impl StockGameServer {
             escort: (rule == 2).then(|| StockEscortState::home(1, SN03.flag_home)),
             escort_definition: None,
             scene_items: BTreeMap::new(),
+            scene_state: Vec::new(),
+            runtime: Default::default(),
+            last_xstar: None,
             item_rules: StockRoomItemRules::default(),
+            scene_item_option_bits: BTreeMap::new(),
             next_scene_record_id: 2,
             round_ended: false,
             round_restart_at_ms: None,
@@ -1755,8 +2121,8 @@ impl StockGameServer {
         self.escort_definition = Some(definition);
     }
 
-    fn escort_stage_data(&self) -> crate::escort::EscortStage {
-        self.escort_definition.as_ref().map_or(SN03, |d| d.stage)
+    fn escort_stage_data(&self) -> &crate::escort::EscortStage {
+        self.escort_definition.as_ref().map_or(&SN03, |d| &d.stage)
     }
 
     fn escort_item_id(&self) -> u32 {
@@ -1766,8 +2132,17 @@ impl StockGameServer {
     }
 
     pub fn set_stage_id(&mut self, stage_id: impl Into<String>) {
-        self.stage_id = Some(stage_id.into().to_ascii_lowercase());
+        let stage_id = stage_id.into().to_ascii_lowercase();
+        if self.stage_id.as_deref() != Some(&stage_id) {
+            self.scene_state.clear();
+            self.runtime.reset_pending = true;
+        }
+        self.stage_id = Some(stage_id);
         self.transport.set_discovery_stage(self.stage_id.clone());
+    }
+
+    pub fn set_spawn_pad_counts(&mut self, counts: [usize; 3]) {
+        self.spawn_pad_counts = counts;
     }
 
     pub fn set_scene_frame(&mut self, frame: StockSceneFrame) {
@@ -1778,8 +2153,65 @@ impl StockGameServer {
         self.scene_frame
     }
 
+    pub fn transfer_scene_actor(
+        &mut self,
+        actor_id: u32,
+        event: StockSceneTransferEvent,
+        now_ms: u64,
+    ) -> Result<(), StockGameError> {
+        let event = StockSceneTransferEvent::decode(&event.encode())?;
+        let Some(peer) = self.roles.iter().find_map(|(peer, role)| {
+            (role.actor_id == actor_id && role.health > 0.0 && role.respawn_at_ms.is_none())
+                .then_some(*peer)
+        }) else {
+            return Ok(());
+        };
+        if self.round_ended {
+            return Ok(());
+        }
+        self.transport.send_application(
+            peer,
+            STOCK_EVENT_SCENE_TRANSFER,
+            event.encode().to_vec(),
+            STOCK_DISCRETE_RELIABLE_FLAGS,
+            now_ms,
+        )?;
+        let target = event.role_state();
+        if let Some(role) = self.roles.get_mut(&peer) {
+            if let Some(state) = &mut role.state {
+                state.position = target.position;
+                state.forward = target.forward;
+                state.velocity = RoleVec3::ZERO;
+                role.dirty = true;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn set_battle_rules(&mut self, rules: meteor_combat::battle_rules::BattleRules) {
+        assert!(
+            self.roles.is_empty() && self.rules_waiting.is_empty(),
+            "room rules are immutable after admission"
+        );
+        self.battle_rules = rules;
+    }
+
     pub fn set_item_rules(&mut self, rules: StockRoomItemRules) {
         self.item_rules = rules;
+    }
+
+    pub fn set_scene_item_registry(&mut self, resource: &MeteorRes) {
+        self.scene_item_option_bits = resource
+            .records
+            .iter()
+            .filter(|record| matches!(record.category, 1 | 2))
+            .map(|record| {
+                let bit = record
+                    .prop_seed_value(11)
+                    .and_then(crate::stock_protocol::stock_scene_item_option_bit);
+                ((record.category, record.id), bit)
+            })
+            .collect();
     }
 
     pub fn team_wins(&self) -> [u32; 2] {
@@ -1803,13 +2235,20 @@ impl StockGameServer {
         items: Vec<StockAuthoredSceneItem>,
         now_ms: u64,
     ) -> Result<(), StockGameError> {
-        self.scene_items.clear();
+        self.scene_items.retain(|_, item| !item.authored);
         let item_rules = self.item_rules;
-        for seed in items
-            .into_iter()
-            .filter(valid_authored_scene_item)
-            .filter(|seed| item_rules.allows(seed.category, seed.item_id))
-        {
+        let flags = item_rules.scene_option_bits();
+        for seed in items.into_iter().filter(valid_authored_scene_item) {
+            let allowed = match self
+                .scene_item_option_bits
+                .get(&(seed.category, seed.item_id))
+            {
+                Some(bit) => bit.is_none_or(|bit| flags & bit != 0),
+                None => item_rules.allows(seed.category, seed.item_id),
+            };
+            if !allowed {
+                continue;
+            }
             let record_id = self.allocate_scene_record_id();
             self.scene_items.insert(
                 record_id,
@@ -1820,6 +2259,7 @@ impl StockGameServer {
                     script_active: seed.active,
                     interactive: seed.interactive,
                     respawn_at_ms: None,
+                    expires_at_ms: None,
                     authored: true,
                 },
             );
@@ -1828,6 +2268,8 @@ impl StockGameServer {
     }
 
     pub fn tick(&mut self, now_ms: u64) -> Result<Vec<StockGameEvent>, StockGameError> {
+        self.transport
+            .set_discovery_rebalance_enabled(self.battle_rules.enabled());
         self.transport.set_discovery_rule(self.rule as u8);
         let mut discovery_camps = [0usize; 2];
         for role in self.roles.values() {
@@ -1850,6 +2292,9 @@ impl StockGameServer {
                     transport_id,
                     identity: _,
                 } => {
+                    if self.battle_rules != meteor_combat::battle_rules::BattleRules::ORIGINAL {
+                        self.rules_waiting.insert(peer, now_ms);
+                    }
                     let elapsed = self
                         .round_started_ms
                         .map_or(0, |start| now_ms.saturating_sub(start) / 1000);
@@ -1874,13 +2319,21 @@ impl StockGameServer {
                     if self.transport.peer_transport_id(peer).is_none() {
                         continue;
                     }
-                    self.handle_application(
+                    if let Err(error) = self.handle_application(
                         peer,
                         packet.opcode,
                         &packet.payload,
                         now_ms,
                         &mut events,
-                    )?;
+                    ) {
+                        match error {
+                            StockGameError::Transport(StockTransportError::Io(_))
+                            | StockGameError::Io(_) => return Err(error),
+                            _ => log::debug!(target: "meteor_network::stock_session",
+                                "[stock-lan] request discarded: peer={peer}, opcode={}, {error}",
+                                packet.opcode),
+                        }
+                    }
                 }
                 StockSessionEvent::Disconnected { peer, reason } => {
                     self.remove_disconnected_peer(peer, reason, now_ms, &mut events)?;
@@ -1888,12 +2341,24 @@ impl StockGameServer {
                 StockSessionEvent::Connected { .. } | StockSessionEvent::DiscoveryReply { .. } => {}
             }
         }
+        let expired: Vec<_> = self
+            .rules_waiting
+            .iter()
+            .filter(|(_, at)| now_ms.saturating_sub(**at) >= 5000)
+            .map(|(peer, _)| *peer)
+            .collect();
+        for peer in expired {
+            self.transport.disconnect_peer(peer, 0x80)?;
+            self.remove_disconnected_peer(peer, 0x80, now_ms, &mut events)?;
+        }
         if self
             .round_restart_at_ms
             .is_some_and(|deadline| now_ms >= deadline)
         {
             self.round_restart_at_ms = None;
             self.reset_roles_for_round(now_ms);
+            self.runtime_reset(now_ms)?;
+            self.assign_round_spawn_pads(now_ms)?;
             self.round_ended = false;
             self.broadcast_scene_snapshot(now_ms)?;
             events.push(StockGameEvent::RoundRestart);
@@ -1901,6 +2366,7 @@ impl StockGameServer {
         if !self.round_ended {
             self.assign_vips_if_ready(now_ms, &mut events)?;
             self.update_scene_items(now_ms, &mut events)?;
+            self.update_runtime(now_ms)?;
             self.update_item_effects(now_ms, &mut events)?;
             self.update_environment_hazards(now_ms, &mut events)?;
             self.update_escort(now_ms, &mut events)?;
@@ -2008,7 +2474,7 @@ impl StockGameServer {
                 .strip_prefix("sn")
                 .and_then(|id| id.parse().ok())
                 .unwrap_or(0),
-            field_c: 0,
+            field_c: self.item_rules.scene_option_bits(),
         };
         self.transport.send_application(
             peer,
@@ -2029,14 +2495,24 @@ impl StockGameServer {
         now_ms: u64,
         events: &mut Vec<StockGameEvent>,
     ) -> Result<(), StockGameError> {
+        self.rules_waiting.remove(&peer);
+        self.rules_transfers.remove(&peer);
+        self.rules_verified.remove(&peer);
+        self.pending_rule_entry.remove(&peer);
+        self.pending_rule_ready.remove(&peer);
         let disconnected_role = self.roles.remove(&peer);
         self.ready_peers.remove(&peer);
         self.remote_vitals_peers.remove(&peer);
+        self.runtime.peers.remove(&peer);
+        self.runtime.hit_serials.remove(&peer);
         self.player_name_peers.remove(&peer);
         self.unicode_player_names.remove(&peer);
         self.requested_role_rates.remove(&peer);
         events.push(StockGameEvent::PeerDisconnected { peer, reason });
         if let Some(role) = disconnected_role {
+            self.runtime
+                .projectiles
+                .forget_owner(&format!("stock-{}", role.actor_id));
             if self.rule == 4 && self.vips.iter().flatten().any(|vip| *vip == role.actor_id) {
                 self.complete_round(role.camp == 1, role.camp == 2, now_ms, events)?;
             } else if self.rule == 2
@@ -2073,16 +2549,88 @@ impl StockGameServer {
                     | STOCK_REQUEST_DROP_ITEM
                     | STOCK_REQUEST_SPAWN_SCENE_ITEM
                     | STOCK_REQUEST_CURE
-                    | STOCK_REQUEST_ANGER_FULL
-                    | STOCK_REQUEST_ANGER_COST
-                    | STOCK_REQUEST_QI_BURST
                     | crate::stock_protocol::STOCK_REQUEST_POSE_CHAIN
                     | crate::stock_protocol::STOCK_EVENT_SCENE_OPS
             )
         {
             return Ok(());
         }
+        if self.battle_rules != meteor_combat::battle_rules::BattleRules::ORIGINAL
+            && !self.rules_verified.contains(&peer)
+        {
+            if opcode == STOCK_REQUEST_ENTER_ROLE {
+                StockEnterRoleRequest::decode(payload)?;
+                self.pending_rule_entry.insert(peer, payload.to_vec());
+                return Ok(());
+            }
+            if opcode == STOCK_REQUEST_READY {
+                if payload.is_empty() {
+                    self.pending_rule_ready.insert(peer);
+                }
+                return Ok(());
+            }
+        }
         match opcode {
+            REQUEST_BATTLE_RULES => {
+                if payload == BATTLE_RULES_V7
+                    && self.battle_rules != meteor_combat::battle_rules::BattleRules::ORIGINAL
+                {
+                    let transfer = self.rules_transfers.entry(peer).or_insert_with(|| {
+                        FileSender::new(
+                            BATTLE_RULES_TRANSFER_ID,
+                            BATTLE_RULES_ZLIB_KIND,
+                            std::io::Cursor::new(compress_battle_rules(self.battle_rules.clone())),
+                            MAX_RULES_COMPRESSED_BYTES,
+                        )
+                        .expect("validated room rules fit the transfer limit")
+                    });
+                    self.transport.send_application(
+                        peer,
+                        EVENT_BATTLE_RULES,
+                        transfer.offer().encode(),
+                        STOCK_DISCRETE_RELIABLE_FLAGS,
+                        now_ms,
+                    )?;
+                }
+            }
+            ACK_BATTLE_RULES => {
+                let Ok(reply) = FileFrame::decode(payload) else {
+                    return Ok(());
+                };
+                let Some(transfer) = self.rules_transfers.get_mut(&peer) else {
+                    return Ok(());
+                };
+                let Ok(frames) = transfer.accept(&reply) else {
+                    return Ok(());
+                };
+                let complete = transfer.complete();
+                for frame in frames {
+                    self.transport.send_application(
+                        peer,
+                        EVENT_BATTLE_RULES,
+                        frame.encode(),
+                        STOCK_DISCRETE_RELIABLE_FLAGS,
+                        now_ms,
+                    )?;
+                }
+                if self.rules_waiting.contains_key(&peer) && complete {
+                    self.rules_waiting.remove(&peer);
+                    self.rules_transfers.remove(&peer);
+                    self.rules_verified.insert(peer);
+                    if let Some(entry) = self.pending_rule_entry.remove(&peer) {
+                        self.handle_application(
+                            peer,
+                            STOCK_REQUEST_ENTER_ROLE,
+                            &entry,
+                            now_ms,
+                            events,
+                        )?;
+                    }
+                    if self.pending_rule_ready.remove(&peer) {
+                        self.handle_application(peer, STOCK_REQUEST_READY, &[], now_ms, events)?;
+                    }
+                }
+            }
             STOCK_REQUEST_STAGE_CHECKSUM => {
                 let request = StockStageChecksumRequest::decode(payload)?;
                 let stage = self.stage_id.as_ref().ok_or_else(|| {
@@ -2123,6 +2671,9 @@ impl StockGameServer {
                     )?;
                 }
             }
+            crate::runtime_sync::REQUEST => {
+                self.handle_runtime_request(peer, payload, now_ms)?;
+            }
             crate::stock_remote_vitals::REQUEST_REMOTE_VITALS => {
                 if payload == crate::stock_remote_vitals::REMOTE_VITALS_V1 {
                     self.remote_vitals_peers.insert(peer);
@@ -2148,20 +2699,22 @@ impl StockGameServer {
                 }
             }
             STOCK_REQUEST_ANGER_FULL | STOCK_REQUEST_ANGER_COST | STOCK_REQUEST_QI_BURST => {
-                if self.round_ended {
-                    return Ok(());
-                }
                 let spend = StockAngerSpend::decode(opcode, payload)?;
                 let role = self
                     .roles
                     .get_mut(&peer)
                     .ok_or(StockGameError::RoleNotEntered)?;
+                let insufficient_full = spend == StockAngerSpend::Full && role.anger < 100.0;
+                let actor_id = role.actor_id;
 
-                if role.health > 0.0
-                    && (1..=100).contains(&spend.cost())
-                    && role.anger >= spend.cost() as f32
-                {
-                    role.anger = spend.remaining(role.anger);
+                role.anger = spend.remaining(role.anger);
+                if insufficient_full {
+                    self.broadcast_with_flags(
+                        crate::stock_protocol::STOCK_EVENT_ANGER_INSUFFICIENT,
+                        &actor_id.to_le_bytes(),
+                        0,
+                        now_ms,
+                    )?;
                 }
             }
             27 if payload.is_empty() => {
@@ -2180,20 +2733,30 @@ impl StockGameServer {
                 log::debug!(target: "meteor_network::stock_session",
                     "[stock-lan] enter-role decoded: peer={peer}, hero={}, camp={}, rule={}, checksum={:#010x}, expected_checksum={expected_checksum:?}",
                     request.hero, request.camp, self.rule, request.hero_checksum);
-                let camp_valid = if self.rule == 1 {
-                    request.camp == 0
-                } else {
-                    (1..=2).contains(&request.camp)
-                };
-                if !self.heroes.accepts(request) || !camp_valid {
+                if !self.heroes.accepts(request) {
                     log::warn!(target: "meteor_network::stock_session",
-                        "[stock-lan] enter-role rejected: peer={peer}, reason={}, hero={}, camp={}, rule={}, checksum={:#010x}, expected_checksum={expected_checksum:?}",
-                        if expected_checksum.is_none() { "unknown hero" }
-                        else if !self.heroes.accepts(request) { "POS checksum mismatch" }
-                        else { "invalid camp" },
-                        request.hero, request.camp, self.rule, request.hero_checksum);
+                        "[stock-lan] enter-role rejected: peer={peer}, hero={}, checksum={:#010x}, expected_checksum={expected_checksum:?}",
+                        request.hero, request.hero_checksum);
                     self.transport.disconnect_peer(peer, 0x80)?;
                     return Ok(());
+                }
+
+                if request.camp != 0
+                    && self
+                        .roles
+                        .values()
+                        .filter(|role| role.camp == request.camp)
+                        .count()
+                        >= 8
+                {
+                    let suggested = if request.camp == 1 { 2u32 } else { 1u32 };
+                    self.transport.send_application(
+                        peer,
+                        crate::stock_protocol::STOCK_EVENT_CAMP_SUGGESTION,
+                        suggested.to_le_bytes(),
+                        STOCK_DISCRETE_RELIABLE_FLAGS,
+                        now_ms,
+                    )?;
                 }
                 let actor_id = self
                     .transport
@@ -2201,6 +2764,7 @@ impl StockGameServer {
                     .ok_or(StockTransportError::UnknownPeer(peer))?;
                 let existing: Vec<StockHostedRole> = self.roles.values().cloned().collect();
                 let role = StockHostedRole {
+                    defensive_effects: Default::default(),
                     pending_self_health: 0,
                     actor_id,
                     hero: request.hero,
@@ -2251,14 +2815,16 @@ impl StockGameServer {
                     }
                 }
                 self.broadcast_role_entered(role.entered_event(), now_ms)?;
+                self.runtime_role_ready(peer, now_ms)?;
                 self.broadcast_player_names(now_ms)?;
                 self.send_scene_bootstrap(peer, now_ms)?;
+                self.send_scene_state(peer, now_ms)?;
 
                 let mut scene_init = 0u16.to_le_bytes().to_vec();
                 scene_init.extend_from_slice(&(now_ms as u32).to_le_bytes());
                 self.transport.send_application(
                     peer,
-                    48,
+                    STOCK_EVENT_SCENE_STATE,
                     scene_init,
                     STOCK_DISCRETE_RELIABLE_FLAGS,
                     now_ms,
@@ -2266,6 +2832,7 @@ impl StockGameServer {
                 log::debug!(target: "meteor_network::stock_session",
                     "[stock-lan] entry replies sent: peer={peer}, actor={actor_id}, scene_init=48");
                 events.push(StockGameEvent::RoleEntered(role.entered_event()));
+                self.assign_vips_if_ready(now_ms, events)?;
             }
             STOCK_REQUEST_HIT => {
                 if self.round_ended {
@@ -2285,11 +2852,16 @@ impl StockGameServer {
                 else {
                     return Ok(());
                 };
-                if target_role.health <= 0.0
-                    || target_role
-                        .last_hit_ms
-                        .is_some_and(|last| now_ms.saturating_sub(last) <= 200)
-                {
+                let attacker_item = attacker_role.equipped_item_id();
+                let attacker_weapon = stock_weapon_from_item_id(u32::from(attacker_item))
+                    .map_or(6, |(weapon, _)| weapon);
+                let pose_id = (request.hit_word & 0x03ff) as u16;
+                log::debug!(target: "meteor_network::stock_hit",
+                    "request attacker={} target={} pose={} now_ms={} previous_hit_ms={:?} hp_before={} values_word={:#x}",
+                    attacker_role.actor_id, target_role.actor_id, request.hit_word & 0x03ff,
+                    now_ms, target_role.last_hit_ms, target_role.health, request.values_word);
+
+                if target_role.health <= 0.0 {
                     return Ok(());
                 }
                 if now_ms.saturating_sub(target_role.spawned_at_ms) < 2_000 {
@@ -2298,17 +2870,7 @@ impl StockGameServer {
                     }
                     return Ok(());
                 }
-                let attacker_weapon = attacker_role
-                    .weapon_item_id
-                    .and_then(stock_weapon_from_item_id)
-                    .map(|(weapon, _)| weapon)
-                    .unwrap_or(6);
-                let defender_weapon = target_role
-                    .weapon_item_id
-                    .and_then(stock_weapon_from_item_id)
-                    .map(|(weapon, _)| weapon)
-                    .unwrap_or(6);
-                let pose_id = (request.hit_word & 0x03ff) as u16;
+                let defender_item = target_role.equipped_item_id();
                 let attack = AttackBlock {
                     start: 0,
                     end: 0,
@@ -2327,12 +2889,12 @@ impl StockGameServer {
                 };
                 let attacker_power = self
                     .combat_resources
-                    .weapon_stats(attacker_weapon)
+                    .weapon_stats(attacker_item)
                     .map(|stats| stats.attack);
                 let attacker_item_bonus = attacker_role.item_attack_bonus();
                 let defender_weapon_def = self
                     .combat_resources
-                    .weapon_stats(defender_weapon)
+                    .weapon_stats(defender_item)
                     .map(|stats| stats.defense);
                 let combat_resources = &self.combat_resources;
                 let result = {
@@ -2341,7 +2903,8 @@ impl StockGameServer {
                         .get_mut(&target_peer)
                         .ok_or(StockGameError::RoleNotEntered)?;
                     target.last_hit_ms = Some(now_ms);
-                    resolve_hit(
+                    let mut effects = std::mem::take(&mut target.defensive_effects);
+                    let result = meteor_combat::rebalance_effects::resolve_hit(
                         target,
                         &HitOptions {
                             attacker_team: attacker_role.camp as i32,
@@ -2361,8 +2924,23 @@ impl StockGameServer {
                             attack: Some(&attack),
                             pose_attack_percent: &|pose| combat_resources.pose_attack_percent(pose),
                         },
-                    )
+                        self.battle_rules.clone(),
+                        &mut effects,
+                        meteor_combat::rebalance_effects::HitContext {
+                            attacker: &attacker_role.actor_id.to_string(),
+                            instance: attacker_role
+                                .state
+                                .map_or(0, |s| u32::from(s.state_words.pose_sequence)),
+                            now_seconds: now_ms as f64 / 1000.0,
+                        },
+                    );
+                    target.defensive_effects = effects;
+                    result
                 };
+                log::debug!(target: "meteor_network::stock_hit",
+                    "resolved attacker={} target={} pose={} now_ms={} damage={} hp_after={:?} outcome={:?}",
+                    attacker_role.actor_id, target_role.actor_id, pose_id, now_ms,
+                    result.damage, self.roles.get(&target_peer).map(|target| target.health), result.outcome);
                 if result.killed {
                     if let Some(target) = self.roles.get_mut(&target_peer) {
                         target.hit_status_effects.active.clear();
@@ -2411,8 +2989,60 @@ impl StockGameServer {
                     }
                     return Ok(());
                 }
-                if !result.guarded {
-                    if let Some(definition) = self.combat_resources.pose_status_effect(pose_id) {
+                let guarded = result.guarded;
+                let (pose_id, move_hundred, value_hundred, event_opcode) = if guarded {
+                    (
+                        (u32::from(request.target_pose()) << 16) | request.direction_selector(),
+                        u32::from((result.defense_move * 100.0).round() as u16),
+                        u32::from((result.defense_value * 100.0).round() as u16),
+                        STOCK_EVENT_GUARD_HIT,
+                    )
+                } else {
+                    (
+                        u32::from(request.target_pose()),
+                        u32::from((result.target_move * 100.0).round() as u16),
+                        u32::from((result.target_value * 100.0).round() as u16),
+                        STOCK_EVENT_BE_HIT,
+                    )
+                };
+                let event = StockHitReactionEvent {
+                    pose_id,
+                    move_hundred,
+                    value_hundred,
+                    context: if result.rebalance_effect > 0 {
+                        meteor_combat::rebalance_effects::STOCK_EFFECT_CONTEXT
+                            + u32::from(result.rebalance_effect)
+                    } else {
+                        (request.hit_word >> 16) & 0x0f
+                    },
+                    target_actor_id: request.target_actor_id,
+                };
+                let mut recipients = vec![peer];
+                if target_peer != peer {
+                    recipients.push(target_peer);
+                }
+                if result.rebalance_effect > 0 {
+                    recipients = self.roles.keys().copied().collect();
+                    self.last_vitals_downlink_ms = None;
+                }
+                for recipient in recipients {
+                    self.transport.send_application(
+                        recipient,
+                        event_opcode,
+                        event.encode(),
+                        STOCK_EVENT_HIT_FLAGS,
+                        now_ms,
+                    )?;
+                }
+                events.push(StockGameEvent::HitReaction { guarded, event });
+
+                if !result.guarded
+                    && result.rebalance_effect != meteor_combat::rebalance_effects::INVALID_HIT
+                {
+                    if let Some(definition) = self
+                        .combat_resources
+                        .pose_status_effect((request.hit_word & 0x03ff) as u16)
+                    {
                         if let Some(target) = self.roles.get_mut(&target_peer) {
                             let delta = target
                                 .hit_status_effects
@@ -2434,43 +3064,6 @@ impl StockGameServer {
                         events.push(StockGameEvent::PropertyEffect(event));
                     }
                 }
-                let guarded = result.guarded;
-                let (pose_id, move_hundred, value_hundred, event_opcode) = if guarded {
-                    (
-                        (u32::from(request.target_pose()) << 16) | request.direction_selector(),
-                        u32::from((result.defense_move * 100.0).round() as u16),
-                        u32::from((result.defense_value * 100.0).round() as u16),
-                        STOCK_EVENT_GUARD_HIT,
-                    )
-                } else {
-                    (
-                        u32::from(request.target_pose()),
-                        u32::from((result.target_move * 100.0).round() as u16),
-                        u32::from((result.target_value * 100.0).round() as u16),
-                        STOCK_EVENT_BE_HIT,
-                    )
-                };
-                let event = StockHitReactionEvent {
-                    pose_id,
-                    move_hundred,
-                    value_hundred,
-                    context: (request.hit_word >> 16) & 0x0f,
-                    target_actor_id: request.target_actor_id,
-                };
-                let mut recipients = vec![peer];
-                if target_peer != peer {
-                    recipients.push(target_peer);
-                }
-                for recipient in recipients {
-                    self.transport.send_application(
-                        recipient,
-                        event_opcode,
-                        event.encode(),
-                        STOCK_EVENT_HIT_FLAGS,
-                        now_ms,
-                    )?;
-                }
-                events.push(StockGameEvent::HitReaction { guarded, event });
             }
             STOCK_REQUEST_EQUIP_WEAPON => {
                 let request = StockEquipWeaponRequest::decode(payload)?;
@@ -2480,7 +3073,15 @@ impl StockGameServer {
                         .get_mut(&peer)
                         .ok_or(StockGameError::RoleNotEntered)?;
                     role.weapon_item_id = Some(request.weapon_item_id);
-                    role.weapon_slots[0] = Some(request.weapon_item_id);
+                    if let Some(slot) = role
+                        .weapon_slots
+                        .iter()
+                        .position(|item| *item == Some(request.weapon_item_id))
+                    {
+                        role.weapon_slots.swap(0, slot);
+                    } else {
+                        role.weapon_slots[0] = Some(request.weapon_item_id);
+                    }
                     role.actor_id
                 };
                 let event = StockWeaponEquippedEvent {
@@ -2528,6 +3129,30 @@ impl StockGameServer {
                     .ok_or(StockGameError::RoleNotEntered)?;
                 role.state = Some(state);
                 role.dirty = true;
+                let started = role.defensive_effects.enter_pose(
+                    self.battle_rules.clone(),
+                    state.state_words.pose_id,
+                    u32::from(state.state_words.pose_sequence),
+                    &mut role.anger,
+                    100.0,
+                    role.health > 0.0,
+                );
+                let event = StockHitReactionEvent {
+                    pose_id: u32::from(state.state_words.pose_id),
+                    move_hundred: 0,
+                    value_hundred: 0,
+                    context: meteor_combat::rebalance_effects::STOCK_EFFECT_CONTEXT
+                        + u32::from(meteor_combat::rebalance_effects::ARMOR_START),
+                    target_actor_id: role.actor_id,
+                };
+                if started {
+                    self.last_vitals_downlink_ms = None;
+                    self.broadcast_discrete(STOCK_EVENT_BE_HIT, &event.encode(), now_ms)?;
+                    events.push(StockGameEvent::HitReaction {
+                        guarded: false,
+                        event,
+                    });
+                }
             }
             STOCK_REQUEST_WEAPON_OBJECT => {
                 if payload.is_empty() {
@@ -2599,16 +3224,21 @@ impl StockGameServer {
                 if valid_stock_scene_item_key(request.category, request.item_id) {
                     let record_id = self.allocate_scene_record_id();
                     let record = request.into_record(record_id);
+                    let position = record.role_position();
+                    let position = self
+                        .scene_frame
+                        .map_or(position, |frame| frame.position_to_scene(position));
                     self.scene_items.insert(
                         record_id,
                         StockHostedSceneItem {
                             seed: StockAuthoredSceneItem {
                                 item_id: record.item_id,
                                 category: record.category,
-                                position: record.role_position(),
+                                position,
                                 half_extents: [0.0; 3],
                                 respawn_ms: None,
                                 scene_reference: None,
+                                repeat_on_xstar: false,
                                 active: true,
                                 interactive: true,
                             },
@@ -2617,6 +3247,9 @@ impl StockGameServer {
                             script_active: true,
                             interactive: true,
                             respawn_at_ms: None,
+                            expires_at_ms: Some(
+                                now_ms.saturating_add(STOCK_DYNAMIC_ITEM_LIFETIME_MS),
+                            ),
                             authored: false,
                         },
                     );
@@ -2688,12 +3321,21 @@ impl StockGameServer {
                 log::debug!(target: "meteor_network::stock_session", "[stock-lan] battle ready received: peer={peer}");
             }
             STOCK_EVENT_SCENE_OPS => {
+                if self.runtime.peers.contains(&peer) && Some(peer) != self.runtime.owner {
+                    return Ok(());
+                }
                 if !self.roles.contains_key(&peer) {
                     return Err(StockGameError::RoleNotEntered);
                 }
                 let event = StockSceneOpsEvent::decode(payload)?;
+                log::debug!(target: "meteor_network::scene_sync",
+                    "event56 relay source={} operations={:?}", peer, event.operations);
                 if !event.operations.is_empty() {
                     self.broadcast_discrete_except(peer, STOCK_EVENT_SCENE_OPS, payload, now_ms)?;
+                    for operation in &event.operations {
+                        retain_scene_write(&mut self.scene_state, *operation);
+                    }
+                    self.refresh_xstar_items(peer, &event, now_ms, events)?;
                     self.apply_scene_item_ops(&event, now_ms, events)?;
                     events.push(StockGameEvent::SceneOps(event));
                 }
@@ -2768,6 +3410,7 @@ impl StockGameServer {
 
         for (target_peer, actor_id) in targets {
             if let Some(target) = self.roles.get_mut(&target_peer) {
+                target.defensive_effects = Default::default();
                 target.health = target.max_health;
                 target.anger = 0.0;
                 target.last_hit_ms = None;
@@ -2959,6 +3602,7 @@ impl StockGameServer {
             .collect::<Vec<_>>();
         for (peer, actor_id) in due {
             if let Some(role) = self.roles.get_mut(&peer) {
+                role.defensive_effects = Default::default();
                 role.health = role.max_health;
                 role.anger = 0.0;
                 role.last_hit_ms = None;
@@ -3020,7 +3664,7 @@ impl StockGameServer {
             .scene_items
             .values()
             .filter(|item| item.active && item.interactive)
-            .map(|item| item.record())
+            .map(|item| item.record(self.scene_frame))
             .collect::<Vec<_>>();
         if let Some(escort) = self.escort {
             records.push(escort.scene_record(self.escort_item_id()));
@@ -3068,10 +3712,124 @@ impl StockGameServer {
         Ok(())
     }
 
+    fn send_scene_state(&mut self, peer: SocketAddr, now_ms: u64) -> Result<(), StockGameError> {
+        let mut scene_state = self.scene_state.clone();
+        for item in self.scene_items.values().filter(|item| item.authored) {
+            let Some(reference) = item.seed.scene_reference else {
+                continue;
+            };
+            for (kind, value) in [
+                (
+                    crate::stock_protocol::STOCK_SCENE_OP_ACTIVE,
+                    u32::from(item.active),
+                ),
+                (
+                    crate::stock_protocol::STOCK_SCENE_OP_INTERACTIVE,
+                    u32::from(item.active && item.interactive),
+                ),
+            ] {
+                retain_scene_write(
+                    &mut scene_state,
+                    StockSceneOperation {
+                        reference,
+                        kind,
+                        value,
+                        extra: 0,
+                    },
+                );
+            }
+        }
+        for operations in scene_state.chunks(STOCK_SCENE_OPS_PER_PACKET) {
+            self.transport.send_application(
+                peer,
+                STOCK_EVENT_SCENE_OPS,
+                StockSceneOpsEvent {
+                    timestamp_ms: now_ms as u32,
+                    operations: operations.to_vec(),
+                }
+                .encode(),
+                STOCK_DISCRETE_RELIABLE_FLAGS,
+                now_ms,
+            )?;
+        }
+        Ok(())
+    }
+
     fn broadcast_scene_snapshot(&mut self, now_ms: u64) -> Result<(), StockGameError> {
         for peer in self.transport.peer_addresses() {
             self.send_scene_bootstrap(peer, now_ms)?;
         }
+        Ok(())
+    }
+
+    fn refresh_xstar_items(
+        &mut self,
+        peer: SocketAddr,
+        event: &StockSceneOpsEvent,
+        now_ms: u64,
+        events: &mut Vec<StockGameEvent>,
+    ) -> Result<(), StockGameError> {
+        use crate::stock_protocol::{
+            STOCK_EFFECT_XSTAR, STOCK_SCENE_OP_EFFECT, STOCK_SCENE_OP_POSE,
+        };
+
+        let star_attack = event.operations.windows(2).any(|ops| {
+            ops[0].kind == STOCK_SCENE_OP_EFFECT
+                && ops[0].value == STOCK_EFFECT_XSTAR
+                && ops[1].kind == STOCK_SCENE_OP_POSE
+                && ops[1].reference == ops[0].reference
+                && ops[1].value == 1
+        });
+        if self.round_ended || self.stage_id.as_deref() != Some("sn21") || !star_attack {
+            return Ok(());
+        }
+
+        if self
+            .last_xstar
+            .is_some_and(|(owner, timestamp, received_at)| {
+                if owner == peer {
+                    timestamp == event.timestamp_ms
+                } else {
+                    now_ms.saturating_sub(received_at) < 5_000
+                }
+            })
+        {
+            return Ok(());
+        }
+        self.last_xstar = Some((peer, event.timestamp_ms, now_ms));
+
+        let inactive = self
+            .scene_items
+            .iter()
+            .filter_map(|(&id, item)| (item.seed.repeat_on_xstar && !item.active).then_some(id))
+            .collect::<Vec<_>>();
+        for id in inactive {
+            self.respawn_scene_item(id, now_ms, events)?;
+        }
+        Ok(())
+    }
+
+    fn respawn_scene_item(
+        &mut self,
+        previous_id: u32,
+        now_ms: u64,
+        events: &mut Vec<StockGameEvent>,
+    ) -> Result<(), StockGameError> {
+        let Some(mut item) = self.scene_items.remove(&previous_id) else {
+            return Ok(());
+        };
+        item.record_id = self.allocate_scene_record_id();
+        item.active = true;
+        item.script_active = true;
+        item.interactive = true;
+        item.respawn_at_ms = None;
+        let record = item.record(self.scene_frame);
+        self.scene_items.insert(item.record_id, item);
+        self.broadcast_discrete(STOCK_EVENT_SCENE_SPAWN, &record.encode(), now_ms)?;
+        events.push(StockGameEvent::SceneItemsGrounded {
+            records: vec![record],
+            spawned: true,
+        });
         Ok(())
     }
 
@@ -3108,7 +3866,7 @@ impl StockGameServer {
             }
             if !was_ready && item.active && item.interactive {
                 item.respawn_at_ms = None;
-                released.push(item.record());
+                released.push(item.record(self.scene_frame));
             }
         }
         for record in released {
@@ -3126,13 +3884,32 @@ impl StockGameServer {
         now_ms: u64,
         events: &mut Vec<StockGameEvent>,
     ) -> Result<(), StockGameError> {
-        if self.round_ended
-            || self.roles.is_empty()
-            || !self
-                .roles
-                .keys()
-                .all(|peer| self.ready_peers.contains(peer))
-        {
+        if self.round_ended {
+            return Ok(());
+        }
+        let expired = self
+            .scene_items
+            .iter()
+            .filter_map(|(id, item)| {
+                (!item.authored && item.expires_at_ms.is_some_and(|expires| now_ms > expires))
+                    .then_some(*id)
+            })
+            .collect::<Vec<_>>();
+        for id in expired {
+            let item = self.scene_items.remove(&id).unwrap();
+            let event = crate::stock_protocol::StockSceneItemRemovedEvent {
+                record_id: id,
+                category: item.seed.category,
+                item_id: item.seed.item_id,
+            };
+            self.broadcast_discrete(
+                crate::stock_protocol::STOCK_EVENT_SCENE_ITEM_REMOVED,
+                &event.encode(),
+                now_ms,
+            )?;
+            events.push(StockGameEvent::SceneItemRemoved(event));
+        }
+        if self.roles.is_empty() || self.ready_peers.is_empty() {
             return Ok(());
         }
 
@@ -3145,20 +3922,7 @@ impl StockGameServer {
             })
             .collect::<Vec<_>>();
         for old_record_id in respawn_due {
-            let Some(mut item) = self.scene_items.remove(&old_record_id) else {
-                continue;
-            };
-            item.record_id = self.allocate_scene_record_id();
-            item.active = true;
-            item.interactive = true;
-            item.respawn_at_ms = None;
-            let record = item.record();
-            self.scene_items.insert(item.record_id, item);
-            self.broadcast_discrete(STOCK_EVENT_SCENE_SPAWN, &record.encode(), now_ms)?;
-            events.push(StockGameEvent::SceneItemsGrounded {
-                records: vec![record],
-                spawned: true,
-            });
+            self.respawn_scene_item(old_record_id, now_ms, events)?;
         }
 
         let pickup_candidates = self
@@ -3168,7 +3932,11 @@ impl StockGameServer {
             .filter_map(|(record_id, item)| {
                 self.roles
                     .iter()
-                    .filter(|(_, role)| role.health > 0.0 && role_can_take_scene_item(role, item))
+                    .filter(|(peer, role)| {
+                        self.ready_peers.contains(peer)
+                            && role.health > 0.0
+                            && role_can_take_scene_item(role, item)
+                    })
                     .filter_map(|(peer, role)| {
                         role.state
                             .filter(|state| role_touches_scene_item(state.position, item))
@@ -3193,7 +3961,7 @@ impl StockGameServer {
                 self.scene_items.insert(record_id, item);
                 continue;
             }
-            let record = item.record();
+            let record = item.record(self.scene_frame);
             if item.seed.category == 1 {
                 if let Some(role) = self.roles.get_mut(&peer) {
                     if let Some(slot) = role.weapon_slots.iter().position(Option::is_none) {
@@ -3231,6 +3999,7 @@ impl StockGameServer {
     pub fn replace_environment_geometry(&mut self, geometry: meteor_scene::hazards::StageHazards) {
         self.hazards.volumes = geometry.volumes;
         self.hazards.machines = geometry.machines;
+        self.hazards.world_bounds = geometry.world_bounds;
     }
 
     fn update_environment_hazards(
@@ -3457,6 +4226,10 @@ impl StockGameServer {
         {
             return Ok(());
         }
+
+        let delivery_enabled = self
+            .round_started_ms
+            .is_some_and(|start| now_ms.saturating_sub(start) >= 3_000);
         let Some(escort) = self.escort else {
             return Ok(());
         };
@@ -3479,11 +4252,13 @@ impl StockGameServer {
             if let Some(current) = self.escort.as_mut() {
                 current.position = state.position;
             }
-            if position_inside_safe_zone(
-                state.position,
-                carrier.camp as i32,
-                &self.escort_stage_data(),
-            ) {
+            if delivery_enabled
+                && position_inside_safe_zone(
+                    state.position,
+                    carrier.camp as i32,
+                    &self.escort_stage_data(),
+                )
+            {
                 self.complete_round(carrier.camp == 2, carrier.camp == 1, now_ms, events)?;
             }
             return Ok(());
@@ -3636,15 +4411,7 @@ impl StockGameServer {
         now_ms: u64,
         events: &mut Vec<StockGameEvent>,
     ) -> Result<(), StockGameError> {
-        if self.rule != 4
-            || self.round_ended
-            || self.vips.iter().any(Option::is_some)
-            || self.roles.is_empty()
-            || !self
-                .roles
-                .keys()
-                .all(|peer| self.ready_peers.contains(peer))
-        {
+        if self.rule != 4 || self.round_ended || self.vips.iter().all(Option::is_some) {
             return Ok(());
         }
 
@@ -3658,9 +4425,6 @@ impl StockGameServer {
                 team.push(role.actor_id);
             }
         }
-        if teams.iter().any(Vec::is_empty) {
-            return Ok(());
-        }
         teams.iter_mut().for_each(|actors| actors.sort_unstable());
 
         let actor_mix = teams
@@ -3669,12 +4433,12 @@ impl StockGameServer {
             .fold(0u64, |seed, actor| seed.rotate_left(7) ^ u64::from(*actor));
         let seed =
             now_ms ^ actor_mix ^ u64::from(self.round_count).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-        let selected = [
-            teams[0][seed as usize % teams[0].len()],
-            teams[1][seed.rotate_left(29) as usize % teams[1].len()],
-        ];
 
-        for (index, actor_id) in selected.into_iter().enumerate() {
+        for (index, team) in teams.iter().enumerate() {
+            if self.vips[index].is_some() || team.is_empty() {
+                continue;
+            }
+            let actor_id = team[seed.rotate_left(index as u32 * 29) as usize % team.len()];
             self.vips[index] = Some(actor_id);
             let event = StockVipEvent {
                 camp: index as u32 + 1,
@@ -3691,7 +4455,7 @@ impl StockGameServer {
         now_ms: u64,
         events: &mut Vec<StockGameEvent>,
     ) -> Result<(), StockGameError> {
-        if self.rule != 5 || self.round_ended {
+        if (1..=4).contains(&self.rule) || self.round_ended {
             return Ok(());
         }
         let team1 = self
@@ -3704,11 +4468,8 @@ impl StockGameServer {
             .values()
             .filter(|role| role.camp == 2)
             .collect::<Vec<_>>();
-        if team1.is_empty() || team2.is_empty() {
-            return Ok(());
-        }
-        let team1_wiped = team1.iter().all(|role| role.health <= 0.0);
-        let team2_wiped = team2.iter().all(|role| role.health <= 0.0);
+        let team1_wiped = !team1.is_empty() && team1.iter().all(|role| role.health <= 0.0);
+        let team2_wiped = !team2.is_empty() && team2.iter().all(|role| role.health <= 0.0);
         if !team1_wiped && !team2_wiped {
             return Ok(());
         }
@@ -3742,14 +4503,7 @@ impl StockGameServer {
         winner_team: i32,
         now_ms: u64,
     ) -> Result<Vec<StockGameEvent>, StockGameError> {
-        let stage_valid = self.stage_id.as_deref().is_some_and(is_siege_stage);
-        if self.rule != 3
-            || !stage_valid
-            || !matches!(winner_team, 1 | 2)
-            || self.round_ended
-            || self.roles.is_empty()
-            || self.ready_peers.len() < self.roles.len()
-        {
+        if self.rule != 3 || self.round_ended {
             return Ok(Vec::new());
         }
         let mut events = Vec::new();
@@ -3799,7 +4553,37 @@ impl StockGameServer {
         Ok(())
     }
 
+    fn assign_round_spawn_pads(&mut self, now_ms: u64) -> Result<(), StockGameError> {
+        let mut available: [Vec<u32>; 3] = self
+            .spawn_pad_counts
+            .map(|count| (0..count as u32).collect());
+        let mut actors: Vec<_> = self
+            .roles
+            .iter()
+            .map(|(peer, role)| (*peer, role.actor_id, role.camp))
+            .collect();
+        actors.sort_unstable_by_key(|(_, actor, _)| *actor);
+        for (peer, _, camp) in actors {
+            let group = crate::spawn::group(camp);
+            let candidates = &mut available[group as usize];
+            let mut payload = Vec::new();
+            if let Some(index) = crate::spawn::random_index(candidates.len()) {
+                payload.extend_from_slice(&group.to_le_bytes());
+                payload.extend_from_slice(&candidates.remove(index).to_le_bytes());
+            }
+            self.transport.send_application(
+                peer,
+                crate::stock_protocol::STOCK_EVENT_SPAWN_PAD,
+                payload,
+                STOCK_DISCRETE_RELIABLE_FLAGS,
+                now_ms,
+            )?;
+        }
+        Ok(())
+    }
+
     fn reset_roles_for_round(&mut self, now_ms: u64) {
+        self.scene_state.clear();
         self.hazards
             .build_from_stage(self.hazards.volumes.clone(), self.hazards.machines.clone());
         self.hazard_tick_ms = Some(now_ms);
@@ -3817,6 +4601,7 @@ impl StockGameServer {
             role.next_cure_at_ms = 0;
         }
         self.vips = [None, None];
+        self.last_xstar = None;
         self.scene_items.retain(|_, item| item.authored);
         for item in self.scene_items.values_mut() {
             item.active = item.seed.active;
@@ -3967,6 +4752,59 @@ mod tests {
     use crate::role_state::{pack_state_word0, RoleVec3, StateWords};
     use crate::stock_udp::StockConnectRecord;
 
+    #[test]
+    fn stock_pickup_reaches_head_without_reaching_the_floor_above() {
+        let item = StockHostedSceneItem {
+            seed: StockAuthoredSceneItem {
+                item_id: 9,
+                category: 2,
+                position: RoleVec3 {
+                    x: 0.0,
+                    y: 4.0,
+                    z: 0.0,
+                },
+                half_extents: [0.25; 3],
+                respawn_ms: None,
+                repeat_on_xstar: false,
+                scene_reference: None,
+                active: true,
+                interactive: true,
+            },
+            record_id: 1,
+            active: true,
+            script_active: true,
+            interactive: true,
+            respawn_at_ms: None,
+            expires_at_ms: None,
+            authored: true,
+        };
+        assert!(role_touches_scene_item(RoleVec3::ZERO, &item));
+        assert!(!role_touches_scene_item(
+            RoleVec3 {
+                x: 0.0,
+                y: -1.0,
+                z: 0.0
+            },
+            &item
+        ));
+        assert!(!role_touches_scene_item(
+            RoleVec3 {
+                x: 0.0,
+                y: 7.0,
+                z: 0.0
+            },
+            &item
+        ));
+        assert!(!role_touches_scene_item(
+            RoleVec3 {
+                x: 3.0,
+                y: 0.0,
+                z: 0.0
+            },
+            &item
+        ));
+    }
+
     fn stage_checksum_room(expected: u32, actual: u32) -> (StockGameServer, StockGameClient) {
         let transport =
             StockServerTransport::bind("127.0.0.1:0", "serverlist", "stage-checksum").unwrap();
@@ -3985,6 +4823,296 @@ mod tests {
         .unwrap();
         client.stage_checksums = Some([("sn01".into(), actual), ("sn02".into(), 123)].into());
         (server, client)
+    }
+
+    #[test]
+    fn invalid_or_unentered_requests_do_not_stop_the_host() {
+        let transport =
+            StockServerTransport::bind("127.0.0.1:0", "serverlist", "validation").unwrap();
+        let address = transport.local_addr().unwrap();
+        let mut server = StockGameServer::new(transport, StockHeroCatalog::bundled_revision());
+        let mut client =
+            StockClientTransport::bind("127.0.0.1:0", address, StockConnectRecord::for_open_room())
+                .unwrap();
+        for now in 0..100 {
+            std::thread::sleep(std::time::Duration::from_micros(50));
+            client.tick(now).unwrap();
+            server.tick(now).unwrap();
+        }
+        assert!(server.roles.is_empty());
+        let state = crate::role_state::encode_request1_state(sample_state(12.0, 1));
+        for (opcode, payload) in [
+            (STOCK_REQUEST_ROLE_STATE, state.to_vec()),
+            (STOCK_REQUEST_ROLE_STATE, vec![0]),
+            (STOCK_REQUEST_ANGER_FULL, vec![]),
+            (STOCK_REQUEST_QI_BURST, vec![]),
+            (STOCK_REQUEST_ANGER_COST, vec![0]),
+            (STOCK_REQUEST_ANGER_COST, 10u32.to_le_bytes().to_vec()),
+            (STOCK_REQUEST_ENTER_ROLE, vec![0]),
+            (27, vec![]),
+        ] {
+            client
+                .send_application(opcode, payload, STOCK_DISCRETE_RELIABLE_FLAGS, 101)
+                .unwrap();
+        }
+        let mut replied = false;
+        for now in 101..140 {
+            std::thread::sleep(std::time::Duration::from_micros(50));
+            server.tick(now).unwrap();
+            replied |= client.tick(now).unwrap().iter().any(|event|
+                matches!(event, StockSessionEvent::Application { packet, .. } if packet.opcode == 52));
+        }
+        assert!(
+            replied,
+            "valid requests after malformed requests must still run"
+        );
+        let request = StockEnterRoleRequest {
+            hero: 0,
+            camp: 0,
+            hero_checksum: server.heroes.checksum(0).unwrap(),
+        };
+        client
+            .send_application(
+                STOCK_REQUEST_ENTER_ROLE,
+                request.encode(),
+                STOCK_DISCRETE_RELIABLE_FLAGS,
+                141,
+            )
+            .unwrap();
+        client
+            .send_application(STOCK_REQUEST_ROLE_STATE, state, 0, 141)
+            .unwrap();
+        for now in 141..180 {
+            std::thread::sleep(std::time::Duration::from_micros(50));
+            server.tick(now).unwrap();
+            client.tick(now).unwrap();
+        }
+        assert_eq!(server.roles.len(), 1);
+        assert_eq!(
+            server
+                .roles
+                .values()
+                .next()
+                .unwrap()
+                .state
+                .unwrap()
+                .position
+                .x,
+            12.0
+        );
+    }
+
+    #[test]
+    fn stock_anger_debits_apply_after_death_and_round_end_with_full_warning() {
+        let transport =
+            StockServerTransport::bind("127.0.0.1:0", "serverlist", "anger-boundary").unwrap();
+        let address = transport.local_addr().unwrap();
+        let mut server = StockGameServer::new(transport, StockHeroCatalog::bundled_revision());
+        let mut client = StockGameClient::for_bundled_revision(
+            StockClientTransport::bind("127.0.0.1:0", address, StockConnectRecord::for_open_room())
+                .unwrap(),
+            0,
+            0,
+            6,
+        )
+        .unwrap();
+        drive(&mut server, &mut [&mut client], 0, 100);
+        let peer = server.transport.peer_addresses()[0];
+        let actor = server.roles[&peer].actor_id;
+        server.round_ended = true;
+        server.roles.get_mut(&peer).unwrap().health = 0.0;
+        for (spend, initial, expected) in [
+            (StockAngerSpend::Burst, 59.0, 0.0),
+            (StockAngerSpend::Cost(40), 20.0, 0.0),
+            (StockAngerSpend::Cost(10), 80.0, 70.0),
+            (StockAngerSpend::Full, 99.0, 0.0),
+        ] {
+            server.roles.get_mut(&peer).unwrap().anger = initial;
+            server
+                .handle_application(peer, spend.opcode(), &spend.encode(), 101, &mut Vec::new())
+                .unwrap();
+            assert_eq!(server.roles[&peer].anger, expected);
+        }
+        let mut warned = false;
+        for _ in 0..100 {
+            std::thread::sleep(std::time::Duration::from_micros(50));
+            warned |= client.transport.tick(102).unwrap().iter().any(|event| {
+                matches!(event, StockSessionEvent::Application { packet, .. }
+                    if packet.opcode == crate::stock_protocol::STOCK_EVENT_ANGER_INSUFFICIENT
+                    && packet.payload == actor.to_le_bytes() && !packet.reliable())
+            });
+            if warned {
+                break;
+            }
+        }
+        assert!(warned);
+    }
+
+    #[test]
+    fn assassin_assigns_each_camp_independently_before_ready_and_on_late_entry() {
+        let transport = StockServerTransport::bind("127.0.0.1:0", "serverlist", "vips").unwrap();
+        let address = transport.local_addr().unwrap();
+        let mut server = StockGameServer::with_rule_and_combat_resources(
+            transport,
+            StockHeroCatalog::bundled_revision(),
+            4,
+            CombatResourceTable::default(),
+        );
+        let mut clients = Vec::new();
+        for camp in [1, 1, 2] {
+            let mut client = StockClientTransport::bind(
+                "127.0.0.1:0",
+                address,
+                StockConnectRecord::for_open_room(),
+            )
+            .unwrap();
+            let start = clients.len() as u64 * 200;
+            for now in start..start + 100 {
+                std::thread::sleep(std::time::Duration::from_micros(50));
+                client.tick(now).unwrap();
+                server.tick(now).unwrap();
+            }
+            let entry = StockEnterRoleRequest {
+                hero: 0,
+                camp,
+                hero_checksum: server.heroes.checksum(0).unwrap(),
+            };
+            client
+                .send_application(
+                    STOCK_REQUEST_ENTER_ROLE,
+                    entry.encode(),
+                    STOCK_DISCRETE_RELIABLE_FLAGS,
+                    start + 100,
+                )
+                .unwrap();
+            for now in start + 100..start + 120 {
+                std::thread::sleep(std::time::Duration::from_micros(50));
+                server.tick(now).unwrap();
+                client.tick(now).unwrap();
+            }
+            clients.push(client);
+            assert!(server.ready_peers.is_empty());
+            assert_eq!(server.vips[0], clients[0].transport_id());
+            assert_eq!(
+                server.vips[1],
+                if clients.len() == 3 {
+                    clients[2].transport_id()
+                } else {
+                    None
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn deathmatch_strategy_settles_a_single_nonempty_camp_for_default_rules() {
+        for rule in [5, 6, 0, 10] {
+            let transport =
+                StockServerTransport::bind("127.0.0.1:0", "serverlist", "single-camp").unwrap();
+            let address = transport.local_addr().unwrap();
+            let mut server = StockGameServer::with_rule_and_combat_resources(
+                transport,
+                StockHeroCatalog::bundled_revision(),
+                rule,
+                CombatResourceTable::default(),
+            );
+            let mut client = StockGameClient::for_bundled_revision(
+                StockClientTransport::bind(
+                    "127.0.0.1:0",
+                    address,
+                    StockConnectRecord::for_open_room(),
+                )
+                .unwrap(),
+                0,
+                1,
+                6,
+            )
+            .unwrap();
+            drive(&mut server, &mut [&mut client], 0, 100);
+            assert_eq!(server.rule(), rule);
+            server.roles.values_mut().next().unwrap().health = 0.0;
+            let mut events = Vec::new();
+            server
+                .finish_team_round_if_needed(101, &mut events)
+                .unwrap();
+            assert!(server.round_ended);
+            assert_eq!(server.team_wins(), [0, 1]);
+        }
+    }
+
+    #[test]
+    fn stock_camp_limit_is_a_hint_and_does_not_rewrite_or_reject_entry() {
+        let transport = StockServerTransport::bind("127.0.0.1:0", "serverlist", "camps").unwrap();
+        let address = transport.local_addr().unwrap();
+        let mut server = StockGameServer::new(transport, StockHeroCatalog::bundled_revision());
+        let mut clients = Vec::new();
+        for index in 0..10u64 {
+            let mut client = StockClientTransport::bind(
+                "127.0.0.1:0",
+                address,
+                StockConnectRecord::for_open_room(),
+            )
+            .unwrap();
+            let start = index * 200;
+            for now in start..start + 100 {
+                std::thread::sleep(std::time::Duration::from_micros(50));
+                client.tick(now).unwrap();
+                server.tick(now).unwrap();
+            }
+            let camp = if index < 9 { 1 } else { 7 };
+            let request = StockEnterRoleRequest {
+                hero: 0,
+                camp,
+                hero_checksum: server.heroes.checksum(0).unwrap(),
+            };
+            client
+                .send_application(
+                    STOCK_REQUEST_ENTER_ROLE,
+                    request.encode(),
+                    STOCK_DISCRETE_RELIABLE_FLAGS,
+                    start + 100,
+                )
+                .unwrap();
+            let mut suggested = false;
+            for now in start + 101..start + 140 {
+                std::thread::sleep(std::time::Duration::from_micros(50));
+                server.tick(now).unwrap();
+                suggested |= client.tick(now).unwrap().iter().any(|event| {
+                    matches!(event, StockSessionEvent::Application { packet, .. }
+                        if packet.opcode == crate::stock_protocol::STOCK_EVENT_CAMP_SUGGESTION
+                        && packet.payload == 2u32.to_le_bytes())
+                });
+            }
+            assert_eq!(suggested, index == 8);
+            assert_eq!(
+                server
+                    .roles
+                    .values()
+                    .find(|role| Some(role.actor_id) == client.transport_id())
+                    .unwrap()
+                    .camp,
+                camp
+            );
+            clients.push(client);
+        }
+        assert_eq!(server.roles.len(), 10);
+    }
+
+    #[test]
+    fn siege_callback_accepts_neutral_winner_on_a_custom_map() {
+        let transport = StockServerTransport::bind("127.0.0.1:0", "serverlist", "draw").unwrap();
+        let mut server = StockGameServer::with_rule_and_combat_resources(
+            transport,
+            StockHeroCatalog::bundled_revision(),
+            3,
+            CombatResourceTable::default(),
+        );
+        server.set_stage_id("custom_siege");
+        let events = server.complete_siege_objective(0, 0).unwrap();
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, StockGameEvent::RoundEnd)));
+        assert_eq!(server.team_wins(), [0, 0]);
     }
 
     #[test]
@@ -4047,6 +5175,7 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_micros(50));
         }
+        assert_eq!(requests.remove(0).opcode, REQUEST_BATTLE_RULES);
         assert_eq!(
             requests.iter().map(|p| p.opcode).collect::<Vec<_>>(),
             [
@@ -4161,18 +5290,24 @@ mod tests {
                 &mut events,
             )
             .unwrap();
-        let packets = client.transport.tick(304).unwrap();
-        let rejected = packets
-            .iter()
-            .find_map(|e| match e {
-                StockSessionEvent::Application { packet, .. }
-                    if packet.opcode == STOCK_EVENT_STAGE_CHECKSUM_REJECTED =>
-                {
-                    Some(packet)
-                }
-                _ => None,
+        let rejected = (0..100)
+            .find_map(|_| {
+                std::thread::sleep(std::time::Duration::from_micros(50));
+                client
+                    .transport
+                    .tick(304)
+                    .unwrap()
+                    .into_iter()
+                    .find_map(|event| match event {
+                        StockSessionEvent::Application { packet, .. }
+                            if packet.opcode == STOCK_EVENT_STAGE_CHECKSUM_REJECTED =>
+                        {
+                            Some(packet)
+                        }
+                        _ => None,
+                    })
             })
-            .unwrap();
+            .expect("checksum rejection arrives before disconnect");
         assert!(!rejected.reliable());
         assert_eq!(
             StockStageChecksumRejected::decode(&rejected.payload)
@@ -4337,6 +5472,10 @@ mod tests {
             let config = StockStageConfigEvent::decode(&configs[0].payload).unwrap();
             assert_eq!(config.stage_id, "sn07");
             assert_eq!((config.field_a, config.field_b), (5, 7));
+            assert_eq!(
+                config.field_c, 0x3c,
+                "default room admits all four original item groups"
+            );
             let roster_index = received
                 .iter()
                 .position(|p| p.opcode == STOCK_EVENT_ROSTER)
@@ -4381,6 +5520,7 @@ mod tests {
             .collect();
         let mut initial = [Vec::new(), Vec::new()];
         for now in 42_000..42_100 {
+            std::thread::sleep(std::time::Duration::from_micros(50));
             for (i, client) in clients.iter_mut().enumerate() {
                 for event in client.tick(now).unwrap() {
                     if let StockSessionEvent::Application { packet, .. } = event {
@@ -4409,6 +5549,7 @@ mod tests {
             .unwrap();
         let mut replies = [Vec::new(), Vec::new()];
         for now in 42_100..42_200 {
+            std::thread::sleep(std::time::Duration::from_micros(50));
             server.tick(now).unwrap();
             for (i, client) in clients.iter_mut().enumerate() {
                 for event in client.tick(now).unwrap() {
@@ -4430,6 +5571,32 @@ mod tests {
             "pre-entry requests must not create fighters"
         );
 
+        use crate::stock_protocol::{
+            STOCK_SCENE_OP_ACTIVE, STOCK_SCENE_OP_EFFECT, STOCK_SCENE_OP_FRAME, STOCK_SCENE_OP_POSE,
+        };
+        let op = |kind, value| StockSceneOperation {
+            reference: 17,
+            kind,
+            value,
+            extra: 0,
+        };
+        for operation in [
+            op(STOCK_SCENE_OP_ACTIVE, 1),
+            op(STOCK_SCENE_OP_FRAME, 25),
+            op(STOCK_SCENE_OP_POSE, 2),
+            op(STOCK_SCENE_OP_ACTIVE, 0),
+            op(STOCK_SCENE_OP_EFFECT, 691),
+        ] {
+            retain_scene_write(&mut server.scene_state, operation);
+        }
+
+        let hidden_mechanism = StockSceneOperation {
+            reference: 42,
+            kind: crate::stock_protocol::STOCK_SCENE_OP_VISIBLE,
+            value: 0,
+            extra: 0,
+        };
+        retain_scene_write(&mut server.scene_state, hidden_mechanism);
         let request = StockEnterRoleRequest {
             hero: 0,
             camp: 0,
@@ -4444,8 +5611,16 @@ mod tests {
             )
             .unwrap();
         let mut entry = [Vec::new(), Vec::new()];
+        let mut entered_at = None;
         for now in 42_200..42_300 {
-            server.tick(now).unwrap();
+            std::thread::sleep(std::time::Duration::from_micros(50));
+            let server_events = server.tick(now).unwrap();
+            if server_events
+                .iter()
+                .any(|event| matches!(event, StockGameEvent::RoleEntered(_)))
+            {
+                entered_at = Some(now as u32);
+            }
             for (i, client) in clients.iter_mut().enumerate() {
                 for event in client.tick(now).unwrap() {
                     if let StockSessionEvent::Application { packet, .. } = event {
@@ -4458,19 +5633,88 @@ mod tests {
             !entry[0].iter().any(|p| p.opcode == 48),
             "joining must not reset another peer's scene barrier"
         );
+        assert!(!entry[0].iter().any(|p| p.opcode == STOCK_EVENT_SCENE_OPS));
         let init_index = entry[1].iter().position(|p| p.opcode == 48).unwrap();
+        let scene_index = entry[1]
+            .iter()
+            .position(|p| p.opcode == STOCK_EVENT_SCENE_OPS)
+            .unwrap();
+        assert!(
+            scene_index < init_index,
+            "scene fields must arrive before the join barrier"
+        );
+        assert!(entry[1][scene_index].reliable());
+        assert_eq!(
+            StockSceneOpsEvent::decode(&entry[1][scene_index].payload)
+                .unwrap()
+                .operations,
+            vec![
+                op(STOCK_SCENE_OP_POSE, 2),
+                op(STOCK_SCENE_OP_ACTIVE, 0),
+                hidden_mechanism
+            ]
+        );
         assert!(
             entry[1][..init_index].iter().any(|p| p.opcode == 9),
             "create roles before releasing the join barrier"
         );
         let init = &entry[1][init_index];
         assert!(init.reliable());
+        let init = StockSceneStateEvent::decode(&init.payload).unwrap();
+        assert!(init.objects.is_empty() && Some(init.timestamp_ms) == entered_at);
+        let replay = entry[1][..init_index]
+            .iter()
+            .find(|p| p.opcode == STOCK_EVENT_SCENE_OPS)
+            .expect("restore scene before releasing the join barrier");
+        assert!(replay.reliable());
+        let replay = StockSceneOpsEvent::decode(&replay.payload).unwrap();
         assert_eq!(
-            init.payload,
-            [0, 0, 0xd8, 0xa4, 0, 0],
-            "event 48 requires u16 index + u32 timestamp, even without records"
+            replay.operations,
+            [
+                op(STOCK_SCENE_OP_POSE, 2),
+                op(STOCK_SCENE_OP_ACTIVE, 0),
+                hidden_mechanism
+            ]
         );
         assert_eq!(entry[1].iter().filter(|p| p.opcode == 48).count(), 1);
+    }
+
+    #[test]
+    fn environment_udp_world_boundary_is_authoritative_after_spawn_gate() {
+        let transport = StockServerTransport::bind("127.0.0.1:0", "serverlist", "bounds").unwrap();
+        let address = transport.local_addr().unwrap();
+        let mut server = StockGameServer::new(transport, StockHeroCatalog::bundled_revision());
+        let mut client = StockGameClient::for_bundled_revision(
+            StockClientTransport::bind("127.0.0.1:0", address, StockConnectRecord::for_open_room())
+                .unwrap(),
+            0,
+            0,
+            6,
+        )
+        .unwrap();
+        drive(&mut server, &mut [&mut client], 0, 100);
+        client.send_role_state(sample_state(10.0, 1), 100).unwrap();
+        let mut geometry = meteor_scene::hazards::StageHazards::new();
+        geometry.world_bounds = Some(meteor_scene::hazards::Aabb {
+            min: [-5.0; 3],
+            max: [5.0; 3],
+        });
+        server.replace_environment_geometry(geometry);
+        let protected = drive(&mut server, &mut [&mut client], 100, 100);
+        assert!(!protected[0]
+            .iter()
+            .any(|event| matches!(event, StockGameEvent::LocalDeath)));
+        let died = drive(&mut server, &mut [&mut client], 3200, 100);
+        assert!(died[0]
+            .iter()
+            .any(|event| matches!(event, StockGameEvent::LocalDeath)));
+        assert!(died[0].iter().any(|event| {
+            matches!(event, StockGameEvent::EnvironmentDeath(id) if *id == client.actor_id().unwrap())
+        }));
+        assert!(server
+            .roles
+            .values()
+            .all(|role| role.deaths == 1 && role.kills == 0));
     }
 
     #[test]
@@ -4507,7 +5751,12 @@ mod tests {
         }
         let mut geometry = meteor_scene::hazards::StageHazards::new();
         geometry.build_from_stage(vec![hazard_box("damage30", 30)], vec![]);
+        geometry.world_bounds = Some(meteor_scene::hazards::Aabb {
+            min: [-100.0; 3],
+            max: [100.0; 3],
+        });
         server.replace_environment_geometry(geometry.clone());
+        assert_eq!(server.hazards.world_bounds.unwrap().min, [-100.0; 3]);
         drive(
             &mut server,
             &mut clients.iter_mut().collect::<Vec<_>>(),
@@ -4633,6 +5882,8 @@ mod tests {
                 min: [10.0; 3],
                 max: [11.0; 3],
             }],
+            obbs: vec![],
+            collider_owners: vec![],
         });
         server.replace_environment_geometry(geometry.clone());
         drive(&mut server, &mut [&mut client], 3200, 100);
@@ -4712,7 +5963,14 @@ mod tests {
             let mut geometry = meteor_scene::hazards::StageHazards::new();
             geometry.volumes.push(hazard_box("hell", 100000));
             server.replace_environment_geometry(geometry);
-            let events = drive(&mut server, &mut [&mut a, &mut b], 2200, 100);
+
+            let protected = drive(&mut server, &mut [&mut a, &mut b], 2200, 100);
+            assert!(server.roles.values().all(|role| role.health > 0.0));
+            assert!(protected
+                .iter()
+                .flatten()
+                .all(|event| !matches!(event, StockGameEvent::EnvironmentDeath(_))));
+            let events = drive(&mut server, &mut [&mut a, &mut b], 3200, 100);
             if rule == 4 {
                 assert!(server.round_ended);
                 assert_eq!(server.team_wins, [0, 1]);
@@ -4731,10 +5989,21 @@ mod tests {
                 .flatten()
                 .any(|e| matches!(e, StockGameEvent::Kill(_))));
             if rule == 2 {
-                assert!(events
-                    .iter()
-                    .flatten()
-                    .any(|e| matches!(e, StockGameEvent::EscortGrounded { dropped: true, .. })));
+                assert!(
+                    events
+                        .iter()
+                        .flatten()
+                        .any(|e| matches!(e, StockGameEvent::EscortGrounded { dropped: true, .. })),
+                    "roles={:?}, carrier={:?}, client actors={:?}, received={:?}",
+                    server
+                        .roles
+                        .values()
+                        .map(|role| (role.actor_id, role.health, role.state))
+                        .collect::<Vec<_>>(),
+                    server.escort,
+                    [a.actor_id(), b.actor_id()],
+                    events
+                );
             }
         }
     }
@@ -4824,9 +6093,24 @@ mod tests {
         npc.send_anger_spend((100, 141), StockAngerSpend::Cost(u32::MAX), now)
             .unwrap();
         drive(&mut server, &mut [&mut player, &mut npc], now, 100);
-        assert!(
-            server.roles.values().all(|role| role.anger == 59.0),
-            "insufficient or invalid debit cannot grant or remove Qi"
+        assert_eq!(
+            server
+                .roles
+                .values()
+                .find(|role| Some(role.actor_id) == npc.actor_id())
+                .unwrap()
+                .anger,
+            0.0,
+            "an insufficient debit clamps to zero and a high-bit cost never grants Qi"
+        );
+        assert_eq!(
+            server
+                .roles
+                .values()
+                .find(|role| Some(role.actor_id) == player.actor_id())
+                .unwrap()
+                .anger,
+            59.0
         );
     }
 
@@ -5186,6 +6470,20 @@ mod tests {
                 ..
             }
         )));
+        let late_actor = late.actor_id().unwrap();
+        let name_index = joined[1].iter().position(|event| matches!(event,
+            StockGameEvent::PlayerName { actor_id, name } if *actor_id == late_actor && name == "德玛西亚?")).unwrap();
+        let entry_index = joined[1]
+            .iter()
+            .position(|event| {
+                matches!(event,
+            StockGameEvent::RoleEntered(entered) if entered.actor_id == late_actor)
+            })
+            .unwrap();
+        assert!(
+            name_index < entry_index,
+            "event 0 supplies names before role entry without extensions"
+        );
         let first_peer = first.transport.local_addr().unwrap();
         for invalid in [
             b"MRN2".to_vec(),
@@ -5290,6 +6588,247 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_micros(50));
         }
         output
+    }
+
+    #[test]
+    fn stock_dagger_double_stomp_host_accepts_distinct_client_hits_inside_200ms() {
+        let transport = StockServerTransport::bind("127.0.0.1:0", "serverlist", "stomp").unwrap();
+        let address = transport.local_addr().unwrap();
+        let checksums = [1234; STOCK_HERO_COUNT];
+        let table = meteor_asset::res::parse_meteor_res(include_bytes!(
+            "../../../../origin_res/Meteor.res"
+        ))
+        .unwrap()
+        .combat_table();
+        let mut server = StockGameServer::with_combat_resources(
+            transport,
+            StockHeroCatalog::from_checksums(checksums),
+            table,
+        );
+        let client = || {
+            StockGameClient::new(
+                StockClientTransport::bind(
+                    "127.0.0.1:0",
+                    address,
+                    StockConnectRecord::for_open_room(),
+                )
+                .unwrap(),
+                StockEnterRoleRequest {
+                    hero: 0,
+                    camp: 0,
+                    hero_checksum: checksums[0],
+                },
+                1,
+            )
+        };
+        let mut attacker = client();
+        let mut defender = client();
+        drive(&mut server, &mut [&mut attacker, &mut defender], 0, 100);
+        let target_id = defender.actor_id().unwrap();
+        let target_peer = *server
+            .roles
+            .iter()
+            .find(|(_, role)| role.actor_id == target_id)
+            .unwrap()
+            .0;
+        let attacker_peer = *server
+            .roles
+            .iter()
+            .find(|(_, role)| role.actor_id == attacker.actor_id().unwrap())
+            .unwrap()
+            .0;
+        server.roles.get_mut(&attacker_peer).unwrap().weapon_item_id = Some(5);
+        let hit = |pose| StockHitRequest {
+            target_actor_id: target_id,
+            hit_word: 256 | (1 << 16),
+            target_pose_word: pose,
+            moves_word: 150,
+            values_word: 0,
+        };
+        attacker.send_hit(hit(103), 2100).unwrap();
+        let first = drive(&mut server, &mut [&mut attacker, &mut defender], 2100, 60);
+        assert!(first
+            .iter()
+            .all(|events| events.iter().any(|event| matches!(event,
+                StockGameEvent::HitReaction { guarded: false, event }
+                    if event.target_actor_id == target_id && event.pose_id == 103
+            ))));
+        let hp_after_first = server.roles[&target_peer].health;
+        assert!(hp_after_first > 0.0 && hp_after_first < server.roles[&target_peer].max_health);
+
+        attacker.send_hit(hit(105), 2292).unwrap();
+        let second = drive(&mut server, &mut [&mut attacker, &mut defender], 2292, 60);
+        assert!(second
+            .iter()
+            .all(|events| events.iter().any(|event| matches!(event,
+                StockGameEvent::HitReaction { guarded: false, event }
+                    if event.target_actor_id == target_id && event.pose_id == 105
+            ))));
+        assert!(server.roles[&target_peer].health < hp_after_first);
+    }
+
+    #[test]
+    fn json_rules_udp_transmits_custom_configuration() {
+        use meteor_combat::battle_rules::BattleRules;
+        let overrides: Vec<_> = (0..1024)
+            .map(|pose_id| {
+                let mut value = serde_json::json!({
+                    "poseId": pose_id, "damagePercent": 45, "speedPercent": 125,
+                    "hitStunMs": 400, "guardStunMs": 250,
+                    "superArmor": {"qiCostPercent": 20},
+                    "invalidAttack": {"qiCostPercent": 0, "windowMs": 1200},
+                });
+                if pose_id == 400 || pose_id == 401 {
+                    value["invalidAttack"]["groupId"] = 1.into();
+                    value["invalidAttack"]["armOnHit"] = true.into();
+                }
+                value
+            })
+            .collect();
+        let json = serde_json::json!({"schemaVersion": 2, "rebalance": {
+            "guardChipPercent": 15, "guardChipPoses": (0..900).collect::<Vec<u16>>(), "poseOverrides": overrides,
+        }}).to_string();
+        let rules = BattleRules::from_json(&json).unwrap();
+        assert_eq!(
+            rules.invalid_attack_key(400).unwrap().1,
+            rules.invalid_attack_key(401).unwrap().1
+        );
+        assert!(rules.to_json().len() > crate::stock_file_transfer::CHUNK_BYTES);
+        let compressed = compress_battle_rules(rules.clone());
+        assert!(compressed.len() > crate::stock_file_transfer::CHUNK_BYTES);
+        assert!(compressed.len() < rules.to_json().len());
+        assert_eq!(decode_battle_rules(&compressed), Some(rules.clone()));
+        let transport = StockServerTransport::bind("127.0.0.1:0", "serverlist", "custom").unwrap();
+        let address = transport.local_addr().unwrap();
+        let mut server = StockGameServer::new(transport, StockHeroCatalog::bundled_revision());
+        server.set_battle_rules(rules.clone());
+        let mut client = StockGameClient::for_bundled_revision(
+            StockClientTransport::bind("127.0.0.1:0", address, StockConnectRecord::for_open_room())
+                .unwrap(),
+            0,
+            0,
+            5,
+        )
+        .unwrap();
+        let events = drive(&mut server, &mut [&mut client], 0, 400);
+        assert!(events[0]
+            .iter()
+            .any(|e| matches!(e, StockGameEvent::BattleRules(received) if *received == rules)));
+        assert_eq!(server.roles.len(), 1);
+        assert_eq!(server.rules_verified.len(), 1);
+        let mut late = StockGameClient::for_bundled_revision(
+            StockClientTransport::bind("127.0.0.1:0", address, StockConnectRecord::for_open_room())
+                .unwrap(),
+            0,
+            0,
+            5,
+        )
+        .unwrap();
+        let events = drive(&mut server, &mut [&mut client, &mut late], 400, 400);
+        assert!(events[1]
+            .iter()
+            .any(|e| matches!(e, StockGameEvent::BattleRules(received) if *received == rules)));
+        assert_eq!(server.roles.len(), 2);
+        assert_eq!(server.rules_verified.len(), 2);
+    }
+
+    #[test]
+    fn compressed_rules_reject_oversize_and_trailing_data() {
+        let valid = compress_battle_rules(meteor_combat::battle_rules::BattleRules::BALANCED);
+        let mut trailing = valid.clone();
+        trailing.push(0);
+        assert!(decode_battle_rules(&trailing).is_none());
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
+        encoder
+            .write_all(&vec![
+                b' ';
+                meteor_combat::battle_rules::MAX_RULES_JSON_BYTES + 1
+            ])
+            .unwrap();
+        assert!(decode_battle_rules(&encoder.finish().unwrap()).is_none());
+    }
+
+    #[test]
+    fn balance_udp_requires_ack_and_late_join_receives_rules() {
+        const BALANCED: meteor_combat::battle_rules::BattleRules =
+            meteor_combat::battle_rules::BattleRules::BALANCED;
+        let transport = StockServerTransport::bind("127.0.0.1:0", "serverlist", "balance").unwrap();
+        let address = transport.local_addr().unwrap();
+        let mut server = StockGameServer::new(transport, StockHeroCatalog::bundled_revision());
+        server.set_battle_rules(BALANCED);
+        let connect = || {
+            StockGameClient::for_bundled_revision(
+                StockClientTransport::bind(
+                    "127.0.0.1:0",
+                    address,
+                    StockConnectRecord::for_open_room(),
+                )
+                .unwrap(),
+                0,
+                0,
+                5,
+            )
+            .unwrap()
+        };
+        let mut first = connect();
+        let events = drive(&mut server, &mut [&mut first], 0, 400);
+        assert!(events[0]
+            .iter()
+            .any(|e| matches!(e, StockGameEvent::BattleRules(received) if *received == BALANCED)));
+        assert_eq!(server.roles.len(), 1);
+        assert_eq!(server.rules_verified.len(), 1);
+        let mut late = connect();
+        let events = drive(&mut server, &mut [&mut first, &mut late], 400, 400);
+        assert!(events[1]
+            .iter()
+            .any(|e| matches!(e, StockGameEvent::BattleRules(received) if *received == BALANCED)));
+        assert_eq!(server.roles.len(), 2);
+        assert!(server
+            .roles
+            .keys()
+            .all(|peer| server.rules_verified.contains(peer)));
+
+        let mut legacy =
+            StockClientTransport::bind("127.0.0.1:0", address, StockConnectRecord::for_open_room())
+                .unwrap();
+        for now in 800..1000 {
+            legacy.tick(now).unwrap();
+            server.tick(now).unwrap();
+        }
+        let peer = legacy.local_addr().unwrap();
+        let request = StockEnterRoleRequest {
+            hero: 0,
+            camp: 0,
+            hero_checksum: server.heroes.checksum(0).unwrap(),
+        };
+        server
+            .handle_application(
+                peer,
+                STOCK_REQUEST_ENTER_ROLE,
+                &request.encode(),
+                1000,
+                &mut Vec::new(),
+            )
+            .unwrap();
+        server
+            .handle_application(peer, STOCK_REQUEST_READY, &[], 1000, &mut Vec::new())
+            .unwrap();
+        server
+            .handle_application(peer, ACK_BATTLE_RULES, b"MBR2\x01", 1000, &mut Vec::new())
+            .unwrap();
+        let stale = FileFrame::Ack {
+            id: BATTLE_RULES_TRANSFER_ID,
+            next: 0,
+        }
+        .encode();
+        server
+            .handle_application(peer, ACK_BATTLE_RULES, &stale, 1000, &mut Vec::new())
+            .unwrap();
+        assert!(!server.roles.contains_key(&peer));
+        assert!(!server.ready_peers.contains(&peer));
+        server.tick(7000).unwrap();
+        assert!(!server.rules_waiting.contains_key(&peer));
+        assert!(!server.pending_rule_entry.contains_key(&peer));
     }
 
     #[test]
@@ -5618,6 +7157,160 @@ mod tests {
     }
 
     #[test]
+    fn balance_udp_chip_death_reaches_both_peers() {
+        let transport = StockServerTransport::bind("127.0.0.1:0", "serverlist", "status").unwrap();
+        let addr = transport.local_addr().unwrap();
+        let checksums = [1234; STOCK_HERO_COUNT];
+        let table = meteor_asset::res::parse_meteor_res(include_bytes!(
+            "../../../../origin_res/Meteor.res"
+        ))
+        .unwrap()
+        .combat_table();
+        let mut server = StockGameServer::with_combat_resources(
+            transport,
+            StockHeroCatalog::from_checksums(checksums),
+            table,
+        );
+        server.set_battle_rules(meteor_combat::battle_rules::BattleRules::BALANCED);
+        let client = |hero| {
+            StockGameClient::new(
+                StockClientTransport::bind(
+                    "127.0.0.1:0",
+                    addr,
+                    StockConnectRecord::for_open_room(),
+                )
+                .unwrap(),
+                StockEnterRoleRequest {
+                    hero,
+                    camp: 0,
+                    hero_checksum: checksums[hero as usize],
+                },
+                1,
+            )
+        };
+        let mut attacker = client(0);
+        let mut defender = client(1);
+        drive(&mut server, &mut [&mut attacker, &mut defender], 0, 100);
+        let target = defender.actor_id().unwrap();
+        let target_peer = *server
+            .roles
+            .iter()
+            .find(|(_, role)| role.actor_id == target)
+            .unwrap()
+            .0;
+        let mut state = sample_state(0.0, 1);
+        state.state_words.guard_route = true;
+        let role = server.roles.get_mut(&target_peer).unwrap();
+        role.state = Some(state);
+        role.health = 1.0;
+        attacker
+            .send_hit(
+                StockHitRequest {
+                    target_actor_id: target,
+                    hit_word: 245 | (1 << 16),
+                    target_pose_word: 110,
+                    moves_word: 100 | (125 << 16),
+                    values_word: 50 | (35 << 16),
+                },
+                2100,
+            )
+            .unwrap();
+        let received = drive(&mut server, &mut [&mut attacker, &mut defender], 2100, 100);
+        assert_eq!(server.roles[&target_peer].health, 0.0);
+        for events in received {
+            assert!(events.iter().any(
+                |e| matches!(e, StockGameEvent::Kill(kill) if kill.target_actor_id == target)
+            ));
+        }
+        assert_eq!(server.roles[&target_peer].deaths, 1);
+    }
+
+    #[test]
+    fn pose_rules_udp_guard_minimum_uses_host_override() {
+        let transport = StockServerTransport::bind("127.0.0.1:0", "serverlist", "status").unwrap();
+        let addr = transport.local_addr().unwrap();
+        let checksums = [1234; STOCK_HERO_COUNT];
+        let table = meteor_asset::res::parse_meteor_res(include_bytes!(
+            "../../../../origin_res/Meteor.res"
+        ))
+        .unwrap()
+        .combat_table();
+        let mut server = StockGameServer::with_combat_resources(
+            transport,
+            StockHeroCatalog::from_checksums(checksums),
+            table,
+        );
+        server.set_battle_rules(meteor_combat::battle_rules::BattleRules::from_json(r#"{"schemaVersion":2,"rebalance":{"guardChipPercent":10,"guardChipPoses":"all","poseOverrides":[{"poseId":245,"guardStunMs":450}]}}"#).unwrap());
+        let client = |hero| {
+            StockGameClient::new(
+                StockClientTransport::bind(
+                    "127.0.0.1:0",
+                    addr,
+                    StockConnectRecord::for_open_room(),
+                )
+                .unwrap(),
+                StockEnterRoleRequest {
+                    hero,
+                    camp: 0,
+                    hero_checksum: checksums[hero as usize],
+                },
+                1,
+            )
+        };
+        let mut attacker = client(0);
+        let mut defender = client(1);
+        drive(&mut server, &mut [&mut attacker, &mut defender], 0, 100);
+        let target = defender.actor_id().unwrap();
+        let target_peer = *server
+            .roles
+            .iter()
+            .find(|(_, role)| role.actor_id == target)
+            .unwrap()
+            .0;
+        for selector in 0..4u32 {
+            let now = 2100 + u64::from(selector) * 1000;
+            let mut state = sample_state(0.0, 1);
+            state.state_words.guard_route = true;
+            let role = server.roles.get_mut(&target_peer).unwrap();
+            role.state = Some(state);
+            role.weapon_item_id = Some(5);
+            attacker
+                .send_hit(
+                    StockHitRequest {
+                        target_actor_id: target,
+                        hit_word: 245 | (1 << 16),
+                        target_pose_word: 110 | (selector << 12),
+                        moves_word: 100 | (125 << 16),
+                        values_word: 50 | (35 << 16),
+                    },
+                    now,
+                )
+                .unwrap();
+            let received = drive(&mut server, &mut [&mut attacker, &mut defender], now, 60);
+            for events in received {
+                let event = events
+                    .iter()
+                    .find_map(|event| match event {
+                        StockGameEvent::HitReaction {
+                            guarded: true,
+                            event,
+                        } => Some(event),
+                        _ => None,
+                    })
+                    .expect("both original-compatible peers receive event 14");
+
+                let wire = event.encode();
+                assert_eq!(u16::from_le_bytes([wire[0], wire[1]]), selector as u16);
+                assert_eq!(u16::from_le_bytes([wire[2], wire[3]]), 110);
+                assert_eq!(event.move_hundred, 125);
+                assert_eq!(event.value_hundred, 45);
+                assert_eq!(event.context, 1);
+                assert_eq!(event.target_actor_id, target);
+            }
+        }
+    }
+
+    #[test]
     fn stock_guard_event_uses_selector_and_target_pose_for_original_client() {
         let transport = StockServerTransport::bind("127.0.0.1:0", "serverlist", "status").unwrap();
         let addr = transport.local_addr().unwrap();
@@ -5773,7 +7466,21 @@ mod tests {
         attacker.send_hit(hit(204), 2100).unwrap();
         let events = drive(&mut server, &mut [&mut attacker, &mut defender], 2100, 60);
         for events in events {
-            assert!(events.iter().any(|event| matches!(event, StockGameEvent::PropertyEffect(effect) if effect.actor_id == target && effect.category == 2 && effect.resource_id == 12)));
+            let hit_index = events
+                .iter()
+                .position(|event| {
+                    matches!(event,
+                        StockGameEvent::HitReaction { guarded: false, event }
+                            if event.target_actor_id == target
+                    )
+                })
+                .expect("the target receives the original event 11");
+            let property_index = events.iter().position(|event| matches!(event,
+                StockGameEvent::PropertyEffect(effect)
+                    if effect.actor_id == target && effect.category == 2 && effect.resource_id == 12
+            )).expect("the target receives the paired original event 61");
+            assert!(hit_index < property_index,
+                "Meteor.exe 0x4af983 enqueues event 11 before 0x4afe24 enqueues event 61: {events:?}");
         }
         attacker.send_hit(hit(204), 3000).unwrap();
         drive(&mut server, &mut [&mut attacker, &mut defender], 3000, 30);
@@ -5825,6 +7532,194 @@ mod tests {
                 .speed_factor(1.0),
             1.0
         );
+    }
+
+    #[test]
+    fn stock_recorded_ultimate_hit_precedes_property_on_both_peers() {
+        let transport =
+            StockServerTransport::bind("127.0.0.1:0", "serverlist", "ultimate-order").unwrap();
+        let address = transport.local_addr().unwrap();
+        let checksums = [1234; STOCK_HERO_COUNT];
+        let table = meteor_asset::res::parse_meteor_res(include_bytes!(
+            "../../../../origin_res/Meteor.res"
+        ))
+        .unwrap()
+        .combat_table();
+        assert_eq!(table.pose_status_effect(473).unwrap().id, 37);
+        assert_eq!(table.pose_status_effect(421).unwrap().id, 21);
+        assert_eq!(table.pose_status_effect(473).unwrap().anger, -5);
+        assert_eq!(table.pose_status_effect(421).unwrap().anger, -10);
+        let mut server = StockGameServer::with_combat_resources(
+            transport,
+            StockHeroCatalog::from_checksums(checksums),
+            table,
+        );
+        let client = || {
+            StockGameClient::new(
+                StockClientTransport::bind(
+                    "127.0.0.1:0",
+                    address,
+                    StockConnectRecord::for_open_room(),
+                )
+                .unwrap(),
+                StockEnterRoleRequest {
+                    hero: 0,
+                    camp: 0,
+                    hero_checksum: checksums[0],
+                },
+                1,
+            )
+        };
+        let mut attacker = client();
+        let mut defender = client();
+        drive(&mut server, &mut [&mut attacker, &mut defender], 0, 100);
+        let target = defender.actor_id().unwrap();
+        for (now_ms, pose, strategy, minimum_hundred, resource_id) in
+            [(2100, 473, 11, 300, 37), (2400, 421, 10, 100, 21)]
+        {
+            attacker
+                .send_hit(
+                    StockHitRequest {
+                        target_actor_id: target,
+                        hit_word: pose | (strategy << 16),
+                        target_pose_word: 109,
+                        moves_word: 0,
+                        values_word: minimum_hundred,
+                    },
+                    now_ms,
+                )
+                .unwrap();
+            for events in drive(&mut server, &mut [&mut attacker, &mut defender], now_ms, 60) {
+                let hit = events
+                    .iter()
+                    .position(|event| {
+                        matches!(event,
+                            StockGameEvent::HitReaction { guarded: false, event }
+                                if event.target_actor_id == target && event.pose_id == 109
+                                    && event.value_hundred == minimum_hundred
+                                    && event.context == strategy
+                        )
+                    })
+                    .unwrap_or_else(|| panic!("event 11 for pose {pose}: {events:?}"));
+                let property = events
+                    .iter()
+                    .position(|event| {
+                        matches!(event,
+                            StockGameEvent::PropertyEffect(event)
+                                if event.actor_id == target && event.category == 2
+                                    && event.resource_id == resource_id
+                        )
+                    })
+                    .expect("event 61");
+                assert!(hit < property, "pose={pose} events={events:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn stock_scene_transfer_reaches_only_target_and_preserves_pose_and_vitals() {
+        let transport =
+            StockServerTransport::bind("127.0.0.1:0", "serverlist", "SN22 transfer").unwrap();
+        let address = transport.local_addr().unwrap();
+        let mut server = StockGameServer::new(transport, StockHeroCatalog::bundled_revision());
+        let mut clients = (0..2)
+            .map(|_| {
+                StockGameClient::for_bundled_revision(
+                    StockClientTransport::bind(
+                        "127.0.0.1:0",
+                        address,
+                        StockConnectRecord::for_open_room(),
+                    )
+                    .unwrap(),
+                    0,
+                    0,
+                    6,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        drive(
+            &mut server,
+            &mut clients.iter_mut().collect::<Vec<_>>(),
+            0,
+            100,
+        );
+        let guest = clients[1].actor_id().unwrap();
+        clients[1]
+            .send_role_state(sample_state(1.2, 7), 100)
+            .unwrap();
+        drive(
+            &mut server,
+            &mut clients.iter_mut().collect::<Vec<_>>(),
+            100,
+            100,
+        );
+        let before = server
+            .roles
+            .values()
+            .find(|role| role.actor_id == guest)
+            .unwrap()
+            .clone();
+        let mut state = sample_state(90.0, 99);
+        state.position.y = 12.0;
+        state.position.z = -36.0;
+        state.forward = RoleVec3 {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+        };
+        let event = StockSceneTransferEvent::from_role_state(state);
+        server.transfer_scene_actor(guest, event, 200).unwrap();
+        let received = drive(
+            &mut server,
+            &mut clients.iter_mut().collect::<Vec<_>>(),
+            200,
+            100,
+        );
+        assert!(!received[0]
+            .iter()
+            .any(|event| matches!(event, StockGameEvent::SceneTransfer(_))));
+        assert_eq!(
+            received[1]
+                .iter()
+                .filter(|received| **received == StockGameEvent::SceneTransfer(event))
+                .count(),
+            1
+        );
+        let role = server
+            .roles
+            .values()
+            .find(|role| role.actor_id == guest)
+            .unwrap();
+        assert_eq!(role.state.unwrap().position, state.position);
+        assert_eq!(role.state.unwrap().forward, state.forward);
+        assert_eq!(role.state.unwrap().velocity, RoleVec3::ZERO);
+        assert_eq!(
+            role.state.unwrap().state_words,
+            before.state.unwrap().state_words
+        );
+        assert_eq!(role.health, before.health);
+        assert_eq!(role.anger, before.anger);
+
+        clients[0]
+            .transport_mut()
+            .send_application(
+                STOCK_EVENT_SCENE_TRANSFER,
+                event.encode().to_vec(),
+                STOCK_DISCRETE_RELIABLE_FLAGS,
+                300,
+            )
+            .unwrap();
+        let untrusted = drive(
+            &mut server,
+            &mut clients.iter_mut().collect::<Vec<_>>(),
+            300,
+            100,
+        );
+        assert!(untrusted
+            .iter()
+            .flatten()
+            .all(|event| !matches!(event, StockGameEvent::SceneTransfer(_))));
     }
 
     #[test]
@@ -6165,6 +8060,150 @@ mod tests {
     }
 
     #[test]
+    fn stock_christmas_star_candies_are_shared_across_transaction_chunks() {
+        use crate::stock_protocol::{
+            StockSceneOperation, STOCK_SCENE_OP_ACTIVE, STOCK_SCENE_OP_INTERACTIVE,
+        };
+        let transport = StockServerTransport::bind("127.0.0.1:0", "serverlist", "sn21").unwrap();
+        let address = transport.local_addr().unwrap();
+        let mut server = StockGameServer::new(transport, StockHeroCatalog::bundled_revision());
+        let connect = || {
+            StockGameClient::for_bundled_revision(
+                StockClientTransport::bind(
+                    "127.0.0.1:0",
+                    address,
+                    StockConnectRecord::for_open_room(),
+                )
+                .unwrap(),
+                0,
+                0,
+                6,
+            )
+            .unwrap()
+        };
+        let mut host = connect();
+        let mut peer = connect();
+        drive(&mut server, &mut [&mut host, &mut peer], 0, 100);
+
+        server
+            .replace_authored_scene_items(
+                (5..=103)
+                    .map(|reference| StockAuthoredSceneItem {
+                        item_id: 28,
+                        category: 2,
+                        position: RoleVec3 {
+                            x: reference as f32 * 10.0,
+                            y: 0.0,
+                            z: 0.0,
+                        },
+                        half_extents: [0.25; 3],
+                        respawn_ms: Some(99_999_000),
+                        repeat_on_xstar: true,
+                        scene_reference: Some(reference),
+                        active: false,
+                        interactive: false,
+                    })
+                    .collect(),
+                100,
+            )
+            .unwrap();
+        let hidden = drive(&mut server, &mut [&mut host, &mut peer], 100, 30);
+        assert!(server.active_scene_records().is_empty());
+        assert!(hidden
+            .iter()
+            .flatten()
+            .all(|event| !matches!(event, StockGameEvent::SceneItemTaken { .. })));
+        let operations = (5..=103)
+            .flat_map(|reference| {
+                [
+                    StockSceneOperation {
+                        reference,
+                        kind: STOCK_SCENE_OP_ACTIVE,
+                        value: 1,
+                        extra: 0,
+                    },
+                    StockSceneOperation {
+                        reference,
+                        kind: STOCK_SCENE_OP_INTERACTIVE,
+                        value: 1,
+                        extra: 0,
+                    },
+                ]
+            })
+            .collect::<Vec<_>>();
+
+        host.send_scene_ops(
+            &StockSceneOpsEvent {
+                timestamp_ms: 130,
+                operations,
+            },
+            130,
+        )
+        .unwrap();
+        let released = drive(&mut server, &mut [&mut host, &mut peer], 130, 60);
+        assert_eq!(server.active_scene_records().len(), 99);
+        for events in &released {
+            assert_eq!(
+                events
+                    .iter()
+                    .filter_map(|event| match event {
+                        StockGameEvent::SceneItemsGrounded {
+                            records,
+                            spawned: true,
+                        } => Some(records.len()),
+                        _ => None,
+                    })
+                    .sum::<usize>(),
+                99
+            );
+        }
+        let record = server
+            .scene_items
+            .values()
+            .find(|item| item.seed.scene_reference == Some(5))
+            .unwrap()
+            .record(None);
+
+        peer.send_role_state(sample_state(50.0, 2), 190).unwrap();
+        let picked = drive(&mut server, &mut [&mut host, &mut peer], 190, 30);
+        assert_eq!(server.active_scene_records().len(), 98);
+        for events in &picked {
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event,
+                        StockGameEvent::SceneItemTaken { event, record: Some(observed) }
+                            if Some(event.actor_id) == peer.actor_id() && *observed == record
+                    ))
+                    .count(),
+                1
+            );
+        }
+        let mut late = connect();
+        let joined = drive(
+            &mut server,
+            &mut [&mut host, &mut peer, &mut late],
+            220,
+            100,
+        );
+        let observed = joined[2]
+            .iter()
+            .filter_map(|event| match event {
+                StockGameEvent::SceneItemsGrounded {
+                    records,
+                    spawned: false,
+                } => Some(records.as_slice()),
+                _ => None,
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        assert_eq!(observed.len(), 98);
+        assert!(observed
+            .iter()
+            .all(|remaining| remaining.record_id != record.record_id));
+    }
+
+    #[test]
     fn stock_box_release_registers_before_pickup_for_host_peer_and_late_join() {
         use crate::stock_protocol::{
             StockSceneOperation, STOCK_SCENE_OP_ACTIVE, STOCK_SCENE_OP_INTERACTIVE,
@@ -6199,6 +8238,7 @@ mod tests {
                         half_extents: [0.25; 3],
                         respawn_ms: Some(1_000),
                         scene_reference: Some(101),
+                        repeat_on_xstar: false,
                         active: false,
                         interactive: false,
                     },
@@ -6213,6 +8253,7 @@ mod tests {
                         half_extents: [0.25; 3],
                         respawn_ms: Some(1_000),
                         scene_reference: Some(102),
+                        repeat_on_xstar: false,
                         active: false,
                         interactive: false,
                     },
@@ -6280,6 +8321,39 @@ mod tests {
             records,
             "repeated active state must retain record identities"
         );
+        let broken_box = StockSceneOpsEvent {
+            timestamp_ms: 240,
+            operations: vec![
+                op(200, crate::stock_protocol::STOCK_SCENE_OP_POSE, 2),
+                op(200, crate::stock_protocol::STOCK_SCENE_OP_COLLISION, 0),
+                op(200, crate::stock_protocol::STOCK_SCENE_OP_VISIBLE, 0),
+                op(200, crate::stock_protocol::STOCK_SCENE_OP_DAMAGE, 80),
+                op(200, crate::stock_protocol::STOCK_SCENE_OP_EFFECT, 691),
+                op(200, crate::stock_protocol::STOCK_SCENE_OP_POSE, 3),
+            ],
+        };
+        host.send_scene_ops(&broken_box, 240).unwrap();
+        peer.send_scene_ops(
+            &StockSceneOpsEvent {
+                timestamp_ms: 241,
+                operations: vec![op(201, crate::stock_protocol::STOCK_SCENE_OP_FRAME, 4)],
+            },
+            241,
+        )
+        .unwrap();
+        host.send_scene_ops(
+            &StockSceneOpsEvent {
+                timestamp_ms: 241,
+                operations: (300..370)
+                    .map(|reference| {
+                        op(reference, crate::stock_protocol::STOCK_SCENE_OP_VISIBLE, 0)
+                    })
+                    .collect(),
+            },
+            241,
+        )
+        .unwrap();
+        drive(&mut server, &mut [&mut host, &mut peer], 240, 10);
         let mut late = connect();
         let joined = drive(
             &mut server,
@@ -6289,6 +8363,40 @@ mod tests {
         );
         assert!(joined[2].iter().any(|event| matches!(event,
             StockGameEvent::SceneItemsGrounded { records: observed, spawned: false } if observed == &records)));
+        let late_addr = late.transport().local_addr().unwrap();
+        assert!(server.ready_peers.remove(&late_addr));
+        let bootstrap_ops = joined[2]
+            .iter()
+            .filter_map(|event| match event {
+                StockGameEvent::SceneOps(event) => Some(event.operations.as_slice()),
+                _ => None,
+            })
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        assert!(bootstrap_ops.contains(&op(200, crate::stock_protocol::STOCK_SCENE_OP_POSE, 3)));
+        assert!(bootstrap_ops.contains(&op(
+            200,
+            crate::stock_protocol::STOCK_SCENE_OP_COLLISION,
+            0
+        )));
+        assert!(bootstrap_ops.contains(&op(200, crate::stock_protocol::STOCK_SCENE_OP_VISIBLE, 0)));
+        assert!(bootstrap_ops.contains(&op(200, crate::stock_protocol::STOCK_SCENE_OP_DAMAGE, 80)));
+        assert!(bootstrap_ops.contains(&op(201, crate::stock_protocol::STOCK_SCENE_OP_FRAME, 4)));
+        assert!(!bootstrap_ops.contains(&op(200, crate::stock_protocol::STOCK_SCENE_OP_POSE, 2)));
+        assert!(!bootstrap_ops
+            .iter()
+            .any(|op| op.kind == crate::stock_protocol::STOCK_SCENE_OP_EFFECT));
+        assert!(bootstrap_ops.contains(&op(101, STOCK_SCENE_OP_ACTIVE, 1)));
+        assert!(bootstrap_ops.contains(&op(101, STOCK_SCENE_OP_INTERACTIVE, 1)));
+        assert_eq!(
+            bootstrap_ops
+                .iter()
+                .filter(|op| (300..370).contains(&op.reference))
+                .count(),
+            70,
+            "late-join replay must cross the event-56 packet boundary"
+        );
 
         host.send_role_state(sample_state(0.0, 3), 350).unwrap();
         peer.send_role_state(sample_state(0.0, 3), 350).unwrap();
@@ -6313,6 +8421,27 @@ mod tests {
                 .count(),
             1
         );
+        let mut after_pickup = connect();
+        let joined_after_pickup = drive(
+            &mut server,
+            &mut [&mut host, &mut peer, &mut late, &mut after_pickup],
+            380,
+            30,
+        );
+        assert!(!joined_after_pickup[3].iter().any(|event| matches!(event,
+            StockGameEvent::SceneItemsGrounded { records, .. }
+                if records.iter().any(|record| record.category == 1 && record.item_id == 5))));
+        let claimed_ops = joined_after_pickup[3]
+            .iter()
+            .filter_map(|event| match event {
+                StockGameEvent::SceneOps(event) => Some(event.operations.as_slice()),
+                _ => None,
+            })
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        assert!(claimed_ops.contains(&op(101, STOCK_SCENE_OP_ACTIVE, 0)));
+        assert!(claimed_ops.contains(&op(101, STOCK_SCENE_OP_INTERACTIVE, 0)));
 
         peer.send_scene_ops(
             &StockSceneOpsEvent {
@@ -6322,10 +8451,15 @@ mod tests {
                     op(101, STOCK_SCENE_OP_INTERACTIVE, 1),
                 ],
             },
-            380,
+            410,
         )
         .unwrap();
-        drive(&mut server, &mut [&mut host, &mut peer, &mut late], 380, 20);
+        drive(
+            &mut server,
+            &mut [&mut host, &mut peer, &mut late, &mut after_pickup],
+            410,
+            20,
+        );
         assert!(server
             .active_scene_records()
             .iter()
@@ -6340,11 +8474,19 @@ mod tests {
         for role in server.roles.values_mut() {
             role.health = 1_000.0;
         }
-        peer.send_role_state(sample_state(20.0, 4), 400).unwrap();
-        let healed = drive(&mut server, &mut [&mut host, &mut peer, &mut late], 400, 30);
-        assert!(healed[1].iter().any(|event| matches!(event,
-            StockGameEvent::SceneItemTaken { event, record: Some(_) }
-                if event.category == 2 && event.item_id == 1 && Some(event.actor_id) == peer.actor_id())));
+        peer.send_role_state(sample_state(20.0, 4), 430).unwrap();
+        let healed = drive(
+            &mut server,
+            &mut [&mut host, &mut peer, &mut late, &mut after_pickup],
+            430,
+            30,
+        );
+        for observed in &healed {
+            assert_eq!(observed.iter().filter(|event| matches!(event,
+                StockGameEvent::SceneItemTaken { event, record: Some(_) }
+                    if event.category == 2 && event.item_id == 1 && Some(event.actor_id) == peer.actor_id()
+            )).count(), 1, "food pickup must reach the host, collector and other observer");
+        }
         assert_eq!(
             server
                 .roles
@@ -6356,6 +8498,10 @@ mod tests {
         );
         server.reset_roles_for_round(500);
         assert!(
+            server.scene_state.is_empty(),
+            "next round must not replay the broken box"
+        );
+        assert!(
             server.active_scene_records().is_empty(),
             "new-round boxes must contain hidden items again"
         );
@@ -6366,12 +8512,91 @@ mod tests {
     }
 
     #[test]
+    fn stock_sn21_star_reopens_only_authored_star_items_after_pickup() {
+        use crate::stock_protocol::{
+            StockSceneOperation, STOCK_EFFECT_XSTAR, STOCK_SCENE_OP_EFFECT, STOCK_SCENE_OP_POSE,
+        };
+        let transport = StockServerTransport::bind("127.0.0.1:0", "serverlist", "sn21").unwrap();
+        let mut server = StockGameServer::new(
+            transport,
+            StockHeroCatalog::from_checksums([0x1234_5678; STOCK_HERO_COUNT]),
+        );
+        server.set_stage_id("sn21");
+        let seed = |item_id, repeat_on_xstar| StockAuthoredSceneItem {
+            item_id,
+            category: 2,
+            position: RoleVec3::ZERO,
+            half_extents: [0.25; 3],
+            respawn_ms: Some(99_999_000),
+            scene_reference: Some(item_id),
+            repeat_on_xstar,
+            active: false,
+            interactive: false,
+        };
+        server
+            .replace_authored_scene_items(vec![seed(28, true), seed(33, true), seed(32, false)], 0)
+            .unwrap();
+        let peer = "127.0.0.1:3000".parse().unwrap();
+        let other = "127.0.0.1:3001".parse().unwrap();
+        let mut event = StockSceneOpsEvent {
+            timestamp_ms: 1,
+            operations: vec![
+                StockSceneOperation {
+                    reference: 9,
+                    kind: STOCK_SCENE_OP_EFFECT,
+                    value: STOCK_EFFECT_XSTAR,
+                    extra: 0,
+                },
+                StockSceneOperation {
+                    reference: 9,
+                    kind: STOCK_SCENE_OP_POSE,
+                    value: 1,
+                    extra: 0,
+                },
+            ],
+        };
+        let mut events = Vec::new();
+        server
+            .refresh_xstar_items(peer, &event, 100, &mut events)
+            .unwrap();
+        let first = server.active_scene_records();
+        assert_eq!(
+            first
+                .iter()
+                .map(|record| record.item_id)
+                .collect::<Vec<_>>(),
+            [28, 33]
+        );
+        let item = server.scene_items.get_mut(&first[0].record_id).unwrap();
+        item.active = false;
+        item.respawn_at_ms = Some(99_999_000);
+        server
+            .refresh_xstar_items(peer, &event, 200, &mut events)
+            .unwrap();
+        server
+            .refresh_xstar_items(other, &event, 250, &mut events)
+            .unwrap();
+        assert_eq!(server.active_scene_records(), [first[1]]);
+        event.timestamp_ms += 5_000;
+        server
+            .refresh_xstar_items(other, &event, 5_101, &mut events)
+            .unwrap();
+        let second = server.active_scene_records();
+        assert_eq!(second.len(), 2);
+        assert_eq!(second[1].item_id, 28);
+        assert_ne!(second[1].record_id, first[0].record_id);
+        assert_eq!(events.len(), 3);
+    }
+
+    #[test]
     fn stock_host_bootstraps_takes_and_respawns_authored_scene_item() {
         let transport = StockServerTransport::bind("127.0.0.1:0", "serverlist", "items").unwrap();
         let server_addr = transport.local_addr().unwrap();
         let checksums = [0x1234_5678; STOCK_HERO_COUNT];
         let mut server =
             StockGameServer::new(transport, StockHeroCatalog::from_checksums(checksums));
+        let frame = StockSceneFrame([100.0, 200.0, 50.0]);
+        server.set_scene_frame(frame);
         let mut client = StockGameClient::new(
             StockClientTransport::bind(
                 "127.0.0.1:0",
@@ -6396,6 +8621,7 @@ mod tests {
                     half_extents: [0.25; 3],
                     respawn_ms: Some(50),
                     scene_reference: None,
+                    repeat_on_xstar: false,
                     active: true,
                     interactive: true,
                 }],
@@ -6413,9 +8639,12 @@ mod tests {
                 _ => None,
             })
             .expect("event 29 authored item");
+        assert_eq!(record.position_tenths, [1000, 2000, 500]);
         server.roles.values_mut().next().unwrap().health = 1_000.0;
 
-        client.send_role_state(sample_state(0.0, 1), 120).unwrap();
+        client
+            .send_role_state(frame.to_stock(sample_state(0.0, 1)), 120)
+            .unwrap();
         let picked = drive(&mut server, &mut [&mut client], 120, 30);
         assert!(picked[0].iter().any(|event| matches!(
             event,
@@ -6433,7 +8662,9 @@ mod tests {
         )));
         assert_eq!(server.roles.values().next().unwrap().health, 1_300.0);
 
-        client.send_role_state(sample_state(20.0, 2), 151).unwrap();
+        client
+            .send_role_state(frame.to_stock(sample_state(20.0, 2)), 151)
+            .unwrap();
         let respawned = drive(&mut server, &mut [&mut client], 151, 100);
         assert!(respawned[0].iter().any(|event| matches!(
             event,
@@ -6447,7 +8678,20 @@ mod tests {
 
     #[test]
     fn stock_room_item_rules_filter_only_authored_meteor_res_groups() {
-        assert_eq!(stock_room_item_group(1, 6), Some(StockRoomItemGroup::Hide));
+        assert_eq!(
+            stock_room_item_group(1, 6),
+            Some(StockRoomItemGroup::Health)
+        );
+        assert_eq!(
+            stock_room_item_group(1, 5),
+            Some(StockRoomItemGroup::Update)
+        );
+        assert_eq!(
+            stock_room_item_group(1, 3),
+            Some(StockRoomItemGroup::Special)
+        );
+        assert_eq!(stock_room_item_group(1, 1), Some(StockRoomItemGroup::Hide));
+        assert_eq!(stock_room_item_group(1, 4), None);
         assert_eq!(
             stock_room_item_group(2, 1),
             Some(StockRoomItemGroup::Health)
@@ -6480,6 +8724,7 @@ mod tests {
             half_extents: [0.25; 3],
             respawn_ms: None,
             scene_reference: None,
+            repeat_on_xstar: false,
             active: true,
             interactive: true,
         };
@@ -6492,6 +8737,50 @@ mod tests {
             .map(|item| (item.seed.category, item.seed.item_id))
             .collect::<Vec<_>>();
         assert_eq!(authored, [(2, 6)]);
+    }
+
+    #[test]
+    fn stock_room_item_rules_follow_original_scene_registry_keys() {
+        let transport = StockServerTransport::bind("127.0.0.1:0", "serverlist", "rules").unwrap();
+        let mut server = StockGameServer::new(transport, StockHeroCatalog::bundled_revision());
+        let registry = meteor_asset::res::parse_meteor_res(include_bytes!(
+            "../../../../origin_res/Meteor.res"
+        ))
+        .unwrap();
+        server.set_scene_item_registry(&registry);
+        let seed = |item_id| StockAuthoredSceneItem {
+            item_id,
+            category: 1,
+            position: RoleVec3::ZERO,
+            half_extents: [0.25; 3],
+            respawn_ms: None,
+            scene_reference: None,
+            repeat_on_xstar: false,
+            active: true,
+            interactive: true,
+        };
+        let seeds = vec![seed(1), seed(4), seed(6)];
+        let ids = |server: &StockGameServer| {
+            server
+                .scene_items
+                .values()
+                .map(|item| item.seed.item_id)
+                .collect::<Vec<_>>()
+        };
+        server.set_item_rules(StockRoomItemRules {
+            hide_item: false,
+            ..Default::default()
+        });
+        server
+            .replace_authored_scene_items(seeds.clone(), 0)
+            .unwrap();
+        assert_eq!(ids(&server), [4, 6]);
+        server.set_item_rules(StockRoomItemRules {
+            health_item: false,
+            ..Default::default()
+        });
+        server.replace_authored_scene_items(seeds, 1).unwrap();
+        assert_eq!(ids(&server), [1, 4]);
     }
 
     #[test]
@@ -6544,6 +8833,196 @@ mod tests {
     }
 
     #[test]
+    fn stock_dynamic_pickup_uses_a_strict_sphere_without_changing_authored_bounds() {
+        let radius = STOCK_SCENE_PICKUP_RADIUS;
+        let mut item = StockHostedSceneItem {
+            seed: StockAuthoredSceneItem {
+                item_id: 5,
+                category: 1,
+                position: RoleVec3 {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                half_extents: [0.0; 3],
+                respawn_ms: None,
+                scene_reference: None,
+                repeat_on_xstar: false,
+                active: true,
+                interactive: true,
+            },
+            record_id: 1,
+            active: true,
+            script_active: true,
+            interactive: true,
+            respawn_at_ms: None,
+            expires_at_ms: Some(30_000),
+            authored: false,
+        };
+        let diagonal = RoleVec3 {
+            x: radius * 0.8,
+            y: 0.0,
+            z: radius * 0.8,
+        };
+        assert!(!role_touches_scene_item(diagonal, &item));
+        assert!(!role_touches_scene_item(
+            RoleVec3 {
+                x: radius,
+                y: 0.0,
+                z: 0.0
+            },
+            &item
+        ));
+        assert!(role_touches_scene_item(
+            RoleVec3 {
+                x: 0.0,
+                y: radius * 0.99,
+                z: 0.0
+            },
+            &item
+        ));
+        assert!(!role_touches_scene_item(
+            RoleVec3 {
+                x: 0.0,
+                y: radius,
+                z: 0.0
+            },
+            &item
+        ));
+        item.authored = true;
+        item.expires_at_ms = None;
+        assert!(role_touches_scene_item(diagonal, &item));
+        assert!(!role_touches_scene_item(
+            RoleVec3 {
+                x: 0.0,
+                y: STOCK_SCENE_PICKUP_HEIGHT,
+                z: 0.0
+            },
+            &item
+        ));
+        assert!(role_touches_scene_item(
+            RoleVec3 {
+                x: 0.0,
+                y: -STOCK_SCENE_PICKUP_HEIGHT,
+                z: 0.0
+            },
+            &item
+        ));
+    }
+
+    #[test]
+    fn stock_dynamic_drop_expires_after_thirty_seconds_without_a_pickup() {
+        let transport = StockServerTransport::bind("127.0.0.1:0", "serverlist", "expiry").unwrap();
+        let address = transport.local_addr().unwrap();
+        let mut server = StockGameServer::new(transport, StockHeroCatalog::bundled_revision());
+        let mut client = StockGameClient::for_bundled_revision(
+            StockClientTransport::bind("127.0.0.1:0", address, StockConnectRecord::for_open_room())
+                .unwrap(),
+            0,
+            0,
+            6,
+        )
+        .unwrap();
+        drive(&mut server, &mut [&mut client], 0, 100);
+        let peer = server.transport.peer_addresses()[0];
+        let request = StockSceneItemSpawnRequest::from_role_position(
+            5,
+            1,
+            RoleVec3 {
+                x: 100.0,
+                y: 0.0,
+                z: 100.0,
+            },
+        );
+        server
+            .handle_application(
+                peer,
+                STOCK_REQUEST_SPAWN_SCENE_ITEM,
+                &request.encode(),
+                100,
+                &mut Vec::new(),
+            )
+            .unwrap();
+        drive(&mut server, &mut [&mut client], 101, 30);
+        let record_id = *server.scene_items.keys().next().unwrap();
+        assert!(client.scene_items.contains_key(&record_id));
+
+        let mut authored = server.scene_items[&record_id];
+        authored.record_id = 900;
+        authored.authored = true;
+        authored.expires_at_ms = None;
+        server.scene_items.insert(900, authored);
+        for now in (5_000..=30_000).step_by(5_000) {
+            drive(&mut server, &mut [&mut client], now, 3);
+        }
+        server.update_scene_items(30_100, &mut Vec::new()).unwrap();
+        assert!(
+            server.scene_items.contains_key(&record_id),
+            "the EXE compares strictly greater than 30s"
+        );
+        let events = drive(&mut server, &mut [&mut client], 30_101, 100);
+        assert!(events[0].iter().any(|event| matches!(event,
+            StockGameEvent::SceneItemRemoved(removed)
+                if removed.record_id == record_id && removed.category == 1 && removed.item_id == 5)));
+        assert!(events[0]
+            .iter()
+            .all(|event| !matches!(event, StockGameEvent::SceneItemTaken { .. })));
+        assert!(!server.scene_items.contains_key(&record_id));
+        assert!(!client.scene_items.contains_key(&record_id));
+        assert!(server.scene_items.contains_key(&900));
+    }
+
+    #[test]
+    fn stock_item15_and_item16_pulse_without_an_instant_award_or_refresh_reset() {
+        let transport =
+            StockServerTransport::bind("127.0.0.1:0", "serverlist", "periodic").unwrap();
+        let address = transport.local_addr().unwrap();
+        let mut server = StockGameServer::new(transport, StockHeroCatalog::bundled_revision());
+        let mut client = StockGameClient::for_bundled_revision(
+            StockClientTransport::bind("127.0.0.1:0", address, StockConnectRecord::for_open_room())
+                .unwrap(),
+            0,
+            0,
+            6,
+        )
+        .unwrap();
+        drive(&mut server, &mut [&mut client], 0, 100);
+        let peer = server.transport.peer_addresses()[0];
+        let role = server.roles.get_mut(&peer).unwrap();
+        role.health = 1000.0;
+        role.anger = 0.0;
+        apply_stock_item_effect(role, 32, 100);
+        apply_stock_item_effect(role, 33, 100);
+        assert_eq!((role.health, role.anger), (1000.0, 0.0));
+        assert_eq!(role.active_item_effects[&32].expires_at_ms, 10_000_000);
+        server.update_item_effects(299, &mut Vec::new()).unwrap();
+        assert_eq!(server.roles[&peer].health, 1000.0);
+        server.update_item_effects(300, &mut Vec::new()).unwrap();
+        assert_eq!(
+            (server.roles[&peer].health, server.roles[&peer].anger),
+            (1050.0, 1.0)
+        );
+        let role = server.roles.get_mut(&peer).unwrap();
+        apply_stock_item_effect(role, 32, 350);
+        apply_stock_item_effect(role, 33, 350);
+        assert_eq!(role.active_item_effects[&32].next_tick_ms, Some(500));
+        assert_eq!(role.active_item_effects.len(), 2);
+        server.update_item_effects(500, &mut Vec::new()).unwrap();
+        assert_eq!(
+            (server.roles[&peer].health, server.roles[&peer].anger),
+            (1100.0, 2.0)
+        );
+        let role = server.roles.get_mut(&peer).unwrap();
+        role.health = role.max_health - 10.0;
+        role.anger = 99.0;
+        server.update_item_effects(700, &mut Vec::new()).unwrap();
+        assert_eq!(
+            (server.roles[&peer].health, server.roles[&peer].anger),
+            (server.roles[&peer].max_health, 100.0)
+        );
+    }
+
+    #[test]
     fn stock_host_item_effects_update_vitals_combat_bonus_and_expire() {
         let transport = StockServerTransport::bind("127.0.0.1:0", "serverlist", "effects").unwrap();
         let server_addr = transport.local_addr().unwrap();
@@ -6567,6 +9046,7 @@ mod tests {
         drive(&mut server, &mut [&mut client], 0, 100);
         let role = server.roles.values_mut().next().unwrap();
         role.health = 1_000.0;
+        role.anger = 10.0;
         apply_stock_item_effect(role, 2, 100);
         apply_stock_item_effect(role, 4, 100);
         apply_stock_item_effect(role, 18, 100);
@@ -6585,6 +9065,61 @@ mod tests {
         assert_eq!((role.health, role.max_health), (940.0, 2_000.0));
         assert_eq!(role.item_attack_bonus(), 0);
         assert!(role.active_item_effects.is_empty());
+    }
+
+    #[test]
+    fn stock_gun_ultimate_uses_both_equipped_records_and_accepts_ray_and_effect() {
+        let transport = StockServerTransport::bind("127.0.0.1:0", "serverlist", "gun").unwrap();
+        let address = transport.local_addr().unwrap();
+        let checksums = [0x1234_5678; STOCK_HERO_COUNT];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        let resources =
+            meteor_asset::res::parse_meteor_res(&std::fs::read(root.join("Meteor.res")).unwrap())
+                .unwrap()
+                .combat_table();
+        let mut server = StockGameServer::with_combat_resources(
+            transport,
+            StockHeroCatalog::from_checksums(checksums),
+            resources,
+        );
+        let connect = |hero| {
+            StockGameClient::new(
+                StockClientTransport::bind(
+                    "127.0.0.1:0",
+                    address,
+                    StockConnectRecord::for_open_room(),
+                )
+                .unwrap(),
+                StockEnterRoleRequest {
+                    hero,
+                    camp: 0,
+                    hero_checksum: checksums[hero as usize],
+                },
+                39,
+            )
+        };
+        let mut attacker = connect(0);
+        let mut target = connect(1);
+        drive(&mut server, &mut [&mut attacker, &mut target], 0, 100);
+        let target_id = target.actor_id().unwrap();
+        let hit = StockHitRequest {
+            target_actor_id: target_id,
+            hit_word: 217,
+            target_pose_word: 95,
+            moves_word: 0,
+            values_word: 0,
+        };
+        for (now, remaining) in [(2_100, 1_780.0), (2_150, 1_560.0)] {
+            attacker.send_hit(hit, now).unwrap();
+            drive(&mut server, &mut [&mut attacker, &mut target], now, 20);
+            let role = server
+                .roles
+                .values()
+                .find(|role| role.actor_id == target_id)
+                .unwrap();
+
+            assert_eq!(role.health, remaining);
+        }
     }
 
     #[test]
@@ -6734,7 +9269,7 @@ mod tests {
         assert_eq!(
             server.roles.values().next().unwrap().weapon_item_id,
             Some(6),
-            "zero-length request 19 commits the alternate slot"
+            "request 6 commits the alternate slot"
         );
         let mut switched_drop = g;
         switched_drop.item_id = 5;
@@ -6742,7 +9277,7 @@ mod tests {
         client.send_weapon_drop(switched_drop, 5_290).unwrap();
         drive(&mut server, &mut [&mut client], 5_290, 30);
         let role = server.roles.values().next().unwrap();
-        assert_eq!(role.weapon_slots, [None, Some(6)]);
+        assert_eq!(role.weapon_slots, [Some(6), None]);
         assert_eq!(
             role.weapon_item_id,
             Some(6),
@@ -6754,6 +9289,57 @@ mod tests {
         assert!(!client
             .confirm_weapon_drop_collision(unlanded_id, wall, 10_321)
             .unwrap());
+    }
+
+    #[test]
+    fn stock_weapon_switch_broadcasts_item_identity_to_observer() {
+        let transport = StockServerTransport::bind("127.0.0.1:0", "serverlist", "equip").unwrap();
+        let server_addr = transport.local_addr().unwrap();
+        let checksums = [0x1234_5678; STOCK_HERO_COUNT];
+        let mut server =
+            StockGameServer::new(transport, StockHeroCatalog::from_checksums(checksums));
+        let make_client = || {
+            StockGameClient::new(
+                StockClientTransport::bind(
+                    "127.0.0.1:0",
+                    server_addr,
+                    StockConnectRecord::for_open_room(),
+                )
+                .unwrap(),
+                StockEnterRoleRequest {
+                    hero: 0,
+                    camp: 0,
+                    hero_checksum: checksums[0],
+                },
+                6,
+            )
+        };
+        let mut owner = make_client();
+        let mut observer = make_client();
+        drive(&mut server, &mut [&mut owner, &mut observer], 0, 100);
+        let actor_id = owner.actor_id().unwrap();
+
+        server
+            .roles
+            .values_mut()
+            .find(|role| role.actor_id == actor_id)
+            .unwrap()
+            .weapon_slots = [Some(6), Some(14)];
+        for (time, item, spare) in [(100, 14, 6), (150, 6, 14), (200, 14, 6)] {
+            owner.send_weapon_switch(item, time).unwrap();
+            let events = drive(&mut server, &mut [&mut owner, &mut observer], time, 30);
+            assert!(events[1].iter().any(|event| matches!(event,
+                StockGameEvent::WeaponEquipped(e) if e.actor_id == actor_id && e.weapon_item_id == item
+            )), "observer must receive reliable equipment identity");
+            assert_eq!(observer.weapons[&actor_id], item);
+            let role = server
+                .roles
+                .values()
+                .find(|role| role.actor_id == actor_id)
+                .unwrap();
+            assert_eq!(role.weapon_item_id, Some(item));
+            assert_eq!(role.weapon_slots, [Some(item), Some(spare)]);
+        }
     }
 
     #[test]
@@ -6863,6 +9449,7 @@ mod tests {
                 rule,
                 CombatResourceTable::default(),
             );
+            server.set_spawn_pad_counts([16, 8, 8]);
             server.set_round_limit(2);
             server.set_round_time_minutes(1);
             let mut a = StockGameClient::for_bundled_revision(
@@ -6891,7 +9478,7 @@ mod tests {
             .unwrap();
             drive(&mut server, &mut [&mut a, &mut b], 0, 100);
             for now in (5_000..=55_000).step_by(5_000) {
-                drive(&mut server, &mut [&mut a, &mut b], now, 2);
+                drive(&mut server, &mut [&mut a, &mut b], now, 10);
             }
             let victim = b.actor_id().unwrap();
             server
@@ -6951,6 +9538,13 @@ mod tests {
                         .count(),
                     1
                 );
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|e| matches!(e, StockGameEvent::SpawnPad(Some(_))))
+                        .count(),
+                    1
+                );
             }
             assert!(!server.round_ended);
             assert!(server.roles.values().all(|r| r.health == r.max_health));
@@ -6987,6 +9581,8 @@ mod tests {
             seen.extend(drive(&mut server, &mut [&mut client], now, 1).remove(0));
         }
 
+        seen.extend(drive(&mut server, &mut [&mut client], 15_001, 30).remove(0));
+
         assert_eq!(server.role_rate(), 17);
         assert_eq!(client.role_rate(), 17);
         assert!(seen
@@ -6996,9 +9592,17 @@ mod tests {
 
     #[test]
     fn rule2_pickup_and_safe_zone_delivery_end_the_round() {
-        for custom in [false, true] {
-            let definition =
-                std::sync::Arc::new(crate::escort_definition::tests::authored_definition(custom));
+        for (custom, stage, camp) in [
+            (false, "sn03", 1),
+            (true, "sn03", 1),
+            (false, "sn02", 1),
+            (false, "sn02", 2),
+        ] {
+            let definition = std::sync::Arc::new(if stage == "sn02" {
+                crate::escort_definition::tests::original_definition(stage)
+            } else {
+                crate::escort_definition::tests::authored_definition(custom)
+            });
             let transport =
                 StockServerTransport::bind("127.0.0.1:0", "serverlist", "escort").unwrap();
             let server_addr = transport.local_addr().unwrap();
@@ -7020,7 +9624,7 @@ mod tests {
                 .unwrap(),
                 StockEnterRoleRequest {
                     hero: 0,
-                    camp: 1,
+                    camp,
                     hero_checksum: checksums[0],
                 },
                 6,
@@ -7034,7 +9638,7 @@ mod tests {
                 .unwrap(),
                 StockEnterRoleRequest {
                     hero: 1,
-                    camp: 2,
+                    camp: 3 - camp,
                     hero_checksum: checksums[1],
                 },
                 5,
@@ -7096,28 +9700,43 @@ mod tests {
             delivered_state.state_words.state_word1 = 2;
             delivered_state.state_words.pose_sequence = 2;
             client1.send_role_state(delivered_state, 400).unwrap();
-            let delivered = drive(&mut server, &mut [&mut client1, &mut client2], 400, 100);
+            let early = drive(&mut server, &mut [&mut client1, &mut client2], 400, 100);
+            assert!(
+                !server.round_ended,
+                "delivery is gated for the first three seconds"
+            );
+            assert!(early
+                .iter()
+                .flatten()
+                .all(|event| !matches!(event, StockGameEvent::MatchEnd)));
+            let delivered = drive(&mut server, &mut [&mut client1, &mut client2], 3_100, 100);
             for events in delivered {
                 assert!(events.iter().any(|event| matches!(
                     event,
                     StockGameEvent::TeamScore(StockTeamScoreEvent {
-                        team1_wins: 1,
-                        team2_wins: 0,
-                    })
+                        team1_wins,
+                        team2_wins,
+                    }) if *team1_wins == u32::from(camp == 1) && *team2_wins == u32::from(camp == 2)
                 )));
                 assert!(events
                     .iter()
                     .any(|event| matches!(event, StockGameEvent::MatchEnd)));
             }
-            assert_eq!(server.team_wins(), [1, 0]);
+            assert_eq!(
+                server.team_wins(),
+                [u32::from(camp == 1), u32::from(camp == 2)]
+            );
         }
     }
 
     #[test]
     fn rule2_death_drops_then_timeout_and_disconnect_return_the_flag() {
-        for custom in [false, true] {
-            let definition =
-                std::sync::Arc::new(crate::escort_definition::tests::authored_definition(custom));
+        for (custom, stage) in [(false, "sn03"), (true, "sn03"), (false, "sn02")] {
+            let definition = std::sync::Arc::new(if stage == "sn02" {
+                crate::escort_definition::tests::original_definition(stage)
+            } else {
+                crate::escort_definition::tests::authored_definition(custom)
+            });
             let transport =
                 StockServerTransport::bind("127.0.0.1:0", "serverlist", "escort lifecycle")
                     .unwrap();
@@ -7289,8 +9908,7 @@ mod tests {
             |event| matches!(event, StockGameEvent::SceneOps(event) if event == &transaction)
         ));
 
-        assert!(server.complete_siege_objective(2, 400).unwrap().is_empty());
-        server.set_stage_id("sn04");
+        server.set_stage_id("custom_siege");
         let host_events = server.complete_siege_objective(2, 401).unwrap();
         assert!(host_events.iter().any(|event| matches!(
             event,
@@ -7632,4 +10250,8 @@ mod tests {
         )));
         assert_eq!(server.team_wins(), [1, 0]);
     }
+    include!("stock_game/rebalance_tests.rs");
+    include!("stock_game/spawn_tests.rs");
+    include!("stock_game/scene_sync_tests.rs");
+    include!("stock_game/runtime_sync_tests.rs");
 }

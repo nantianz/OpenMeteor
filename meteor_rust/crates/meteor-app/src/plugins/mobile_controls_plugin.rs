@@ -508,6 +508,7 @@ fn spawn_mobile_layout_editor(
             bevy::ui::FocusPolicy::Block,
             ZIndex(500),
             MobileLayoutEditorRoot,
+            super::ui_plugin::pause_backdrop::PauseForeground,
         ))
         .with_children(|root| {
             root.spawn((
@@ -1354,8 +1355,11 @@ impl Plugin for MobileControlsPlugin {
     }
 }
 
-fn mobile_controls_visible(config: Res<MobileControlsConfig>) -> bool {
-    config.visible
+fn mobile_controls_visible(
+    config: Res<MobileControlsConfig>,
+    replay: Option<Res<crate::plugins::replay_plugin::MrcPlayback>>,
+) -> bool {
+    config.visible && !replay.is_some_and(|replay| replay.active)
 }
 
 fn mobile_control_size_factor(width: f32, height: f32) -> f32 {
@@ -2380,9 +2384,10 @@ fn release_all_mobile_inputs(
 
 fn show_mobile_controls(
     config: Res<MobileControlsConfig>,
+    replay: Option<Res<crate::plugins::replay_plugin::MrcPlayback>>,
     mut roots: Query<&mut Visibility, With<MobileControlsRoot>>,
 ) {
-    let visibility = if config.visible {
+    let visibility = if config.visible && !replay.is_some_and(|replay| replay.active) {
         Visibility::Visible
     } else {
         Visibility::Hidden
@@ -2437,7 +2442,10 @@ fn sync_touch_controls_visibility(
     windows: Query<&Window>,
     ui_scale: Res<EffectiveUiScale>,
     safe_area: Option<Res<SafeAreaInsets>>,
-    app_state: Res<State<AppState>>,
+    (app_state, replay): (
+        Res<State<AppState>>,
+        Option<Res<crate::plugins::replay_plugin::MrcPlayback>>,
+    ),
     keymap: Res<Keymap>,
     mut keys: ResMut<ButtonInput<KeyCode>>,
     mut mouse: ResMut<ButtonInput<MouseButton>>,
@@ -2453,7 +2461,7 @@ fn sync_touch_controls_visibility(
         return;
     }
     config.visible = visible;
-    if visible {
+    if visible && !replay.is_some_and(|replay| replay.active) {
         if *app_state.get() == AppState::Playing && roots.is_empty() {
             if let (Some(font), Ok(window)) = (font, windows.single()) {
                 spawn_mobile_controls(

@@ -21,6 +21,8 @@ rand = "0.8"
 
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+sha2 = "0.10"
+flate2 = "1"
 
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

@@ -377,6 +377,7 @@ mod tests {
             Some(WeaponStats {
                 attack: 110,
                 defense: 15,
+                speed_percent: 100,
             })
         );
     }

@@ -24,6 +24,9 @@ pub const HUD_SURFACE: Color = Color::srgba(0.055, 0.063, 0.078, 0.84);
 pub const HEALTH: Color = Color::srgb(0.73, 0.20, 0.21);
 pub const ANGER: Color = Color::srgb(0.72, 0.58, 0.30);
 
+#[derive(Component)]
+pub(crate) struct CinematicBackdrop;
+
 #[derive(Resource)]
 pub struct CinematicArt {
     pub image: Handle<Image>,
@@ -177,6 +180,7 @@ fn background_art(
             With<NetRoomRoot>,
             With<RoomRoot>,
             With<SettingsRoot>,
+            With<CinematicBackdrop>,
         )>,
     >,
 ) {

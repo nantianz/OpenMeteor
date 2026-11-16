@@ -6,6 +6,32 @@ use meteor_asset::pak::PakArchive;
 use meteor_asset::texture::decode_image;
 use std::collections::HashMap;
 
+#[derive(Resource, Default)]
+pub struct QualityTextureHandles(pub Vec<Handle<Image>>);
+
+pub fn register_quality_texture(handles: &mut QualityTextureHandles, handle: Handle<Image>) {
+    handles.0.push(handle);
+}
+
+pub fn sync_quality_texture_samplers(
+    settings: Res<crate::app_state::Settings>,
+    handles: Res<QualityTextureHandles>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    if !settings.is_changed() {
+        return;
+    }
+    for handle in &handles.0 {
+        if let Some(mut image) = images.get_mut(handle) {
+            apply_texture_quality(&mut image, settings.texture_quality);
+        }
+    }
+}
+
+pub fn clear_quality_texture_handles(mut handles: ResMut<QualityTextureHandles>) {
+    handles.0.clear();
+}
+
 pub fn pak_read_ci(pak: &PakArchive, prefix: &str, name: &str) -> Option<Vec<u8>> {
     let prefixed = format!("{prefix}/{name}");
     if let Some(bytes) = pak.read_entry(&prefixed) {
@@ -199,54 +225,6 @@ impl PakCache {
         let refs: Vec<&PakArchive> = chain.iter().collect();
         resolve_pak_texture_exact(&refs, &file)
     }
-
-    pub fn resolve_mask(
-        &mut self,
-        root: &std::path::Path,
-        scope: &str,
-        name: &str,
-    ) -> Option<(String, Vec<u8>)> {
-        let (effective_scope, file) = texture_scope_and_name(scope, name);
-        let stem = file
-            .rsplit_once('.')
-            .map_or(file.as_str(), |(stem, _)| stem);
-        let candidates = [format!("k{stem}.bmp"), format!("_k{stem}.bmp")];
-
-        let runtime_mask = meteor_asset::runtime_assets::read_entry(&format!(
-            "texture-masks/{effective_scope}.json"
-        ))
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .and_then(|json| {
-            json.get("masks")
-                .and_then(serde_json::Value::as_array)
-                .cloned()
-        })
-        .is_some_and(|masks| {
-            masks.iter().any(|mask| {
-                mask.as_str()
-                    .is_some_and(|mask| mask.eq_ignore_ascii_case(stem))
-            })
-        });
-        if runtime_mask {
-            let runtime_scopes: Vec<&str> = if is_stage_scope(&effective_scope) {
-                vec![effective_scope.as_str(), "patch", "ctexture", "ptexture"]
-            } else {
-                vec!["patch", "ctexture", "ptexture"]
-            };
-
-            for scope in &runtime_scopes {
-                for candidate in &candidates {
-                    if let Some(bytes) = resolve_runtime_texture_exact(&[scope], candidate) {
-                        return Some((candidate.clone(), bytes));
-                    }
-                }
-            }
-        }
-
-        let chain = self.chain(root, &effective_scope);
-        let refs: Vec<&PakArchive> = chain.iter().collect();
-        resolve_mask_in_chain(&refs, stem)
-    }
 }
 
 fn is_stage_scope(scope: &str) -> bool {
@@ -266,39 +244,6 @@ fn texture_scope_and_name(scope: &str, name: &str) -> (String, String) {
         }
     }
     (scope.to_ascii_lowercase(), normalized)
-}
-
-fn is_8bit_bmp(bytes: &[u8]) -> bool {
-    bytes.len() > 30 && bytes.starts_with(b"BM") && u16::from_le_bytes([bytes[28], bytes[29]]) == 8
-}
-
-fn pak_has_colour_stem(pak: &PakArchive, stem: &str) -> bool {
-    pak.entries().any(|entry| {
-        let base = entry.name.rsplit('/').next().unwrap_or(&entry.name);
-        base.rsplit_once('.')
-            .is_some_and(|(s, _)| !s.is_empty() && s.eq_ignore_ascii_case(stem))
-    })
-}
-
-fn resolve_mask_in_chain(refs: &[&PakArchive], stem: &str) -> Option<(String, Vec<u8>)> {
-    let candidates = [format!("k{stem}.bmp"), format!("_k{stem}.bmp")];
-    let gated = refs.iter().any(|pak| {
-        pak_has_colour_stem(pak, stem)
-            && candidates
-                .iter()
-                .any(|candidate| find_pak_entry(pak, candidate).is_some_and(|b| is_8bit_bmp(&b)))
-    });
-    if !gated {
-        return None;
-    }
-    for pak in refs {
-        for candidate in &candidates {
-            if let Some(bytes) = find_pak_entry(pak, candidate) {
-                return Some((candidate.clone(), bytes));
-            }
-        }
-    }
-    None
 }
 
 pub fn image_handle(images: &mut Assets<Image>, bytes: &[u8]) -> Option<Handle<Image>> {
@@ -396,14 +341,51 @@ pub fn image_handle_with_legacy_style(
     luminance_fallback: bool,
     color_key: bool,
 ) -> Option<Handle<Image>> {
+    let color = decode_legacy_style(color_bytes, companion_bytes, luminance_fallback, color_key)?;
+    Some(image_from_decoded(images, &color))
+}
+
+fn decode_legacy_style(
+    color_bytes: &[u8],
+    companion_bytes: Option<&[u8]>,
+    luminance_fallback: bool,
+    color_key: bool,
+) -> Option<meteor_asset::texture::DecodedImage> {
     let mut color = decode_image(color_bytes).ok()?;
     let companion = companion_bytes.and_then(|bytes| decode_image(bytes).ok());
     apply_legacy_alpha(&mut color, companion.as_ref(), luminance_fallback);
-
     if color_key && companion.is_none() {
         punch_color_key(&mut color.rgba, 8, 26);
     }
-    Some(image_from_decoded(images, &color))
+    Some(color)
+}
+
+pub(crate) fn hd_image_handle_with_legacy_style_quality(
+    images: &mut Assets<Image>,
+    hd_bytes: &[u8],
+    original_bytes: Option<&[u8]>,
+    companion_bytes: Option<&[u8]>,
+    luminance_fallback: bool,
+    color_key: bool,
+    quality: u8,
+) -> Option<Handle<Image>> {
+    let mut hd = decode_image(hd_bytes).ok()?;
+    if let Some(bytes) = original_bytes {
+        let original = decode_legacy_style(bytes, companion_bytes, luminance_fallback, color_key)?;
+        for y in 0..hd.height {
+            let source_y =
+                (u64::from(y) * u64::from(original.height) / u64::from(hd.height)) as u32;
+            for x in 0..hd.width {
+                let source_x =
+                    (u64::from(x) * u64::from(original.width) / u64::from(hd.width)) as u32;
+                hd.rgba[((y * hd.width + x) * 4 + 3) as usize] =
+                    original.rgba[((source_y * original.width + source_x) * 4 + 3) as usize];
+            }
+        }
+    } else if companion_bytes.is_some() || luminance_fallback || color_key {
+        return None;
+    }
+    Some(image_from_decoded_with_quality(images, &hd, quality))
 }
 
 pub fn image_handle_with_legacy_style_quality(
@@ -414,13 +396,7 @@ pub fn image_handle_with_legacy_style_quality(
     color_key: bool,
     texture_quality: u8,
 ) -> Option<Handle<Image>> {
-    let mut color = decode_image(color_bytes).ok()?;
-    let companion = companion_bytes.and_then(|bytes| decode_image(bytes).ok());
-    apply_legacy_alpha(&mut color, companion.as_ref(), luminance_fallback);
-
-    if color_key && companion.is_none() {
-        punch_color_key(&mut color.rgba, 8, 26);
-    }
+    let color = decode_legacy_style(color_bytes, companion_bytes, luminance_fallback, color_key)?;
     Some(image_from_decoded_with_quality(
         images,
         &color,
@@ -475,7 +451,7 @@ pub fn apply_texture_quality(image: &mut Image, texture_quality: u8) {
         } else if texture_quality == 1 {
             2
         } else {
-            8
+            16
         },
         ..Default::default()
     });
@@ -621,7 +597,7 @@ mod tests {
     #[test]
     fn texture_quality_maps_to_web_sampler_profiles() {
         for (quality, filter, anisotropy, lod_max) in [
-            (0, ImageFilterMode::Linear, 8, 32.0),
+            (0, ImageFilterMode::Linear, 16, 32.0),
             (1, ImageFilterMode::Linear, 2, 32.0),
             (2, ImageFilterMode::Nearest, 1, 0.0),
         ] {
@@ -726,61 +702,6 @@ mod tests {
             texture_scope_and_name("sn01", "plain.jpg"),
             ("sn01".to_string(), "plain.jpg".to_string())
         );
-    }
-
-    #[test]
-    fn mask_requires_same_pak_colour_pair() {
-        let stage = zip_pak(&[("sn09/wpnFR02.jpg", b"colour")]);
-        let ctex = zip_pak(&[("ctexture/kwpnFR02.bmp", &bmp8()[..])]);
-        let chain = [&stage, &ctex];
-        assert_eq!(resolve_mask_in_chain(&chain, "wpnFR02"), None);
-    }
-
-    #[test]
-    fn mask_pairs_with_colour_in_same_pak() {
-        let stage = zip_pak(&[
-            ("sn03/sn3tr.JPG", b"colour"),
-            ("sn03/ksn3tr.bmp", &bmp8()[..]),
-        ]);
-        let chain = [&stage];
-        let (name, bytes) = resolve_mask_in_chain(&chain, "sn3tr").expect("paired mask");
-        assert_eq!(name, "ksn3tr.bmp");
-        assert_eq!(bytes, bmp8());
-    }
-
-    #[test]
-    fn mask_requires_8bit_bmp() {
-        let stage = zip_pak(&[
-            ("sn03/mtr4.jpg", b"colour"),
-            ("sn03/kmtr4.bmp", &bmp24()[..]),
-        ]);
-        let chain = [&stage];
-        assert_eq!(resolve_mask_in_chain(&chain, "mtr4"), None);
-    }
-
-    #[test]
-    fn mask_fetch_is_pak_outer_then_k_before_underscore_k() {
-        let b = zip_pak(&[("sn03/ksn3tr.bmp", b"mask-b")]);
-
-        let a = zip_pak(&[("sn03/sn3tr.jpg", b"c"), ("sn03/_ksn3tr.bmp", &bmp8()[..])]);
-        let chain = [&a, &b];
-        let (name, bytes) = resolve_mask_in_chain(&chain, "sn3tr").expect("mask");
-        assert_eq!(name, "_ksn3tr.bmp");
-        assert_eq!(bytes, bmp8());
-    }
-
-    fn bmp8() -> Vec<u8> {
-        let mut bytes = vec![0u8; 54];
-        bytes[0] = b'B';
-        bytes[1] = b'M';
-        bytes[28..30].copy_from_slice(&8u16.to_le_bytes());
-        bytes
-    }
-
-    fn bmp24() -> Vec<u8> {
-        let mut bytes = bmp8();
-        bytes[28..30].copy_from_slice(&24u16.to_le_bytes());
-        bytes
     }
 
     #[test]

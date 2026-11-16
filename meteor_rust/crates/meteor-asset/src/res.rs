@@ -91,6 +91,8 @@ pub struct MeteorRes {
 pub struct WeaponCombatStats {
     pub attack: i32,
     pub defense: i32,
+
+    pub speed_percent: i32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -98,6 +100,8 @@ pub struct HitStatusEffect {
     pub id: u32,
     pub duration: f32,
     pub tick_every: f32,
+
+    pub defer_first_tick: bool,
     pub health: i32,
     pub anger: i32,
     pub speed_percent: Option<i32>,
@@ -190,6 +194,7 @@ impl MeteorRes {
                 id: record.id,
                 duration: record.prop_seed_value(1).unwrap_or(0).max(0) as f32 / 10.0,
                 tick_every: 0.0,
+                defer_first_tick: false,
                 health: 0,
                 anger: 0,
                 speed_percent: None,
@@ -207,14 +212,18 @@ impl MeteorRes {
                     continue;
                 }
                 match (segment.property(), segment.operation()) {
-                    (2, 0) => {
-                        effect.health += segment.value();
+                    (2 | 6, 0) => {
+                        if segment.property() == 2 {
+                            effect.health += segment.value();
+                        } else {
+                            effect.anger += segment.value();
+                        }
 
                         effect.tick_every = segment.words[3].max(0) as f32;
-                    }
-                    (6, 0) => {
-                        effect.anger += segment.value();
-                        effect.tick_every = segment.words[3].max(0) as f32;
+                        if effect.duration > 0.0 && segment.words[3] == 0 && segment.words[4] >= 0 {
+                            effect.tick_every = 0.2;
+                            effect.defer_first_tick = true;
+                        }
                     }
                     (3, 0) => effect.attack_bonus += segment.value(),
                     (4, 0) => effect.defense_bonus += segment.value(),
@@ -265,7 +274,22 @@ impl MeteorRes {
                                 .then_some(segment.value())
                         })
                         .unwrap_or_default();
-                    let stats = WeaponCombatStats { attack, defense };
+                    let speed_percent = 100
+                        + record
+                            .segments
+                            .iter()
+                            .filter(|segment| {
+                                segment.active_for_combat()
+                                    && segment.property() == 5
+                                    && segment.operation() == 1
+                            })
+                            .map(|segment| segment.value() - 100)
+                            .sum::<i32>();
+                    let stats = WeaponCombatStats {
+                        attack,
+                        defense,
+                        speed_percent,
+                    };
                     table.weapon_stats_by_id.insert(weapon_id, stats);
                     if !record.name.is_empty() {
                         table
@@ -474,12 +498,34 @@ mod tests {
         let table = parsed.combat_table();
         assert_eq!(table.pose_attack_percent_count(), 264);
         assert_eq!(table.weapon_stats_count(), 59);
+        for record in parsed.records.iter().filter(|record| record.category == 1) {
+            let variant = record.name.split('_').nth(1).unwrap().as_bytes()[0] - b'0';
+            let expected = match record.name.as_str() {
+                "W3_5" => 110,
+                "W6_5" => 100,
+                _ => [100, 90, 90, 120, 110][usize::from(variant)],
+            };
+            assert_eq!(
+                table.weapon_stats(record.id as u8).unwrap().speed_percent,
+                expected,
+                "{}",
+                record.name
+            );
+            assert_eq!(
+                table
+                    .weapon_stats_for_model(&record.name)
+                    .unwrap()
+                    .speed_percent,
+                expected
+            );
+        }
         assert_eq!(table.pose_attack_percent(303), Some(80.0));
         assert_eq!(
             table.weapon_stats_for_model("W0_3"),
             Some(WeaponCombatStats {
                 attack: 95,
                 defense: 7,
+                speed_percent: 120,
             })
         );
 
@@ -508,6 +554,34 @@ mod tests {
         let hot = table.status_effect_for_model("hot").unwrap();
         assert_eq!(hot.anger, 1);
         assert_eq!(hot.tick_every, 1.0);
+        for (model, id, health, anger) in [("item15", 32, 50, 0), ("item16", 33, 0, 1)] {
+            let effect = table.status_effect_for_model(model).unwrap();
+            assert_eq!(effect.id, id);
+            assert_eq!(effect.duration, 9999.9);
+            assert_eq!(effect.tick_every, 0.2);
+            assert!(effect.defer_first_tick);
+            assert_eq!((effect.health, effect.anger), (health, anger));
+        }
+        let immediate = table.status_effect_for_model("item01").unwrap();
+        assert_eq!(immediate.tick_every, 0.0);
+        assert!(!immediate.defer_first_tick);
         assert!(table.status_effect_for_model("w0_0").is_none());
+    }
+
+    #[test]
+    fn weapon_without_speed_segment_keeps_neutral_speed() {
+        let parsed = MeteorRes {
+            records: vec![MeteorResRecord {
+                category: 1,
+                id: 6,
+                name: "W0_0".into(),
+                prop_seeds: vec![],
+                segments: vec![],
+            }],
+        };
+        assert_eq!(
+            parsed.combat_table().weapon_stats(6).unwrap().speed_percent,
+            100
+        );
     }
 }

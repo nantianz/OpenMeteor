@@ -8,6 +8,7 @@
 struct PonEfMaterialParams {
     color: vec4<f32>,
     has_texture: u32,
+    uv_offset: vec2<f32>,
 };
 
 struct PonEfParamsPage {
@@ -19,7 +20,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let params = param_page.values[param_slot.x];
     var texel = vec4<f32>(1.0);
     if (params.has_texture == 1u) {
-        texel = textureSample(base_color_texture, base_color_sampler, in.uv);
+        texel = textureSample(base_color_texture, base_color_sampler, in.uv + params.uv_offset);
     }
     return texel * params.color;
 }

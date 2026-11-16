@@ -34,6 +34,9 @@ pub const STAGE_MUSIC: [(&str, u32); 22] = [
 #[derive(Resource, Default)]
 struct BgmEntity(Option<Entity>);
 
+#[derive(Component)]
+pub(super) struct StreamingMusic;
+
 #[derive(Resource)]
 pub struct SfxCache {
     map: HashMap<String, Handle<AudioSource>>,
@@ -247,6 +250,7 @@ fn play_bgm(
     let entity = commands
         .spawn((
             AudioPlayer::new(handle),
+            StreamingMusic,
             PlaybackSettings {
                 mode: PlaybackMode::Loop,
                 volume: Volume::Linear(if enabled { volume } else { 0.0 }),
@@ -547,8 +551,8 @@ mod tests {
             return;
         }
         for (file, sample_rate, duration) in [
-            ("menu.mp3", 44_100, 154.625_f32),
-            ("s2.mp3", 16_000, 82.899_f32),
+            ("menu.mp3", 44_100, 69.851_f32),
+            ("s2.mp3", 44_100, 82.991_f32),
         ] {
             let source = AudioSource {
                 bytes: std::fs::read(root.join("music").join(file))

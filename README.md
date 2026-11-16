@@ -69,6 +69,8 @@ cargo run --locked -p meteor-app --bin meteor -- --original-dir /path/to/game
 
 使用已有资源包时，将 `METEOR_PACKS_DIR` 设置为包含 `packs.json` 及其资源包文件的目录，或将 `packs/` 目录放在可执行文件旁。
 
+预生成的场景法线和水面贴图不随源码分发。桌面客户端可根据自行提供的场景资源在运行时生成水面数据；高清法线贴图需要另外提供兼容的资源包。
+
 ## 多人联机
 
 原生客户端默认连接 `ws://127.0.0.1:9001`。启动自己的服务器：
@@ -92,7 +94,14 @@ cargo test --workspace --locked
 
 依赖原版游戏文件或独立参考采集数据的测试由 `original-assets` feature 控制。启用该功能前，需要在本地准备匹配的资源与测试数据；这些文件未随源码分发。
 
-本次发布已在 macOS 上使用 Rust 1.97.1 验证。Android、WebAssembly 和可选的 Windows 渲染后端需要各自的平台环境，本次发布未验证这些平台。
+本次更新已在 macOS 上使用 Rust 1.97.1 通过工作区编译与默认测试（1132 项通过、2 项忽略），并通过独立 WebAssembly crate 的编译检查：
+
+```sh
+rustup target add wasm32-unknown-unknown
+cargo check --manifest-path crates/meteor-wasm/Cargo.toml --target wasm32-unknown-unknown --locked
+```
+
+这些检查不代表完整游戏实测；Android、Windows 和浏览器运行仍需在对应平台验证。
 
 ## 工程结构
 

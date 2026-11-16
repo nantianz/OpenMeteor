@@ -498,6 +498,8 @@ pub enum MessageKind {
     SceneTransfer = 93,
     SceneTransferAck = 94,
     ScenePropHit = 95,
+    ProjectileState = 96,
+    ProjectileSubscribe = 97,
     RtcPing = 100,
     RtcPong = 101,
 }

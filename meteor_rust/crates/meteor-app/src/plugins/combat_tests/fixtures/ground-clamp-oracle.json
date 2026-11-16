@@ -1,0 +1,510 @@
+{
+  "boundary": "Original root node and XYZ speed clamp before flat-ground rejection.\n\nRun unmodified 573140 and 4cebe2..4cec41. AMB/POS lookup, the selected\ninteger frame, incoming carry, and a flat ground rejecting Z are fixtures;\nthis is not a full original controller, contact or network replay.\n",
+  "exeSha256": "baebb6d59e6da61e03660c57c31f842f8a3ec157f07d1e2f9bf8d78373a58619",
+  "samples": [
+    {
+      "pose": 256,
+      "frame": 9388,
+      "fps": 30,
+      "carry": 0.0,
+      "authoredSourceDelta": [
+        -0.6050000190734863,
+        -30.664794921875,
+        -77.10696411132812
+      ],
+      "requestedWorld": [
+        -0.017497559506318792,
+        -2.230055536228328,
+        0.8868745579728602
+      ],
+      "flatAcceptedWorld": [
+        -0.017497559506318792,
+        0,
+        0.8868745579728602
+      ]
+    },
+    {
+      "pose": 256,
+      "frame": 9388,
+      "fps": 30,
+      "carry": 72.0,
+      "authoredSourceDelta": [
+        -0.6050000190734863,
+        -30.664794921875,
+        -77.10696411132812
+      ],
+      "requestedWorld": [
+        -0.01629426278218503,
+        -2.076695909089376,
+        1.2029419572695588
+      ],
+      "flatAcceptedWorld": [
+        -0.01629426278218503,
+        0,
+        1.2029419572695588
+      ]
+    },
+    {
+      "pose": 256,
+      "frame": 9388,
+      "fps": 60,
+      "carry": 0.0,
+      "authoredSourceDelta": [
+        -0.30249977111816406,
+        -15.3323974609375,
+        -38.55348205566406
+      ],
+      "requestedWorld": [
+        -0.0087487740311132,
+        -1.115027768114164,
+        0.4434372789864301
+      ],
+      "flatAcceptedWorld": [
+        -0.0087487740311132,
+        0,
+        0.4434372789864301
+      ]
+    },
+    {
+      "pose": 256,
+      "frame": 9388,
+      "fps": 60,
+      "carry": 72.0,
+      "authoredSourceDelta": [
+        -0.30249977111816406,
+        -15.3323974609375,
+        -38.55348205566406
+      ],
+      "requestedWorld": [
+        -0.008008644521687244,
+        -1.0206986616320182,
+        0.630959810739148
+      ],
+      "flatAcceptedWorld": [
+        -0.008008644521687244,
+        0,
+        0.630959810739148
+      ]
+    },
+    {
+      "pose": 256,
+      "frame": 9388,
+      "fps": 120,
+      "carry": 0.0,
+      "authoredSourceDelta": [
+        -0.15124988555908203,
+        -7.66619873046875,
+        -19.27674102783203
+      ],
+      "requestedWorld": [
+        -0.0043743870155566,
+        -0.557513884057082,
+        0.22171863949321505
+      ],
+      "flatAcceptedWorld": [
+        -0.0043743870155566,
+        0,
+        0.22171863949321505
+      ]
+    },
+    {
+      "pose": 256,
+      "frame": 9388,
+      "fps": 120,
+      "carry": 72.0,
+      "authoredSourceDelta": [
+        -0.15124988555908203,
+        -7.66619873046875,
+        -19.27674102783203
+      ],
+      "requestedWorld": [
+        -0.003969397513462462,
+        -0.5058981892264421,
+        0.3225698410420773
+      ],
+      "flatAcceptedWorld": [
+        -0.003969397513462462,
+        0,
+        0.3225698410420773
+      ]
+    },
+    {
+      "pose": 256,
+      "frame": 9388,
+      "fps": 165,
+      "carry": 0.0,
+      "authoredSourceDelta": [
+        -0.1100001335144043,
+        -5.575416564941406,
+        -14.019447326660156
+      ],
+      "requestedWorld": [
+        -0.0031813780037317587,
+        -0.4054646089649531,
+        0.16124987282371533
+      ],
+      "flatAcceptedWorld": [
+        -0.0031813780037317587,
+        0,
+        0.16124987282371533
+      ]
+    },
+    {
+      "pose": 256,
+      "frame": 9388,
+      "fps": 165,
+      "carry": 72.0,
+      "authoredSourceDelta": [
+        -0.1100001335144043,
+        -5.575416564941406,
+        -14.019447326660156
+      ],
+      "requestedWorld": [
+        -0.0028798934718187396,
+        -0.36704062669443144,
+        0.23597904082318563
+      ],
+      "flatAcceptedWorld": [
+        -0.0028798934718187396,
+        0,
+        0.23597904082318563
+      ]
+    },
+    {
+      "pose": 245,
+      "frame": 8840,
+      "fps": 30,
+      "carry": 0.0,
+      "authoredSourceDelta": [
+        0.0,
+        0.0,
+        0.16666674613952637
+      ],
+      "requestedWorld": [
+        0.0,
+        0.020000008672476213,
+        -0.0
+      ],
+      "flatAcceptedWorld": [
+        0.0,
+        0.020000008672476213,
+        -0.0
+      ]
+    },
+    {
+      "pose": 245,
+      "frame": 8840,
+      "fps": 30,
+      "carry": 72.0,
+      "authoredSourceDelta": [
+        0.0,
+        0.0,
+        0.16666674613952637
+      ],
+      "requestedWorld": [
+        0.0,
+        0.020000008672476213,
+        1.6800000876188277
+      ],
+      "flatAcceptedWorld": [
+        0.0,
+        0.020000008672476213,
+        1.6800000876188277
+      ]
+    },
+    {
+      "pose": 245,
+      "frame": 8840,
+      "fps": 60,
+      "carry": 0.0,
+      "authoredSourceDelta": [
+        0.0,
+        0.0,
+        0.08333325386047363
+      ],
+      "requestedWorld": [
+        0.0,
+        0.009999990031122613,
+        -0.0
+      ],
+      "flatAcceptedWorld": [
+        0.0,
+        0.009999990031122613,
+        -0.0
+      ]
+    },
+    {
+      "pose": 245,
+      "frame": 8840,
+      "fps": 60,
+      "carry": 72.0,
+      "authoredSourceDelta": [
+        0.0,
+        0.0,
+        0.08333325386047363
+      ],
+      "requestedWorld": [
+        0.0,
+        0.009999990031122613,
+        1.0200000531971454
+      ],
+      "flatAcceptedWorld": [
+        0.0,
+        0.009999990031122613,
+        1.0200000531971454
+      ]
+    },
+    {
+      "pose": 245,
+      "frame": 8840,
+      "fps": 120,
+      "carry": 0.0,
+      "authoredSourceDelta": [
+        0.0,
+        0.0,
+        0.04166674613952637
+      ],
+      "requestedWorld": [
+        0.0,
+        0.005000009320676799,
+        -0.0
+      ],
+      "flatAcceptedWorld": [
+        0.0,
+        0.005000009320676799,
+        -0.0
+      ]
+    },
+    {
+      "pose": 245,
+      "frame": 8840,
+      "fps": 120,
+      "carry": 72.0,
+      "authoredSourceDelta": [
+        0.0,
+        0.0,
+        0.04166674613952637
+      ],
+      "requestedWorld": [
+        0.0,
+        0.005000009320676799,
+        0.5550000289455056
+      ],
+      "flatAcceptedWorld": [
+        0.0,
+        0.005000009320676799,
+        0.5550000289455056
+      ]
+    },
+    {
+      "pose": 245,
+      "frame": 8840,
+      "fps": 165,
+      "carry": 0.0,
+      "authoredSourceDelta": [
+        0.0,
+        0.0,
+        0.030303001403808594
+      ],
+      "requestedWorld": [
+        0.0,
+        0.0036363600533118046,
+        -0.0
+      ],
+      "flatAcceptedWorld": [
+        0.0,
+        0.0036363600533118046,
+        -0.0
+      ]
+    },
+    {
+      "pose": 245,
+      "frame": 8840,
+      "fps": 165,
+      "carry": 72.0,
+      "authoredSourceDelta": [
+        0.0,
+        0.0,
+        0.030303001403808594
+      ],
+      "requestedWorld": [
+        0.0,
+        0.0036363600533118046,
+        0.4125619542657842
+      ],
+      "flatAcceptedWorld": [
+        0.0,
+        0.0036363600533118046,
+        0.4125619542657842
+      ]
+    },
+    {
+      "pose": 248,
+      "frame": 8960,
+      "fps": 30,
+      "carry": 0.0,
+      "authoredSourceDelta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "requestedWorld": [
+        0.0,
+        -0.11760001223683389,
+        -0.0
+      ],
+      "flatAcceptedWorld": [
+        0.0,
+        0,
+        -0.0
+      ]
+    },
+    {
+      "pose": 248,
+      "frame": 8960,
+      "fps": 30,
+      "carry": 72.0,
+      "authoredSourceDelta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "requestedWorld": [
+        0.0,
+        -0.11760001223683389,
+        1.6800000876188277
+      ],
+      "flatAcceptedWorld": [
+        0.0,
+        0,
+        1.6800000876188277
+      ]
+    },
+    {
+      "pose": 248,
+      "frame": 8960,
+      "fps": 60,
+      "carry": 0.0,
+      "authoredSourceDelta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "requestedWorld": [
+        0.0,
+        -0.029400003059208472,
+        -0.0
+      ],
+      "flatAcceptedWorld": [
+        0.0,
+        0,
+        -0.0
+      ]
+    },
+    {
+      "pose": 248,
+      "frame": 8960,
+      "fps": 60,
+      "carry": 72.0,
+      "authoredSourceDelta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "requestedWorld": [
+        0.0,
+        -0.029400003059208472,
+        1.0200000531971454
+      ],
+      "flatAcceptedWorld": [
+        0.0,
+        0,
+        1.0200000531971454
+      ]
+    },
+    {
+      "pose": 248,
+      "frame": 8960,
+      "fps": 120,
+      "carry": 0.0,
+      "authoredSourceDelta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "requestedWorld": [
+        0.0,
+        -0.007350000764802118,
+        -0.0
+      ],
+      "flatAcceptedWorld": [
+        0.0,
+        0,
+        -0.0
+      ]
+    },
+    {
+      "pose": 248,
+      "frame": 8960,
+      "fps": 120,
+      "carry": 72.0,
+      "authoredSourceDelta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "requestedWorld": [
+        0.0,
+        -0.007350000764802118,
+        0.5550000289455056
+      ],
+      "flatAcceptedWorld": [
+        0.0,
+        0,
+        0.5550000289455056
+      ]
+    },
+    {
+      "pose": 248,
+      "frame": 8960,
+      "fps": 165,
+      "carry": 0.0,
+      "authoredSourceDelta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "requestedWorld": [
+        0.0,
+        -0.0038876029430834785,
+        -0.0
+      ],
+      "flatAcceptedWorld": [
+        0.0,
+        0,
+        -0.0
+      ]
+    },
+    {
+      "pose": 248,
+      "frame": 8960,
+      "fps": 165,
+      "carry": 72.0,
+      "authoredSourceDelta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "requestedWorld": [
+        0.0,
+        -0.0038876029430834785,
+        0.4125619542657842
+      ],
+      "flatAcceptedWorld": [
+        0.0,
+        0,
+        0.4125619542657842
+      ]
+    }
+  ]
+}

@@ -1,4 +1,12 @@
-use crate::app_state::AppState;
+mod decision_space;
+mod getitem_route;
+mod obstacle_avoidance;
+mod perception;
+mod pursuit_recovery;
+mod weapon_replacement;
+use decision_space::{npc_roll, queue_command, DecisionSpace};
+pub(crate) use weapon_replacement::NpcWeaponDropRequest;
+
 use crate::components::fighter::{
     AiIntent, CombatState, EntryBlend, Fighter, FighterHitReaction, Health, MotionState,
     PoseRuntime, RangedFireGate, SmState,
@@ -7,7 +15,8 @@ use crate::plugins::character_contact_plugin::{
     commit_fighter_position, resolve_fighter_xz, CharacterContactFrame,
 };
 use crate::plugins::character_plugin::CharacterAssetsSet;
-use crate::plugins::combat_plugin::NpcFighter;
+use crate::plugins::combat_plugin::{fighter_speed_factor, CombatResourceData, NpcFighter};
+use crate::plugins::item_plugin::{npc_getitem_model, StageProp};
 use crate::plugins::movement_plugin::{
     accepted_motion_velocity, apply_dodge_pose_now, clamp_air_motion_step, enter_dodge_state,
     finish_air_landing_state, ordinary_locomotion_allowed, project_air_velocity_on_surface,
@@ -17,10 +26,13 @@ use crate::plugins::movement_plugin::{
 use crate::plugins::network_plugin::RemoteFighter;
 use crate::plugins::stage_collider::{StageCollider, StageMeshCollider};
 use crate::plugins::stage_plugin::{
-    LocalFighter, MissionNpc, NpcCombatProfile, NpcPerformance, StageMissionRuntime,
+    LocalEscortState, LocalFighter, MissionNpc, NpcCombatProfile, NpcPerformance,
+    StageMissionRuntime,
 };
 use bevy::prelude::*;
-use meteor_ai::behavior::{find_waypoint_path, BehaviorMode, Waypoint};
+use meteor_ai::behavior::BehaviorMode;
+#[cfg(test)]
+use meteor_ai::behavior::{find_waypoint_path, Waypoint};
 use meteor_core::FighterState;
 use meteor_physics::jump::{RUN_SPEED, WALK_SPEED};
 use meteor_physics::{
@@ -28,8 +40,6 @@ use meteor_physics::{
     jump,
 };
 use meteor_scene::stage_loader::WaypointGraph;
-
-const NPC_FACE_SMOOTH: f32 = 14.0;
 
 #[cfg(test)]
 fn path_target(graph: &WaypointGraph, npc_pos: [f32; 3], target_pos: [f32; 3]) -> Option<[f32; 3]> {
@@ -53,17 +63,52 @@ fn path_target(graph: &WaypointGraph, npc_pos: [f32; 3], target_pos: [f32; 3]) -
     graph.world_position(path[0])
 }
 
+#[derive(Component, Debug, Clone, Copy)]
+pub(crate) struct StockNpcBrain;
+
 #[derive(Component, Debug, Clone)]
 pub struct NpcPatrol {
+    behavior_stack: Vec<NpcBehaviorFrame>,
+    temporary_target: Option<i64>,
+    behavior_ticks: i32,
+    pub(crate) attack_target_point: Option<Vec3>,
     navigation: super::npc_navigation::Navigation,
     patrol_navigation: super::npc_navigation::Navigation,
+    navigation_frame_step: NpcTravelStep,
 
     pub route: Vec<usize>,
+    patrol_destination: Option<usize>,
     pub index: usize,
     think_remaining: f32,
+
+    first_update_pending: bool,
+    init_delay: f32,
+    script_tick_due: bool,
+    collision_clock: obstacle_avoidance::CollisionClock,
+    avoidance: Option<ObstacleCallback>,
+    path_heading: Option<f32>,
+    path_input: Vec2,
+    last_weapon_switch_time: Option<f64>,
+    perception: perception::Perception,
+    navigation_reset_pending: bool,
+    airborne_heading: Option<f32>,
+    airborne_input: Vec2,
+    combat_spacing: Option<BehaviorMode>,
+    combat_ticks: i32,
+    combat_strafe: f32,
     rng: u64,
     wander_goal: Option<usize>,
+
+    idle_facing: Option<f32>,
     flee_goal: Option<usize>,
+
+    getitem_goal: Option<Vec3>,
+    getitem_entity: Option<Entity>,
+    getitem_ticks: i32,
+
+    last_getitem_record: Option<u64>,
+    getitem_scan_ticks: i32,
+    getitem_direct: bool,
 
     current_waypoint: Option<usize>,
     travel_goal: Option<usize>,
@@ -74,22 +119,69 @@ pub struct NpcPatrol {
 
     command_memory: meteor_ai::combat::CommandMemory,
     sampled_hp: Option<f32>,
+}
 
-    down_recovery_pose_instance_id: Option<u32>,
-    down_recovery_remaining: f32,
+#[derive(Debug, Clone)]
+struct NpcBehaviorFrame {
+    getitem: (Option<Vec3>, Option<Entity>, i32, bool),
+    attack_target_point: Option<Vec3>,
+    temporary_target: Option<i64>,
+    mode: Option<BehaviorMode>,
+    args: Vec<meteor_scene::pst_runtime::PstValue>,
+    target_slot: Option<i64>,
+    target_remaining: i64,
+    route: Vec<usize>,
+    index: usize,
+    perception: perception::Perception,
+    enemy: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+struct ObstacleCallback {
+    ticks: i32,
+    desired_yaw: f32,
+    forward: bool,
 }
 
 impl Default for NpcPatrol {
     fn default() -> Self {
         Self {
+            behavior_stack: Vec::new(),
+            temporary_target: None,
+            behavior_ticks: -1,
+            attack_target_point: None,
             navigation: default(),
             patrol_navigation: default(),
+            navigation_frame_step: default(),
             route: Vec::new(),
+            patrol_destination: None,
             index: 0,
             think_remaining: 0.0,
+            first_update_pending: false,
+            init_delay: 0.0,
+            script_tick_due: false,
+            collision_clock: default(),
+            avoidance: None,
+            path_heading: None,
+            path_input: Vec2::ZERO,
+            last_weapon_switch_time: None,
+            perception: default(),
+            navigation_reset_pending: false,
+            airborne_heading: None,
+            airborne_input: Vec2::Y,
+            combat_spacing: None,
+            combat_ticks: -1,
+            combat_strafe: 0.0,
             rng: 0x9e37_79b9_7f4a_7c15,
             wander_goal: None,
+            idle_facing: None,
             flee_goal: None,
+            getitem_goal: None,
+            getitem_entity: None,
+            getitem_ticks: -1,
+            last_getitem_record: None,
+            getitem_scan_ticks: -1,
+            getitem_direct: false,
             current_waypoint: None,
             travel_goal: None,
             travel_route: Vec::new(),
@@ -97,37 +189,190 @@ impl Default for NpcPatrol {
             patrol_route: Vec::new(),
             command_memory: default(),
             sampled_hp: None,
-            down_recovery_pose_instance_id: None,
-            down_recovery_remaining: 0.0,
         }
     }
 }
 
 impl NpcPatrol {
-    pub(crate) fn invalidate_navigation(&mut self) {
-        self.navigation = default();
-        self.patrol_navigation = default();
+    #[cfg(test)]
+    pub(crate) fn callback_ticks_for_test(&self) -> (i32, i32) {
+        (self.behavior_ticks, self.combat_ticks)
+    }
+
+    pub(crate) fn finish_callback_install(&mut self) {
+        self.behavior_ticks = 0;
+        self.combat_ticks = 0;
+        if self.getitem_goal.is_some() {
+            self.getitem_ticks = 0;
+        }
+    }
+    pub(crate) fn schedule_initial_think(&mut self, think: f32, actor_id: i64) {
+        self.first_update_pending = true;
+        self.schedule_reset_think(think, actor_id);
+    }
+
+    pub(crate) fn schedule_reset_think(&mut self, think: f32, actor_id: i64) {
+        if self.rng == 0x9e37_79b9_7f4a_7c15 {
+            self.rng ^= (actor_id as u64)
+                .wrapping_add(1)
+                .wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        }
+        self.init_delay = (npc_roll(self) % 1000) as f32 * 0.0005;
+        self.think_remaining = meteor_ai::combat::decision_interval(think, self.init_delay);
+    }
+
+    fn stop_navigation(&mut self) {
+        self.navigation_frame_step = default();
+        self.navigation.stop();
+        self.patrol_navigation.stop();
         self.current_waypoint = None;
-        self.wander_goal = None;
-        self.flee_goal = None;
         self.travel_goal = None;
         self.travel_route.clear();
         self.patrol_goal = None;
         self.patrol_route.clear();
+        self.path_input = Vec2::ZERO;
+        self.airborne_input = Vec2::ZERO;
+        self.collision_clock = default();
+    }
+    #[cfg(test)]
+    pub(crate) fn set_decision_for_test(&mut self, remaining: f32, rng: u64) {
+        self.think_remaining = remaining;
+        self.rng = rng;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn return_combat_to_parent_for_test(&mut self) {
+        self.perception.return_from_failed_pursuit(None);
+    }
+
+    pub(crate) fn invalidate_navigation(&mut self) {
+        self.navigation_frame_step = default();
+        self.navigation = default();
+        self.patrol_navigation = default();
+        self.current_waypoint = None;
+        self.wander_goal = None;
+        self.idle_facing = None;
+        self.flee_goal = None;
+        self.getitem_direct = false;
+        self.getitem_goal = None;
+        self.getitem_entity = None;
+        self.getitem_ticks = -1;
+        self.travel_goal = None;
+        self.travel_route.clear();
+        self.patrol_goal = None;
+        self.patrol_destination = None;
+        self.patrol_route.clear();
+    }
+
+    pub(crate) fn prepare_behavior_change(
+        &mut self,
+        npc: Option<&MissionNpc>,
+        intent: &AiIntent,
+        mode: Option<BehaviorMode>,
+    ) {
+        let mut stack = std::mem::take(&mut self.behavior_stack);
+        if matches!(
+            mode,
+            Some(BehaviorMode::Dodge | BehaviorMode::Kill | BehaviorMode::AttackTarget)
+        ) {
+            stack.push(NpcBehaviorFrame {
+                getitem: (
+                    self.getitem_goal,
+                    self.getitem_entity,
+                    self.getitem_ticks,
+                    self.getitem_direct,
+                ),
+                attack_target_point: self.attack_target_point,
+                temporary_target: self.temporary_target,
+                mode: npc.and_then(|npc| npc.forced_behavior),
+                args: npc.map_or_else(Vec::new, |npc| npc.behavior_args.clone()),
+                target_slot: npc.and_then(|npc| npc.attack_target_slot),
+                target_remaining: npc.map_or(0, |npc| npc.attack_target_remaining),
+                route: self.route.clone(),
+                index: self.index,
+                perception: self.perception.clone(),
+                enemy: intent.enemy_id,
+            });
+        } else {
+            stack.clear();
+        }
+        let sampled_hp = self.sampled_hp;
+        self.reset_behavior_state();
+        self.sampled_hp = sampled_hp;
+        self.behavior_stack = stack;
+    }
+
+    fn return_to_parent(&mut self, npc: Option<&mut MissionNpc>, intent: &mut AiIntent) -> bool {
+        let Some(frame) = self.behavior_stack.pop() else {
+            return false;
+        };
+        let stack = std::mem::take(&mut self.behavior_stack);
+        let remaining = self.think_remaining;
+        let sampled_hp = self.sampled_hp;
+        self.reset_behavior_state();
+        self.behavior_stack = stack;
+        self.think_remaining = remaining;
+        self.sampled_hp = sampled_hp;
+        (
+            self.getitem_goal,
+            self.getitem_entity,
+            self.getitem_ticks,
+            self.getitem_direct,
+        ) = frame.getitem;
+        self.attack_target_point = frame.attack_target_point;
+        self.route = frame.route;
+        self.index = frame.index;
+        self.perception = frame.perception;
+        self.temporary_target = frame.temporary_target;
+        self.finish_callback_install();
+        if let Some(npc) = npc {
+            npc.forced_behavior = frame.mode;
+            npc.behavior_args = frame.args;
+            npc.attack_target_slot = frame.target_slot;
+            npc.attack_target_remaining = frame.target_remaining;
+        }
+        *intent = default();
+        intent.enemy_id = frame.enemy;
+        intent.attack_cooldown = remaining;
+        true
     }
 
     pub(crate) fn reset_behavior_state(&mut self) {
+        self.navigation_frame_step = default();
+        self.behavior_stack.clear();
+        self.attack_target_point = None;
+        self.temporary_target = None;
+        self.behavior_ticks = -1;
+        self.getitem_scan_ticks = -1;
+        self.current_waypoint = None;
         self.navigation = default();
         self.patrol_navigation = default();
         self.think_remaining = 0.0;
+        self.perception = default();
+        self.navigation_reset_pending = false;
+        self.collision_clock = default();
+        self.avoidance = None;
+        self.path_heading = None;
+        self.path_input = Vec2::ZERO;
+        self.airborne_heading = None;
+        self.airborne_input = Vec2::Y;
+        self.combat_spacing = None;
+        self.combat_ticks = -1;
+        self.combat_strafe = 0.0;
         self.sampled_hp = None;
         self.route.clear();
         self.index = 0;
         self.wander_goal = None;
+        self.idle_facing = None;
         self.flee_goal = None;
+        self.getitem_direct = false;
+        self.getitem_goal = None;
+        self.getitem_entity = None;
+        self.getitem_ticks = -1;
         self.travel_goal = None;
         self.travel_route.clear();
         self.patrol_goal = None;
+        self.patrol_destination = None;
         self.patrol_route.clear();
     }
 
@@ -135,25 +380,22 @@ impl NpcPatrol {
         &mut self,
         graph: Option<&WaypointGraph>,
         mesh: Option<&StageMeshCollider>,
-        dt: f32,
         from: Vec3,
         target: Vec3,
+        replan: bool,
     ) -> NpcTravelStep {
-        if let Some(mesh) = mesh {
-            let (direction, arrived) = self.navigation.step(graph, mesh, from, target, dt);
-            return NpcTravelStep {
-                direction,
-                arrived,
-                jump_target: self.navigation.jump_target(),
-            };
+        if replan {
+            self.stop_navigation();
+            let mut rng = self.rng;
+            self.navigation.request_path(graph, mesh, from, target, || {
+                (next_npc_rand(&mut rng) * 0x0100_0000 as f32) as u32
+            });
+            self.rng = rng;
         }
-        cached_travel_step(
-            graph,
-            &mut self.current_waypoint,
-            &mut self.travel_goal,
-            &mut self.travel_route,
+        navigation_step(
+            &self.navigation,
             from,
-            target,
+            !replan && self.navigation_frame_step.arrived,
         )
     }
 
@@ -161,33 +403,77 @@ impl NpcPatrol {
         &mut self,
         graph: Option<&WaypointGraph>,
         mesh: Option<&StageMeshCollider>,
-        dt: f32,
         from: Vec3,
         target: Vec3,
+        replan: bool,
     ) -> NpcTravelStep {
-        if let Some(mesh) = mesh {
-            let (direction, arrived) = self.patrol_navigation.step(graph, mesh, from, target, dt);
-            return NpcTravelStep {
-                direction,
-                arrived,
-                jump_target: self.patrol_navigation.jump_target(),
-            };
+        if replan {
+            self.stop_navigation();
+            let mut rng = self.rng;
+            self.patrol_navigation
+                .request_path(graph, mesh, from, target, || {
+                    (next_npc_rand(&mut rng) * 0x0100_0000 as f32) as u32
+                });
+            self.rng = rng;
         }
-        cached_travel_step(
-            graph,
-            &mut self.current_waypoint,
-            &mut self.patrol_goal,
-            &mut self.patrol_route,
+        navigation_step(
+            &self.patrol_navigation,
             from,
-            target,
+            !replan && self.navigation_frame_step.arrived,
         )
+    }
+
+    fn advance_navigation(&mut self, from: Vec3, velocity: Vec3) {
+        let mut rng = self.rng;
+        let navigation = if self.navigation.in_progress() {
+            &mut self.navigation
+        } else {
+            &mut self.patrol_navigation
+        };
+        let activation_serial = navigation.activation_serial();
+        let (direction, arrived) = navigation.follow(from, velocity, || {
+            (next_npc_rand(&mut rng) * 0x0100_0000 as f32) as u32
+        });
+        self.navigation_frame_step = NpcTravelStep {
+            direction,
+            arrived,
+            failed: navigation.failed(),
+            jump_target: navigation.jump_target(),
+        };
+        self.rng = rng;
+        let activated =
+            navigation.in_progress() && navigation.activation_serial() != activation_serial;
+        if arrived || activated {
+            self.path_input = Vec2::ZERO;
+            self.airborne_input = Vec2::ZERO;
+            self.collision_clock = default();
+        }
     }
 }
 
 #[cfg(test)]
 const PATROL_ROUTE_LEN: usize = 4;
 
+#[cfg(test)]
 const PATROL_ARRIVE_DIST: f32 = 1.2;
+
+pub(crate) const STOCK_NPC_VIEW: f32 = 10_000.0;
+pub(crate) const STOCK_NPC_THINK: f32 = 10_000.0;
+
+pub(crate) fn stock_npc_profile() -> NpcCombatProfile {
+    NpcCombatProfile {
+        attack1: 30.0,
+        attack2: 25.0,
+        attack3: 25.0,
+        guard: 20.0,
+        dodge: 0.0,
+        jump: 1.0,
+        look: 1000.0,
+        burst: 30.0,
+        aim: 100.0,
+        get_item: 0.0,
+    }
+}
 
 fn npc_attack_range(weapon: u8) -> f32 {
     meteor_ai::combat::weapon_tactics(weapon).attack_range * meteor_core::MODEL_SCALE
@@ -204,6 +490,7 @@ fn aim_npc_attack(
     profile: Option<&NpcCombatProfile>,
     from: Vec3,
     target: Vec3,
+    facing: f32,
 ) {
     if intent.want_attack && meteor_ai::combat::weapon_tactics(fighter.weapon).ranged {
         let rolls = [
@@ -215,6 +502,7 @@ fn aim_npc_attack(
             fighter.weapon,
             from.to_array(),
             target.to_array(),
+            facing,
             profile.map_or(100.0, |p| p.aim),
             rolls,
         )));
@@ -225,14 +513,46 @@ fn yaw_towards(delta: Vec3) -> Option<f32> {
     (delta.x * delta.x + delta.z * delta.z > 1e-6).then(|| delta.x.atan2(delta.z))
 }
 
+fn npc_script_callback_delay(mode: Option<BehaviorMode>) -> f32 {
+    match mode {
+        Some(BehaviorMode::Wait | BehaviorMode::Idle | BehaviorMode::Dodge) => 0.4,
+        Some(
+            BehaviorMode::Patrol
+            | BehaviorMode::Run
+            | BehaviorMode::Follow
+            | BehaviorMode::Kill
+            | BehaviorMode::AttackTarget,
+        ) => 0.3,
+        _ => 0.2,
+    }
+}
+
 fn npc_combat_turn(facing: f32, target: f32, dt: f32) -> f32 {
-    let error = npc_facing_error(facing, target);
-    facing + error.clamp(-500.0_f32.to_radians() * dt, 500.0_f32.to_radians() * dt)
+    let direct_error = target - facing;
+    let error = if direct_error.abs() < std::f32::consts::PI {
+        direct_error
+    } else {
+        npc_facing_error(facing, target)
+    };
+
+    if error.abs() < 1.0_f32.to_radians() {
+        return facing;
+    }
+    if error.abs() < 3.0_f32.to_radians() {
+        return facing + error;
+    }
+    let whole_error = error.to_degrees().trunc().abs().max(3.0).to_radians();
+    let step = (500.0_f32.to_radians() * dt).min(whole_error);
+    facing + error.signum() * step
 }
 
 fn npc_facing_error(facing: f32, target: f32) -> f32 {
     (target - facing + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
         - std::f32::consts::PI
+}
+
+fn npc_can_turn(state: Option<&SmState>, airborne: bool) -> bool {
+    airborne || state.is_none_or(|state| state.current == FighterState::Name)
 }
 
 fn npc_locomotion_input_for_facing(move_dir: Vec2, facing: f32) -> Vec2 {
@@ -250,91 +570,35 @@ fn npc_locomotion_input_for_facing(move_dir: Vec2, facing: f32) -> Vec2 {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct NpcTravelStep {
+    failed: bool,
     jump_target: Option<Vec3>,
     direction: Vec3,
     arrived: bool,
 }
 
-fn cached_travel_step(
-    graph: Option<&WaypointGraph>,
-    current_waypoint: &mut Option<usize>,
-    cached_goal: &mut Option<usize>,
-    cached_route: &mut Vec<usize>,
+fn navigation_step(
+    navigation: &super::npc_navigation::Navigation,
     from: Vec3,
-    target: Vec3,
+    arrived: bool,
 ) -> NpcTravelStep {
-    let flat_to_target = Vec3::new(target.x - from.x, 0.0, target.z - from.z);
-    let direct = || NpcTravelStep {
-        jump_target: None,
-        direction: flat_to_target.normalize_or_zero(),
-        arrived: flat_to_target.length() <= PATROL_ARRIVE_DIST,
-    };
-    let Some(graph) = graph else {
-        return direct();
-    };
-    let Some(goal) = graph.nearest(target.to_array()) else {
-        return if graph.disabled.is_empty() {
-            direct()
-        } else {
-            NpcTravelStep {
-                jump_target: None,
-                direction: Vec3::ZERO,
-                arrived: false,
-            }
-        };
-    };
-    if *cached_goal != Some(goal) || cached_route.is_empty() {
-        let Some(start) = graph.nearest(from.to_array()) else {
-            return direct();
-        };
-        *current_waypoint = Some(start);
-        *cached_goal = Some(goal);
-        *cached_route = if start == goal {
-            Vec::new()
-        } else {
-            let points: Vec<Waypoint> = graph
-                .points
-                .iter()
-                .map(|point| Waypoint {
-                    id: point.id,
-                    links: graph.navigation_links(point.id),
-                })
-                .collect();
-            let route = find_waypoint_path(&points, start, goal);
-            if route.is_empty() && !graph.disabled.is_empty() {
-                return NpcTravelStep {
-                    jump_target: None,
-                    direction: Vec3::ZERO,
-                    arrived: false,
-                };
-            }
-            route
-        };
-    }
-    let Some(next_id) = cached_route.first().copied() else {
-        return direct();
-    };
-    let Some(next) = graph.world_position(next_id).map(Vec3::from_array) else {
-        cached_route.clear();
-        return direct();
-    };
-    let delta = Vec3::new(next.x - from.x, 0.0, next.z - from.z);
-    if delta.length() <= PATROL_ARRIVE_DIST {
-        *current_waypoint = Some(next_id);
-        cached_route.remove(0);
-        return NpcTravelStep {
-            jump_target: None,
-            direction: Vec3::ZERO,
-            arrived: false,
-        };
-    }
     NpcTravelStep {
-        jump_target: None,
-        direction: delta.normalize_or_zero(),
-        arrived: false,
+        direction: navigation.steering_target().map_or(Vec3::ZERO, |target| {
+            Vec3::new(target.x - from.x, 0.0, target.z - from.z).normalize_or_zero()
+        }),
+        arrived,
+        failed: navigation.failed(),
+        jump_target: navigation.jump_target(),
     }
+}
+
+fn route_reconsider(active: bool, remaining: usize, roll: u32) -> bool {
+    !active || roll % (remaining as u32 + 10) == 0
+}
+
+fn attack_goal_reconsider(tick: i32, remaining: usize) -> bool {
+    (tick as u32) % (remaining as u32 + 10) == 0
 }
 
 fn next_npc_rand(state: &mut u64) -> f32 {
@@ -367,30 +631,40 @@ fn choose_npc_opening_action(profile: &NpcCombatProfile, roll: f32) -> NpcOpenin
     }
 }
 
-fn npc_think_interval(npc: Option<&MissionNpc>) -> f32 {
-    meteor_ai::combat::decision_interval(npc.map_or(50.0, |npc| npc.think), 0.2)
+fn npc_think_interval(think: f32) -> f32 {
+    meteor_ai::combat::decision_interval(think, 0.2)
 }
 
-fn update_npc_down_recovery(
-    patrol: &mut NpcPatrol,
-    reaction: Option<(meteor_combat::hit_reaction::HitReactKind, f32)>,
-    pose_instance_id: u32,
-    decision_delay: f32,
-    dt: f32,
-) -> bool {
-    let Some((_, down_remaining)) =
-        reaction.filter(|(kind, _)| *kind == meteor_combat::hit_reaction::HitReactKind::Down)
-    else {
-        patrol.down_recovery_pose_instance_id = None;
-        patrol.down_recovery_remaining = 0.0;
-        return false;
+fn queue_npc_down_recovery(
+    intent: &mut AiIntent,
+    roll: u32,
+    attack_allowed: bool,
+    facing: f32,
+    position: Vec3,
+    mesh: Option<&StageMeshCollider>,
+) {
+    let direction = match roll % 8 {
+        0 => Vec2::Y,
+        1 => Vec2::NEG_Y,
+        2 => Vec2::NEG_X,
+        3 => Vec2::X,
+        4 => {
+            intent.want_attack = attack_allowed;
+            return;
+        }
+        _ => return,
     };
-    if patrol.down_recovery_pose_instance_id != Some(pose_instance_id) {
-        patrol.down_recovery_pose_instance_id = Some(pose_instance_id);
-        patrol.down_recovery_remaining = down_remaining.max(0.0) + decision_delay.max(0.0);
+    if (DecisionSpace {
+        position,
+        facing,
+        ground_controllable: true,
+        mesh,
+    })
+    .supported(direction, 50.0)
+    {
+        intent.dodge_dir = direction;
+        intent.dodge_burst = Some(false);
     }
-    patrol.down_recovery_remaining = (patrol.down_recovery_remaining - dt.max(0.0)).max(0.0);
-    patrol.down_recovery_remaining <= 0.0
 }
 
 fn queue_npc_opening_action(
@@ -400,40 +674,61 @@ fn queue_npc_opening_action(
     patrol: &mut NpcPatrol,
     weapon: u8,
     airborne: bool,
+    attack_allowed: bool,
+    space: DecisionSpace<'_>,
 ) {
     intent.want_attack = false;
     intent.want_guard = false;
     intent.dodge_burst = None;
     intent.attack_directions.clear();
     let Some(profile) = profile else {
-        intent.want_attack = true;
+        intent.want_attack = attack_allowed;
         return;
     };
 
-    let choice = if next_npc_rand(&mut patrol.rng) * 100.0 < profile.burst {
-        NpcOpeningAction::Dodge
-    } else {
-        choose_npc_opening_action(profile, next_npc_rand(&mut patrol.rng))
-    };
+    if ((npc_roll(patrol) % 100) as f32) < profile.burst {
+        let direction = [
+            Vec2::Y,
+            -Vec2::Y,
+            -Vec2::Y,
+            -Vec2::X,
+            -Vec2::X,
+            Vec2::X,
+            Vec2::X,
+        ][npc_roll(patrol) as usize % 7];
+        if space.supported(direction, 70.0) {
+            intent.dodge_dir = direction;
+            intent.dodge_burst = Some(false);
+            patrol.think_remaining = intent.attack_cooldown * 2.5;
+            intent.attack_cooldown = patrol.think_remaining;
+            return;
+        }
+    }
+
+    if patrol.combat_ticks % 3 == 0 {
+        let direction = match npc_roll(patrol) % 10 {
+            0 => 1.0,
+            1 => -1.0,
+            _ => 0.0,
+        };
+        patrol.combat_strafe = if direction != 0.0 && space.supported(Vec2::X * direction, 50.0) {
+            direction
+        } else {
+            0.0
+        };
+    }
+    let choice = choose_npc_opening_action(profile, (npc_roll(patrol) % 100) as f32 / 100.0);
     apply_npc_opening_action(intent, performance, profile, patrol, choice);
     if intent.want_attack {
+        if !attack_allowed {
+            intent.want_attack = false;
+            return;
+        }
         let category = meteor_ai::combat::attack_category(
             [profile.attack1, profile.attack2, profile.attack3],
-            (next_npc_rand(&mut patrol.rng) * 100.0) as u32,
+            npc_roll(patrol),
         );
-        let reuse = next_npc_rand(&mut patrol.rng) < 0.5;
-        let roll = (next_npc_rand(&mut patrol.rng) * 0x0100_0000 as f32) as u32;
-        let command = if airborne {
-            meteor_ai::combat::AIR_COMMANDS[roll as usize % 17]
-        } else {
-            patrol.command_memory.choose(
-                meteor_ai::combat::weapon_tactics(weapon),
-                category,
-                reuse,
-                roll,
-            )
-        };
-        intent.attack_directions = meteor_ai::combat::directions(command);
+        queue_command(intent, patrol, weapon, category, airborne, attack_allowed);
     }
 }
 
@@ -444,11 +739,19 @@ fn apply_npc_opening_action(
     patrol: &mut NpcPatrol,
     choice: NpcOpeningAction,
 ) {
+    performance.crouching = false;
     match choice {
         NpcOpeningAction::Attack => intent.want_attack = true,
         NpcOpeningAction::Guard => {
-            intent.want_guard = true;
-            performance.guard_remaining = intent.attack_cooldown * 2.0;
+            performance.crouching = npc_roll(patrol) % 5 == 0;
+            intent.want_guard = !performance.crouching;
+            patrol.think_remaining = intent.attack_cooldown * 2.0;
+            intent.attack_cooldown = patrol.think_remaining;
+            performance.guard_remaining = if intent.want_guard {
+                patrol.think_remaining
+            } else {
+                0.0
+            };
         }
         NpcOpeningAction::Dodge => {
             let dir = (next_npc_rand(&mut patrol.rng) * 7.0) as usize;
@@ -517,40 +820,19 @@ struct AiActorSnapshot {
     alive: bool,
 }
 
-fn closest_hostile(
-    self_id: i64,
-    self_team: u8,
-    position: Vec3,
-    view_range: f32,
-    actors: &[AiActorSnapshot],
-    mut visible: impl FnMut(AiActorSnapshot) -> bool,
-) -> Option<AiActorSnapshot> {
-    actors
-        .iter()
-        .filter(|actor| {
-            actor.id != self_id
-                && actor.alive
-                && (meteor_combat::hit_resolve::team_mask(i32::from(actor.team))
-                    & meteor_combat::hit_resolve::team_mask(i32::from(self_team)))
-                    == 0
-        })
-        .filter_map(|actor| {
-            let distance = (actor.position - position).length();
-            (distance <= view_range && visible(*actor)).then_some((distance, *actor))
-        })
-        .min_by(|a, b| a.0.total_cmp(&b.0))
-        .map(|(_, actor)| actor)
-}
-
 fn npc_target_visible<M: MeshCollider + ?Sized>(
     origin: Vec3,
     target: Vec3,
+    weapon: u8,
     view_range: f32,
     collider: Option<&M>,
 ) -> bool {
+    let origin = origin
+        + Vec3::Y * meteor_ai::combat::weapon_tactics(weapon).aim_height * meteor_core::MODEL_SCALE;
+    let target = target + Vec3::Y * (20.0 * meteor_core::MODEL_SCALE);
     let delta = target - origin;
     let distance = delta.length();
-    if distance > view_range || delta.y.abs() > 12.0 {
+    if distance > view_range {
         return false;
     }
     if distance <= 0.001 {
@@ -562,11 +844,11 @@ fn npc_target_visible<M: MeshCollider + ?Sized>(
     let direction = delta / distance;
     collider
         .raycast_hit(
-            Point3::new(origin.x, origin.y + 1.1, origin.z),
+            Point3::new(origin.x, origin.y, origin.z),
             Point3::new(direction.x, direction.y, direction.z),
             distance,
         )
-        .is_none_or(|hit| hit.t >= distance - 0.45)
+        .is_none_or(|hit| hit.t >= distance)
 }
 
 fn behavior_scans_enemies(mode: Option<BehaviorMode>) -> bool {
@@ -576,43 +858,197 @@ fn behavior_scans_enemies(mode: Option<BehaviorMode>) -> bool {
     )
 }
 
-fn farthest_reachable_waypoint(
+fn getitem_seek_range_world(view_model_units: f32) -> f32 {
+    (view_model_units * 0.5).min(2000.0).max(0.0) * meteor_core::MODEL_SCALE
+}
+
+fn getitem_arrived(npc_pos: Vec3, item_pos: Vec3) -> bool {
+    let dx = (npc_pos.x - item_pos.x).abs();
+    let dy = (npc_pos.y - item_pos.y).abs();
+    let dz = (npc_pos.z - item_pos.z).abs();
+    dx < 20.0 * meteor_core::MODEL_SCALE
+        && dz < 20.0 * meteor_core::MODEL_SCALE
+        && dy < 60.0 * meteor_core::MODEL_SCALE
+}
+
+fn behavior_may_seek_getitem(mode: BehaviorMode) -> bool {
+    matches!(
+        mode,
+        BehaviorMode::Wait
+            | BehaviorMode::Patrol
+            | BehaviorMode::Run
+            | BehaviorMode::Follow
+            | BehaviorMode::Kill
+            | BehaviorMode::Attack
+    )
+}
+
+#[cfg(test)]
+fn npc_seekable_prop(prop: &StageProp, visibility: &Visibility) -> bool {
+    npc_seekable_prop_active(prop, visibility, None)
+}
+
+fn npc_seekable_prop_active(
+    prop: &StageProp,
+    visibility: &Visibility,
+    active: Option<bool>,
+) -> bool {
+    active.unwrap_or(*visibility != Visibility::Hidden && prop.interactive)
+        && !prop.broken
+        && prop.respawn_timer <= 0.0
+        && npc_getitem_model(&prop.model)
+}
+
+fn getitem_scan_points(npc_pos: Vec3, item_pos: Vec3) -> (Vec3, Vec3) {
+    (
+        npc_pos + Vec3::Y * (40.0 * meteor_core::MODEL_SCALE),
+        item_pos + Vec3::Y * (20.0 * meteor_core::MODEL_SCALE),
+    )
+}
+
+fn getitem_visible<M: MeshCollider + ?Sized>(
+    npc_pos: Vec3,
+    item_pos: Vec3,
+    collider: Option<&M>,
+) -> bool {
+    let Some(collider) = collider else {
+        return true;
+    };
+    let (origin, target) = getitem_scan_points(npc_pos, item_pos);
+    let delta = target - origin;
+    let distance = delta.length();
+    if distance <= 0.001 {
+        return true;
+    }
+    let direction = delta / distance;
+    collider
+        .raycast_hit(
+            Point3::new(origin.x, origin.y, origin.z),
+            Point3::new(direction.x, direction.y, direction.z),
+            distance,
+        )
+        .is_none_or(|hit| hit.t >= distance)
+}
+
+#[derive(Clone, Copy, Debug)]
+struct GetItemCandidate {
+    record: u64,
+    entity: Entity,
+    position: Vec3,
+}
+
+fn getitem_record(
+    entity: Entity,
+    order: Option<&crate::plugins::item_plugin::SceneRecordOrder>,
+) -> u64 {
+    order.map_or((1_u64 << 63) | entity.to_bits(), |order| order.0 as u64)
+}
+
+fn first_getitem_target(
+    npc_pos: Vec3,
+    range: f32,
+    previous: Option<u64>,
+    candidates: impl IntoIterator<Item = GetItemCandidate>,
+) -> Option<GetItemCandidate> {
+    candidates
+        .into_iter()
+        .filter(|candidate| {
+            let (origin, target) = getitem_scan_points(npc_pos, candidate.position);
+            Some(candidate.record) != previous && target.distance_squared(origin) <= range * range
+        })
+        .min_by_key(|candidate| (candidate.record, candidate.entity.to_bits()))
+        .map(|mut candidate| {
+            candidate.position.y += 20.0 * meteor_core::MODEL_SCALE;
+            candidate
+        })
+}
+
+fn try_start_getitem_seek(
+    patrol: &mut NpcPatrol,
+    profile: Option<&NpcCombatProfile>,
+    view_model_units: f32,
+    npc_pos: Vec3,
+    candidates: impl IntoIterator<Item = GetItemCandidate>,
+) {
+    if patrol.getitem_goal.is_some() {
+        return;
+    }
+    let tick = patrol.getitem_scan_ticks;
+    patrol.getitem_scan_ticks = tick.wrapping_add(1);
+    if tick % 4 != 3 {
+        return;
+    }
+    let Some(profile) = profile else {
+        return;
+    };
+
+    let roll = (next_npc_rand(&mut patrol.rng) * 0x0100_0000 as f32) as u32;
+    if (roll % 100) as f32 > profile.get_item {
+        return;
+    }
+    let range = getitem_seek_range_world(view_model_units);
+    if let Some(candidate) =
+        first_getitem_target(npc_pos, range, patrol.last_getitem_record, candidates)
+    {
+        patrol.last_getitem_record = Some(candidate.record);
+        patrol.getitem_entity = Some(candidate.entity);
+        patrol.getitem_goal = Some(candidate.position);
+    }
+}
+
+fn npc_stock_drop_ready(net: &crate::plugins::network_plugin::NetState, entity: Entity) -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        net.is_stock_host() && net.round_active && net.stock_npc_ready.contains(&entity)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (net, entity);
+        false
+    }
+}
+
+fn concealed_escape_waypoint(
     graph: &WaypointGraph,
+    mesh: &StageMeshCollider,
     start_position: Vec3,
     threat: Vec3,
+    mut roll: impl FnMut() -> u32,
 ) -> Option<usize> {
-    let start = graph.nearest(start_position.to_array())?;
+    let start = super::npc_navigation::nearest_original(graph, Some(mesh), start_position)?;
     let mut visited = std::collections::HashSet::from([start]);
     let mut queue = std::collections::VecDeque::from([start]);
-    let mut best = (start, -1.0f32);
-    while let Some(id) = queue.pop_front() {
-        let Some(position) = graph.world_position(id) else {
+    let target = threat + Vec3::Y * (30.0 * meteor_core::MODEL_SCALE);
+    for _ in 0..20 {
+        let Some(id) = queue.pop_front() else {
+            break;
+        };
+        let Some(position) = graph.world_position(id).map(Vec3::from_array) else {
             continue;
         };
-        let dx = position[0] - threat.x;
-        let dz = position[2] - threat.z;
-        let distance = dx * dx + dz * dz;
-        if distance > best.1 {
-            best = (id, distance);
-        }
-        if visited.len() >= 20 {
-            continue;
+        let delta = target - position;
+        let distance = delta.length();
+        if roll() % 4 != 0
+            && distance > 0.001
+            && mesh
+                .raycast_hit(
+                    Point3::new(position.x, position.y, position.z),
+                    Point3::new(delta.x / distance, delta.y / distance, delta.z / distance),
+                    distance,
+                )
+                .is_some_and(|hit| hit.t < distance)
+        {
+            return Some(id);
         }
         if let Some(point) = graph.points.get(id) {
-            for (target, _) in &point.links {
-                if !graph.is_enabled(*target) {
-                    continue;
-                }
-                if visited.len() >= 20 {
-                    break;
-                }
-                if visited.insert(*target) {
-                    queue.push_back(*target);
+            for (next, _) in &point.links {
+                if graph.is_enabled(*next) && visited.insert(*next) {
+                    queue.push_back(*next);
                 }
             }
         }
     }
-    (best.0 != start).then_some(best.0)
+    None
 }
 
 type NpcAiQuery<'w, 's> = Query<
@@ -633,7 +1069,7 @@ type NpcAiQuery<'w, 's> = Query<
         Option<&'static mut MissionNpc>,
         Option<&'static NpcCombatProfile>,
         Option<&'static PoseRuntime>,
-        &'static FighterHitReaction,
+        (&'static FighterHitReaction, Option<&'static StockNpcBrain>),
     ),
     (
         With<Fighter>,
@@ -662,10 +1098,11 @@ impl Plugin for AiPlugin {
         let actor_schedule = super::fighter_frame::schedule(app);
         app.add_systems(
             actor_schedule,
-            drive_npc_ai
+            (drive_npc_ai, finish_npc_script_tick)
+                .chain()
                 .in_set(crate::plugins::FighterFrameSet::Movement)
                 .run_if(crate::plugins::simulation_frame)
-                .run_if(in_state(AppState::Playing)),
+                .run_if(super::ui_plugin::gameplay_hud_visibility::scene_session_active),
         )
         .add_systems(
             actor_schedule,
@@ -673,7 +1110,7 @@ impl Plugin for AiPlugin {
                 .after(crate::plugins::movement_plugin::move_local_fighter)
                 .in_set(crate::plugins::FighterFrameSet::Locomotion)
                 .run_if(crate::plugins::simulation_frame)
-                .run_if(in_state(AppState::Playing)),
+                .run_if(super::ui_plugin::gameplay_hud_visibility::scene_session_active),
         );
     }
 }
@@ -896,12 +1333,15 @@ type NpcBallisticAirQuery<'w, 's> = Query<
     's,
     (
         Entity,
+        &'static Fighter,
         &'static mut Transform,
         &'static mut MotionState,
         &'static mut FighterAir,
         &'static FighterHitReaction,
         Option<&'static AiIntent>,
         Option<&'static crate::components::fighter::FighterStatusEffects>,
+        &'static mut SmState,
+        &'static mut CombatState,
     ),
     (
         With<NpcFighter>,
@@ -912,6 +1352,7 @@ type NpcBallisticAirQuery<'w, 's> = Query<
 
 pub(crate) fn npc_ballistic_air_root_motion(
     active_fighter: Option<Res<super::fighter_frame::ActiveFighter>>,
+    combat_resources: Option<Res<CombatResourceData>>,
     time: Res<Time>,
     frame_clock: Option<Res<crate::plugins::FrameClock>>,
     collider: Option<Res<StageCollider>>,
@@ -930,11 +1371,23 @@ pub(crate) fn npc_ballistic_air_root_motion(
     {
         mover.set_mesh_collider(mesh);
     }
-    for (entity, mut transform, mut motion, mut air, hit_reaction, intent, status) in &mut npcs {
+    for (
+        entity,
+        fighter,
+        mut transform,
+        mut motion,
+        mut air,
+        hit_reaction,
+        intent,
+        status,
+        mut sm,
+        mut combat,
+    ) in &mut npcs
+    {
         if !super::fighter_frame::accepts(active_fighter.as_deref(), entity) {
             continue;
         }
-        if hit_reaction.current.is_some() {
+        if air.dodge_owns_motion_tick || hit_reaction.current.is_some() {
             continue;
         }
         if air.pending_ledge_fall && !air.air.airborne {
@@ -960,14 +1413,14 @@ pub(crate) fn npc_ballistic_air_root_motion(
         if crate::plugins::movement_plugin::air_curve_motion_owned(air.air.motion_mode, false) {
             continue;
         }
-        if let Some(intent) = intent.filter(|intent| intent.navigation_jump_target.is_some()) {
+        if let Some(intent) = intent.filter(|intent| intent.locomotion_input != Vec2::ZERO) {
             super::movement_plugin::tick_air_input_drive(
                 &mut air,
                 dt,
                 Vec3::new(intent.locomotion_input.x, 0.0, intent.locomotion_input.y),
                 motion.facing,
                 false,
-                status.map_or(1.0, |status| status.effects.speed_factor(1.0)),
+                fighter_speed_factor(combat_resources.as_deref(), fighter, 1.0, status),
                 false,
             );
         }
@@ -982,6 +1435,9 @@ pub(crate) fn npc_ballistic_air_root_motion(
             dt,
             false,
         );
+        if !air.air.airborne {
+            super::movement_plugin::land_jump_state(&mut sm, &mut combat);
+        }
     }
 }
 
@@ -992,24 +1448,69 @@ fn npc_ordinary_locomotion_allowed(sm: Option<&SmState>) -> bool {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn drive_npc_ai(
     active_fighter: Option<Res<super::fighter_frame::ActiveFighter>>,
-    time: Res<Time>,
-    frame_clock: Option<Res<crate::plugins::FrameClock>>,
+    (time, frame_clock): (Res<Time>, Option<Res<crate::plugins::FrameClock>>),
     waypoints: Option<Res<WaypointGraph>>,
-    collider: Option<Res<StageCollider>>,
-    script: Option<Res<StageMissionRuntime>>,
+    (collider, contacts): (
+        Option<Res<StageCollider>>,
+        Option<Res<CharacterContactFrame>>,
+    ),
+    (mut script, scene_script): (
+        Option<ResMut<StageMissionRuntime>>,
+        Option<Res<crate::plugins::stage_plugin::StageScriptRuntime>>,
+    ),
     net: Option<Res<crate::plugins::network_plugin::NetState>>,
     qi_values: Query<&crate::components::fighter::Qi>,
+    switching: Query<(), With<crate::components::fighter::WeaponSwitchActive>>,
+    concealment: Query<&crate::components::fighter::Concealment>,
     mut npcs: NpcAiQuery<'_, '_>,
 
     players: Query<(Entity, &Transform, &Health), With<LocalFighter>>,
     remotes: NpcRemoteTargets<'_, '_>,
-    mut dialogue: Option<ResMut<crate::plugins::ui_plugin::DialogueState>>,
+    (cargos, network_flags): (
+        Query<
+            (
+                Entity,
+                &LocalEscortState,
+                &Transform,
+                Option<&crate::plugins::item_plugin::SceneRecordOrder>,
+            ),
+            Without<Fighter>,
+        >,
+        Query<
+            (
+                Entity,
+                &Transform,
+                Option<&crate::plugins::item_plugin::SceneRecordOrder>,
+            ),
+            (
+                With<crate::plugins::stage_plugin::NetworkEscortFlag>,
+                Without<Fighter>,
+            ),
+        >,
+    ),
+    props: Query<
+        (
+            Entity,
+            &StageProp,
+            &Transform,
+            &Visibility,
+            Option<&crate::plugins::item_plugin::SceneRecordOrder>,
+            Option<&crate::plugins::item_plugin::StockSceneItemView>,
+        ),
+        Without<Fighter>,
+    >,
+    (mut commands, mut dialogue): (
+        Commands,
+        Option<ResMut<crate::plugins::ui_plugin::DialogueState>>,
+    ),
 ) {
     #[cfg(not(target_arch = "wasm32"))]
     let _perf = super::perf_plugin::Scope::new(11);
     let dt = crate::plugins::simulation_dt(frame_clock.as_deref(), time.delta_secs());
     let performance_dt =
         crate::plugins::simulation_wall_step(frame_clock.as_deref(), time.delta_secs());
+    let peace = script.as_deref().map_or(0, StageMissionRuntime::peace);
+    let attack_allowed = peace <= 0;
     let Some((player_entity, player_pos, player_alive)) = players
         .iter()
         .next()
@@ -1017,14 +1518,47 @@ pub(crate) fn drive_npc_ai(
     else {
         return;
     };
+    let prop_active: std::collections::HashMap<_, _> = scene_script
+        .as_deref()
+        .and_then(|script| script.script())
+        .map(|script| {
+            script
+                .host()
+                .instances()
+                .iter()
+                .map(|instance| {
+                    (
+                        instance.name.to_ascii_lowercase(),
+                        instance
+                            .props
+                            .get("active")
+                            .is_none_or(|value| value.as_f64() != 0.0),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let prop_available =
+        |prop: &StageProp,
+         visibility: &Visibility,
+         view: Option<&crate::plugins::item_plugin::StockSceneItemView>| {
+            view.is_none_or(|view| view.available)
+                && npc_seekable_prop_active(
+                    prop,
+                    visibility,
+                    prop_active.get(&prop.name.to_ascii_lowercase()).copied(),
+                )
+        };
 
     #[cfg(not(target_arch = "wasm32"))]
     let snapshot_perf = super::perf_plugin::Scope::new(19);
     let npc_positions: std::collections::HashMap<i64, Vec3> = npcs
         .iter()
-        .filter_map(|(_, _, _, _, _, transform, _, _, _, _, _, npc, _, _, _)| {
-            npc.map(|npc| (npc.id, transform.translation))
-        })
+        .filter_map(
+            |(_, _, _, _, _, transform, _, _, _, _, _, npc, _, _, (_, _))| {
+                npc.map(|npc| (npc.id, transform.translation))
+            },
+        )
         .collect();
 
     let default_net = crate::plugins::network_plugin::NetState::default();
@@ -1039,7 +1573,7 @@ pub(crate) fn drive_npc_ai(
         alive: player_alive,
     }];
     actors.extend(npcs.iter().map(
-        |(entity, _, health, _, _, transform, _, _, _, _, _, npc, _, _, _)| {
+        |(entity, _, health, _, _, transform, _, _, _, _, _, npc, _, _, (_, _))| {
             let id = npc.map_or(-1 - i64::from(entity.index_u32()), |npc| npc.id);
             actor_entities.insert(id, entity);
             AiActorSnapshot {
@@ -1062,12 +1596,23 @@ pub(crate) fn drive_npc_ai(
             alive: health.current > 0.0,
         });
     }
+
+    let concealed_ids: std::collections::HashSet<i64> = actor_entities
+        .iter()
+        .filter(|(_, entity)| concealment.get(**entity).is_ok_and(|c| c.remaining > 0.0))
+        .map(|(id, _)| *id)
+        .collect();
+    let perceived_actors: Vec<_> = actors
+        .iter()
+        .copied()
+        .filter(|actor| !concealed_ids.contains(&actor.id))
+        .collect();
     #[cfg(not(target_arch = "wasm32"))]
     drop(snapshot_perf);
     for (
         entity,
         fighter,
-        health,
+        mut health,
         mut motion,
         mut intent,
         mut transform,
@@ -1078,19 +1623,41 @@ pub(crate) fn drive_npc_ai(
         mut performance,
         mut mission_npc,
         combat_profile,
-        pose,
-        hit_reaction,
+        _pose,
+        (hit_reaction, stock_brain),
     ) in &mut npcs
     {
         if !super::fighter_frame::accepts(active_fighter.as_deref(), entity) {
             continue;
         }
+        let stock_brain = stock_brain.is_some();
+        patrol.script_tick_due = false;
+        let mut base_behavior = mission_npc
+            .as_deref()
+            .and_then(|npc| npc.forced_behavior)
+            .or(stock_brain.then_some(BehaviorMode::Run));
+        let base_think = mission_npc
+            .as_deref()
+            .map_or(if stock_brain { STOCK_NPC_THINK } else { 100.0 }, |npc| {
+                npc.think
+            });
+        let base_view = mission_npc
+            .as_deref()
+            .map_or(if stock_brain { STOCK_NPC_VIEW } else { 400.0 }, |npc| {
+                npc.view.max(0.0)
+            });
 
         intent.locomotion_input = Vec2::ZERO;
         if !air.air.airborne || health.current <= 0.0 {
             intent.navigation_jump_target = None;
+            patrol.airborne_heading = None;
+            patrol.airborne_input = Vec2::Y;
         }
         intent.want_qi_burst = false;
+        intent.want_weapon_switch = false;
+        if let Some(performance) = performance.as_deref_mut() {
+            performance.ai_jump = None;
+        }
 
         if patrol.rng == 0x9e37_79b9_7f4a_7c15 {
             patrol.rng ^= (u64::from(entity.index_u32()) + 1).wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -1108,6 +1675,7 @@ pub(crate) fn drive_npc_ai(
             intent.ranged_aim = None;
             intent.attack_directions.clear();
             patrol.sampled_hp = None;
+            patrol.perception = default();
             if let Some(performance) = performance.as_deref_mut() {
                 performance.crouching = false;
                 performance.jump_requested = false;
@@ -1120,6 +1688,49 @@ pub(crate) fn drive_npc_ai(
             intent.attack_cooldown -= dt;
         }
         let npc_pos = transform.translation;
+        patrol.advance_navigation(npc_pos, motion.velocity);
+        let mut route_recovery = obstacle_avoidance::FollowRecovery::Normal;
+        if patrol.avoidance.is_none()
+            && (patrol.navigation.in_progress() || patrol.patrol_navigation.in_progress())
+        {
+            let mut rng = patrol.rng;
+            route_recovery = patrol.collision_clock.follow_recovery(
+                obstacle_avoidance::ObstacleSpace {
+                    position: npc_pos,
+                    facing: motion.facing,
+                    mesh: collider.as_deref().and_then(|c| c.mesh.as_ref()),
+                },
+                || (next_npc_rand(&mut rng) * 0x0100_0000 as f32) as u32,
+            );
+            patrol.rng = rng;
+            match route_recovery {
+                obstacle_avoidance::FollowRecovery::AvoidObstacle => {
+                    let heading = patrol.path_heading.unwrap_or(motion.facing);
+                    patrol.stop_navigation();
+                    patrol.avoidance = Some(ObstacleCallback {
+                        ticks: -1,
+                        desired_yaw: heading,
+                        forward: false,
+                    });
+                }
+                obstacle_avoidance::FollowRecovery::StrongJump
+                | obstacle_avoidance::FollowRecovery::WeakJump => {
+                    if let Some(performance) = performance.as_deref_mut() {
+                        performance.ai_jump =
+                            Some(route_recovery == obstacle_avoidance::FollowRecovery::StrongJump);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let blocked = sm_state
+            .as_deref()
+            .is_none_or(|state| !matches!(state.current, FighterState::Down | FighterState::Fake))
+            && contacts
+                .as_deref()
+                .is_some_and(|contacts| contacts.last_mover_scene_contact(entity));
+        patrol.collision_clock.record_previous_mover(blocked, dt);
         let damaged = patrol
             .sampled_hp
             .is_some_and(|previous| health.current < previous);
@@ -1127,45 +1738,225 @@ pub(crate) fn drive_npc_ai(
         if patrol.sampled_hp.is_none() {
             patrol.sampled_hp = Some(health.current);
         }
-        let can_react =
-            behavior_scans_enemies(mission_npc.as_deref().and_then(|npc| npc.forced_behavior))
-                && performance.as_deref().is_none_or(|performance| {
-                    performance.pause_remaining <= 0.0 && performance.queue.is_empty()
-                });
-        if intent.attack_cooldown <= 0.0 && can_react {
+
+        patrol.think_remaining -= dt;
+        let thought_tick = patrol.think_remaining <= 0.0;
+        let mut performing = performance
+            .as_deref()
+            .is_some_and(|p| !p.queue.is_empty() || p.pause_remaining > 0.0);
+        patrol.script_tick_due = if performing {
+            performance
+                .as_deref()
+                .is_some_and(|p| p.clock.pulse_due(performance_dt))
+        } else {
+            thought_tick
+        };
+        let stock_init_tick = stock_brain && thought_tick && patrol.first_update_pending;
+        if thought_tick && patrol.first_update_pending {
+            patrol.first_update_pending = false;
+            patrol.reset_behavior_state();
+            let id = mission_npc
+                .as_deref()
+                .map_or(-1 - i64::from(entity.index_u32()), |npc| npc.id);
+            patrol.schedule_reset_think(base_think, id);
+            if let Some(npc) = mission_npc.as_deref_mut() {
+                npc.forced_behavior = None;
+                npc.behavior_args.clear();
+                npc.attack_target_slot = None;
+                npc.attack_target_remaining = 0;
+            }
+            let loaded_hp = script
+                .as_deref()
+                .and_then(|s| s.script())
+                .and_then(|runtime| runtime.npc_initial_hp(id))
+                .or_else(|| stock_brain.then_some(health.max));
+            if let Some(hp) = loaded_hp {
+                health.current = hp;
+                health.max = hp;
+            }
+            if let Some(runtime) = script.as_deref_mut().and_then(|s| s.script_mut()) {
+                runtime.reset_npc_init(id);
+                if let Some(hp) = loaded_hp {
+                    let team = mission_npc
+                        .as_deref()
+                        .map_or(0.0, |npc| f64::from(npc.team));
+                    runtime
+                        .host_mut()
+                        .sync_fighter(id, f64::from(hp), f64::from(hp), team);
+                }
+            }
+            base_behavior = None;
+            if let Some(performance) = performance.as_deref_mut() {
+                *performance = default();
+            }
+            patrol.script_tick_due = true;
+            performing = false;
+            *intent = default();
+        }
+        if stock_brain && (patrol.first_update_pending || stock_init_tick) {
+            if stock_init_tick {
+                let id = -1 - i64::from(entity.index_u32());
+                patrol.schedule_reset_think(base_think, id);
+                patrol.finish_callback_install();
+            }
+            *intent = default();
+            motion.movement_mode = meteor_core::MovementMode::Idle;
+            continue;
+        }
+        if thought_tick {
+            let mode = if patrol.temporary_target.is_some() {
+                Some(BehaviorMode::Dodge)
+            } else {
+                base_behavior
+            };
+            let delay = if patrol.avoidance.is_some() {
+                obstacle_avoidance::AVOID_CALLBACK_DELAY
+            } else if patrol.getitem_goal.is_some() {
+                0.3
+            } else if (intent.enemy_id.is_some() || patrol.perception.passive)
+                && !matches!(mode, Some(BehaviorMode::Idle | BehaviorMode::Dodge))
+            {
+                patrol.perception.callback_delay()
+            } else {
+                npc_script_callback_delay(mode)
+            };
+            patrol.think_remaining = meteor_ai::combat::decision_interval(base_think, delay);
+        }
+        let init_id = mission_npc
+            .as_deref()
+            .filter(|npc| npc.forced_behavior.is_none())
+            .map(|npc| npc.id)
+            .filter(|id| {
+                script
+                    .as_deref()
+                    .and_then(|s| s.script())
+                    .is_some_and(|runtime| runtime.npc_init_pending(*id))
+            });
+        if let Some(id) = init_id.filter(|_| !performing && patrol.avoidance.is_none()) {
+            if thought_tick {
+                if let Some(runtime) = script.as_deref_mut().and_then(|s| s.script_mut()) {
+                    if let Err(error) = runtime.run_npc_init(id) {
+                        warn!("NPC {id} OnStart: {error}");
+                    }
+                }
+                patrol.think_remaining =
+                    meteor_ai::combat::decision_interval(base_think, patrol.init_delay);
+            }
+            intent.move_dir = Vec2::ZERO;
+            intent.want_attack = false;
+            intent.want_guard = false;
+            intent.dodge_burst = None;
+            motion.movement_mode = meteor_core::MovementMode::Idle;
+            continue;
+        }
+        if switching.contains(entity) {
+            intent.want_attack = false;
+            intent.want_guard = false;
+            intent.want_taunt = false;
+            intent.dodge_burst = None;
+            intent.move_dir = Vec2::ZERO;
+            continue;
+        }
+        let can_react = behavior_scans_enemies(base_behavior)
+            && patrol.avoidance.is_none()
+            && !patrol.perception.in_combat()
+            && patrol.temporary_target.is_none()
+            && patrol.getitem_goal.is_none()
+            && performance.as_deref().is_none_or(|performance| {
+                performance.pause_remaining <= 0.0 && performance.queue.is_empty()
+            });
+        if thought_tick && can_react {
             patrol.sampled_hp = Some(health.current);
             let enemy = intent
                 .enemy_id
                 .and_then(|id| actors.iter().find(|actor| actor.id == id && actor.alive));
-            if let Some(enemy) = enemy.filter(|_| damaged) {
+            if damaged {
+                if let Some(enemy) = enemy {
+                    let dodge_roll = (next_npc_rand(&mut patrol.rng) * 0x0100_0000 as f32) as u32;
+                    if ((dodge_roll % 100) as f32)
+                        < combat_profile.map_or(0.0, |profile| profile.dodge)
+                    {
+                        patrol.prepare_behavior_change(
+                            mission_npc.as_deref(),
+                            &intent,
+                            Some(BehaviorMode::Dodge),
+                        );
+                        patrol.finish_callback_install();
+                        if let Some(npc) = mission_npc.as_deref_mut() {
+                            npc.forced_behavior = Some(BehaviorMode::Dodge);
+                            npc.behavior_args =
+                                vec![meteor_scene::pst_runtime::PstValue::Num(enemy.id as f64)];
+                        } else {
+                            patrol.temporary_target = Some(enemy.id);
+                        }
+                        *intent = default();
+                        continue;
+                    }
+                    let qi = qi_values.get(entity).map_or(0.0, |qi| qi.current);
+                    let distance = (enemy.position - npc_pos).length();
+                    let roll = if qi > 60.0 && distance < 80.0 * meteor_core::MODEL_SCALE {
+                        (next_npc_rand(&mut patrol.rng) * 0x0100_0000 as f32) as u32
+                    } else {
+                        1
+                    };
+                    if meteor_ai::combat::reacts_with_qi_burst(
+                        damaged,
+                        qi_values.get(entity).map_or(0.0, |qi| qi.current),
+                        (enemy.position - npc_pos).length(),
+                        roll,
+                    ) {
+                        intent.want_qi_burst = true;
+                        intent.want_attack = false;
+                        intent.want_guard = false;
+                        intent.dodge_burst = None;
+                        intent.move_dir = Vec2::ZERO;
+                        intent.attack_cooldown = npc_think_interval(base_think);
+                        continue;
+                    }
+                }
                 let roll = (next_npc_rand(&mut patrol.rng) * 0x0100_0000 as f32) as u32;
-                if meteor_ai::combat::reacts_with_qi_burst(
-                    damaged,
-                    qi_values.get(entity).map_or(0.0, |qi| qi.current),
-                    (enemy.position - npc_pos).length(),
-                    roll,
-                ) {
-                    intent.want_qi_burst = true;
-                    intent.want_attack = false;
-                    intent.want_guard = false;
-                    intent.dodge_burst = None;
-                    intent.move_dir = Vec2::ZERO;
-                    intent.attack_cooldown = npc_think_interval(mission_npc.as_deref());
+                let spare = fighter.weapon_slots[1 - usize::from(fighter.weapon_slot.min(1))];
+                if roll % 5 == 0 && spare != 0 {
+                    patrol.last_weapon_switch_time = Some(time.elapsed_secs_f64());
+                    let delay = meteor_ai::combat::decision_interval(base_think, 0.6);
+                    patrol.think_remaining = delay;
+                    *intent = default();
+                    intent.want_weapon_switch = true;
+                    intent.attack_cooldown = delay;
+                    if let Some(performance) = performance.as_deref_mut() {
+                        performance.guard_remaining = 0.0;
+                    }
                     continue;
                 }
+                let guard_roll = (next_npc_rand(&mut patrol.rng) * 0x0100_0000 as f32) as u32;
+                intent.want_guard = ((guard_roll % 100) as f32)
+                    < combat_profile.map_or(0.0, |p| p.guard)
+                    && !meteor_ai::combat::weapon_tactics(fighter.weapon).ranged;
+                intent.want_attack = false;
+                intent.move_dir = Vec2::ZERO;
+                intent.dodge_burst = None;
+                if intent.want_guard {
+                    if let Some(performance) = performance.as_deref_mut() {
+                        performance.guard_remaining = patrol.think_remaining;
+                    }
+                }
+                if !intent.want_guard {
+                    if let Some(performance) = performance.as_deref_mut() {
+                        performance.guard_remaining = 0.0;
+                    }
+                    let following = mission_npc
+                        .as_deref()
+                        .is_some_and(|npc| npc.forced_behavior == Some(BehaviorMode::Follow));
+                    if enemy.is_none() && !following {
+                        let roll = (next_npc_rand(&mut patrol.rng) * 0x0100_0000 as f32) as u32;
+                        if ((roll % 100) as f32) < 2.0 * combat_profile.map_or(0.0, |p| p.dodge) {
+                            patrol.perception.start_search();
+                        }
+                    }
+                }
+                continue;
             }
         }
-        let request_getup = update_npc_down_recovery(
-            &mut patrol,
-            hit_reaction
-                .current
-                .as_ref()
-                .map(|reaction| (reaction.kind, reaction.down_remaining)),
-            pose.map_or(0, |pose| pose.pose_instance_id),
-            npc_think_interval(mission_npc.as_deref()),
-            dt,
-        );
-
         let perform_reaction_ready = performance.as_deref().is_some_and(|performance| {
             performance.queue.front().is_some_and(|command| {
                 sm_state
@@ -1175,9 +1966,18 @@ pub(crate) fn drive_npc_ai(
                             state.current,
                             FighterState::Guard | FighterState::Down | FighterState::Fake
                         ),
-                        "aggress" => {
+                        "aggress" | "attack" | "jump" | "crouch" | "pause" => {
                             matches!(state.current, FighterState::Down | FighterState::Fake)
                         }
+                        "use" | "faceto" => true,
+                        "say" => matches!(
+                            state.current,
+                            FighterState::Name
+                                | FighterState::Down
+                                | FighterState::Fake
+                                | FighterState::Guard
+                                | FighterState::BeHit
+                        ),
                         _ => false,
                     })
             })
@@ -1198,18 +1998,65 @@ pub(crate) fn drive_npc_ai(
                 }
             }
             if intent.attack_cooldown <= 0.0 {
-                intent.attack_cooldown = npc_think_interval(mission_npc.as_deref());
+                intent.attack_cooldown = npc_think_interval(base_think);
             }
             intent.move_dir = Vec2::ZERO;
             intent.want_attack = false;
-            intent.want_guard = request_getup;
+            intent.want_guard = false;
             intent.dodge_burst = None;
+            intent.locomotion_input = Vec2::ZERO;
+            intent.attack_directions.clear();
+            if thought_tick
+                && performance
+                    .as_deref()
+                    .is_none_or(|p| p.pause_remaining.is_finite())
+                && sm_state
+                    .as_deref()
+                    .is_some_and(|state| state.current == FighterState::Down)
+                && hit_reaction.current.as_ref().is_some_and(|reaction| {
+                    reaction.kind == meteor_combat::hit_reaction::HitReactKind::Down
+                })
+            {
+                let roll = (next_npc_rand(&mut patrol.rng) * 0x0100_0000 as f32) as u32;
+                queue_npc_down_recovery(
+                    &mut intent,
+                    roll,
+                    attack_allowed,
+                    motion.facing,
+                    npc_pos,
+                    collider.as_deref().and_then(|stage| stage.mesh.as_ref()),
+                );
+            }
             motion.movement_mode = if air.air.airborne {
                 meteor_core::MovementMode::Airborne
             } else {
                 meteor_core::MovementMode::Idle
             };
             continue;
+        }
+
+        let mut down_recovery_attack = false;
+        if thought_tick
+            && hit_reaction.current.as_ref().is_some_and(|reaction| {
+                reaction.kind == meteor_combat::hit_reaction::HitReactKind::Down
+            })
+            && sm_state
+                .as_deref()
+                .is_some_and(|state| state.current == FighterState::Down)
+            && performance
+                .as_deref()
+                .is_none_or(|p| p.pause_remaining.is_finite())
+        {
+            let roll = npc_roll(&mut patrol);
+            queue_npc_down_recovery(
+                &mut intent,
+                roll,
+                attack_allowed,
+                motion.facing,
+                npc_pos,
+                collider.as_deref().and_then(|stage| stage.mesh.as_ref()),
+            );
+            down_recovery_attack = intent.want_attack;
         }
 
         let mut empty_performance = NpcPerformance::default();
@@ -1229,19 +2076,97 @@ pub(crate) fn drive_npc_ai(
             !performance.queue.is_empty() && performance.guard_remaining <= 0.0;
         let mut perform_attack = false;
 
+        let faceto_target = performance
+            .queue
+            .front()
+            .filter(|cmd| cmd.action == "faceto")
+            .and_then(|cmd| {
+                let id = cmd.args.first().map_or(0, |value| value.as_f64() as i64);
+                if id == 0 {
+                    Some(player_pos)
+                } else {
+                    npc_positions.get(&id).copied()
+                }
+            });
+        if let Some(target) = faceto_target {
+            patrol.idle_facing = yaw_towards(target - npc_pos);
+        }
+        if !performance.queue.is_empty() && npc_can_turn(sm_state.as_deref(), air.air.airborne) {
+            if let Some(yaw) = patrol.idle_facing {
+                motion.facing = npc_combat_turn(motion.facing, yaw, dt);
+            }
+        }
+
+        if !performance.queue.is_empty()
+            && performance.guard_remaining <= 0.0
+            && performance.clock.pulse_due(performance_dt)
+        {
+            if intent.enemy_id.is_some_and(|id| {
+                !perceived_actors
+                    .iter()
+                    .any(|actor| actor.id == id && actor.alive)
+            }) {
+                intent.enemy_id = None;
+                intent.enemy_entity = None;
+            }
+            if intent.enemy_id.is_none() {
+                let scan = perception::Scan {
+                    peace,
+                    self_id: mission_npc
+                        .as_deref()
+                        .map_or(-1 - i64::from(entity.index_u32()), |npc| npc.id),
+                    team: crate::plugins::combat_plugin::fighter_combat_team(
+                        net,
+                        false,
+                        None,
+                        mission_npc.as_deref(),
+                    ) as u8,
+                    origin: npc_pos,
+                    forward: Vec3::new(motion.facing.sin(), 0.0, motion.facing.cos()),
+                    center: npc_pos,
+                    radius: (3000.0
+                        + meteor_ai::combat::weapon_tactics(fighter.weapon).attack_range * 0.5)
+                        * meteor_core::MODEL_SCALE,
+                };
+                intent.enemy_id = perception::select_hostile(
+                    scan,
+                    &perceived_actors,
+                    || npc_roll(&mut patrol),
+                    |actor| {
+                        npc_target_visible(
+                            npc_pos,
+                            actor.position,
+                            fighter.weapon,
+                            base_view * meteor_core::MODEL_SCALE,
+                            collider.as_deref().and_then(|stage| stage.mesh.as_ref()),
+                        )
+                    },
+                )
+                .map(|actor| actor.id);
+                intent.enemy_entity = intent
+                    .enemy_id
+                    .and_then(|id| actor_entities.get(&id).copied());
+            }
+        }
+        let missing_faceto = performance
+            .queue
+            .front()
+            .is_some_and(|cmd| cmd.action == "faceto")
+            && faceto_target.is_none();
         let next = if performance.guard_remaining > 0.0 {
             None
         } else {
-            performance.clock.next_eligible(
+            performance.clock.next_npc(
                 &mut performance.queue,
                 performance_dt,
-                !air.air.airborne
-                    && sm_state.as_deref().is_none_or(|state| {
-                        matches!(
-                            state.current,
-                            FighterState::Name | FighterState::Down | FighterState::Fake
-                        )
-                    }),
+                missing_faceto
+                    || !air.air.airborne
+                        && sm_state.as_deref().is_none_or(|state| {
+                            matches!(
+                                state.current,
+                                FighterState::Name | FighterState::Down | FighterState::Fake
+                            )
+                        }),
                 !air.air.airborne
                     && sm_state.as_deref().is_none_or(|state| {
                         matches!(
@@ -1252,6 +2177,16 @@ pub(crate) fn drive_npc_ai(
                                 | FighterState::Fake
                         )
                     }),
+                sm_state.as_deref().is_none_or(|state| {
+                    matches!(
+                        state.current,
+                        FighterState::Name
+                            | FighterState::Down
+                            | FighterState::Fake
+                            | FighterState::Guard
+                            | FighterState::BeHit
+                    )
+                }),
             )
         };
         if let Some(command) = next {
@@ -1289,7 +2224,7 @@ pub(crate) fn drive_npc_ai(
                     };
                     if let Some(target) = target {
                         let delta = target - transform.translation;
-                        motion.facing = delta.x.atan2(delta.z);
+                        patrol.idle_facing = yaw_towards(delta);
 
                         transform.rotation = Quat::IDENTITY;
                     }
@@ -1298,7 +2233,18 @@ pub(crate) fn drive_npc_ai(
                 "aggress" => {
                     intent.want_taunt = true;
                 }
-                "attack" => perform_attack = true,
+                "attack" => {
+                    perform_attack = attack_allowed;
+                    let category = (npc_roll(&mut patrol) % 3) as usize;
+                    queue_command(
+                        &mut intent,
+                        &mut patrol,
+                        fighter.weapon,
+                        category,
+                        air.air.airborne,
+                        attack_allowed,
+                    );
+                }
                 "crouch" => {
                     performance.crouching = command
                         .args
@@ -1328,12 +2274,68 @@ pub(crate) fn drive_npc_ai(
         }
         if perform_owns_tick {
             intent.move_dir = Vec2::ZERO;
-            intent.want_attack = perform_attack;
+            intent.want_attack = perform_attack || down_recovery_attack;
             motion.movement_mode = if performance.crouching {
                 meteor_core::MovementMode::Crouch
             } else {
                 meteor_core::MovementMode::Idle
             };
+            continue;
+        }
+        if let Some(mut avoidance) = patrol.avoidance.take() {
+            let callback_facing = motion.facing;
+            if npc_can_turn(sm_state.as_deref(), air.air.airborne) {
+                motion.facing = npc_combat_turn(motion.facing, avoidance.desired_yaw, dt);
+            }
+            let held_forward = avoidance.forward;
+            if thought_tick {
+                let step = obstacle_avoidance::avoid_obstacle_tick(
+                    obstacle_avoidance::ObstacleSpace {
+                        position: npc_pos,
+                        facing: callback_facing,
+                        mesh: collider.as_deref().and_then(|c| c.mesh.as_ref()),
+                    },
+                    avoidance.desired_yaw,
+                    avoidance.ticks,
+                    || npc_roll(&mut patrol),
+                );
+                avoidance.ticks = avoidance.ticks.wrapping_add(1);
+                avoidance.desired_yaw = step.desired_yaw;
+                avoidance.forward = step.forward;
+                patrol.think_remaining = meteor_ai::combat::decision_interval(
+                    base_think,
+                    obstacle_avoidance::AVOID_CALLBACK_DELAY,
+                );
+                if step.return_to_parent {
+                    patrol.stop_navigation();
+                    patrol.finish_callback_install();
+
+                    if patrol.getitem_goal.is_some() {
+                        patrol.getitem_ticks = 0;
+                    }
+                    patrol.wander_goal = None;
+                    patrol.patrol_destination = None;
+                    patrol.idle_facing = Some(avoidance.desired_yaw);
+                    intent.move_dir = Vec2::ZERO;
+                    intent.want_attack = false;
+                    intent.want_guard = false;
+                    intent.navigation_jump_target = None;
+                    motion.movement_mode = meteor_core::MovementMode::Idle;
+                    continue;
+                }
+            }
+            intent.want_attack = false;
+            intent.want_guard = false;
+            intent.dodge_burst = None;
+            intent.navigation_jump_target = None;
+            intent.locomotion_input = if held_forward { Vec2::Y } else { Vec2::ZERO };
+            intent.move_dir = decision_space::world_input(intent.locomotion_input, motion.facing);
+            motion.movement_mode = if held_forward {
+                meteor_core::MovementMode::Run
+            } else {
+                meteor_core::MovementMode::Idle
+            };
+            patrol.avoidance = Some(avoidance);
             continue;
         }
 
@@ -1367,12 +2369,11 @@ pub(crate) fn drive_npc_ai(
                 FighterState::Attack1 | FighterState::Attack2 | FighterState::Attack3
             )
         });
-        let forced = mission_npc.as_deref().and_then(|npc| npc.forced_behavior);
-        patrol.think_remaining -= dt;
-        let thought_tick = patrol.think_remaining <= 0.0;
-        if thought_tick {
-            patrol.think_remaining = npc_think_interval(mission_npc.as_deref());
-        }
+        let forced = if patrol.temporary_target.is_some() {
+            Some(BehaviorMode::Dodge)
+        } else {
+            base_behavior
+        };
 
         let actor_ref = matches!(
             forced,
@@ -1384,95 +2385,366 @@ pub(crate) fn drive_npc_ai(
             })
         })
         .flatten();
-        let configured_target = actor_ref.and_then(|id| {
+        let configured_target = patrol.temporary_target.or(actor_ref).and_then(|id| {
             actors
                 .iter()
-                .find(|actor| actor.id == id && actor.alive)
+                .find(|actor| {
+                    actor.id == id
+                        && actor.alive
+                        && (forced == Some(BehaviorMode::Follow) || !concealed_ids.contains(&id))
+                })
                 .map(|actor| (id, actor.position))
         });
 
-        if thought_tick {
-            intent.enemy_id = mission_npc.as_deref().and_then(|npc| {
-                behavior_scans_enemies(forced).then(|| {
-                    let mut view = npc.view.max(0.0) * meteor_core::MODEL_SCALE;
-                    if forced == Some(BehaviorMode::Follow) {
-                        view = view.min(200.0 * meteor_core::MODEL_SCALE);
+        if thought_tick && matches!(forced, Some(BehaviorMode::Dodge | BehaviorMode::Kill)) {
+            let mut finish = configured_target.is_none();
+            let mut exit_facing = None;
+            if forced == Some(BehaviorMode::Dodge) {
+                patrol.think_remaining = meteor_ai::combat::decision_interval(base_think, 0.4);
+                if let Some((_, position)) = configured_target {
+                    if patrol.behavior_ticks != 0 {
+                        let roll = (next_npc_rand(&mut patrol.rng) * 0x0100_0000 as f32) as u32;
+                        finish |= roll % 8 == 0
+                            || npc_pos.distance_squared(position)
+                                > (250.0 * meteor_core::MODEL_SCALE).powi(2);
                     }
-                    closest_hostile(npc.id, npc.team, npc_pos, view, &actors, |actor| {
+                    let view = base_view * meteor_core::MODEL_SCALE;
+                    finish |= !npc_target_visible(
+                        npc_pos,
+                        position,
+                        fighter.weapon,
+                        view,
+                        collider.as_deref().and_then(|stage| stage.mesh.as_ref()),
+                    );
+                    if !finish {
+                        patrol.flee_goal = match (
+                            waypoints.as_deref(),
+                            collider.as_deref().and_then(|stage| stage.mesh.as_ref()),
+                        ) {
+                            (Some(graph), Some(mesh)) => {
+                                concealed_escape_waypoint(graph, mesh, npc_pos, position, || {
+                                    (next_npc_rand(&mut patrol.rng) * 0x0100_0000 as f32) as u32
+                                })
+                            }
+                            _ => None,
+                        };
+                        finish = patrol.flee_goal.is_none();
+                    }
+                    if finish {
+                        exit_facing = yaw_towards(position - npc_pos);
+                        if let Some(yaw) = exit_facing {
+                            motion.facing = npc_combat_turn(motion.facing, yaw, dt);
+                        }
+                    }
+                }
+            }
+            patrol.behavior_ticks = patrol.behavior_ticks.saturating_add(1);
+            if finish {
+                if patrol.return_to_parent(mission_npc.as_deref_mut(), &mut intent) {
+                    if forced == Some(BehaviorMode::Dodge) {
+                        patrol.idle_facing = exit_facing;
+                    }
+                    motion.movement_mode = meteor_core::MovementMode::Idle;
+                    continue;
+                }
+            }
+        }
+
+        let previous_enemy = intent.enemy_id;
+        if thought_tick && patrol.getitem_goal.is_none() {
+            let id = mission_npc
+                .as_deref()
+                .map_or(-1 - i64::from(entity.index_u32()), |npc| npc.id);
+            let team = crate::plugins::combat_plugin::fighter_combat_team(
+                net,
+                false,
+                None,
+                mission_npc.as_deref(),
+            ) as u8;
+            let view = base_view * meteor_core::MODEL_SCALE;
+            let navigating = patrol.navigation.in_progress()
+                || !patrol.travel_route.is_empty()
+                || intent.navigation_jump_target.is_some();
+            let context = perception::Context {
+                peace,
+                self_id: id,
+                team,
+                position: npc_pos,
+                forward: Vec3::new(motion.facing.sin(), 0.0, motion.facing.cos()),
+                weapon: fighter.weapon,
+                mode: forced,
+                configured: configured_target,
+                navigating,
+                look: combat_profile.map_or(0.0, |profile| profile.look),
+            };
+            let mut rng = patrol.rng;
+            intent.enemy_id = patrol
+                .perception
+                .decide(
+                    context,
+                    previous_enemy,
+                    &perceived_actors,
+                    || (next_npc_rand(&mut rng) * 0x0100_0000 as f32) as u32,
+                    |actor, multiplier| {
                         npc_target_visible(
                             npc_pos,
                             actor.position,
-                            view,
+                            fighter.weapon,
+                            view * multiplier,
                             collider.as_deref().and_then(|stage| stage.mesh.as_ref()),
                         )
-                    })
-                    .map(|enemy| enemy.id)
-                    .or_else(|| {
-                        (forced == Some(BehaviorMode::Kill))
-                            .then_some(configured_target.map(|(id, _)| id))
-                            .flatten()
-                    })
-                })?
-            });
-            if mission_npc.is_none() {
-                let id = -1 - i64::from(entity.index_u32());
-                let team =
-                    crate::plugins::combat_plugin::fighter_combat_team(net, false, None, None)
-                        as u8;
-                let view = 400.0 * meteor_core::MODEL_SCALE;
-                intent.enemy_id = closest_hostile(id, team, npc_pos, view, &actors, |actor| {
-                    npc_target_visible(
-                        npc_pos,
-                        actor.position,
-                        view,
-                        collider.as_deref().and_then(|stage| stage.mesh.as_ref()),
-                    )
-                })
+                    },
+                )
                 .map(|actor| actor.id);
-            }
+            patrol.rng = rng;
+            patrol.navigation_reset_pending |= patrol.perception.clear_navigation;
+            patrol.think_remaining = meteor_ai::combat::decision_interval(
+                base_think,
+                if patrol.perception.passive
+                    || (intent.enemy_id.is_some() && forced != Some(BehaviorMode::Idle))
+                {
+                    patrol.perception.callback_delay()
+                } else {
+                    npc_script_callback_delay(forced)
+                },
+            );
+        }
+
+        if patrol.navigation_reset_pending {
+            patrol.stop_navigation();
+            patrol.navigation_reset_pending = false;
+        }
+
+        if patrol.perception.parent_returned {
+            intent.move_dir = Vec2::ZERO;
+            intent.locomotion_input = Vec2::ZERO;
+            intent.navigation_jump_target = None;
+            intent.want_attack = false;
+            intent.want_guard = false;
+            intent.lock_target = None;
+            intent.ranged_aim = None;
+            motion.movement_mode = if air.air.airborne {
+                meteor_core::MovementMode::Airborne
+            } else {
+                meteor_core::MovementMode::Idle
+            };
+            continue;
         }
 
         let enemy = intent.enemy_id.and_then(|id| {
             actors
                 .iter()
-                .find(|actor| actor.id == id && actor.alive)
+                .find(|actor| actor.id == id && actor.alive && !concealed_ids.contains(&id))
                 .copied()
         });
         intent.enemy_entity = enemy.and_then(|enemy| actor_entities.get(&enemy.id).copied());
         if enemy.is_none() {
             intent.enemy_id = None;
+            intent.lock_target = None;
+            intent.ranged_aim = None;
+            intent.attack_directions.clear();
+        }
+
+        let enemy =
+            enemy.filter(|_| !patrol.perception.parent_returned && behavior_scans_enemies(forced));
+        if intent.enemy_id != previous_enemy {
+            patrol.combat_spacing = None;
+            patrol.combat_ticks = -1;
+
+            intent.lock_target = None;
+        }
+        let ground_controllable = !air.air.airborne
+            && sm_state.as_deref().is_none_or(|state| {
+                matches!(
+                    state.current,
+                    FighterState::Name | FighterState::Down | FighterState::Fake
+                )
+            });
+        let space = DecisionSpace {
+            position: npc_pos,
+            facing: motion.facing,
+            ground_controllable,
+            mesh: collider.as_deref().and_then(|stage| stage.mesh.as_ref()),
+        };
+        let target_in_range = enemy.is_some_and(|enemy| {
+            meteor_ai::combat::in_attack_range(
+                fighter.weapon,
+                (enemy.position - npc_pos).to_array(),
+                ground_controllable,
+            )
+        });
+        if enemy.is_none()
+            || !target_in_range
+            || meteor_ai::combat::weapon_tactics(fighter.weapon).ranged
+        {
+            intent.lock_target = None;
+        }
+        if thought_tick && enemy.is_some() && !patrol.perception.passive {
+            patrol.combat_ticks = patrol.combat_ticks.saturating_add(1);
+            let jump = combat_profile.map_or(0, |profile| profile.jump as i32);
+            let yaw = yaw_towards(enemy.unwrap().position - npc_pos).unwrap_or(motion.facing);
+            let forward = ((npc_roll(&mut patrol) % 100) as i32) < jump * 3 / 4;
+            if forward && space.jump(&mut patrol, &mut intent, performance, yaw, true) {
+                let delay = 0.1 + 0.05 * (npc_roll(&mut patrol) % 10) as f32;
+                patrol.think_remaining = meteor_ai::combat::decision_interval(base_think, delay);
+                intent.attack_cooldown = patrol.think_remaining;
+                motion.movement_mode = meteor_core::MovementMode::Run;
+                continue;
+            }
+            if target_in_range
+                && enemy.is_some_and(|enemy| {
+                    enemy.position.distance(npc_pos) < npc_minimum_range(fighter.weapon)
+                })
+                && forced != Some(BehaviorMode::Follow)
+                && ((npc_roll(&mut patrol) % 100) as f32) < combat_profile.map_or(0.0, |p| p.dodge)
+            {
+                let id = enemy.unwrap().id;
+                patrol.prepare_behavior_change(
+                    mission_npc.as_deref(),
+                    &intent,
+                    Some(BehaviorMode::Dodge),
+                );
+                patrol.finish_callback_install();
+                if let Some(npc) = mission_npc.as_deref_mut() {
+                    npc.forced_behavior = Some(BehaviorMode::Dodge);
+                    npc.behavior_args = vec![meteor_scene::pst_runtime::PstValue::Num(id as f64)];
+                } else {
+                    patrol.temporary_target = Some(id);
+                }
+                *intent = default();
+                performance.guard_remaining = 0.0;
+                performance.crouching = false;
+                continue;
+            }
+        }
+        if thought_tick
+            && !air.air.airborne
+            && sm_state
+                .as_deref()
+                .is_some_and(|sm| sm.current == FighterState::Name)
+        {
+            if let Some(enemy) = enemy {
+                let delta = enemy.position - npc_pos;
+                let elapsed = patrol
+                    .last_weapon_switch_time
+                    .map_or(f64::INFINITY, |last| time.elapsed_secs_f64() - last);
+                let spare = fighter.weapon_slots[1 - usize::from(fighter.weapon_slot.min(1))];
+                if meteor_ai::combat::wants_weapon_switch(
+                    fighter.weapon,
+                    spare,
+                    delta.length() / meteor_core::MODEL_SCALE,
+                    delta.y / meteor_core::MODEL_SCALE,
+                    elapsed,
+                    || (next_npc_rand(&mut patrol.rng) * 0x0100_0000 as f32) as u32,
+                ) {
+                    patrol.last_weapon_switch_time = Some(time.elapsed_secs_f64());
+                    let delay = meteor_ai::combat::decision_interval(base_think, 0.6);
+                    patrol.think_remaining = delay;
+                    intent.attack_cooldown = delay;
+                    performance.guard_remaining = 0.0;
+                    intent.want_weapon_switch = true;
+                    intent.want_attack = false;
+                    intent.want_guard = false;
+                    intent.dodge_burst = None;
+                    intent.attack_directions.clear();
+                    intent.lock_target = None;
+                    intent.ranged_aim = None;
+                    intent.move_dir = Vec2::ZERO;
+                    motion.movement_mode = meteor_core::MovementMode::Idle;
+                    continue;
+                }
+            }
         }
         let tactics = meteor_ai::combat::weapon_tactics(fighter.weapon);
-        if let Some(enemy) = enemy {
-            if !tactics.ranged
-                && intent.lock_target.is_none()
-                && (enemy.position - npc_pos).length() <= npc_attack_range(fighter.weapon)
+        if thought_tick && target_in_range && enemy.is_some() && !patrol.perception.passive {
+            let jump = combat_profile.map_or(0, |profile| profile.jump as i32);
+            let yaw = yaw_towards(enemy.unwrap().position - npc_pos).unwrap_or(motion.facing);
+            if ((npc_roll(&mut patrol) % 100) as i32) < jump / 4
+                && space.jump(&mut patrol, &mut intent, performance, yaw, false)
             {
+                motion.movement_mode = meteor_core::MovementMode::Run;
+                continue;
+            }
+        }
+        if enemy.is_some() {
+            if !tactics.ranged && intent.lock_target.is_none() && target_in_range {
                 intent.lock_target = intent.enemy_entity;
             }
         }
         if air.air.airborne && !attacking {
-            if let Some(target) = intent.navigation_jump_target {
-                let delta = Vec3::new(target.x - npc_pos.x, 0.0, target.z - npc_pos.z);
-                intent.move_dir = delta.normalize_or_zero().xz();
-                if let Some(yaw) = yaw_towards(delta) {
-                    motion.facing =
-                        meteor_core::math::lerp_angle(motion.facing, yaw, NPC_FACE_SMOOTH * dt);
+            if patrol.navigation_frame_step.arrived {
+                intent.navigation_jump_target = None;
+                intent.move_dir = Vec2::ZERO;
+                intent.locomotion_input = Vec2::ZERO;
+            }
+            if patrol.navigation.in_progress()
+                || patrol.patrol_navigation.in_progress()
+                || intent.navigation_jump_target.is_some()
+            {
+                let target = patrol
+                    .navigation
+                    .steering_target()
+                    .or_else(|| patrol.patrol_navigation.steering_target());
+                if let Some(target) = target {
+                    intent.navigation_jump_target = patrol.navigation_frame_step.jump_target;
+                    let delta = Vec3::new(target.x - npc_pos.x, 0.0, target.z - npc_pos.z);
+                    patrol.airborne_heading = yaw_towards(delta).or(patrol.airborne_heading);
+                    intent.move_dir = delta.normalize_or_zero().xz();
+                    if !thought_tick {
+                        if let Some(yaw) = patrol.airborne_heading {
+                            motion.facing = npc_combat_turn(motion.facing, yaw, dt);
+                        }
+                    }
+                    patrol.airborne_input =
+                        npc_locomotion_input_for_facing(intent.move_dir, motion.facing);
+                } else {
+                    let yaw = patrol.airborne_heading.unwrap_or(motion.facing);
+                    if !thought_tick {
+                        motion.facing = npc_combat_turn(motion.facing, yaw, dt);
+                    }
+                    intent.move_dir =
+                        decision_space::world_input(patrol.airborne_input, motion.facing);
                 }
-                intent.locomotion_input =
-                    npc_locomotion_input_for_facing(intent.move_dir, motion.facing);
+                intent.locomotion_input = patrol.airborne_input;
                 intent.want_attack = false;
-                continue;
+                if !thought_tick {
+                    continue;
+                }
+            } else if patrol.airborne_heading.is_some() {
+                intent.locomotion_input = patrol.airborne_input;
+                intent.move_dir = decision_space::world_input(patrol.airborne_input, motion.facing);
+                if thought_tick && npc_roll(&mut patrol) % 4 == 0 {
+                    patrol.airborne_input.y = 0.0;
+                    intent.locomotion_input = patrol.airborne_input;
+                }
+                if !thought_tick {
+                    continue;
+                }
             }
         }
-        if attacking || air.air.airborne {
-            intent.move_dir = Vec2::ZERO;
+        if (attacking || (air.air.airborne && enemy.is_some() && target_in_range))
+            && forced != Some(BehaviorMode::AttackTarget)
+        {
+            if !air.air.airborne {
+                intent.move_dir = Vec2::ZERO;
+            }
             intent.want_attack = perform_attack;
             if enemy.is_some_and(|enemy| {
-                (enemy.position - npc_pos).length() <= npc_attack_range(fighter.weapon)
-            }) && intent.attack_cooldown <= 0.0
+                let delta = enemy.position - npc_pos;
+
+                meteor_ai::combat::in_attack_range(
+                    fighter.weapon,
+                    delta.to_array(),
+                    ground_controllable,
+                ) && (!tactics.ranged
+                    || yaw_towards(delta).is_none_or(|yaw| {
+                        npc_facing_error(motion.facing, yaw).abs()
+                            <= tactics.angle_degrees.to_radians()
+                    }))
+            }) && thought_tick
+                && intent.attack_cooldown <= 0.0
             {
-                intent.attack_cooldown = npc_think_interval(mission_npc.as_deref());
+                intent.attack_cooldown = npc_think_interval(base_think);
                 queue_npc_opening_action(
                     &mut intent,
                     performance,
@@ -1480,6 +2752,8 @@ pub(crate) fn drive_npc_ai(
                     &mut patrol,
                     fighter.weapon,
                     air.air.airborne,
+                    attack_allowed,
+                    space,
                 );
                 if let Some(enemy) = enemy {
                     aim_npc_attack(
@@ -1489,12 +2763,14 @@ pub(crate) fn drive_npc_ai(
                         combat_profile,
                         npc_pos,
                         enemy.position,
+                        motion.facing,
                     );
                 }
 
                 intent.want_guard = false;
                 intent.dodge_burst = None;
                 performance.guard_remaining = 0.0;
+                performance.crouching = false;
             }
             continue;
         }
@@ -1504,7 +2780,8 @@ pub(crate) fn drive_npc_ai(
                 & meteor_combat::hit_resolve::team_mask(i32::from(npc.team)))
                 == 0
         });
-        let live_player = (player_alive && player_is_hostile).then_some(player_pos);
+        let live_player = (player_alive && player_is_hostile && !concealed_ids.contains(&0))
+            .then_some(player_pos);
         let fallback_target = match forced {
             Some(BehaviorMode::Follow | BehaviorMode::Dodge) => configured_position,
             Some(BehaviorMode::Kill) => configured_position,
@@ -1518,29 +2795,63 @@ pub(crate) fn drive_npc_ai(
         let attack_range = npc_attack_range(fighter.weapon);
         let minimum_range = npc_minimum_range(fighter.weapon);
 
-        let mode = if enemy.is_some() {
-            if distance > attack_range {
-                BehaviorMode::Follow
-            } else if distance < minimum_range {
-                BehaviorMode::Defend
-            } else {
-                BehaviorMode::Attack
+        let view_model = base_view;
+        if thought_tick && patrol.getitem_goal.is_some() {
+            let present = patrol.getitem_entity.is_some_and(|entity| {
+                cargos
+                    .get(entity)
+                    .is_ok_and(|(_, state, _, _)| state.carrier.is_none())
+                    || (network_flags.get(entity).is_ok()
+                        && net
+                            .escort_flag
+                            .as_ref()
+                            .is_some_and(|flag| flag.carrier_id.is_none()))
+                    || props
+                        .get(entity)
+                        .is_ok_and(|(_, prop, _, visibility, _, view)| {
+                            prop_available(prop, visibility, view)
+                        })
+            });
+            let arrived = patrol
+                .getitem_goal
+                .is_some_and(|goal| getitem_arrived(npc_pos, goal));
+            if !present || arrived || patrol.getitem_ticks > 10 {
+                patrol.invalidate_navigation();
+                intent.move_dir = Vec2::ZERO;
+                intent.want_attack = false;
+                motion.movement_mode = meteor_core::MovementMode::Idle;
+                continue;
             }
+        }
+        let mode = if patrol.perception.passive {
+            BehaviorMode::Idle
+        } else if patrol.getitem_goal.is_some() {
+            BehaviorMode::GetItem
+        } else if enemy.is_some() {
+            let mode = if thought_tick || patrol.combat_spacing.is_none() {
+                if target_in_range {
+                    BehaviorMode::Attack
+                } else {
+                    BehaviorMode::Follow
+                }
+            } else {
+                patrol.combat_spacing.unwrap()
+            };
+            patrol.combat_spacing = Some(mode);
+            mode
         } else {
-            match forced {
+            let mode = match forced {
                 Some(BehaviorMode::Follow) if configured_target.is_none() => BehaviorMode::Run,
-                Some(BehaviorMode::Follow) if distance <= 100.0 * meteor_core::MODEL_SCALE => {
+                Some(BehaviorMode::Follow)
+                    if delta.length() <= 100.0 * meteor_core::MODEL_SCALE
+                        && !patrol.navigation.in_progress() =>
+                {
                     BehaviorMode::Idle
                 }
                 Some(BehaviorMode::Kill) if target_position.is_none() => BehaviorMode::Wait,
-                Some(BehaviorMode::Kill) if distance > attack_range => BehaviorMode::Follow,
-                Some(BehaviorMode::Kill) if distance < minimum_range => BehaviorMode::Defend,
-                Some(BehaviorMode::Kill) => BehaviorMode::Attack,
-                Some(BehaviorMode::Dodge) if configured_target.is_none() => BehaviorMode::Wait,
-                Some(BehaviorMode::Dodge) if distance < 250.0 * meteor_core::MODEL_SCALE => {
-                    BehaviorMode::Dodge
-                }
-                Some(BehaviorMode::Dodge) => BehaviorMode::Idle,
+
+                Some(BehaviorMode::Kill) => BehaviorMode::Follow,
+                Some(BehaviorMode::Dodge) => BehaviorMode::Dodge,
                 Some(mode) => mode,
                 None if target_position.is_some() && distance > attack_range => {
                     BehaviorMode::Follow
@@ -1551,31 +2862,182 @@ pub(crate) fn drive_npc_ai(
                 None if target_position.is_some() => BehaviorMode::Attack,
                 None if !patrol.route.is_empty() => BehaviorMode::Patrol,
                 None => BehaviorMode::Idle,
-            }
+            };
+            mode
         };
-        let mut desired_facing = None;
+        let seek_mode = if enemy.is_some() {
+            BehaviorMode::Attack
+        } else if forced == Some(BehaviorMode::Follow) {
+            BehaviorMode::Follow
+        } else if forced == Some(BehaviorMode::Kill) {
+            BehaviorMode::Kill
+        } else {
+            mode
+        };
+        let mode = if thought_tick
+            && !patrol.perception.passive
+            && mode != BehaviorMode::GetItem
+            && behavior_may_seek_getitem(seek_mode)
+        {
+            try_start_getitem_seek(
+                &mut patrol,
+                combat_profile,
+                if matches!(seek_mode, BehaviorMode::Attack | BehaviorMode::Follow) {
+                    view_model.min(400.0)
+                } else {
+                    view_model
+                },
+                npc_pos,
+                cargos
+                    .iter()
+                    .filter(|(_, state, transform, _)| {
+                        state.carrier.is_none()
+                            && getitem_visible(
+                                npc_pos,
+                                transform.translation,
+                                collider.as_deref().and_then(|stage| stage.mesh.as_ref()),
+                            )
+                    })
+                    .map(|(entity, _, transform, order)| GetItemCandidate {
+                        record: getitem_record(entity, order),
+                        entity,
+                        position: transform.translation,
+                    })
+                    .chain(props.iter().filter_map(
+                        |(entity, prop, transform, visibility, order, view)| {
+                            let position = prop.world_center(transform);
+                            (prop_available(prop, visibility, view)
+                                && getitem_visible(
+                                    npc_pos,
+                                    position,
+                                    collider.as_deref().and_then(|stage| stage.mesh.as_ref()),
+                                ))
+                            .then_some(GetItemCandidate {
+                                record: getitem_record(entity, order),
+                                entity,
+                                position,
+                            })
+                        },
+                    ))
+                    .chain(
+                        network_flags
+                            .iter()
+                            .filter_map(|(entity, transform, order)| {
+                                (net.escort_flag
+                                    .as_ref()
+                                    .is_some_and(|flag| flag.carrier_id.is_none())
+                                    && getitem_visible(
+                                        npc_pos,
+                                        transform.translation,
+                                        collider.as_deref().and_then(|stage| stage.mesh.as_ref()),
+                                    ))
+                                .then_some(GetItemCandidate {
+                                    record: getitem_record(entity, order),
+                                    entity,
+                                    position: transform.translation,
+                                })
+                            }),
+                    ),
+            );
+            if let Some(goal) = patrol.getitem_goal {
+                let target_entity = patrol.getitem_entity;
+                patrol.invalidate_navigation();
+                let weapon = target_entity
+                    .and_then(|entity| props.get(entity).ok())
+                    .and_then(|(_, prop, _, _, _, _)| {
+                        crate::plugins::item_plugin::weapon_from_model(&prop.model)
+                    });
+                let admission = if let Some(weapon) = weapon {
+                    weapon_replacement::admit_weapon_getitem(
+                        &mut patrol,
+                        fighter,
+                        weapon,
+                        npc_pos,
+                        goal,
+                        waypoints.as_deref(),
+                        collider.as_deref().and_then(|stage| stage.mesh.as_ref()),
+                        dt,
+                        net.status != crate::plugins::network_plugin::NetStatus::InRoom
+                            || npc_stock_drop_ready(net, entity),
+                    )
+                } else {
+                    let step = patrol.travel_step(
+                        waypoints.as_deref(),
+                        collider.as_deref().and_then(|stage| stage.mesh.as_ref()),
+                        npc_pos,
+                        goal,
+                        true,
+                    );
+                    if step.failed {
+                        Err(())
+                    } else {
+                        Ok(None)
+                    }
+                };
+                match admission {
+                    Ok(drop) => {
+                        patrol.getitem_direct = patrol.navigation.remaining_waypoints() == 0;
+                        if let Some(mut drop) = drop {
+                            drop.facing = motion.facing;
+                            commands.entity(entity).insert(drop);
+                        }
+                        patrol.getitem_goal = Some(goal);
+                        patrol.getitem_entity = target_entity;
+                        intent.lock_target = None;
+                        intent.want_guard = false;
+                        performance.guard_remaining = 0.0;
+                        performance.crouching = false;
+                        patrol.think_remaining =
+                            meteor_ai::combat::decision_interval(base_think, 0.3);
+                        BehaviorMode::GetItem
+                    }
+                    Err(()) => {
+                        patrol.invalidate_navigation();
+                        mode
+                    }
+                }
+            } else {
+                mode
+            }
+        } else {
+            mode
+        };
+        if !matches!(
+            mode,
+            BehaviorMode::Wait | BehaviorMode::Run | BehaviorMode::Patrol
+        ) && !(mode == BehaviorMode::Idle
+            && (forced == Some(BehaviorMode::Follow) || patrol.perception.passive))
+        {
+            patrol.idle_facing = None;
+        }
+        let mut desired_facing = patrol.perception.search_yaw.or_else(|| {
+            patrol
+                .perception
+                .passive
+                .then_some(patrol.idle_facing)
+                .flatten()
+        });
         match mode {
             BehaviorMode::Attack | BehaviorMode::AttackTarget => {
                 let attack_target = mode == BehaviorMode::AttackTarget;
+                let callback_tick = patrol.behavior_ticks;
+                if attack_target && thought_tick {
+                    patrol.behavior_ticks = callback_tick.wrapping_add(1);
+                }
 
                 let target = if attack_target {
-                    mission_npc
-                        .as_deref()
-                        .and_then(|npc| npc.attack_target_slot)
-                        .and_then(|slot| {
-                            script
-                                .as_deref()
-                                .and_then(|s| s.script())
-                                .and_then(|runtime| runtime.host().target(slot))
-                        })
-                        .and_then(|slot_target| {
-                            resolve_target_point(
-                                Some(slot_target),
-                                waypoints.as_deref(),
-                                player_pos,
-                                &npc_positions,
-                            )
-                        })
+                    if patrol.attack_target_point.is_none() {
+                        patrol.attack_target_point = mission_npc
+                            .as_deref()
+                            .and_then(|npc| npc.attack_target_slot)
+                            .and_then(|slot| {
+                                script.as_deref()?.script()?.host().target_position(slot)
+                            })
+                            .map(|point| {
+                                Vec3::new(point[0] as f32, point[1] as f32, point[2] as f32)
+                            });
+                    }
+                    patrol.attack_target_point
                 } else {
                     target_position
                 };
@@ -1596,13 +3058,26 @@ pub(crate) fn drive_npc_ai(
                     } else {
                         attack_range
                     };
-                    if dist > arrive {
+                    let arrived = if attack_target {
+                        flat.x.abs() < arrive
+                            && flat.z.abs() < arrive
+                            && delta.y.abs() < arrive + 30.0 * meteor_core::MODEL_SCALE
+                    } else {
+                        dist <= arrive
+                    };
+                    if !arrived && (attack_target || enemy.is_none()) {
+                        let replan = thought_tick
+                            && (!attack_target
+                                || attack_goal_reconsider(
+                                    callback_tick,
+                                    patrol.navigation.remaining_waypoints(),
+                                ));
                         let step = patrol.travel_step(
                             waypoints.as_deref(),
                             collider.as_deref().and_then(|c| c.mesh.as_ref()),
-                            dt,
                             npc_pos,
                             target,
+                            replan,
                         );
                         intent.move_dir = Vec2::new(step.direction.x, step.direction.z);
                         intent.navigation_jump_target = step.jump_target;
@@ -1613,27 +3088,70 @@ pub(crate) fn drive_npc_ai(
                             meteor_core::MovementMode::Idle
                         };
                     } else {
+                        if attack_target && remaining <= 0 && thought_tick {
+                            patrol.return_to_parent(mission_npc.as_deref_mut(), &mut intent);
+                            intent.move_dir = Vec2::ZERO;
+                            intent.want_attack = false;
+                            motion.movement_mode = meteor_core::MovementMode::Idle;
+                            continue;
+                        }
                         intent.move_dir = Vec2::ZERO;
-                        if let Some(yaw) = yaw_towards(flat) {
+                        if let Some(yaw) = yaw_towards(flat)
+                            .filter(|_| npc_can_turn(sm_state.as_deref(), air.air.airborne))
+                        {
                             motion.facing = npc_combat_turn(motion.facing, yaw, dt);
                         }
                         let in_angle = yaw_towards(flat).is_none_or(|yaw| {
                             npc_facing_error(motion.facing, yaw).abs()
-                                <= tactics.angle_degrees.to_radians()
+                                <= if attack_target {
+                                    30.0_f32.to_radians()
+                                } else {
+                                    tactics.angle_degrees.to_radians()
+                                }
                         });
-                        if (!attack_target || remaining > 0)
-                            && intent.attack_cooldown <= 0.0
-                            && in_angle
+
+                        let spare =
+                            fighter.weapon_slots[1 - usize::from(fighter.weapon_slot.min(1))];
+                        if attack_target
+                            && remaining > 0
+                            && thought_tick
+                            && !in_angle
+                            && tactics.ranged
+                            && spare != 0
                         {
-                            intent.attack_cooldown = npc_think_interval(mission_npc.as_deref());
+                            let delay = meteor_ai::combat::decision_interval(base_think, 0.6);
+                            patrol.think_remaining = delay;
+                            patrol.last_weapon_switch_time = Some(time.elapsed_secs_f64());
+                            *intent = default();
+                            intent.want_weapon_switch = true;
+                            intent.attack_cooldown = delay;
+                            performance.guard_remaining = 0.0;
+                            continue;
+                        }
+                        if (!attack_target || remaining > 0)
+                            && thought_tick
+                            && (attack_target || intent.attack_cooldown <= 0.0)
+                            && (!attack_target || in_angle)
+                        {
+                            intent.attack_cooldown = if attack_target {
+                                meteor_ai::combat::decision_interval(base_think, 0.3)
+                            } else {
+                                npc_think_interval(base_think)
+                            };
                             if attack_target {
-                                intent.want_attack = true;
-                                let category = (next_npc_rand(&mut patrol.rng) * 3.0) as usize;
-                                let roll =
-                                    (next_npc_rand(&mut patrol.rng) * 0x0100_0000 as f32) as u32;
-                                let command =
-                                    patrol.command_memory.choose(tactics, category, false, roll);
-                                intent.attack_directions = meteor_ai::combat::directions(command);
+                                intent.want_attack = attack_allowed;
+                                let category = (npc_roll(&mut patrol) % 3) as usize;
+
+                                if attack_allowed {
+                                    queue_command(
+                                        &mut intent,
+                                        &mut patrol,
+                                        fighter.weapon,
+                                        category,
+                                        air.air.airborne,
+                                        attack_allowed,
+                                    );
+                                }
                             } else {
                                 queue_npc_opening_action(
                                     &mut intent,
@@ -1642,16 +3160,34 @@ pub(crate) fn drive_npc_ai(
                                     &mut patrol,
                                     fighter.weapon,
                                     false,
+                                    attack_allowed && in_angle,
+                                    DecisionSpace {
+                                        facing: motion.facing,
+                                        ..space
+                                    },
                                 );
                             }
-                            aim_npc_attack(
-                                &mut intent,
-                                &mut patrol,
-                                fighter,
-                                combat_profile,
-                                npc_pos,
-                                target,
-                            );
+                            if attack_target {
+                                if intent.want_attack && tactics.ranged {
+                                    intent.ranged_aim =
+                                        Some(Vec3::from_array(meteor_ai::combat::point_aim(
+                                            fighter.weapon,
+                                            npc_pos.to_array(),
+                                            target.to_array(),
+                                            motion.facing,
+                                        )));
+                                }
+                            } else {
+                                aim_npc_attack(
+                                    &mut intent,
+                                    &mut patrol,
+                                    fighter,
+                                    combat_profile,
+                                    npc_pos,
+                                    target,
+                                    motion.facing,
+                                );
+                            }
                             if attack_target {
                                 if let Some(npc) = mission_npc.as_deref_mut() {
                                     npc.attack_target_remaining =
@@ -1660,6 +3196,21 @@ pub(crate) fn drive_npc_ai(
                             }
                         }
                         motion.movement_mode = meteor_core::MovementMode::Idle;
+                        if !attack_target
+                            && ground_controllable
+                            && !intent.want_attack
+                            && !intent.want_guard
+                            && intent.dodge_burst.is_none()
+                        {
+                            intent.move_dir = decision_space::world_input(
+                                Vec2::X * patrol.combat_strafe,
+                                motion.facing,
+                            );
+                            if patrol.combat_strafe != 0.0 {
+                                motion.movement_mode = meteor_core::MovementMode::Walk;
+                            }
+                            desired_facing = Some(motion.facing);
+                        }
                     }
                 } else {
                     intent.move_dir = Vec2::ZERO;
@@ -1680,66 +3231,133 @@ pub(crate) fn drive_npc_ai(
             }
             BehaviorMode::Follow => {
                 let target_position = target_position.unwrap_or(npc_pos);
+                let mut replan = false;
+                if thought_tick {
+                    let active = patrol.navigation.in_progress();
+                    if enemy.is_some() {
+                        if !active || npc_roll(&mut patrol) % 30 == 0 {
+                            if target_position.distance(npc_pos) <= 120.0 * meteor_core::MODEL_SCALE
+                                && npc_roll(&mut patrol) % 2 != 0
+                            {
+                                desired_facing = yaw_towards(target_position - npc_pos);
+                            } else {
+                                patrol.stop_navigation();
+                                replan = ground_controllable;
+                            }
+                        }
+                    } else {
+                        let remaining = patrol.navigation.remaining_waypoints();
+                        let reconsider =
+                            !active || route_reconsider(true, remaining, npc_roll(&mut patrol));
+                        if reconsider {
+                            if forced != Some(BehaviorMode::Follow)
+                                || target_position.distance(npc_pos)
+                                    > 100.0 * meteor_core::MODEL_SCALE
+                            {
+                                replan = true;
+                            } else if npc_roll(&mut patrol) % 6 == 0 {
+                                desired_facing = yaw_towards(target_position - npc_pos);
+                                patrol.idle_facing = desired_facing;
+                            } else if ((npc_roll(&mut patrol) % 100) as f32)
+                                < combat_profile.map_or(0.0, |profile| profile.look)
+                            {
+                                patrol.idle_facing = Some(
+                                    (npc_roll(&mut patrol) % 360) as f32 * std::f32::consts::PI
+                                        / 180.0,
+                                );
+                                desired_facing = patrol.idle_facing;
+                            }
+                        }
+                        if forced == Some(BehaviorMode::Follow) {
+                            patrol.behavior_ticks = patrol.behavior_ticks.wrapping_add(1);
+                        }
+                    }
+                }
                 let step = patrol.travel_step(
                     waypoints.as_deref(),
                     collider.as_deref().and_then(|c| c.mesh.as_ref()),
-                    dt,
                     npc_pos,
-                    target_position,
+                    target_position + Vec3::Y * (30.0 * meteor_core::MODEL_SCALE),
+                    replan,
                 );
-                intent.move_dir = Vec2::new(step.direction.x, step.direction.z);
+                intent.move_dir = step.direction.xz();
                 intent.navigation_jump_target = step.jump_target;
                 intent.want_attack = false;
-                motion.movement_mode = if step.direction.length_squared() > 0.01 {
+                motion.movement_mode = if patrol.navigation.in_progress() {
                     meteor_core::MovementMode::Run
                 } else {
                     meteor_core::MovementMode::Idle
                 };
+                if replan && step.failed {
+                    desired_facing = yaw_towards(flat);
+                    if enemy.is_some() {
+                        desired_facing = pursuit_recovery::recover(
+                            &mut patrol,
+                            &mut intent,
+                            motion.facing,
+                            target_position,
+                            npc_pos,
+                            combat_profile.map_or(0.0, |profile| profile.look),
+                            base_think,
+                        );
+                    } else if forced == Some(BehaviorMode::Follow) {
+                        patrol.think_remaining =
+                            meteor_ai::combat::decision_interval(base_think, 0.5);
+                        if npc_roll(&mut patrol) % 6 == 0
+                            && desired_facing.is_none_or(|yaw| {
+                                npc_facing_error(motion.facing, yaw).abs() <= 5.0_f32.to_radians()
+                            })
+                        {
+                            intent.want_taunt = true;
+                        }
+                    }
+                }
             }
             BehaviorMode::Patrol => {
-                if let Some(graph) = waypoints.as_deref() {
-                    for _ in 0..patrol.route.len() {
-                        if patrol
-                            .route
-                            .get(patrol.index)
-                            .is_some_and(|id| graph.is_enabled(*id))
+                let mut replan = false;
+                if thought_tick {
+                    if !patrol.patrol_navigation.in_progress() || patrol.behavior_ticks % 40 == 20 {
+                        if npc_roll(&mut patrol) % 10 == 0 && !patrol.route.is_empty() {
+                            patrol.index %= patrol.route.len();
+                            patrol.patrol_destination = Some(patrol.route[patrol.index]);
+                            patrol.index += 1;
+                            if npc_roll(&mut patrol) % 4 == 0 {
+                                patrol.index += 1;
+                            }
+                            replan = true;
+                        } else if ((npc_roll(&mut patrol) % 100) as f32)
+                            < combat_profile.map_or(0.0, |profile| profile.look)
                         {
-                            break;
+                            patrol.idle_facing = Some(
+                                (npc_roll(&mut patrol) % 360) as f32 * std::f32::consts::PI / 180.0,
+                            );
+                            desired_facing = patrol.idle_facing;
                         }
-                        patrol.index = (patrol.index + 1) % patrol.route.len();
                     }
-                    let target_id = patrol
-                        .route
-                        .get(patrol.index)
-                        .copied()
-                        .filter(|id| graph.is_enabled(*id));
-                    if let Some(target) = target_id.and_then(|id| graph.world_position(id)) {
-                        let step = patrol.patrol_step(
-                            Some(graph),
-                            collider.as_deref().and_then(|c| c.mesh.as_ref()),
-                            dt,
-                            npc_pos,
-                            Vec3::from_array(target),
-                        );
-                        if step.arrived && !patrol.route.is_empty() {
-                            patrol.index = (patrol.index + 1) % patrol.route.len();
-                        }
-                        intent.move_dir = Vec2::new(step.direction.x, step.direction.z);
-                        intent.navigation_jump_target = step.jump_target;
-                        intent.want_attack = false;
-                        motion.movement_mode = if step.direction.length_squared() > 0.01 {
-                            meteor_core::MovementMode::Run
-                        } else {
-                            meteor_core::MovementMode::Idle
-                        };
-                    } else {
-                        intent.move_dir = Vec2::ZERO;
-                        intent.want_attack = false;
-                        motion.movement_mode = meteor_core::MovementMode::Idle;
+                    patrol.behavior_ticks = patrol.behavior_ticks.wrapping_add(1);
+                }
+                let target = patrol
+                    .patrol_destination
+                    .and_then(|id| waypoints.as_deref()?.world_position(id));
+                intent.want_attack = false;
+                intent.move_dir = Vec2::ZERO;
+                motion.movement_mode = meteor_core::MovementMode::Idle;
+                if let Some(target) = target {
+                    let step = patrol.patrol_step(
+                        waypoints.as_deref(),
+                        collider.as_deref().and_then(|c| c.mesh.as_ref()),
+                        npc_pos,
+                        Vec3::from_array(target),
+                        replan,
+                    );
+                    intent.move_dir = step.direction.xz();
+                    intent.navigation_jump_target = step.jump_target;
+                    if patrol.patrol_navigation.in_progress() {
+                        motion.movement_mode = meteor_core::MovementMode::Run;
                     }
-                } else {
-                    intent.move_dir = Vec2::ZERO;
-                    motion.movement_mode = meteor_core::MovementMode::Idle;
+                }
+                if intent.move_dir == Vec2::ZERO {
+                    desired_facing = desired_facing.or(patrol.idle_facing);
                 }
             }
             BehaviorMode::Idle => {
@@ -1751,104 +3369,143 @@ pub(crate) fn drive_npc_ai(
                     Some(BehaviorMode::Dodge) => Some(1.0 / 8.0),
                     _ => None,
                 };
-                if thought_tick {
+                if thought_tick && !patrol.perception.passive {
                     if let (Some(target), Some(chance)) = (configured_position, face_chance) {
                         if next_npc_rand(&mut patrol.rng) < chance {
-                            motion.facing = yaw_towards(target - npc_pos).unwrap_or(motion.facing);
+                            patrol.idle_facing = yaw_towards(target - npc_pos);
                         }
                     }
+                }
+                if forced == Some(BehaviorMode::Follow) && !patrol.perception.passive {
+                    desired_facing = patrol.idle_facing;
+                }
+            }
+            BehaviorMode::GetItem => {
+                if let Some(target) = patrol.getitem_goal {
+                    let replan = thought_tick && patrol.getitem_ticks == 0;
+                    let step = patrol.travel_step(
+                        waypoints.as_deref(),
+                        collider.as_deref().and_then(|c| c.mesh.as_ref()),
+                        npc_pos,
+                        target,
+                        replan,
+                    );
+                    if thought_tick {
+                        let finished = getitem_arrived(npc_pos, target)
+                            || !patrol.navigation.in_progress()
+                            || patrol.getitem_ticks > 10;
+                        patrol.getitem_ticks = patrol.getitem_ticks.saturating_add(1);
+                        if finished {
+                            patrol.invalidate_navigation();
+                            intent.move_dir = Vec2::ZERO;
+                            intent.want_attack = false;
+                            motion.movement_mode = meteor_core::MovementMode::Idle;
+                            continue;
+                        }
+                    }
+                    intent.move_dir = Vec2::new(step.direction.x, step.direction.z);
+                    intent.navigation_jump_target = step.jump_target;
+                    intent.want_attack = false;
+                    motion.movement_mode = if step.direction.length_squared() > 0.01 {
+                        meteor_core::MovementMode::Run
+                    } else {
+                        meteor_core::MovementMode::Idle
+                    };
+                    if !patrol.navigation.in_progress() {
+                        desired_facing = yaw_towards(target - npc_pos);
+                    }
+                } else {
+                    intent.move_dir = Vec2::ZERO;
+                    intent.want_attack = false;
+                    motion.movement_mode = meteor_core::MovementMode::Idle;
                 }
             }
             BehaviorMode::Wait => {
                 intent.move_dir = Vec2::ZERO;
                 intent.want_attack = false;
                 motion.movement_mode = meteor_core::MovementMode::Idle;
-                if thought_tick && next_npc_rand(&mut patrol.rng) < 0.1 {
-                    motion.facing = next_npc_rand(&mut patrol.rng) * std::f32::consts::TAU;
+
+                if thought_tick
+                    && next_npc_rand(&mut patrol.rng) * 100.0
+                        < combat_profile.map_or(0.0, |p| p.look)
+                {
+                    patrol.idle_facing =
+                        Some(next_npc_rand(&mut patrol.rng) * std::f32::consts::TAU);
                 }
+                desired_facing = patrol.idle_facing;
             }
             BehaviorMode::Run => {
-                if thought_tick
-                    && patrol.wander_goal.is_none()
-                    && next_npc_rand(&mut patrol.rng) < 1.0 / 7.0
-                {
-                    if let Some(graph) = waypoints.as_deref() {
-                        let enabled = graph
-                            .points
-                            .iter()
-                            .filter(|p| graph.is_enabled(p.id))
-                            .map(|p| p.id)
-                            .collect::<Vec<_>>();
-                        if !enabled.is_empty() {
-                            let index =
-                                (next_npc_rand(&mut patrol.rng) * enabled.len() as f32) as usize;
-                            patrol.wander_goal = Some(enabled[index.min(enabled.len() - 1)]);
+                let mut replan = false;
+                if thought_tick {
+                    if !patrol.navigation.in_progress() || patrol.behavior_ticks % 40 == 20 {
+                        if npc_roll(&mut patrol) % 7 == 0 {
+                            if let Some(graph) = waypoints
+                                .as_deref()
+                                .filter(|graph| !graph.points.is_empty())
+                            {
+                                patrol.wander_goal =
+                                    Some(npc_roll(&mut patrol) as usize % graph.points.len());
+                                replan = true;
+                            }
+                        } else if ((npc_roll(&mut patrol) % 100) as f32)
+                            < combat_profile.map_or(0.0, |profile| profile.look)
+                        {
+                            patrol.idle_facing = Some(
+                                (npc_roll(&mut patrol) % 360) as f32 * std::f32::consts::PI / 180.0,
+                            );
+                            desired_facing = patrol.idle_facing;
                         }
                     }
+                    patrol.behavior_ticks = patrol.behavior_ticks.wrapping_add(1);
                 }
-                let wander_target = patrol
+                intent.move_dir = Vec2::ZERO;
+                intent.want_attack = false;
+                motion.movement_mode = meteor_core::MovementMode::Idle;
+                if let Some(target) = patrol
                     .wander_goal
-                    .and_then(|goal| waypoints.as_deref()?.world_position(goal))
-                    .map(Vec3::from_array);
-                if let Some(target) = wander_target {
-                    let to_goal = target - npc_pos;
-                    let goal_flat = Vec3::new(to_goal.x, 0.0, to_goal.z);
-                    if goal_flat.length() <= PATROL_ARRIVE_DIST {
-                        patrol.wander_goal = None;
-                        intent.move_dir = Vec2::ZERO;
-                        motion.movement_mode = meteor_core::MovementMode::Idle;
-                    } else {
-                        let step = patrol.travel_step(
-                            waypoints.as_deref(),
-                            collider.as_deref().and_then(|c| c.mesh.as_ref()),
-                            dt,
-                            npc_pos,
-                            target,
-                        );
-                        intent.move_dir = Vec2::new(step.direction.x, step.direction.z);
-                        intent.navigation_jump_target = step.jump_target;
-                        intent.want_attack = false;
-                        motion.movement_mode = if step.direction.length_squared() > 0.01 {
-                            meteor_core::MovementMode::Run
-                        } else {
-                            meteor_core::MovementMode::Idle
-                        };
+                    .and_then(|id| waypoints.as_deref()?.world_position(id))
+                {
+                    let step = patrol.travel_step(
+                        waypoints.as_deref(),
+                        collider.as_deref().and_then(|c| c.mesh.as_ref()),
+                        npc_pos,
+                        Vec3::from_array(target),
+                        replan,
+                    );
+                    intent.move_dir = step.direction.xz();
+                    intent.navigation_jump_target = step.jump_target;
+                    if patrol.navigation.in_progress() {
+                        motion.movement_mode = meteor_core::MovementMode::Run;
                     }
-                } else {
-                    intent.move_dir = Vec2::ZERO;
-                    intent.want_attack = false;
-                    motion.movement_mode = meteor_core::MovementMode::Idle;
-
-                    if thought_tick && next_npc_rand(&mut patrol.rng) < 0.1 {
-                        motion.facing = next_npc_rand(&mut patrol.rng) * std::f32::consts::TAU;
-                    }
+                }
+                if intent.move_dir == Vec2::ZERO {
+                    desired_facing = desired_facing.or(patrol.idle_facing);
                 }
             }
             BehaviorMode::Dodge => {
-                let threat = configured_position.unwrap_or(npc_pos);
-                if patrol.flee_goal.is_none() {
-                    patrol.flee_goal = waypoints
-                        .as_deref()
-                        .and_then(|graph| farthest_reachable_waypoint(graph, npc_pos, threat));
-                }
                 let flee_target = patrol
                     .flee_goal
                     .and_then(|goal| waypoints.as_deref()?.world_position(goal))
                     .map(Vec3::from_array);
-                let destination = flee_target.unwrap_or_else(|| npc_pos - (threat - npc_pos));
+                let Some(destination) = flee_target else {
+                    intent.move_dir = Vec2::ZERO;
+                    intent.want_attack = false;
+                    motion.movement_mode = meteor_core::MovementMode::Idle;
+                    continue;
+                };
                 let step = patrol.travel_step(
                     waypoints.as_deref(),
                     collider.as_deref().and_then(|c| c.mesh.as_ref()),
-                    dt,
                     npc_pos,
                     destination,
+                    thought_tick,
                 );
-                if flee_target.is_some_and(|target| {
-                    (Vec3::new(target.x, 0.0, target.z) - Vec3::new(npc_pos.x, 0.0, npc_pos.z))
-                        .length()
-                        <= PATROL_ARRIVE_DIST
-                }) {
-                    patrol.flee_goal = None;
+                if thought_tick
+                    && step.failed
+                    && patrol.return_to_parent(mission_npc.as_deref_mut(), &mut intent)
+                {
+                    motion.movement_mode = meteor_core::MovementMode::Idle;
+                    continue;
                 }
                 intent.move_dir = Vec2::new(step.direction.x, step.direction.z);
                 intent.navigation_jump_target = step.jump_target;
@@ -1864,30 +3521,132 @@ pub(crate) fn drive_npc_ai(
             }
         }
         intent.want_attack |= perform_attack;
-        if !npc_ordinary_locomotion_allowed(sm_state.as_deref()) {
+        if !air.air.airborne && !npc_ordinary_locomotion_allowed(sm_state.as_deref()) {
             intent.navigation_jump_target = None;
 
             intent.move_dir = Vec2::ZERO;
             intent.locomotion_input = Vec2::ZERO;
             continue;
         }
+        let following_path =
+            patrol.navigation.in_progress() || patrol.patrol_navigation.in_progress();
+        if following_path
+            && intent.move_dir == Vec2::ZERO
+            && matches!(
+                mode,
+                BehaviorMode::Follow
+                    | BehaviorMode::Patrol
+                    | BehaviorMode::Run
+                    | BehaviorMode::Dodge
+                    | BehaviorMode::GetItem
+                    | BehaviorMode::AttackTarget
+            )
+            && patrol
+                .navigation
+                .steering_target()
+                .or_else(|| patrol.patrol_navigation.steering_target())
+                .is_some_and(|target| (target - npc_pos).xz().length_squared() <= 1e-10)
+        {
+            intent.move_dir = Vec2::new(motion.facing.sin(), motion.facing.cos());
+        }
+
+        let height_failed_held = !thought_tick
+            && patrol.path_input != Vec2::ZERO
+            && (patrol.navigation.failed() || patrol.patrol_navigation.failed());
+        let held_path = height_failed_held
+            || (following_path
+                && route_recovery == obstacle_avoidance::FollowRecovery::KeepPathInputs);
+        let obstacle_jump = following_path
+            && matches!(
+                route_recovery,
+                obstacle_avoidance::FollowRecovery::StrongJump
+                    | obstacle_avoidance::FollowRecovery::WeakJump
+            );
+        if held_path {
+            desired_facing = patrol.path_heading;
+            intent.move_dir = decision_space::world_input(patrol.path_input, motion.facing);
+            if height_failed_held {
+                motion.movement_mode = meteor_core::MovementMode::Run;
+            }
+        }
         let dir = Vec3::new(intent.move_dir.x, 0.0, intent.move_dir.y);
         if desired_facing.is_none() && intent.move_dir.length_squared() > 0.01 {
             desired_facing = yaw_towards(dir);
         }
         if let Some(target_yaw) = desired_facing {
-            motion.facing =
-                meteor_core::math::lerp_angle(motion.facing, target_yaw, NPC_FACE_SMOOTH * dt);
+            if intent.navigation_jump_target.is_some() {
+                patrol.airborne_heading = Some(target_yaw);
+            }
+            motion.facing = npc_combat_turn(motion.facing, target_yaw, dt);
+
+            if !held_path
+                && !obstacle_jump
+                && intent.move_dir.length_squared() > 0.01
+                && matches!(
+                    mode,
+                    BehaviorMode::Follow
+                        | BehaviorMode::Patrol
+                        | BehaviorMode::Run
+                        | BehaviorMode::Dodge
+                        | BehaviorMode::GetItem
+                        | BehaviorMode::AttackTarget
+                )
+            {
+                let tolerance = if intent.navigation_jump_target.is_some() {
+                    5.0_f32
+                } else {
+                    45.0_f32
+                };
+                if npc_facing_error(motion.facing, target_yaw).abs() <= tolerance.to_radians() {
+                    intent.move_dir = Vec2::new(motion.facing.sin(), motion.facing.cos());
+                } else {
+                    intent.move_dir = Vec2::ZERO;
+                    motion.movement_mode = meteor_core::MovementMode::Idle;
+                }
+            }
         }
         if performance.crouching {
             motion.movement_mode = meteor_core::MovementMode::Crouch;
         }
         intent.locomotion_input = npc_locomotion_input_for_facing(intent.move_dir, motion.facing);
+        if obstacle_jump {
+            intent.locomotion_input = Vec2::Y;
+            intent.move_dir = decision_space::world_input(Vec2::Y, motion.facing);
+            motion.movement_mode = meteor_core::MovementMode::Run;
+        } else if held_path {
+            intent.locomotion_input = patrol.path_input;
+            intent.move_dir = decision_space::world_input(patrol.path_input, motion.facing);
+        }
+        if following_path {
+            patrol.path_heading = desired_facing.or(patrol.path_heading);
+            patrol.path_input = intent.locomotion_input;
+        }
 
         if motion.movement_mode == meteor_core::MovementMode::Run
             && intent.locomotion_input != Vec2::Y
         {
             motion.movement_mode = meteor_core::MovementMode::Walk;
+        }
+    }
+}
+
+pub(crate) fn finish_npc_script_tick(
+    active_fighter: Option<Res<super::fighter_frame::ActiveFighter>>,
+    mut script: Option<ResMut<StageMissionRuntime>>,
+    mut npcs: Query<(Entity, &mut NpcPatrol, Option<&MissionNpc>), With<NpcFighter>>,
+) {
+    for (entity, mut patrol, npc) in &mut npcs {
+        if !super::fighter_frame::accepts(active_fighter.as_deref(), entity) {
+            continue;
+        }
+        if std::mem::take(&mut patrol.script_tick_due) {
+            if let (Some(npc), Some(runtime)) =
+                (npc, script.as_deref_mut().and_then(|s| s.script_mut()))
+            {
+                if let Err(error) = runtime.update_npc_script(npc.id) {
+                    warn!("NPC {} OnUpdate: {error}", npc.id);
+                }
+            }
         }
     }
 }
@@ -1911,6 +3670,7 @@ type NpcMoveQuery<'w, 's> = Query<
             &'static RangedFireGate,
             &'static crate::components::fighter::FighterStatusEffects,
             Option<&'static mut NpcPerformance>,
+            &'static mut FighterHitReaction,
         ),
     ),
     (
@@ -1923,6 +3683,7 @@ type NpcMoveQuery<'w, 's> = Query<
 
 pub(crate) fn move_npc_fighters(
     active_fighter: Option<Res<super::fighter_frame::ActiveFighter>>,
+    combat_resources: Option<Res<CombatResourceData>>,
     time: Res<Time>,
     frame_clock: Option<Res<crate::plugins::FrameClock>>,
     collider: Option<Res<StageCollider>>,
@@ -1955,7 +3716,7 @@ pub(crate) fn move_npc_fighters(
         mut blend,
         mut sm,
         mut combat,
-        (ranged_gate, status_effects, performance),
+        (ranged_gate, status_effects, performance, mut hit_reaction),
     ) in &mut npcs
     {
         if !super::fighter_frame::accepts(active_fighter.as_deref(), entity) {
@@ -1963,18 +3724,29 @@ pub(crate) fn move_npc_fighters(
         }
         if let Some(burst) = intent.dodge_burst.take() {
             if !wheel_vetoes_dodge_action(ranged_gate.wheel_out, burst) {
+                let down_roll = matches!(pose.pose_id, 112 | 113 | 117);
+                let roll = burst || down_roll;
                 let dodge_pose = meteor_physics::locomotion::dodge_pose_for_input(
                     intent.dodge_dir.x,
                     intent.dodge_dir.y,
                     burst,
-                    burst,
+                    roll,
                     Some(meteor_combat::weapon_strategy::weapon_to_strategy(
                         fighter.weapon,
                     )),
                 );
+
+                let carry = if down_roll {
+                    motion.velocity
+                } else {
+                    Vec3::ZERO
+                };
+                if down_roll {
+                    hit_reaction.clear();
+                }
                 dodge
                     .state
-                    .start(dodge_pose, motion.facing, burst, 0.0, 0.0);
+                    .start(dodge_pose, motion.facing, roll, carry.x, carry.z);
                 dodge.pose = dodge_pose;
                 dodge.pose_entered = false;
                 motion.movement_mode = meteor_core::MovementMode::Dodge;
@@ -1997,7 +3769,8 @@ pub(crate) fn move_npc_fighters(
             })
         });
         let scripted_jump = performance.as_deref().is_some_and(|p| p.jump_requested);
-        if (navigation_jump || scripted_jump)
+        let ai_jump = performance.as_deref().and_then(|p| p.ai_jump);
+        if (navigation_jump || scripted_jump || ai_jump.is_some())
             && !air.air.airborne
             && !dodge.state.active
             && npc_ordinary_locomotion_allowed(Some(&sm))
@@ -2013,10 +3786,11 @@ pub(crate) fn move_npc_fighters(
                     &mut blend,
                     &mut sm,
                     &mut combat,
-                    navigation_jump,
+                    navigation_jump || scripted_jump || ai_jump == Some(true),
                 ) {
                     if let Some(mut performance) = performance {
                         performance.jump_requested = false;
+                        performance.ai_jump = None;
                     }
                 }
             }
@@ -2051,7 +3825,13 @@ pub(crate) fn move_npc_fighters(
             &mut transform,
             &mut motion,
             &mut air,
-            dir * speed * status_effects.effects.speed_factor(1.0),
+            dir * speed
+                * fighter_speed_factor(
+                    combat_resources.as_deref(),
+                    fighter,
+                    1.0,
+                    Some(status_effects),
+                ),
             dt,
             true,
         );
@@ -2061,8 +3841,40 @@ pub(crate) fn move_npc_fighters(
 #[cfg(feature = "original-assets")]
 #[cfg(test)]
 mod tests {
+    include!("ai_plugin/init_tests.rs");
+    include!("ai_plugin/basic_parity_tests.rs");
+    include!("ai_plugin/river_audit_tests.rs");
+    include!("ai_plugin/behavior_tests.rs");
+    include!("ai_plugin/weapon_replacement_tests.rs");
+    include!("ai_plugin/idle_facing_tests.rs");
+    include!("ai_plugin/peace_tests.rs");
+    include!("ai_plugin/review_r5_tests.rs");
+    include!("ai_plugin/obstacle_integration_tests.rs");
     use super::*;
     use meteor_scene::stage_loader::parse_waypoint_graph;
+
+    fn test_hostile(
+        self_id: i64,
+        team: u8,
+        origin: Vec3,
+        actors: &[AiActorSnapshot],
+        visible: impl FnMut(AiActorSnapshot) -> bool,
+    ) -> Option<AiActorSnapshot> {
+        perception::select_hostile(
+            perception::Scan {
+                peace: 0,
+                self_id,
+                team,
+                origin,
+                forward: Vec3::Z,
+                center: origin,
+                radius: 1000.0,
+            },
+            actors,
+            || 0,
+            visible,
+        )
+    }
 
     #[derive(Resource, Default)]
     struct NpcHitJudgeSnapshot(Option<(Vec3, bool)>);
@@ -2228,10 +4040,12 @@ mod tests {
         }
     }
 
+    include!("ai_plugin/campaign_regression_tests.rs");
+
     fn sn09_jump_case(start_id: usize, fps: u32) {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
         let center = meteor_scene::stage_loader::get_stage_center("sn09", None);
-        let graph = parse_waypoint_graph(
+        let mut graph = parse_waypoint_graph(
             &std::fs::read_to_string(root.join("Level/sn09.wp")).unwrap(),
             center,
         );
@@ -2239,6 +4053,7 @@ mod tests {
         let gmdl =
             meteor_asset::gmdl::decode_gmdl(&std::fs::read(root.join("sn09/sn09.gmb")).unwrap())
                 .unwrap();
+        graph.navigation_bounds = super::super::npc_navigation::source_bounds_for_test(&gmdl);
         let mut des = meteor_asset::des::parse_stage_description(
             &std::fs::read_to_string(root.join("sn09/sn09.des")).unwrap(),
         );
@@ -2288,6 +4103,7 @@ mod tests {
         .unwrap();
         let mut app = App::new();
         app.init_resource::<Time>()
+            .init_resource::<CharacterContactFrame>()
             .insert_resource(graph)
             .insert_resource(StageCollider { mesh: Some(mesh) })
             .insert_resource(CharacterAssetsSet(std::collections::HashMap::from([(
@@ -2298,7 +4114,9 @@ mod tests {
             .add_systems(
                 Update,
                 (
+                    super::super::character_contact_plugin::begin_character_contact_frame,
                     drive_npc_ai,
+                    finish_npc_script_tick,
                     move_npc_fighters,
                     npc_ballistic_air_root_motion,
                 )
@@ -2343,7 +4161,8 @@ mod tests {
                 MissionNpc {
                     id: 1,
                     name: "冷燕".into(),
-                    team: 2,
+
+                    team: 1,
                     in_scene_roster: true,
                     view: 500.0,
                     think: 100.0,
@@ -2473,11 +4292,96 @@ mod tests {
     }
 
     #[test]
-    fn pst_disabled_waypoint_invalidates_routes_and_can_be_reenabled() {
+    fn height_failed_route_keeps_production_input_between_callbacks_until_stop() {
+        let (mut app, npc) =
+            perception_test_app(BehaviorMode::AttackTarget, Vec3::splat(1000.0), None);
+        let graph = app.world().resource::<WaypointGraph>().clone();
+        let target = Vec3::new(1.0, 3.6, 0.0);
+        let active;
+        {
+            let mut patrol = app.world_mut().get_mut::<NpcPatrol>(npc).unwrap();
+            assert!(
+                !patrol
+                    .travel_step(Some(&graph), None, Vec3::ZERO, target, true)
+                    .failed
+            );
+            active = patrol.navigation.steering_target().unwrap();
+            patrol.attack_target_point = Some(target);
+            patrol.path_input = Vec2::Y;
+            patrol.path_heading = Some(0.0);
+            patrol.think_remaining = 100.0;
+        }
+        app.world_mut()
+            .get_mut::<Transform>(npc)
+            .unwrap()
+            .translation = Vec3::new(active.x, -10.0, active.z);
+        app.world_mut()
+            .get_mut::<MotionState>(npc)
+            .unwrap()
+            .velocity = Vec3::X * 10.0;
+        for _ in 0..2 {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_millis(16));
+            app.update();
+            let patrol = app.world().get::<NpcPatrol>(npc).unwrap();
+            assert!(!patrol.navigation.in_progress());
+            assert!(patrol.navigation.failed());
+            let intent = app.world().get::<AiIntent>(npc).unwrap();
+            assert_eq!(intent.locomotion_input, Vec2::Y);
+            assert_eq!(intent.move_dir, Vec2::Y);
+        }
+        app.world_mut()
+            .get_mut::<NpcPatrol>(npc)
+            .unwrap()
+            .stop_navigation();
+        app.update();
+        assert_eq!(
+            app.world().get::<AiIntent>(npc).unwrap().locomotion_input,
+            Vec2::ZERO
+        );
+    }
+
+    #[test]
+    fn path_completion_releases_held_inputs_but_height_failure_only_clears_route() {
+        for height_failure in [false, true] {
+            let graph = line_graph();
+            let mut patrol = NpcPatrol::default();
+            let goal = Vec3::new(1.0, 3.6, 0.0);
+            assert!(
+                !patrol
+                    .travel_step(Some(&graph), None, Vec3::ZERO, goal, true)
+                    .failed
+            );
+            let active = patrol.navigation.steering_target().unwrap();
+            patrol.path_input = Vec2::Y;
+            patrol.airborne_input = Vec2::Y;
+            patrol.collision_clock = obstacle_avoidance::CollisionClock {
+                blocked_seconds: 0.8,
+                clear_seconds: 0.2,
+            };
+            let feet = Vec3::new(active.x, if height_failure { -10.0 } else { 0.0 }, active.z);
+            patrol.advance_navigation(feet, Vec3::X * 10.0);
+            assert!(!patrol.navigation.in_progress());
+            assert_eq!(patrol.navigation_frame_step.arrived, !height_failure);
+            assert_eq!(
+                patrol.path_input,
+                if height_failure { Vec2::Y } else { Vec2::ZERO }
+            );
+            assert_eq!(patrol.airborne_input, patrol.path_input);
+            assert_eq!(
+                patrol.collision_clock.blocked_seconds,
+                if height_failure { 0.8 } else { 0.0 }
+            );
+        }
+    }
+
+    #[test]
+    fn pst_disabled_waypoint_preserves_active_route_and_applies_to_next_request() {
         let mut graph = line_graph();
         for point in &mut graph.points {
             for axis in &mut point.position {
-                *axis *= 10.0;
+                *axis *= 60.0;
             }
         }
         let start = Vec3::from_array(graph.world_position(0).unwrap());
@@ -2485,24 +4389,27 @@ mod tests {
         let mut patrol = NpcPatrol::default();
         assert!(
             patrol
-                .travel_step(Some(&graph), None, 0.016, start, target)
-                .direction
-                .length_squared()
-                > 0.0
+                .travel_step(Some(&graph), None, start, target, true)
+                .failed
+                == false
         );
         assert!(graph.set_enabled(1, false));
-        patrol.invalidate_navigation();
-        let blocked = patrol.travel_step(Some(&graph), None, 0.016, start, target);
+        assert!(
+            patrol.navigation.in_progress(),
+            "enabled writes do not clear an active route"
+        );
+        let held = patrol.travel_step(Some(&graph), None, start, target, false);
+        assert!(!held.failed);
+        let blocked = patrol.travel_step(Some(&graph), None, start, target, true);
         assert_eq!(blocked.direction, Vec3::ZERO);
         assert!(!blocked.arrived);
         assert!(graph.set_enabled(1, true));
         patrol.invalidate_navigation();
         assert!(
             patrol
-                .travel_step(Some(&graph), None, 0.016, start, target)
-                .direction
-                .length_squared()
-                > 0.0
+                .travel_step(Some(&graph), None, start, target, true)
+                .failed
+                == false
         );
     }
 
@@ -2990,6 +4897,106 @@ mod tests {
     }
 
     #[test]
+    fn getitem_seek_range_uses_half_view_capped_at_2000_model_units() {
+        assert!((getitem_seek_range_world(400.0) - 200.0 * meteor_core::MODEL_SCALE).abs() < 1e-4);
+        assert!(
+            (getitem_seek_range_world(5000.0) - 2000.0 * meteor_core::MODEL_SCALE).abs() < 1e-4
+        );
+    }
+
+    #[test]
+    fn getitem_scene_scan_rejects_occluded_props() {
+        let npc = Vec3::ZERO;
+        let item = Vec3::X * 4.0;
+        assert!(getitem_visible(npc, item, Some(&NpcVisionMesh(None))));
+        assert!(!getitem_visible(npc, item, Some(&NpcVisionMesh(Some(1.0)))));
+    }
+
+    #[test]
+    fn getitem_skips_hidden_broken_and_recharging_props() {
+        let mut prop = StageProp {
+            name: "D_it01".into(),
+            model: "item01".into(),
+            center_offset: Vec3::ZERO,
+            half_extents: Vec3::ONE,
+            hit_count: 0,
+            respawn_timer: 0.0,
+            interactive: true,
+            collision_enabled: true,
+            breakable: false,
+            broken: false,
+        };
+        assert!(npc_seekable_prop(&prop, &Visibility::Visible));
+        assert!(!npc_seekable_prop(&prop, &Visibility::Hidden));
+        prop.respawn_timer = 1.0;
+        assert!(!npc_seekable_prop(&prop, &Visibility::Visible));
+        prop.respawn_timer = 0.0;
+        prop.broken = true;
+        assert!(!npc_seekable_prop(&prop, &Visibility::Visible));
+    }
+
+    #[test]
+    fn getitem_target_keeps_entity_and_respects_three_dimensional_view() {
+        let mut world = World::new();
+        let near = world.spawn_empty().id();
+        let high = world.spawn_empty().id();
+        let selected = first_getitem_target(
+            Vec3::ZERO,
+            5.0,
+            None,
+            [
+                GetItemCandidate {
+                    record: 0,
+                    entity: high,
+                    position: Vec3::new(1.0, 12.0, 0.0),
+                },
+                GetItemCandidate {
+                    record: 1,
+                    entity: near,
+                    position: Vec3::new(3.0, 0.0, 0.0),
+                },
+            ],
+        )
+        .map(|candidate| (candidate.entity, candidate.position));
+        assert_eq!(
+            selected,
+            Some((near, Vec3::new(3.0, 20.0 * meteor_core::MODEL_SCALE, 0.0)))
+        );
+        assert_eq!(
+            first_getitem_target(
+                Vec3::ZERO,
+                2.0,
+                None,
+                [GetItemCandidate {
+                    record: 0,
+                    entity: near,
+                    position: Vec3::X * 3.0
+                }]
+            )
+            .map(|candidate| candidate.entity),
+            None
+        );
+    }
+
+    #[test]
+    fn getitem_arrive_box_matches_exe_20_20_60_model_units() {
+        let npc = Vec3::ZERO;
+        let inside = Vec3::new(19.0 * meteor_core::MODEL_SCALE, 0.0, 0.0);
+        let outside = Vec3::new(21.0 * meteor_core::MODEL_SCALE, 0.0, 0.0);
+        assert!(getitem_arrived(npc, inside));
+        assert!(!getitem_arrived(npc, outside));
+    }
+
+    #[test]
+    fn parent_and_combat_callbacks_may_seek_getitem_but_idle_does_not() {
+        assert!(behavior_may_seek_getitem(BehaviorMode::Wait));
+        assert!(behavior_may_seek_getitem(BehaviorMode::Patrol));
+        assert!(behavior_may_seek_getitem(BehaviorMode::Run));
+        assert!(behavior_may_seek_getitem(BehaviorMode::Follow));
+        assert!(!behavior_may_seek_getitem(BehaviorMode::Idle));
+    }
+
+    #[test]
     fn eight_script_behaviors_keep_distinct_web_distance_gates() {
         for mode in [
             BehaviorMode::Wait,
@@ -3027,12 +5034,12 @@ mod tests {
         ];
 
         assert_eq!(
-            closest_hostile(1, 1, Vec3::ZERO, 10.0, &actors, |_| true).map(|actor| actor.position),
+            test_hostile(1, 1, Vec3::ZERO, &actors, |_| true).map(|actor| actor.position),
             Some(Vec3::new(0.0, 0.0, 4.0))
         );
 
         assert_eq!(
-            closest_hostile(2, 2, Vec3::ZERO, 10.0, &actors, |_| true).map(|actor| actor.position),
+            test_hostile(2, 2, Vec3::ZERO, &actors, |_| true).map(|actor| actor.position),
             Some(Vec3::new(0.0, 0.0, 2.0))
         );
 
@@ -3051,25 +5058,25 @@ mod tests {
             },
         ];
         assert_eq!(
-            closest_hostile(1, 0, Vec3::ZERO, 10.0, &unaffiliated, |_| true).map(|actor| actor.id),
+            test_hostile(1, 0, Vec3::ZERO, &unaffiliated, |_| true).map(|actor| actor.id),
             Some(2)
         );
     }
 
     #[test]
     fn npc_weapon_spacing_uses_original_tables() {
-        let debug_profile = NpcCombatProfile::web_debug();
+        let stock_profile = stock_npc_profile();
         assert_eq!(
             (
-                debug_profile.attack1,
-                debug_profile.attack2,
-                debug_profile.attack3,
-                debug_profile.guard,
-                debug_profile.dodge,
-                debug_profile.burst,
+                stock_profile.attack1,
+                stock_profile.attack2,
+                stock_profile.attack3,
+                stock_profile.guard,
+                stock_profile.dodge,
+                stock_profile.burst,
             ),
-            (40.0, 30.0, 20.0, 20.0, 15.0, 10.0),
-            "room/debug NPCs keep the Web-authored default personality"
+            (30.0, 25.0, 25.0, 20.0, 0.0, 30.0),
+            "room/debug NPC decisions use the original stock PST weights"
         );
         assert!(
             (npc_attack_range(6) - 7.2).abs() < 1e-6,
@@ -3101,51 +5108,152 @@ mod tests {
     }
 
     #[test]
-    fn npc_perception_uses_height_and_stage_occlusion_gates() {
+    fn npc_perception_uses_original_height_range_and_occlusion() {
         let origin = Vec3::ZERO;
         let target = Vec3::new(0.0, 0.0, 5.0);
         assert!(npc_target_visible(
             origin,
             target,
+            3,
             10.0,
             Some(&NpcVisionMesh(None))
         ));
-        assert!(!npc_target_visible(
-            origin,
-            Vec3::new(0.0, 12.1, 1.0),
-            20.0,
-            Some(&NpcVisionMesh(None))
-        ));
+        assert!(
+            npc_target_visible(
+                origin,
+                Vec3::new(0.0, 12.1, 1.0),
+                3,
+                20.0,
+                Some(&NpcVisionMesh(None)),
+            ),
+            "high ground inside View is not rejected by a separate height cap"
+        );
         assert!(!npc_target_visible(
             origin,
             target,
+            3,
             10.0,
             Some(&NpcVisionMesh(Some(1.0)))
         ));
         assert!(
-            npc_target_visible(origin, target, 10.0, Some(&NpcVisionMesh(Some(4.8)))),
-            "a hit inside Web's target-end tolerance does not occlude"
+            !npc_target_visible(origin, target, 3, 10.0, Some(&NpcVisionMesh(Some(4.8)))),
+            "a wall near the target must not be ignored by Web's 0.45 tolerance"
+        );
+        assert!(!npc_target_visible(
+            origin,
+            target,
+            3,
+            4.0,
+            Some(&NpcVisionMesh(None))
+        ));
+
+        let high = Vec3::new(0.0, 10.5, 1.0);
+        assert!(npc_target_visible(
+            origin,
+            high,
+            3,
+            10.0,
+            Some(&NpcVisionMesh(None))
+        ));
+        let actors = [AiActorSnapshot {
+            id: 2,
+            team: 2,
+            position: high,
+            alive: true,
+        }];
+        assert_eq!(
+            test_hostile(1, 1, origin, &actors, |actor| {
+                npc_target_visible(origin, actor.position, 3, 10.0, Some(&NpcVisionMesh(None)))
+            })
+            .map(|actor| actor.id),
+            Some(2),
+            "root-distance prefilter must not undo sight geometry"
         );
     }
 
+    fn perception_wall(height: f32, z: f32) -> super::super::stage_collider::StageMeshCollider {
+        let mut mesh = super::super::stage_collider::StageMeshCollider::default();
+        mesh.append_world_triangles(
+            &[
+                [-10.0, -1.0, z],
+                [10.0, -1.0, z],
+                [10.0, height, z],
+                [-10.0, height, z],
+            ],
+            &[0, 1, 2, 0, 2, 3],
+        );
+        mesh
+    }
+
     #[test]
-    fn authored_patrol_target_uses_linked_route_instead_of_wall_cutting() {
+    fn npc_perception_sees_over_low_wall_but_not_solid_wall() {
+        let target = Vec3::new(0.0, 0.0, 10.0);
+        for weapon in [1, 3, 6] {
+            assert!(
+                npc_target_visible(
+                    Vec3::ZERO,
+                    target,
+                    weapon,
+                    20.0,
+                    Some(&perception_wall(2.0, 5.0))
+                ),
+                "weapon {weapon} sees above a low wall"
+            );
+            assert!(
+                !npc_target_visible(
+                    Vec3::ZERO,
+                    target,
+                    weapon,
+                    20.0,
+                    Some(&perception_wall(8.0, 5.0))
+                ),
+                "weapon {weapon} cannot see through a wall"
+            );
+        }
+
+        let wall = perception_wall(4.0, 1.0);
+        assert!(!npc_target_visible(
+            Vec3::ZERO,
+            target,
+            3,
+            20.0,
+            Some(&wall)
+        ));
+        assert!(npc_target_visible(Vec3::ZERO, target, 6, 20.0, Some(&wall)));
+    }
+
+    #[test]
+    fn authored_long_route_is_advanced_once_before_callback_requests() {
         let graph = parse_waypoint_graph(
-            "WayPoints 3\nPos 0 0 0\nSize 1\nLink 1\n1 0 20\nPos 0 -20 0\nSize 1\nLink 2\n0 0 20\n2 0 20\nPos 20 -20 0\nSize 1\nLink 1\n1 0 20\n",
-            [0.0, 0.0, 0.0],
+            "WayPoints 3\nPos 0 0 30\nSize 10\nLink 1\n1 0 600\nPos 0 -600 30\nSize 10\nLink 2\n0 0 600\n2 0 600\nPos 600 -600 30\nSize 10\nLink 1\n1 0 600\n",
+            [0.0; 3],
         );
         let target = Vec3::from_array(graph.world_position(2).unwrap());
         let mut patrol = NpcPatrol::default();
-        let step = patrol.travel_step(Some(&graph), None, 0.016, Vec3::ZERO, target);
-        let dir = step.direction;
-        assert!(dir.z > 0.999, "first leg follows waypoint 1: {dir:?}");
-        assert!(
-            dir.x.abs() < 1e-5,
-            "patrol must not cut diagonally to waypoint 2"
-        );
+        let first = patrol.travel_step(Some(&graph), None, Vec3::ZERO, target, true);
+        assert!(!first.failed);
+        let remaining = patrol.navigation.remaining_waypoints();
 
-        let step = patrol.travel_step(Some(&graph), None, 0.016, Vec3::new(0.01, 0.0, 0.0), target);
-        assert!(step.direction.z > 0.999, "cached leg flipped: {step:?}");
+        patrol.travel_step(Some(&graph), None, Vec3::ZERO, target, false);
+        assert_eq!(patrol.navigation.remaining_waypoints(), remaining);
+        patrol.advance_navigation(Vec3::ZERO, Vec3::X * 12.0);
+        patrol.advance_navigation(Vec3::ZERO, Vec3::X * 12.0);
+        let step = patrol.travel_step(Some(&graph), None, Vec3::ZERO, target, false);
+        assert!(step.direction.z > 0.999 && step.direction.x.abs() < 1e-5);
+        let old_target = patrol.navigation.steering_target();
+        patrol.travel_step(Some(&graph), None, Vec3::new(0.01, 0.0, 0.0), target, false);
+        assert_eq!(patrol.navigation.steering_target(), old_target);
+    }
+
+    #[test]
+    fn path_callback_cadence_distinguishes_rng_and_unsigned_tick() {
+        assert!(route_reconsider(false, 3, 12));
+        assert!(route_reconsider(true, 3, 26));
+        assert!(!route_reconsider(true, 3, 25));
+        assert!(attack_goal_reconsider(0, 3));
+        assert!(attack_goal_reconsider(13, 3));
+        assert!(!attack_goal_reconsider(-1, 0));
+        assert!(attack_goal_reconsider(-1, 5), "u32::MAX is divisible by 15");
     }
 
     #[test]
@@ -3185,28 +5293,20 @@ mod tests {
     }
 
     #[test]
-    fn npc_down_recovery_waits_for_authored_hold_plus_decision_delay() {
-        let mut patrol = NpcPatrol::default();
-
-        assert!(!update_npc_down_recovery(
-            &mut patrol,
-            Some((meteor_combat::hit_reaction::HitReactKind::Down, 0.8)),
-            7,
-            0.3,
-            0.5,
-        ));
-        assert!((patrol.down_recovery_remaining - 0.6).abs() < 1e-6);
-        assert!(update_npc_down_recovery(
-            &mut patrol,
-            Some((meteor_combat::hit_reaction::HitReactKind::Down, 0.8)),
-            7,
-            0.3,
-            0.6,
-        ));
-
-        assert!(!update_npc_down_recovery(&mut patrol, None, 7, 0.3, 0.0,));
-        assert_eq!(patrol.down_recovery_pose_instance_id, None);
-        assert_eq!(patrol.down_recovery_remaining, 0.0);
+    fn npc_down_recovery_uses_original_direction_and_attack_choices() {
+        for roll in 0..8 {
+            let mut intent = AiIntent::default();
+            queue_npc_down_recovery(&mut intent, roll, true, 0.0, Vec3::ZERO, None);
+            assert_eq!(intent.want_attack, roll == 4);
+            assert_eq!(intent.dodge_burst, (roll < 4).then_some(false));
+            assert!(!intent.want_guard);
+            if roll < 4 {
+                assert_eq!(
+                    intent.dodge_dir,
+                    [Vec2::Y, Vec2::NEG_Y, Vec2::NEG_X, Vec2::X][roll as usize]
+                );
+            }
+        }
     }
 
     #[test]
@@ -3245,7 +5345,8 @@ mod tests {
     #[test]
     fn production_ai_sees_the_local_fighter_and_drives_an_npc() {
         let mut app = App::new();
-        app.init_resource::<Time>();
+        app.init_resource::<Time>()
+            .insert_resource(fixture_navigation_graph());
         app.add_systems(Update, drive_npc_ai);
 
         app.world_mut().spawn((
@@ -3260,7 +5361,7 @@ mod tests {
                 weapon_variant: 0,
             },
             Health::default(),
-            Transform::from_xyz(10.0, 0.9, 0.0),
+            Transform::from_xyz(9.0, 0.9, 0.0),
         ));
         let npc = app
             .world_mut()
@@ -3291,17 +5392,21 @@ mod tests {
         app.update();
 
         let intent = app.world().get::<AiIntent>(npc).unwrap();
-        assert!(intent.move_dir.x > 0.9, "NPC AI did not follow the player");
+        assert_eq!(
+            intent.move_dir,
+            Vec2::ZERO,
+            "the NPC must turn before moving"
+        );
         assert_eq!(
             intent.locomotion_input,
-            Vec2::NEG_X,
-            "a 90-degree route turn must use the matching side-step pose"
+            Vec2::ZERO,
+            "a 90-degree route turn must not slide sideways"
         );
         assert_eq!(intent.enemy_id, Some(0));
         assert_eq!(
             app.world().get::<MotionState>(npc).unwrap().movement_mode,
-            meteor_core::MovementMode::Walk,
-            "side-step pose must not move at forward-run speed"
+            meteor_core::MovementMode::Idle,
+            "navigation waits until the heading is within 45 degrees"
         );
 
         for _ in 0..12 {
@@ -3316,6 +5421,241 @@ mod tests {
             app.world().get::<MotionState>(npc).unwrap().movement_mode,
             meteor_core::MovementMode::Run,
             "once facing catches the route, the NPC returns to forward run"
+        );
+    }
+
+    fn fixture_navigation_graph() -> WaypointGraph {
+        let side = 13usize;
+        let mut graph = WaypointGraph::default();
+        for z in 0..side {
+            for x in 0..side {
+                let id = z * side + x;
+                let mut links = Vec::new();
+                for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                    let nx = x as i32 + dx;
+                    let nz = z as i32 + dz;
+                    if nx >= 0 && nz >= 0 && nx < side as i32 && nz < side as i32 {
+                        links.push((
+                            nz as usize * side + nx as usize,
+                            40.0 / meteor_core::MODEL_SCALE,
+                        ));
+                    }
+                }
+                graph
+                    .points
+                    .push(meteor_scene::stage_loader::WaypointPoint {
+                        id,
+                        position: [
+                            (x as f32 - 6.0) * 40.0 / meteor_core::MODEL_SCALE,
+                            -(z as f32 - 6.0) * 40.0 / meteor_core::MODEL_SCALE,
+                            30.0,
+                        ],
+                        size: 10.0,
+                        links,
+                    });
+            }
+        }
+        graph
+    }
+
+    fn perception_test_app(mode: BehaviorMode, target: Vec3, wall: Option<f32>) -> (App, Entity) {
+        let mut app = App::new();
+        app.insert_resource(fixture_navigation_graph())
+            .init_resource::<Time>()
+            .add_systems(Update, drive_npc_ai);
+        let player = app
+            .world_mut()
+            .spawn((
+                LocalFighter,
+                Fighter {
+                    character_id: 0,
+                    player_slot: 0,
+                    weapon: 3,
+                    weapon_slots: [3, 5],
+                    weapon_slot: 0,
+                    weapon_slot_variants: [0, 0],
+                    weapon_variant: 0,
+                },
+                Health::default(),
+                Transform::from_translation(target),
+            ))
+            .id();
+        let npc = app
+            .world_mut()
+            .spawn((
+                NpcFighter,
+                Fighter {
+                    character_id: 1,
+                    player_slot: 1,
+                    weapon: 3,
+                    weapon_slots: [3, 5],
+                    weapon_slot: 0,
+                    weapon_slot_variants: [0, 0],
+                    weapon_variant: 0,
+                },
+                Health {
+                    current: 100.0,
+                    max: 100.0,
+                },
+                MotionState {
+                    movement_mode: meteor_core::MovementMode::Idle,
+                    velocity: Vec3::ZERO,
+                    facing: 0.0,
+                },
+                FighterAir::default(),
+                AiIntent::default(),
+                Transform::default(),
+                NpcPatrol::default(),
+                MissionNpc {
+                    id: 7,
+                    name: "guard".into(),
+                    team: 2,
+                    in_scene_roster: true,
+                    view: 400.0,
+                    think: 0.0,
+                    forced_behavior: Some(mode),
+                    is_vip: false,
+                    attack_target_slot: None,
+                    behavior_args: vec![meteor_scene::pst_runtime::PstValue::Num(0.0)],
+                    attack_target_remaining: 0,
+                },
+            ))
+            .id();
+        if let Some(height) = wall {
+            app.insert_resource(StageCollider {
+                mesh: Some(perception_wall(height, 5.0)),
+            });
+        }
+        let _ = player;
+        (app, npc)
+    }
+
+    #[test]
+    fn production_ai_acquires_targets_over_low_walls_and_on_high_ground() {
+        for (target, wall, visible) in [
+            (Vec3::new(0.0, 0.0, 20.0), Some(2.0), true),
+            (Vec3::new(0.0, 13.0, 20.0), None, true),
+            (Vec3::new(0.0, 0.0, 20.0), Some(8.0), false),
+            (Vec3::new(0.0, 0.0, 60.0), None, false),
+            (Vec3::new(0.0, 0.0, -20.0), None, false),
+            (Vec3::new(0.0, 0.0, -5.0), None, true),
+        ] {
+            let (mut app, npc) = perception_test_app(BehaviorMode::Wait, target, wall);
+            app.update();
+            assert_eq!(
+                app.world().get::<AiIntent>(npc).unwrap().enemy_id,
+                visible.then_some(0),
+                "target={target:?}, wall={wall:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn production_kill_target_requires_sight_before_combat_and_reacquires() {
+        let (mut app, npc) =
+            perception_test_app(BehaviorMode::Kill, Vec3::new(0.0, 0.0, 30.0), Some(8.0));
+        app.update();
+        let intent = app.world().get::<AiIntent>(npc).unwrap();
+        assert_eq!(
+            intent.enemy_id, None,
+            "configured target is not automatically visible"
+        );
+        assert!(!intent.want_attack);
+        assert_eq!(intent.ranged_aim, None);
+
+        app.world_mut().resource_mut::<StageCollider>().mesh = None;
+        app.world_mut()
+            .get_mut::<NpcPatrol>(npc)
+            .unwrap()
+            .think_remaining = 0.0;
+        app.update();
+        assert_eq!(app.world().get::<AiIntent>(npc).unwrap().enemy_id, Some(0));
+
+        app.world_mut().resource_mut::<StageCollider>().mesh = Some(perception_wall(8.0, 5.0));
+        app.world_mut()
+            .get_mut::<NpcPatrol>(npc)
+            .unwrap()
+            .think_remaining = 0.0;
+        app.update();
+        let intent = app.world().get::<AiIntent>(npc).unwrap();
+        assert_eq!(intent.enemy_id, None);
+        assert!(!intent.want_attack);
+    }
+
+    #[test]
+    fn production_follow_acquires_beyond_old_self_view_cap() {
+        let (mut app, npc) =
+            perception_test_app(BehaviorMode::Follow, Vec3::new(0.0, 0.0, 20.0), None);
+        app.world_mut().get_mut::<MissionNpc>(npc).unwrap().team = 1;
+        let mut hostile = app.world().get::<MissionNpc>(npc).unwrap().clone();
+        hostile.id = 8;
+        hostile.team = 2;
+        hostile.forced_behavior = Some(BehaviorMode::Idle);
+        let fighter = app.world().get::<Fighter>(npc).unwrap().clone();
+        let motion = app.world().get::<MotionState>(npc).unwrap().clone();
+        app.world_mut().spawn((
+            NpcFighter,
+            fighter,
+            motion,
+            Health::default(),
+            FighterAir::default(),
+            AiIntent::default(),
+            NpcPatrol::default(),
+            hostile,
+            Transform::from_xyz(0.0, 0.0, 40.0),
+        ));
+        app.update();
+        assert_eq!(app.world().get::<AiIntent>(npc).unwrap().enemy_id, Some(8));
+    }
+
+    #[test]
+    fn production_search_holds_fire_and_resets_on_behavior_change() {
+        let (mut app, npc) =
+            perception_test_app(BehaviorMode::Wait, Vec3::new(0.0, 0.0, 35.0), None);
+        app.update();
+        assert_eq!(app.world().get::<AiIntent>(npc).unwrap().enemy_id, Some(0));
+        app.insert_resource(StageCollider {
+            mesh: Some(perception_wall(8.0, 5.0)),
+        });
+        {
+            let mut patrol = app.world_mut().get_mut::<NpcPatrol>(npc).unwrap();
+            patrol.think_remaining = 0.0;
+            patrol.rng = (1..100)
+                .find(|seed| {
+                    let mut seed = *seed;
+                    ((next_npc_rand(&mut seed) * 0x0100_0000 as f32) as u32) % 30 != 0
+                })
+                .unwrap();
+        }
+        app.update();
+        assert!(app
+            .world()
+            .get::<NpcPatrol>(npc)
+            .unwrap()
+            .perception
+            .searching());
+        assert!(!app.world().get::<AiIntent>(npc).unwrap().want_attack);
+
+        assert_eq!(
+            app.world().get::<NpcPatrol>(npc).unwrap().think_remaining,
+            2.5
+        );
+        app.world_mut()
+            .get_mut::<NpcPatrol>(npc)
+            .unwrap()
+            .reset_behavior_state();
+        assert!(!app
+            .world()
+            .get::<NpcPatrol>(npc)
+            .unwrap()
+            .perception
+            .searching());
+        assert!(
+            !app.world()
+                .get::<NpcPatrol>(npc)
+                .unwrap()
+                .perception
+                .passive
         );
     }
 
@@ -3403,7 +5743,7 @@ mod tests {
                 },
                 FighterAir::default(),
                 AiIntent::default(),
-                Transform::from_xyz(0.0, 0.9, 8.0),
+                Transform::from_xyz(0.0, 0.9, 60.0),
                 NpcPatrol::default(),
                 MissionNpc {
                     id: 8,
@@ -3446,6 +5786,12 @@ mod tests {
             "target is stable between Think ticks"
         );
 
+        app.world_mut().get_mut::<NpcPatrol>(npc).unwrap().rng = (1..100)
+            .find(|seed| {
+                let mut seed = *seed;
+                ((next_npc_rand(&mut seed) * 0x0100_0000 as f32) as u32) % 30 != 0
+            })
+            .unwrap();
         for _ in 0..42 {
             app.world_mut()
                 .resource_mut::<Time>()
@@ -3455,9 +5801,30 @@ mod tests {
         let think_remaining = app.world().get::<NpcPatrol>(npc).unwrap().think_remaining;
         assert_eq!(
             app.world().get::<AiIntent>(npc).unwrap().enemy_id,
-            Some(8),
-            "next Think tick selects the now-closest visible hostile; remaining={think_remaining}"
+            Some(0),
+            "valid target stays stable across Think ticks; remaining={think_remaining}"
         );
+        app.world_mut()
+            .get_mut::<crate::components::fighter::Concealment>(player)
+            .unwrap()
+            .remaining = 60.0;
+        app.update();
+        let intent = app.world().get::<AiIntent>(npc).unwrap();
+        assert_eq!(
+            intent.enemy_id, None,
+            "concealment invalidates between Think ticks"
+        );
+        assert_eq!(intent.lock_target, None);
+        for _ in 0..42 {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_millis(50));
+            app.update();
+        }
+        assert_eq!(app.world().get::<AiIntent>(npc).unwrap().enemy_id, Some(8));
+        app.world_mut().get_mut::<Health>(other).unwrap().current = 0.0;
+        app.update();
+        assert_eq!(app.world().get::<AiIntent>(npc).unwrap().enemy_id, None);
     }
 
     #[test]
@@ -3735,6 +6102,7 @@ mod tests {
                 FighterAir::default(),
                 dodge,
                 PoseRuntime {
+                    action_id: None,
                     pose_id: 176,
                     frame: 581.0,
                     start: 570,
@@ -3742,6 +6110,7 @@ mod tests {
                     loop_start: 570,
                     loop_end: 581,
                     loops: false,
+                    link_past_end: false,
                     pose_instance_id: 1,
                 },
                 EntryBlend::default(),
@@ -3955,5 +6324,54 @@ mod tests {
             app.world().get::<MissionNpc>(npc).unwrap().forced_behavior,
             Some(BehaviorMode::Dodge)
         );
+    }
+
+    #[test]
+    fn search_resamples_original_look_but_turns_with_original_speed_limit() {
+        let (mut app, npc) =
+            perception_test_app(BehaviorMode::Wait, Vec3::new(0.0, 0.0, 35.0), None);
+        app.world_mut().entity_mut(npc).insert(NpcCombatProfile {
+            look: 50.0,
+            ..default()
+        });
+        app.world_mut().get_mut::<MissionNpc>(npc).unwrap().think = 100.0;
+        app.update();
+        app.insert_resource(StageCollider {
+            mesh: Some(perception_wall(8.0, 5.0)),
+        });
+        app.world_mut()
+            .get_mut::<NpcPatrol>(npc)
+            .unwrap()
+            .think_remaining = 0.0;
+
+        let mut chosen: Option<f32> = None;
+        let mut search_frames = 0;
+        let mut changes = 0;
+        let mut previous_facing = app.world().get::<MotionState>(npc).unwrap().facing;
+        for _ in 0..300 {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_millis(16));
+            app.update();
+            let facing = app.world().get::<MotionState>(npc).unwrap().facing;
+            assert!(
+                npc_facing_error(previous_facing, facing).abs()
+                    <= 500.0_f32.to_radians() * 0.016 + 1e-5
+            );
+            previous_facing = facing;
+            let patrol = app.world().get::<NpcPatrol>(npc).unwrap();
+            if patrol.perception.searching() {
+                search_frames += 1;
+                if let Some(yaw) = patrol.perception.search_yaw {
+                    if chosen.is_some_and(|old| npc_facing_error(old, yaw).abs() > 1e-6) {
+                        changes += 1;
+                    }
+                    chosen = Some(yaw);
+                }
+            }
+        }
+        assert!(changes > 1, "original search resamples Look every callback");
+        assert!(search_frames > 0, "test must exercise the search state");
+        assert!(chosen.is_some(), "look=50 must choose one search direction");
     }
 }

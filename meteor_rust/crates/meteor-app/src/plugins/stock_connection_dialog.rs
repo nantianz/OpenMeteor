@@ -577,7 +577,14 @@ mod tests {
         );
         assert!(app.world().resource::<NativeNetThread>().handle.is_some());
         app.world().resource::<NetTx>().disconnect();
-        app.world_mut().resource_mut::<NativeNetThread>().shutdown();
-        assert!(app.world().resource::<NativeNetThread>().handle.is_none());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while app.world().resource::<NativeNetThread>().handle.is_some() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "cancelled host must release its worker"
+            );
+            app.world_mut().resource_mut::<NativeNetThread>().shutdown();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     }
 }

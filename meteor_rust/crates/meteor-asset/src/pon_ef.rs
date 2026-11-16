@@ -20,6 +20,10 @@ pub const HEADER_BLEND_MODE: usize = 0x51;
 pub const HEADER_BLEND_SRC: usize = 0x55;
 pub const HEADER_BLEND_DST: usize = 0x59;
 
+pub fn texture_scroll_speed(header: &[u8]) -> [f32; 2] {
+    [0x49, 0x4d].map(|offset| f32::from_bits(read_u32(header, offset).unwrap_or(0)))
+}
+
 const CUSTOM_BLEND_REMAP: [u8; 10] = [1, 0, 2, 4, 6, 7, 3, 5, 8, 9];
 
 #[derive(Debug, Clone, Copy, PartialEq)]

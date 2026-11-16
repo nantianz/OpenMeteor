@@ -146,6 +146,7 @@ fn uniform_only_particles_really_instance_and_keep_independent_colors() {
                     params: PonEfMaterialParams {
                         color: Vec4::ONE,
                         has_texture: 0,
+                        uv_offset: Vec2::ZERO,
                     },
                     texture: None,
                     blend: PonEfBlendMode::SrcAlphaInvSrcAlpha,

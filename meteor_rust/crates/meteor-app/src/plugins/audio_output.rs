@@ -1,6 +1,6 @@
 use super::{
     audio_dsp::{self, Pcm, PeakLimiter},
-    audio_plugin::{openal_distance_gain, SpatialSfx},
+    audio_plugin::{openal_distance_gain, SpatialSfx, StreamingMusic},
 };
 use bevy::{
     audio::{AudioSink, AudioSinkPlayback, PlaybackMode, SpatialAudioSink, SpatialListener},
@@ -79,14 +79,17 @@ struct PreparedAudio(HashMap<AssetId<AudioSource>, Prepared>);
 fn prepare_audio(
     output: Res<AudioOutput>,
     assets: Res<Assets<AudioSource>>,
-    players: Query<&AudioPlayer>,
+    players: Query<(&AudioPlayer, Option<&StreamingMusic>)>,
     mut prepared: ResMut<PreparedAudio>,
 ) {
     if output.mixer.is_none() {
         return;
     }
     prepared.0.retain(|id, _| assets.contains(*id));
-    for player in &players {
+    for (player, music) in &players {
+        if music.is_some() {
+            continue;
+        }
         let Some(asset) = assets.get(&player.0) else {
             continue;
         };
@@ -164,6 +167,7 @@ fn spatial_volume(
 fn play_queued(
     mut commands: Commands,
     output: Res<AudioOutput>,
+    assets: Res<Assets<AudioSource>>,
     prepared: Res<PreparedAudio>,
     settings: Res<crate::app_state::Settings>,
     listeners: ListenerQuery,
@@ -174,6 +178,7 @@ fn play_queued(
             &PlaybackSettings,
             Option<&GlobalTransform>,
             Option<&SpatialSfx>,
+            Option<&StreamingMusic>,
         ),
         (
             Without<AudioSink>,
@@ -187,20 +192,40 @@ fn play_queued(
         return;
     };
     let (listener, left, right) = listener_frame(&listeners);
-    for (entity, player, playback, transform, spatial) in &players {
-        let pcm = match prepared.0.get(&player.0.id()) {
-            Some(Prepared::Ready(pcm)) => pcm,
-            Some(Prepared::Failed) => {
-                commands.entity(entity).insert(FailedAudio);
+    for (entity, player, playback, transform, spatial, music) in &players {
+        let music_source = if music.is_some() {
+            let Some(asset) = assets.get(&player.0) else {
                 continue;
+            };
+
+            match rodio::Decoder::new_looped(std::io::Cursor::new(asset.bytes.clone())) {
+                Ok(decoder) => Some(decoder),
+                Err(error) => {
+                    warn!("music decode failed: {error}");
+                    commands.entity(entity).insert(FailedAudio);
+                    continue;
+                }
             }
-            _ => continue,
+        } else {
+            None
         };
-        let source = pcm.source().playback(
-            playback.start_position,
-            playback.duration,
-            matches!(playback.mode, PlaybackMode::Loop),
-        );
+        let pcm_source = if music_source.is_none() {
+            let pcm = match prepared.0.get(&player.0.id()) {
+                Some(Prepared::Ready(pcm)) => pcm,
+                Some(Prepared::Failed) => {
+                    commands.entity(entity).insert(FailedAudio);
+                    continue;
+                }
+                _ => continue,
+            };
+            Some(pcm.source().playback(
+                playback.start_position,
+                playback.duration,
+                matches!(playback.mode, PlaybackMode::Loop),
+            ))
+        } else {
+            None
+        };
         if playback.spatial {
             let position = transform.map_or(Vec3::ZERO, GlobalTransform::translation);
             let scale = playback.spatial_scale.map_or(Vec3::ONE, |scale| scale.0);
@@ -220,7 +245,11 @@ fn play_queued(
             if playback.paused {
                 player.pause();
             }
-            player.append(source);
+            if let Some(source) = music_source {
+                player.append(source);
+            } else if let Some(source) = pcm_source {
+                player.append(source);
+            }
             let mut sink = SpatialAudioSink::new(player);
             if playback.muted {
                 sink.mute();
@@ -248,7 +277,11 @@ fn play_queued(
             if playback.paused {
                 player.pause();
             }
-            player.append(source);
+            if let Some(source) = music_source {
+                player.append(source);
+            } else if let Some(source) = pcm_source {
+                player.append(source);
+            }
             let mut sink = AudioSink::new(player);
             if playback.muted {
                 sink.mute();
@@ -435,6 +468,35 @@ mod tests {
             }),
         );
         (app, source, handle)
+    }
+
+    #[test]
+    fn original_music_starts_without_full_track_pcm_preparation() {
+        let (mut app, mut bus, _) = app_with_bus();
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../origin_res/music/s10.mp3");
+        let handle = app
+            .world_mut()
+            .resource_mut::<Assets<AudioSource>>()
+            .add(AudioSource {
+                bytes: std::fs::read(path).unwrap().into(),
+            });
+        let entity = app
+            .world_mut()
+            .spawn((
+                AudioPlayer::new(handle.clone()),
+                StreamingMusic,
+                PlaybackSettings::LOOP,
+            ))
+            .id();
+        app.update();
+        assert!(app.world().get::<AudioSink>(entity).is_some());
+        assert!(!app
+            .world()
+            .resource::<PreparedAudio>()
+            .0
+            .contains_key(&handle.id()));
+        assert!((0..48_000).any(|_| bus.next().is_some_and(|sample| sample.abs() > 0.001)));
     }
 
     #[test]

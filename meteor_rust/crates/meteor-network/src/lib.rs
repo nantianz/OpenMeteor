@@ -7,12 +7,16 @@ pub mod modes;
 pub mod p2p;
 pub mod protocol;
 pub mod role_state;
+pub mod runtime_sync;
 pub mod server;
+pub mod spawn;
+
+pub mod stock_protocol;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub mod stock_game;
+pub mod stock_file_transfer;
 #[cfg(not(target_arch = "wasm32"))]
-pub mod stock_protocol;
+pub mod stock_game;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod stock_remote_vitals;
 #[cfg(not(target_arch = "wasm32"))]

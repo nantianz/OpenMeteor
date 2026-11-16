@@ -367,6 +367,18 @@ impl<M: MeshCollider> CollisionSystem<M> {
         dz: f32,
         no_probe: bool,
     ) -> (f32, f32, f32, Option<FootHit>) {
+        let (x, z, y, surface, _) = self.resolve_xz_with_contacts(pos, dx, dz, no_probe);
+        (x, z, y, surface)
+    }
+
+    pub fn resolve_xz_with_contacts(
+        &self,
+        pos: Point3,
+        dx: f32,
+        dz: f32,
+        no_probe: bool,
+    ) -> (f32, f32, f32, Option<FootHit>, [bool; 2]) {
+        let mut blocked_axes = [false; 2];
         let mut surface = None;
 
         let dist = (dx * dx + dz * dz).sqrt();
@@ -394,6 +406,8 @@ impl<M: MeshCollider> CollisionSystem<M> {
                 if !self.blocked(x_new, y_after, z) {
                     x = x_new;
                     y = y_after;
+                } else {
+                    blocked_axes[0] = true;
                 }
             }
 
@@ -407,11 +421,13 @@ impl<M: MeshCollider> CollisionSystem<M> {
                 if !self.blocked(x, y_after, z_new) {
                     z = z_new;
                     y = y_after;
+                } else {
+                    blocked_axes[1] = true;
                 }
             }
         }
 
-        (x - pos.x, z - pos.z, y - pos.y, surface)
+        (x - pos.x, z - pos.z, y - pos.y, surface, blocked_axes)
     }
 
     fn foot_y_at(&self, x: f32, y: f32, z: f32, surface: &mut Option<FootHit>) -> f32 {
@@ -558,7 +574,10 @@ impl<M: MeshCollider> CollisionSystem<M> {
                     return (foot.y - pos.y, Some(foot), false);
                 }
 
-                return (y - pos.y, Some(foot), true);
+                let contact = mesh
+                    .body_contact_surface(pos.x, foot.y, pos.z)
+                    .unwrap_or(foot);
+                return (y - pos.y, Some(contact), true);
             }
             if self.blocked(pos.x, cand, pos.z) {
                 return (
@@ -907,6 +926,26 @@ mod tests {
 
         let (_, dz, _) = sys.resolve_xz(pos, 0.0, 2.0, false);
         assert!((dz - 2.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn planar_rejection_is_recorded_after_partial_movement() {
+        let mut sys: CollisionSystem<NullMesh> = CollisionSystem::new(0.55, 1.8);
+        sys.add_box([1.5, 0.0, -10.0], [2.5, 5.0, 10.0]);
+        let (x, z, _, _, axes) =
+            sys.resolve_xz_with_contacts(Point3::new(0.0, 2.0, 0.0), 2.0, 0.2, true);
+        assert!(x > 0.0 && x < 0.6);
+        assert!((z - 0.2).abs() < 1e-5);
+        assert_eq!(axes, [true, false]);
+    }
+
+    #[test]
+    fn rounded_small_planar_displacement_is_not_a_collision() {
+        let sys: CollisionSystem<NullMesh> = CollisionSystem::new(0.55, 1.8);
+        let (_, z, _, _, axes) =
+            sys.resolve_xz_with_contacts(Point3::new(-27.9, 10.2, -81.5), -0.0015, 0.0056, true);
+        assert_ne!(z, 0.0056);
+        assert_eq!(axes, [false, false]);
     }
 
     #[test]

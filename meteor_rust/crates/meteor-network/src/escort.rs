@@ -1,4 +1,5 @@
 use crate::role_state::RoleVec3;
+use std::borrow::Cow;
 
 pub const ESCORT_STAGE_ID: &str = "sn03";
 pub const STOCK_ESCORT_CATEGORY: u32 = 4;
@@ -8,15 +9,16 @@ pub const STOCK_ESCORT_SCENE_OBJECT_ID: i32 = 215;
 const CHARACTER_RADIUS: f32 = 0.96;
 const CHARACTER_HEIGHT: f32 = 3.84;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EscortStage {
     pub flag_home: RoleVec3,
-    pub safe_zones: [SafeZone; 2],
+    pub safe_zones: Cow<'static, [SafeZone]>,
     pub return_seconds: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SafeZone {
+    pub team: i32,
     pub min_x: f32,
     pub min_y: f32,
     pub max_x: f32,
@@ -34,8 +36,9 @@ pub const SN03: EscortStage = EscortStage {
         y: 0.591_84,
         z: -155.950_84,
     },
-    safe_zones: [
+    safe_zones: Cow::Borrowed(&[
         SafeZone {
+            team: 1,
             min_x: 144.403_68,
             min_y: 0.0,
             max_x: 197.876_16,
@@ -47,6 +50,7 @@ pub const SN03: EscortStage = EscortStage {
             center_z: 140.264_07,
         },
         SafeZone {
+            team: 2,
             min_x: -202.055_33,
             min_y: 0.0,
             max_x: -148.582_86,
@@ -57,7 +61,7 @@ pub const SN03: EscortStage = EscortStage {
             center_y: 5.729_192,
             center_z: 140.028_3,
         },
-    ],
+    ]),
     return_seconds: 5.0,
 };
 
@@ -66,13 +70,22 @@ pub fn escort_stage(stage_id: &str) -> Option<&'static EscortStage> {
 }
 
 pub fn position_inside_safe_zone(position: RoleVec3, team: i32, stage: &EscortStage) -> bool {
-    let Some(zone) = matches!(team, 1 | 2).then(|| stage.safe_zones[(team - 1) as usize]) else {
-        return false;
-    };
-    position.x >= zone.min_x
-        && position.x <= zone.max_x
-        && position.z >= zone.min_z
-        && position.z <= zone.max_z
+    safe_zone_at(position, team, stage).is_some()
+}
+
+pub fn safe_zone_at(position: RoleVec3, team: i32, stage: &EscortStage) -> Option<&SafeZone> {
+    if !matches!(team, 1 | 2) {
+        return None;
+    }
+    stage.safe_zones.iter().find(|zone| {
+        (zone.team == 0 || zone.team == team)
+            && position.x >= zone.min_x
+            && position.x <= zone.max_x
+            && position.y >= zone.min_y
+            && position.y <= zone.max_y
+            && position.z >= zone.min_z
+            && position.z <= zone.max_z
+    })
 }
 
 pub fn character_capsule_intersects_flag(player: RoleVec3, flag: RoleVec3) -> bool {
@@ -430,7 +443,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sn03_is_the_only_authored_escort_stage() {
+    fn legacy_sn03_fixture_has_no_fabricated_map_fallback() {
         assert!(escort_stage("sn03").is_some());
         assert!(escort_stage("sn01").is_none());
     }
@@ -440,7 +453,7 @@ mod tests {
         assert!(position_inside_safe_zone(
             RoleVec3 {
                 x: 171.0,
-                y: 99.0,
+                y: 1.0,
                 z: 140.0
             },
             1,

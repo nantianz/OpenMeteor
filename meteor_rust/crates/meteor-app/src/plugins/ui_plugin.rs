@@ -1,12 +1,17 @@
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
+#[path = "gameplay_hud_visibility.rs"]
+pub(crate) mod gameplay_hud_visibility;
+#[path = "pause_backdrop.rs"]
+pub(crate) mod pause_backdrop;
+
 use super::ui_theme as theme;
 use crate::app_state::{
     assign_key_binding, AppState, BackToMenuButton, CharacterButton, InputBinding,
     KeyCaptureButton, KeyCaptureState, Keymap, LaunchRequest, LauncherStyledButton, LoadingRoot,
-    MenuAutoRecordButton, MenuMrcButton, MenuRecordButton, MenuReplayButton, MenuRoomButton,
-    MenuRoot, MenuScreen, ModeButton, NetRoomChatInputText, NetRoomChatText, NetRoomLeaveButton,
-    NetRoomRoot, NetRoomStartButton, NetRoomTeamSelectButton, PlayingRoot, ResultBackToMenuButton,
+    MenuAutoRecordButton, MenuRecordButton, MenuReplayButton, MenuRoomButton, MenuRoot, MenuScreen,
+    ModeButton, NetRoomChatInputText, NetRoomChatText, NetRoomLeaveButton, NetRoomRoot,
+    NetRoomStartButton, NetRoomTeamSelectButton, PlayingRoot, ResultBackToMenuButton,
     ResultRetryButton, ResultRoot, RoomAddNpcButton, RoomBackButton, RoomMember,
     RoomRemoveNpcButton, RoomRoot, RoomStartButton, RoomState, Settings, SettingsBackButton,
     SettingsRoot, StageButton, StageListTab, StartGameButton, WeaponButton, MAX_ROOM_NPC,
@@ -65,8 +70,11 @@ pub struct UiPlugin;
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
+            pause_backdrop::PauseBackdropPlugin,
             super::battle_result::BattleResultPlugin,
             super::scoreboard::ScoreboardPlugin,
+            super::system_notice::SystemNoticePlugin,
+            super::countdown_hud::CountdownHudPlugin,
             theme::CinematicThemePlugin,
             super::campaign_ui::CampaignUiPlugin,
             super::loading_ui::LoadingUiPlugin,
@@ -116,7 +124,18 @@ impl Plugin for UiPlugin {
             },
             crate::plugins::cleanup_suspended_playing_session,
         )
-        .add_systems(OnEnter(AppState::Result), setup_result_panel)
+        .add_systems(
+            Update,
+            setup_result_panel
+                .run_if(in_state(AppState::Result))
+                .after(super::battle_result::timing::CaptureSettlementTime),
+        )
+        .add_systems(
+            Update,
+            result_next_stage_button
+                .in_set(crate::plugins::UiTouchActionSet)
+                .run_if(in_state(AppState::Result)),
+        )
         .add_systems(OnExit(AppState::Result), despawn_root::<ResultRoot>)
         .add_systems(OnEnter(AppState::Room), setup_room_panel)
         .add_systems(OnExit(AppState::Room), despawn_root::<RoomRoot>)
@@ -164,6 +183,7 @@ impl Plugin for UiPlugin {
                 crate::plugins::settings_ui::adapt_settings_navigation,
                 adapt_launcher_touch_targets,
                 adapt_runtime_ui_layout,
+                adapt_pause_sidebar.after(adapt_runtime_ui_layout),
             ),
         )
         .add_systems(
@@ -189,7 +209,7 @@ impl Plugin for UiPlugin {
                 menu_room_button,
                 menu_record_button,
                 menu_replay_button,
-                menu_mrc_button,
+                super::mrc_file_picker::pick_mrc_button,
                 room_add_npc_button,
                 room_remove_npc_button,
                 room_start_button,
@@ -204,6 +224,8 @@ impl Plugin for UiPlugin {
             Update,
             exit_game_buttons.in_set(crate::plugins::UiTouchActionSet),
         )
+        .init_resource::<super::mrc_file_picker::MrcFilePicker>()
+        .add_systems(Update, super::mrc_file_picker::receive_mrc_file)
         .add_systems(Update, replay_timeline_scrub)
         .add_systems(Update, cycle_radar_range.before(update_radar))
         .add_systems(
@@ -216,18 +238,18 @@ impl Plugin for UiPlugin {
         .add_systems(
             Update,
             (
-                toggle_radar,
+                toggle_radar.run_if(in_state(AppState::Playing)),
                 prepare_radar_terrain,
                 update_radar,
                 update_collapsed_radar,
             )
                 .chain()
                 .after(crate::plugins::FighterFrameSet::CameraFinalize)
-                .run_if(in_state(AppState::Playing)),
+                .run_if(gameplay_hud_visibility::scene_session_active),
         )
         .add_systems(
             Update,
-            replay_space_toggle
+            replay_keyboard_controls
                 .before(crate::plugins::FighterFrameSet::Movement)
                 .run_if(in_state(AppState::Playing)),
         )
@@ -236,7 +258,7 @@ impl Plugin for UiPlugin {
             (update_fighter_nameplates, update_fighter_vital_bars)
                 .chain()
                 .after(crate::plugins::FighterFrameSet::CameraFinalize)
-                .run_if(in_state(AppState::Playing)),
+                .run_if(gameplay_hud_visibility::scene_session_active),
         )
         .add_systems(
             Update,
@@ -385,7 +407,7 @@ struct RadarAssets {
 }
 
 #[derive(Component)]
-struct RadarRoot;
+pub(crate) struct RadarRoot;
 
 #[derive(Component)]
 struct CollapsedRadarRoot;
@@ -1320,7 +1342,8 @@ const RADAR_THREAT_SECTORS: usize = 24;
 
 fn radar_view_rotation(camera_rotation: Quat) -> Rot2 {
     let forward = camera_rotation * Vec3::NEG_Z;
-    Rot2::radians(-forward.x.atan2(forward.z))
+
+    Rot2::radians(forward.x.atan2(forward.z))
 }
 
 fn radar_is_hostile(local_team: i32, other_team: i32) -> bool {
@@ -1329,7 +1352,9 @@ fn radar_is_hostile(local_team: i32, other_team: i32) -> bool {
 }
 
 fn add_radar_threat(strengths: &mut [f32; RADAR_THREAT_SECTORS], offset: Vec3) {
-    let angle = offset.x.atan2(offset.z).rem_euclid(std::f32::consts::TAU);
+    let angle = (-offset.x)
+        .atan2(offset.z)
+        .rem_euclid(std::f32::consts::TAU);
     let sector = angle / std::f32::consts::TAU * RADAR_THREAT_SECTORS as f32;
     let first = sector.floor() as usize % RADAR_THREAT_SECTORS;
     let weight = sector.fract();
@@ -1347,7 +1372,8 @@ fn radar_texture_rect(
 ) -> Rect {
     let (min_x, max_x, min_z, max_z) = bounds;
     let pixel_scale = (texture_size - Vec2::ONE) / Vec2::new(max_x - min_x, max_z - min_z);
-    let center = Vec2::new(position.x - min_x, max_z - position.z) * pixel_scale;
+
+    let center = Vec2::new(max_x - position.x, max_z - position.z) * pixel_scale;
     Rect::from_center_size(center, pixel_scale * (radius * 2.0))
 }
 
@@ -1357,7 +1383,7 @@ fn map_world_to_local_radar(
     diameter: f32,
     radius: f32,
 ) -> Option<Vec2> {
-    let delta = Vec2::new(position.x - origin.x, origin.z - position.z) * (diameter * 0.5 / radius);
+    let delta = Vec2::new(origin.x - position.x, origin.z - position.z) * (diameter * 0.5 / radius);
 
     let limit = (diameter * 0.5 - RADAR_MARKER_HALF * std::f32::consts::SQRT_2 - 2.0).max(0.0);
     (delta.length_squared() <= limit * limit).then_some(Vec2::splat(diameter * 0.5) + delta)
@@ -1404,7 +1430,12 @@ fn set_radar_contact_image(
         } else {
             Color::srgb(0.2, 1.0, 0.4)
         };
-        *image = ImageNode::solid_color(color);
+        if kind == RadarMarkerKind::Star {
+            set_radar_marker_image(image, kind, assets);
+            image.color = color;
+        } else {
+            *image = ImageNode::solid_color(color);
+        }
     }
 }
 
@@ -2084,11 +2115,16 @@ fn update_hud_stats(
 fn mode_hud_text(
     request: &LaunchRequest,
     net: &crate::plugins::network_plugin::NetState,
+    level: Option<&crate::plugins::stage_plugin::StageMissionRuntime>,
     score: &KillScore,
     end: &MatchEnd,
     carrying_flag: bool,
 ) -> String {
-    if !meteor_network::modes::is_original_mode(&request.mode) {
+    let solo_vip = request.mode == "single"
+        && !request.spawn_room_npcs
+        && net.status != crate::plugins::network_plugin::NetStatus::InRoom
+        && level.is_some_and(|level| level.vip_team_for_actor(true, None).is_some());
+    if !meteor_network::modes::is_original_mode(&request.mode) && !solo_vip {
         return String::new();
     }
     let mut status = Vec::new();
@@ -2102,6 +2138,7 @@ fn mode_hud_text(
         });
     }
     match request.mode.as_str() {
+        "single" if solo_vip => status.push("你是队长".to_string()),
         "leader" => status.push(format!("击杀 {}", score.player_kills)),
         "escort" if carrying_flag => {
             status.push("你正携带镖物".to_string());
@@ -2164,6 +2201,7 @@ fn update_match_result_banner(
 fn update_mode_hud(
     request: Res<LaunchRequest>,
     net: Res<crate::plugins::network_plugin::NetState>,
+    level: Option<Res<crate::plugins::stage_plugin::StageMissionRuntime>>,
     score: Res<KillScore>,
     end: Res<MatchEnd>,
     carrying: Query<
@@ -2183,11 +2221,18 @@ fn update_mode_hud(
     let Ok((mut text, mut node)) = query.single_mut() else {
         return;
     };
-    let mut value = mode_hud_text(&request, &net, &score, &end, !carrying.is_empty())
-        .split("  ·  ")
-        .filter(|part| *part != "你正携带镖物")
-        .collect::<Vec<_>>()
-        .join(" · ");
+    let mut value = mode_hud_text(
+        &request,
+        &net,
+        level.as_deref(),
+        &score,
+        &end,
+        !carrying.is_empty(),
+    )
+    .split("  ·  ")
+    .filter(|part| *part != "你正携带镖物")
+    .collect::<Vec<_>>()
+    .join(" · ");
     let (width, height) = window
         .single()
         .map_or((1280.0, 720.0), |w| (w.width(), w.height()));
@@ -2350,7 +2395,7 @@ fn exit_game_buttons(
 }
 
 #[derive(Resource, Debug, Clone, Copy)]
-struct SettingsReturnState(AppState);
+pub(crate) struct SettingsReturnState(pub(crate) AppState);
 
 fn toggle_pause(
     keys: Res<ButtonInput<KeyCode>>,
@@ -2387,14 +2432,16 @@ fn toggle_pause(
 
 fn pause_clock(
     state: Res<State<AppState>>,
+    net: Option<Res<crate::plugins::network_plugin::NetState>>,
     opened_from: Option<Res<SettingsReturnState>>,
     loading: Option<Res<super::loading_ui::LoadingPresentation>>,
     mut time: ResMut<Time<Virtual>>,
 ) {
     let keep_paused_in_settings =
         *state.get() == AppState::Settings && opened_from.is_some_and(|r| r.0 == AppState::Paused);
-    let paused = *state.get() == AppState::Paused
-        || keep_paused_in_settings
+    let network_room =
+        net.is_some_and(|net| net.status == super::network_plugin::NetStatus::InRoom);
+    let paused = ((*state.get() == AppState::Paused || keep_paused_in_settings) && !network_room)
         || loading.is_some_and(|loading| loading.active);
     if paused != time.is_paused() {
         if paused {
@@ -2405,34 +2452,79 @@ fn pause_clock(
     }
 }
 
-fn setup_pause_menu(mut commands: Commands, ui_font: Res<UiFont>) {
+#[derive(Component)]
+struct PauseSidebar;
+
+#[derive(Component)]
+struct PauseSidebarButton;
+
+#[derive(Component)]
+struct PauseSidebarFont(f32);
+
+fn setup_pause_menu(
+    mut commands: Commands,
+    ui_font: Res<UiFont>,
+    net: Option<Res<super::network_plugin::NetState>>,
+) {
     let font = Some(ui_font.0.clone());
     let overlay = commands
         .spawn((
-            scrollable_y(Node {
+            Node {
                 position_type: PositionType::Absolute,
                 width: Val::Percent(100.0),
                 height: Val::Percent(100.0),
-                flex_direction: FlexDirection::Column,
-                align_items: AlignItems::Center,
-                justify_content: JustifyContent::Center,
-                row_gap: Val::Px(12.0),
-                padding: UiRect::all(Val::Px(24.0)),
                 ..default()
-            }),
-            BackgroundColor(theme::SCRIM),
+            },
+            BackgroundColor(Color::srgba(0.02, 0.025, 0.035, 0.32)),
             bevy::ui::FocusPolicy::Block,
             UiInputBlocker,
             PauseRoot,
-            ZIndex(PAUSE_OVERLAY_Z_INDEX),
-            ResponsiveOverlayRoot,
+            pause_backdrop::PauseForeground,
+            GlobalZIndex(PAUSE_OVERLAY_Z_INDEX),
         ))
         .id();
-    let surface = overlay_surface(&mut commands);
+    let surface = commands
+        .spawn((
+            scrollable_y(Node {
+                width: Val::Px(360.0),
+                max_width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
+                flex_shrink: 0.0,
+                row_gap: Val::Px(14.0),
+                padding: UiRect::all(Val::Px(28.0)),
+                border: UiRect::right(Val::Px(1.0)),
+                ..default()
+            }),
+            BackgroundColor(Color::srgba(0.025, 0.033, 0.044, 0.68)),
+            BorderColor::all(theme::LINE),
+            PauseSidebar,
+        ))
+        .id();
     commands.entity(overlay).add_child(surface);
-    let title = text(&mut commands, "暂停", 34.0, theme::TEXT, font.clone());
-    commands.entity(title).insert(ResponsiveOverlayTitle(34.0));
+    let online = net.is_some_and(|net| net.status == super::network_plugin::NetStatus::InRoom);
+    let title = text(
+        &mut commands,
+        if online { "对局菜单" } else { "暂停" },
+        32.0,
+        theme::TEXT,
+        font.clone(),
+    );
+    commands.entity(title).insert(PauseSidebarFont(32.0));
     commands.entity(surface).add_child(title);
+    let hint = text(
+        &mut commands,
+        if online {
+            "联机对局仍在继续"
+        } else {
+            "游戏已暂停"
+        },
+        14.0,
+        theme::MUTED,
+        font.clone(),
+    );
+    commands.entity(hint).insert(PauseSidebarFont(14.0));
+    commands.entity(surface).add_child(hint);
     let resume = menu_button(
         &mut commands,
         "继续游戏 (Esc)",
@@ -2440,10 +2532,14 @@ fn setup_pause_menu(mut commands: Commands, ui_font: Res<UiFont>) {
         theme::PRIMARY,
         font.clone(),
     );
-    commands.entity(resume).insert(PauseResumeButton);
+    commands
+        .entity(resume)
+        .insert((PauseResumeButton, PauseSidebarButton));
     commands.entity(surface).add_child(resume);
     let settings_btn = menu_button(&mut commands, "设置", 240.0, theme::CARD, font.clone());
-    commands.entity(settings_btn).insert(PauseSettingsButton);
+    commands
+        .entity(settings_btn)
+        .insert((PauseSettingsButton, PauseSidebarButton));
     commands.entity(surface).add_child(settings_btn);
     let back = menu_button(
         &mut commands,
@@ -2452,11 +2548,60 @@ fn setup_pause_menu(mut commands: Commands, ui_font: Res<UiFont>) {
         theme::CARD,
         font.clone(),
     );
-    commands.entity(back).insert(PauseBackToMenuButton);
+    commands
+        .entity(back)
+        .insert((PauseBackToMenuButton, PauseSidebarButton));
     commands.entity(surface).add_child(back);
     let exit = menu_button(&mut commands, "退出游戏", 240.0, theme::CARD, font);
-    commands.entity(exit).insert(ExitGameButton);
+    commands
+        .entity(exit)
+        .insert((ExitGameButton, PauseSidebarButton));
     commands.entity(surface).add_child(exit);
+}
+
+fn adapt_pause_sidebar(
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    scale: Res<super::ui_scale_plugin::EffectiveUiScale>,
+    safe: Option<Res<SafeAreaInsets>>,
+    mut panels: Query<&mut Node, (With<PauseSidebar>, Without<PauseSidebarButton>)>,
+    mut buttons: Query<(&mut Node, &Children), (With<PauseSidebarButton>, Without<PauseSidebar>)>,
+    mut fonts: Query<&mut TextFont>,
+    labels: Query<(Entity, &PauseSidebarFont)>,
+) {
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let unit = scale.0.max(0.05);
+    let safe = safe.as_deref().copied().unwrap_or_default();
+    let width = (window.width() * 0.78)
+        .clamp(240.0, 360.0)
+        .min(window.width());
+    for mut panel in &mut panels {
+        panel.width = Val::Px(width / unit);
+        panel.padding = UiRect::new(
+            Val::Px((24.0 + safe.left) / unit),
+            Val::Px(24.0 / unit),
+            Val::Px((32.0 + safe.top) / unit),
+            Val::Px((24.0 + safe.bottom) / unit),
+        );
+        panel.row_gap = Val::Px(14.0 / unit);
+    }
+    for (mut button, children) in &mut buttons {
+        button.width = Val::Percent(100.0);
+        button.height = Val::Px(48.0 / unit);
+        button.min_height = button.height;
+        button.max_height = button.height;
+        for child in children {
+            if let Ok(mut font) = fonts.get_mut(*child) {
+                font.font_size = (16.0 / unit).into();
+            }
+        }
+    }
+    for (entity, size) in &labels {
+        if let Ok(mut font) = fonts.get_mut(entity) {
+            font.font_size = (size.0 / unit).into();
+        }
+    }
 }
 
 fn pause_resume_button(
@@ -2534,6 +2679,7 @@ fn setup_settings_panel(
             bevy::ui::FocusPolicy::Block,
             UiInputBlocker,
             SettingsRoot,
+            pause_backdrop::PauseForeground,
             ZIndex(PAUSE_OVERLAY_Z_INDEX),
             ResponsiveOverlayRoot,
         ))
@@ -2630,53 +2776,6 @@ fn menu_replay_button(
                 next_state.set(AppState::Loading);
             }
             None => warn!("no replay files found in replays/"),
-        }
-    }
-}
-
-fn menu_mrc_button(
-    query: Query<&Interaction, (Changed<Interaction>, With<MenuMrcButton>)>,
-    mut playback: ResMut<crate::plugins::replay_plugin::MrcPlayback>,
-    mut request: ResMut<LaunchRequest>,
-    mut next_state: ResMut<NextState<AppState>>,
-) {
-    if query
-        .iter()
-        .any(|interaction| *interaction == Interaction::Pressed)
-    {
-        let dir = std::path::Path::new(crate::plugins::replay_plugin::REPLAY_DIR);
-        let first = std::fs::read_dir(&dir).ok().and_then(|entries| {
-            let mut paths: Vec<_> = entries
-                .flatten()
-                .map(|entry| entry.path())
-                .filter(|path| {
-                    path.extension()
-                        .and_then(|extension| extension.to_str())
-                        .is_some_and(|extension| extension.eq_ignore_ascii_case("mrc"))
-                })
-                .collect();
-            paths.sort();
-            paths.into_iter().next()
-        });
-        match first {
-            Some(path) => match playback.load(&path) {
-                Ok(()) => {
-                    request.mode = "replay".into();
-                    request.spawn_room_npcs = false;
-                    if let Some(stage_id) = playback.stage_id() {
-                        let stage = meteor_scene::stage_registry::get_stage(&stage_id, &[]);
-                        request.stage_id = stage.id;
-                        request.stage_name = stage.name;
-                    }
-                    if let Some((weapon, _)) = playback.local_weapon() {
-                        request.weapon = weapon;
-                    }
-                    info!("mrc loaded: {}", path.display());
-                    next_state.set(AppState::Loading);
-                }
-                Err(error) => warn!("mrc load failed: {error}"),
-            },
-            None => warn!("no mrc recordings in replays/"),
         }
     }
 }
@@ -3538,7 +3637,7 @@ fn update_net_room_cards(
         .map(|stage| stage.name)
         .unwrap_or_else(|| net.stage.clone());
     let info = format!(
-        "{}  /  {}  ·  {} / {} 人  ·  友军伤害{}",
+        "{}  /  {}  ·  {} / {} 人  ·  友军伤害{}  ·  {}",
         if stage.is_empty() {
             "地图待确认"
         } else {
@@ -3551,6 +3650,11 @@ fn update_net_room_cards(
             "开启"
         } else {
             "关闭"
+        },
+        if net.battle_rules.enabled() {
+            "再平衡开启"
+        } else {
+            "原版规则"
         }
     );
     for mut text in &mut details {
@@ -3641,35 +3745,63 @@ fn replay_timeline_scrub(
     }
 }
 
-fn replay_space_toggle(
+fn replay_keyboard_controls(
     mut events: MessageReader<bevy::input::keyboard::KeyboardInput>,
     mut keys: ResMut<ButtonInput<KeyCode>>,
     console: Option<Res<crate::plugins::debug_plugin::DebugConsoleState>>,
     scrub: Res<ReplayScrubState>,
     mut player: ResMut<crate::plugins::replay_plugin::ReplayPlayer>,
     mut mrc: ResMut<crate::plugins::replay_plugin::MrcPlayback>,
+    mut seek: ResMut<crate::plugins::replay_plugin::ReplaySeekRequest>,
+    mut frame_clock: Option<ResMut<crate::plugins::FrameClock>>,
 ) {
     if console.is_some_and(|console| console.open) {
         events.clear();
         return;
     }
     if scrub.active || (!player.active && !mrc.active) {
+        events.clear();
         return;
     }
-    let toggle = events.read().any(|event| {
-        event.key_code == KeyCode::Space
-            && event.state == bevy::input::ButtonState::Pressed
-            && !event.repeat
-    });
-    if !toggle {
-        return;
+    for event in events.read() {
+        if event.state != bevy::input::ButtonState::Pressed {
+            continue;
+        }
+        match event.key_code {
+            KeyCode::Space if !event.repeat => {
+                keys.reset(KeyCode::Space);
+                if mrc.active {
+                    mrc.paused = !mrc.paused;
+                } else {
+                    player.paused = !player.paused;
+                }
+            }
+            KeyCode::ArrowLeft | KeyCode::ArrowRight if mrc.active => {
+                keys.reset(event.key_code);
+                let step = if event.repeat { 1.0 } else { 5.0 };
+                let direction = if event.key_code == KeyCode::ArrowLeft {
+                    -1.0
+                } else {
+                    1.0
+                };
+                let base = seek.0.unwrap_or(mrc.elapsed);
+                seek.0 = Some((base + direction * step).clamp(0.0, mrc.duration()));
+            }
+            _ => {}
+        }
     }
-
-    keys.reset(KeyCode::Space);
-    if mrc.active {
-        mrc.paused = !mrc.paused;
-    } else {
-        player.paused = !player.paused;
+    if mrc.active && mrc.paused {
+        if let Some(clock) = frame_clock.as_mut() {
+            clock.sim_dt = 0.0;
+            clock.wall_dt = 0.0;
+            clock.wall_step = 0.0;
+        }
+    } else if player.active && player.paused {
+        if let Some(clock) = frame_clock.as_mut() {
+            clock.sim_dt = 0.0;
+            clock.wall_dt = 0.0;
+            clock.wall_step = 0.0;
+        }
     }
 }
 
@@ -3901,107 +4033,170 @@ fn result_title(bits: i32) -> &'static str {
     }
 }
 
-fn result_reason(bits: i32) -> &'static str {
-    if bits & 4 != 0 {
-        "敌方已全部击败"
-    } else if bits & 2 != 0 {
-        "我方已无人生还"
-    } else if bits & 1 != 0 {
-        "任务时限已到"
-    } else {
-        "战局结束"
+#[derive(Component)]
+struct ResultNextStageButton;
+
+fn cleared_campaign_mission(
+    request: &LaunchRequest,
+    result: &MatchEnd,
+    net: &crate::plugins::network_plugin::NetState,
+) -> Option<&'static super::campaign_ui::Mission> {
+    if request.mode != "single"
+        || request.spawn_room_npcs
+        || !result.settled
+        || result.result != 4
+        || net.status == crate::plugins::network_plugin::NetStatus::InRoom
+        || net.battle_result.is_some()
+    {
+        return None;
     }
+    super::campaign_ui::mission(&request.stage_id)
 }
 
-fn format_elapsed(seconds: f32) -> String {
-    let total = seconds.max(0.0) as u32;
-    format!("{}:{:02}", total / 60, total % 60)
-}
+#[derive(Component)]
+struct ResultLayout(super::battle_result::SettlementLayout);
 
+#[allow(clippy::too_many_arguments)]
 fn setup_result_panel(
     mut commands: Commands,
     ui_font: Res<UiFont>,
     result: Res<MatchEnd>,
-    score: Res<KillScore>,
     net: Res<crate::plugins::network_plugin::NetState>,
     request: Res<LaunchRequest>,
+    score: Res<KillScore>,
+    offline: Res<super::battle_result::OfflineScores>,
+    timing: Res<super::battle_result::timing::SettlementTime>,
+    records: Res<super::battle_result::timing::BestTimes>,
+    windows: Query<&Window>,
+    scale: Option<Res<UiScale>>,
+    roots: Query<(Entity, &ResultLayout), With<ResultRoot>>,
 ) {
-    let font = Some(ui_font.0.clone());
+    let unit = scale.as_ref().map_or(1.0, |s| s.0).max(0.05);
+    let layout = windows
+        .single()
+        .map_or(super::battle_result::SettlementLayout::Desktop, |w| {
+            super::battle_result::SettlementLayout::for_viewport(
+                w.width() / unit,
+                w.height() / unit,
+            )
+        });
+    if roots.iter().any(|(_, rendered)| rendered.0 == layout) {
+        return;
+    }
+    for (root, _) in &roots {
+        commands.entity(root).despawn();
+    }
     let overlay = commands
         .spawn((
-            scrollable_y(Node {
-                position_type: PositionType::Absolute,
-                width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
-                flex_direction: FlexDirection::Column,
-                align_items: AlignItems::Center,
-                justify_content: JustifyContent::Center,
-                row_gap: Val::Px(14.0),
-                padding: UiRect::all(Val::Px(24.0)),
-                ..default()
-            }),
-            BackgroundColor(theme::SCRIM),
+            super::battle_result::settlement_overlay_node(),
+            BackgroundColor(theme::BACKGROUND),
+            theme::CinematicBackdrop,
+            GlobalZIndex(290),
             bevy::ui::FocusPolicy::Block,
             UiInputBlocker,
             ResultRoot,
-            ResponsiveOverlayRoot,
+            ResultLayout(layout),
         ))
         .id();
-    let surface = overlay_surface(&mut commands);
-    commands.entity(overlay).add_child(surface);
-    let title_color = if result.result & 4 != 0 {
-        Color::srgb(0.5, 0.9, 0.5)
-    } else if result.result & 2 != 0 {
-        Color::srgb(1.0, 0.4, 0.35)
-    } else {
-        theme::TEXT
-    };
-    let title = text(
+    let surface = super::battle_result::spawn_final_surface(
         &mut commands,
-        result_title(result.result),
-        42.0,
-        title_color,
-        font.clone(),
+        overlay,
+        &ui_font,
+        &net,
+        &request,
+        &score,
+        &offline,
+        result.result,
+        result.elapsed,
+        &timing,
+        &records,
+        layout,
     );
-    commands.entity(title).insert(ResponsiveOverlayTitle(42.0));
-    commands.entity(surface).add_child(title);
-    let reason = text(
-        &mut commands,
-        &net.battle_result
-            .as_ref()
-            .map(|result| super::battle_result::result_heading(&net, result))
-            .unwrap_or_else(|| result_reason(result.result).to_owned()),
-        20.0,
-        Color::srgb(0.8, 0.8, 0.9),
-        font.clone(),
-    );
-    commands.entity(surface).add_child(reason);
-    let mut stats_text = format!(
-        "击杀  玩家 {} · NPC {}    用时 {}",
-        score.player_kills,
-        score.npc_kills,
-        format_elapsed(result.elapsed)
-    );
-
-    if net.battle_result.is_some() {
-        stats_text = super::battle_result::score_text(&net, &request, &score);
+    let actions = commands
+        .spawn(Node {
+            width: Val::Percent(100.0),
+            flex_shrink: 0.0,
+            justify_content: JustifyContent::FlexEnd,
+            flex_wrap: FlexWrap::Wrap,
+            column_gap: Val::Px(10.0),
+            row_gap: Val::Px(8.0),
+            border: UiRect::top(Val::Px(1.0)),
+            padding: UiRect::top(Val::Px(8.0)),
+            ..default()
+        })
+        .id();
+    commands
+        .entity(actions)
+        .insert(BorderColor::all(theme::LINE));
+    commands.entity(surface).add_child(actions);
+    let font = Some(ui_font.0.clone());
+    let cleared = cleared_campaign_mission(&request, &result, &net);
+    let next = cleared.and_then(|mission| super::campaign_ui::next_mission(mission.id));
+    if let Some(mission) = cleared.filter(|_| next.is_none()) {
+        let hint = text(
+            &mut commands,
+            &format!("已通关 · {}为最终关", mission.name),
+            14.0,
+            theme::METAL,
+            font.clone(),
+        );
+        commands.entity(hint).insert(Node {
+            width: Val::Percent(100.0),
+            flex_shrink: 0.0,
+            ..default()
+        });
+        commands.entity(actions).add_child(hint);
     }
-    let stats = text(&mut commands, &stats_text, 18.0, Color::WHITE, font.clone());
-    commands.entity(surface).add_child(stats);
     if net.battle_result.is_none() {
-        let retry = menu_button(
+        let retry = net_room_action(
             &mut commands,
             "再来一局",
-            240.0,
-            theme::PRIMARY,
+            120.0,
+            next.is_none(),
             font.clone(),
         );
         commands.entity(retry).insert(ResultRetryButton);
-        commands.entity(surface).add_child(retry);
+        commands.entity(actions).add_child(retry);
     }
-    let back = menu_button(&mut commands, "返回主菜单", 240.0, theme::CARD, font);
+    let back = net_room_action(&mut commands, "返回主菜单", 140.0, false, font.clone());
     commands.entity(back).insert(ResultBackToMenuButton);
-    commands.entity(surface).add_child(back);
+    commands.entity(actions).add_child(back);
+    if let Some(mission) = next {
+        let button = net_room_action(
+            &mut commands,
+            &format!("下一关 · {}", mission.name),
+            200.0,
+            true,
+            font,
+        );
+        commands.entity(button).insert(ResultNextStageButton);
+        commands.entity(actions).add_child(button);
+    }
+}
+
+fn result_next_stage_button(
+    progress: Res<super::campaign_ui::CampaignProgress>,
+    query: Query<&Interaction, (Changed<Interaction>, With<ResultNextStageButton>)>,
+    mut request: ResMut<LaunchRequest>,
+    result: Res<MatchEnd>,
+    net: Res<crate::plugins::network_plugin::NetState>,
+    mut next_state: ResMut<NextState<AppState>>,
+) {
+    if !query
+        .iter()
+        .any(|interaction| *interaction == Interaction::Pressed)
+    {
+        return;
+    }
+    let Some(mission) = cleared_campaign_mission(&request, &result, &net)
+        .and_then(|mission| super::campaign_ui::next_mission(mission.id))
+    else {
+        return;
+    };
+    request.stage_id = mission.id.into();
+    if super::campaign_ui::prepare_launch(&mut request, &progress) {
+        next_state.set(AppState::Loading);
+    }
 }
 
 fn result_retry_button(
@@ -4275,6 +4470,7 @@ fn start_game_button(
     tab: Res<StageListTab>,
     custom: Res<crate::plugins::stage_plugin::CustomStages>,
     mut request: ResMut<LaunchRequest>,
+    progress: Res<super::campaign_ui::CampaignProgress>,
     mut next_state: ResMut<NextState<AppState>>,
 ) {
     if query
@@ -4290,7 +4486,7 @@ fn start_game_button(
                 .iter()
                 .any(|stage| stage.id == request.stage_id),
         };
-        if !valid_stage || !super::campaign_ui::prepare_launch(&mut request) {
+        if !valid_stage || !super::campaign_ui::prepare_launch(&mut request, &progress) {
             warn!("start game ignored: no valid stage selected for {tab:?}");
             return;
         }
@@ -4346,7 +4542,7 @@ fn adapt_runtime_ui_layout(
         Query<&mut Node, With<RadarRoot>>,
         Query<&mut Node, With<ReplayTimelineTrack>>,
         Query<&mut Node, With<ResponsiveOverlayRoot>>,
-        Query<&mut Node, With<ResponsiveMenuButton>>,
+        Query<&mut Node, (With<ResponsiveMenuButton>, Without<PauseSidebarButton>)>,
         Query<&mut Node, With<ResponsiveOverlaySurface>>,
         Query<&mut Node, With<DialoguePanelRoot>>,
         Query<
@@ -4731,7 +4927,8 @@ mod tests {
                 ..default()
             })
             .add_message::<KeyboardInput>()
-            .add_systems(Update, replay_space_toggle);
+            .init_resource::<crate::plugins::replay_plugin::ReplaySeekRequest>()
+            .add_systems(Update, replay_keyboard_controls);
         app.world_mut().write_message(KeyboardInput {
             key_code: KeyCode::Space,
             logical_key: Key::Space,
@@ -4745,6 +4942,101 @@ mod tests {
         app.world_mut().resource_mut::<DebugConsoleState>().open = false;
         app.update();
         assert!(!app.world().resource::<ReplayPlayer>().paused);
+    }
+
+    #[test]
+    fn mrc_arrow_keys_seek_in_both_directions_and_space_preserves_pause() {
+        use crate::plugins::replay_plugin::{MrcPlayback, ReplayPlayer, ReplaySeekRequest};
+        use bevy::input::keyboard::{Key, KeyboardInput};
+
+        let mut doc = meteor_asset::mrc::MrcDocument {
+            magic: meteor_asset::mrc::MRC_MAGIC,
+            header_size: meteor_asset::mrc::MRC_HEADER_SIZE,
+            mark0: 0,
+            mark1: 0,
+            tail: 0,
+            state: [0; meteor_asset::mrc::MRC_STATE_SIZE],
+            meta: [0; 8],
+            queue_a: Vec::new(),
+            queue_b: Vec::new(),
+            queue_c: Vec::new(),
+            queue_d: Vec::new(),
+            queue_e: Vec::new(),
+        };
+        doc.queue_d.push(meteor_asset::mrc::MrcQueueDEntry {
+            a: 0,
+            b: 0,
+            c: 0,
+            time: 20.0,
+        });
+        let mut app = App::new();
+        app.init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<ReplayScrubState>()
+            .init_resource::<ReplayPlayer>()
+            .init_resource::<ReplaySeekRequest>()
+            .insert_resource(MrcPlayback {
+                active: true,
+                elapsed: 12.0,
+                doc: Some(doc),
+                ..default()
+            })
+            .add_message::<KeyboardInput>()
+            .add_systems(Update, replay_keyboard_controls);
+        let key = |key_code, repeat| KeyboardInput {
+            key_code,
+            logical_key: Key::Unidentified(bevy::input::keyboard::NativeKey::Unidentified),
+            state: bevy::input::ButtonState::Pressed,
+            text: None,
+            repeat,
+            window: Entity::PLACEHOLDER,
+        };
+
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::ArrowLeft);
+        app.update();
+        assert_eq!(app.world().resource::<ReplaySeekRequest>().0, None);
+        app.world_mut()
+            .write_message(key(KeyCode::ArrowLeft, false));
+        app.update();
+        assert_eq!(app.world().resource::<ReplaySeekRequest>().0, Some(7.0));
+        assert!(!app.world().resource::<MrcPlayback>().paused);
+        assert!(!app
+            .world()
+            .resource::<ButtonInput<KeyCode>>()
+            .pressed(KeyCode::ArrowLeft));
+
+        app.world_mut()
+            .write_message(key(KeyCode::ArrowRight, true));
+        app.update();
+        assert_eq!(app.world().resource::<ReplaySeekRequest>().0, Some(8.0));
+        app.world_mut().write_message(key(KeyCode::Space, false));
+        app.update();
+        assert!(app.world().resource::<MrcPlayback>().paused);
+        app.world_mut()
+            .write_message(key(KeyCode::ArrowRight, false));
+        app.update();
+        assert_eq!(app.world().resource::<ReplaySeekRequest>().0, Some(13.0));
+        assert!(app.world().resource::<MrcPlayback>().paused);
+        app.world_mut().write_message(key(KeyCode::Space, false));
+        app.update();
+        assert!(!app.world().resource::<MrcPlayback>().paused);
+
+        app.world_mut()
+            .write_message(key(KeyCode::ArrowRight, false));
+        app.update();
+        assert_eq!(app.world().resource::<ReplaySeekRequest>().0, Some(18.0));
+        app.world_mut()
+            .write_message(key(KeyCode::ArrowRight, false));
+        app.update();
+        assert_eq!(app.world().resource::<ReplaySeekRequest>().0, Some(20.0));
+        app.world_mut().resource_mut::<ReplayScrubState>().active = true;
+        app.world_mut()
+            .write_message(key(KeyCode::ArrowLeft, false));
+        app.update();
+        app.world_mut().resource_mut::<ReplayScrubState>().active = false;
+        app.update();
+        assert_eq!(app.world().resource::<ReplaySeekRequest>().0, Some(20.0));
     }
 
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
@@ -4795,12 +5087,52 @@ mod tests {
             .unwrap();
             commands.insert_resource(UiFont(fonts.add(Font::from_bytes(bytes))));
         }
-        fn capture(mut commands: Commands, target: Res<CaptureTarget>, mut frame: Local<u32>) {
+        fn capture(
+            mut commands: Commands,
+            target: Res<CaptureTarget>,
+            mut frame: Local<u32>,
+            windows: Query<&Window>,
+            actions: Query<
+                (&ComputedNode, &UiGlobalTransform, &Children),
+                Or<(
+                    With<ResultBackToMenuButton>,
+                    With<ResultRetryButton>,
+                    With<ResultNextStageButton>,
+                )>,
+            >,
+            labels: Query<(&Text, &ComputedNode, &UiGlobalTransform)>,
+        ) {
             *frame += 1;
             let motion = std::env::var("METEOR_UI_CAPTURE").as_deref() == Ok("hud-motion");
             if (!motion && *frame == 45)
                 || (motion && (30..=90).contains(&*frame) && *frame % 3 == 0)
             {
+                if let Ok(window) = windows.single() {
+                    for (node, transform, children) in &actions {
+                        let rect = Rect::from_center_size(transform.translation, node.size());
+                        assert!(
+                            rect.min.x >= -1.0
+                                && rect.max.x <= window.width() + 1.0
+                                && rect.min.y >= -1.0
+                                && rect.max.y <= window.height() + 1.0,
+                            "result action clipped: {rect:?}"
+                        );
+                        for child in children.iter() {
+                            if let Ok((text, node, transform)) = labels.get(child) {
+                                let rect =
+                                    Rect::from_center_size(transform.translation, node.size());
+                                eprintln!("result action {}: {rect:?}", text.0);
+                                assert!(
+                                    rect.min.x >= -1.0
+                                        && rect.max.x <= window.width() + 1.0
+                                        && rect.max.y <= window.height() + 1.0,
+                                    "result action label clipped: {} {rect:?}",
+                                    text.0
+                                );
+                            }
+                        }
+                    }
+                }
                 let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
                     if std::env::var("METEOR_UI_CAPTURE").as_deref() == Ok("hud") {
                         "../../../output/ui-concepts/A-dialogue-live-desktop.png"
@@ -4849,6 +5181,108 @@ mod tests {
             }
             assert!(*frame < 600, "GPU capture timed out");
         }
+        fn result_mode() -> bool {
+            std::env::var("METEOR_UI_CAPTURE").is_ok_and(|v| v.starts_with("result"))
+        }
+        fn result_fixture(
+            mut net: ResMut<crate::plugins::network_plugin::NetState>,
+            mut request: ResMut<LaunchRequest>,
+            mut end: ResMut<MatchEnd>,
+            mut next: ResMut<NextState<AppState>>,
+        ) {
+            let variant = std::env::var("METEOR_UI_CAPTURE").unwrap_or_default();
+            if variant.contains("solo") {
+                request.mode = "single".into();
+                request.stage_id = if variant.contains("complete") {
+                    "sn10"
+                } else {
+                    "sn01"
+                }
+                .into();
+                request.stage_name = super::super::campaign_ui::mission(&request.stage_id)
+                    .unwrap()
+                    .name
+                    .into();
+                request.player_name = "孟星魂".into();
+                *end = MatchEnd {
+                    result: 4,
+                    settled: true,
+                    elapsed: 125.375,
+                    ..default()
+                };
+                next.set(AppState::Result);
+                return;
+            }
+            net.player_id = "player-2".into();
+            net.mode = if variant.contains("leader") {
+                "leader"
+            } else {
+                "deathmatch"
+            }
+            .into();
+            net.stage = "sn04".into();
+            net.stock_team_wins = [1, 2];
+            net.battle_result = Some(super::super::battle_result::NetworkBattleResult {
+                round: 3,
+                terminal: variant.contains("final"),
+                winner_teams: if variant.contains("draw") {
+                    vec![]
+                } else {
+                    vec![2]
+                },
+                winner_player_id: variant.contains("leader").then(|| "player-2".into()),
+                ..default()
+            });
+            let names = [
+                "孟星魂",
+                "冷燕",
+                "叶翔",
+                "石群",
+                "孙剑",
+                "律香川",
+                "江湖夜雨十年灯",
+                "无名剑客",
+            ];
+            for i in 0..16 {
+                let id = format!("player-{i}");
+                net.remote_actor_names
+                    .insert(id.clone(), names[i % names.len()].into());
+                net.remote_actor_teams.insert(
+                    id.clone(),
+                    if variant.contains("leader") {
+                        0
+                    } else {
+                        1 + i as i32 % 2
+                    },
+                );
+                net.remote_kills.insert(id.clone(), 16 - i as u32);
+                net.stock_deaths.insert(id, i as u32 % 5);
+            }
+            request.stock_camp = if variant.contains("leader") {
+                0
+            } else if variant.contains("defeat") {
+                1
+            } else {
+                2
+            };
+            if variant.contains("leader") {
+                net.remote_kills.insert("player-2".into(), 20);
+            }
+            net.remote_actor_teams
+                .insert("player-2".into(), request.stock_camp as i32);
+            *end = MatchEnd {
+                result: 4,
+                settled: true,
+                elapsed: 185.25,
+                ..default()
+            };
+            next.set(if variant.contains("final") {
+                AppState::Result
+            } else {
+                AppState::Playing
+            });
+        }
+
         fn lobby_mode() -> bool {
             std::env::var("METEOR_UI_CAPTURE").is_ok_and(|v| v.starts_with("lobby"))
         }
@@ -4973,6 +5407,10 @@ mod tests {
         .init_state::<AppState>()
         .init_resource::<crate::plugins::network_plugin::NetState>()
         .init_resource::<crate::plugins::stage_collider::StageCollider>()
+        .init_resource::<KillScore>()
+        .init_resource::<MatchEnd>()
+        .init_resource::<super::super::battle_result::OfflineScores>()
+        .init_resource::<crate::plugins::pak_textures::QualityTextureHandles>()
         .init_resource::<RadarAssets>()
         .init_resource::<RadarState>()
         .init_resource::<RadarTerrain>()
@@ -5009,8 +5447,9 @@ mod tests {
             Startup,
             (
                 prepare,
-                setup_menu.run_if(|| !hud_mode() && !fog_mode() && !lobby_mode()),
+                setup_menu.run_if(|| !hud_mode() && !fog_mode() && !lobby_mode() && !result_mode()),
                 lobby_fixture.run_if(lobby_mode),
+                result_fixture.run_if(result_mode),
                 setup_net_room_panel.run_if(lobby_mode),
                 setup_playing_hud.run_if(hud_mode),
                 hud_fixture.run_if(hud_mode),
@@ -5042,6 +5481,21 @@ mod tests {
             )
                 .chain(),
         );
+        if std::env::var("METEOR_UI_CAPTURE").is_ok_and(|v| v.starts_with("hud-countdown")) {
+            app.add_plugins(super::super::countdown_hud::CountdownHudPlugin);
+            app.world_mut()
+                .resource_mut::<crate::plugins::network_plugin::NetState>()
+                .round_remaining_seconds = Some(877.0);
+        }
+        if result_mode() {
+            app.add_plugins(super::super::battle_result::BattleResultPlugin)
+                .add_systems(
+                    Update,
+                    setup_result_panel
+                        .run_if(in_state(AppState::Result))
+                        .after(super::super::battle_result::timing::CaptureSettlementTime),
+                );
+        }
         if lobby_mode() {
             app.add_systems(
                 Update,
@@ -5383,7 +5837,7 @@ mod tests {
     }
 
     #[test]
-    fn pause_overlay_uses_a_blocking_card_surface() {
+    fn pause_overlay_uses_a_blocking_sidebar_surface() {
         let mut app = App::new();
         app.insert_resource(UiFont(Handle::default()))
             .add_systems(Update, setup_pause_menu);
@@ -5396,7 +5850,7 @@ mod tests {
             .count();
         let surfaces = app
             .world_mut()
-            .query_filtered::<Entity, With<ResponsiveOverlaySurface>>()
+            .query_filtered::<Entity, With<PauseSidebar>>()
             .iter(app.world())
             .count();
         let actions = app
@@ -5406,7 +5860,78 @@ mod tests {
             .count();
         assert_eq!(blockers, 1);
         assert_eq!(surfaces, 1);
-        assert_eq!(actions, 3);
+        assert_eq!(actions, 4);
+    }
+
+    #[test]
+    fn pause_clock_freezes_solo_but_keeps_network_room_live_in_settings() {
+        let mut app = App::new();
+        app.init_resource::<Time<Virtual>>()
+            .init_resource::<super::super::network_plugin::NetState>()
+            .insert_resource(SettingsReturnState(AppState::Paused))
+            .add_systems(Update, pause_clock);
+        for online in [false, true] {
+            app.world_mut()
+                .resource_mut::<super::super::network_plugin::NetState>()
+                .status = if online {
+                super::super::network_plugin::NetStatus::InRoom
+            } else {
+                super::super::network_plugin::NetStatus::Disconnected
+            };
+            for state in [
+                AppState::Playing,
+                AppState::Paused,
+                AppState::Settings,
+                AppState::Paused,
+                AppState::Playing,
+            ] {
+                app.insert_resource(State::new(state));
+                app.update();
+                assert_eq!(
+                    app.world().resource::<Time<Virtual>>().is_paused(),
+                    !online && matches!(state, AppState::Paused | AppState::Settings)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pause_sidebar_respects_small_viewports_scale_and_safe_area() {
+        let mut app = App::new();
+        app.insert_resource(UiFont(Handle::default()))
+            .insert_resource(super::super::ui_scale_plugin::EffectiveUiScale(1.5))
+            .insert_resource(SafeAreaInsets {
+                left: 24.0,
+                top: 48.0,
+                bottom: 12.0,
+                right: 0.0,
+            })
+            .add_systems(Startup, setup_pause_menu)
+            .add_systems(Update, adapt_pause_sidebar);
+        app.world_mut().spawn((
+            bevy::window::PrimaryWindow,
+            Window {
+                resolution: (320, 400).into(),
+                ..default()
+            },
+        ));
+        app.update();
+        let world = app.world_mut();
+        let sidebar = world
+            .query_filtered::<&Node, With<PauseSidebar>>()
+            .single(world)
+            .unwrap();
+        assert_eq!(sidebar.width, Val::Px(320.0 * 0.78 / 1.5));
+        assert_eq!(sidebar.padding.left, Val::Px(32.0));
+        assert_eq!(sidebar.padding.top, Val::Px(80.0 / 1.5));
+        assert_eq!(sidebar.overflow.y, bevy::ui::OverflowAxis::Scroll);
+        for button in world
+            .query_filtered::<&Node, With<PauseSidebarButton>>()
+            .iter(world)
+        {
+            assert_eq!(button.width, Val::Percent(100.0));
+            assert_eq!(button.height, Val::Px(32.0));
+        }
     }
 
     #[test]
@@ -5578,15 +6103,319 @@ mod tests {
     }
 
     #[test]
+    fn campaign_result_advances_all_eight_links_and_stops_at_original_finale() {
+        use super::super::battle_result::{BattleResultPlugin, OfflineScores};
+        use super::super::campaign_ui::MISSIONS;
+        use super::super::network_plugin::{NetState, NetStatus};
+        fn app_for(request: LaunchRequest, result: MatchEnd, net: NetState) -> App {
+            let mut app = App::new();
+            app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+                .init_state::<AppState>()
+                .insert_resource(request)
+                .insert_resource(result)
+                .insert_resource(net)
+                .insert_resource(UiFont(Handle::default()))
+                .init_resource::<KillScore>()
+                .init_resource::<OfflineScores>()
+                .add_plugins(BattleResultPlugin)
+                .add_systems(
+                    Update,
+                    (setup_result_panel, result_next_stage_button)
+                        .chain()
+                        .run_if(in_state(AppState::Result)),
+                );
+            app.world_mut()
+                .resource_mut::<NextState<AppState>>()
+                .set(AppState::Result);
+            app.update();
+            app
+        }
+        for (index, mission) in MISSIONS.iter().enumerate() {
+            let mut app = app_for(
+                LaunchRequest {
+                    stage_id: mission.id.into(),
+                    character_id: 19,
+                    ..default()
+                },
+                MatchEnd {
+                    settled: true,
+                    result: 4,
+                    elapsed: 10.0,
+                    ..default()
+                },
+                NetState::default(),
+            );
+            let world = app.world_mut();
+            let buttons: Vec<_> = world
+                .query_filtered::<Entity, With<ResultNextStageButton>>()
+                .iter(world)
+                .collect();
+            if let Some(next) = MISSIONS.get(index + 1) {
+                assert_eq!(buttons.len(), 1);
+                assert!(world
+                    .query::<&Text>()
+                    .iter(world)
+                    .any(|t| t.0 == format!("下一关 · {}", next.name)));
+                *world.get_mut::<Interaction>(buttons[0]).unwrap() = Interaction::Pressed;
+                app.update();
+                let request = app.world().resource::<LaunchRequest>();
+                assert_eq!(
+                    (request.stage_id.as_str(), request.stage_name.as_str()),
+                    (next.id, next.name)
+                );
+                assert_eq!(
+                    (
+                        request.mode.as_str(),
+                        request.character_id,
+                        request.spawn_room_npcs
+                    ),
+                    ("single", 0, false)
+                );
+                assert!(matches!(
+                    app.world().resource::<NextState<AppState>>(),
+                    NextState::Pending(AppState::Loading)
+                ));
+                assert_eq!(
+                    app.world()
+                        .resource::<super::super::battle_result::timing::BestTimes>()
+                        .best(mission.id),
+                    Some(10_000)
+                );
+            } else {
+                assert!(buttons.is_empty());
+                assert!(world
+                    .query::<&Text>()
+                    .iter(world)
+                    .any(|t| t.0.contains("已通关")));
+            }
+        }
+        for (mode, id, npc, in_room, bits) in [
+            ("single", "sn01", false, false, 2),
+            ("single", "sn01", false, false, 1),
+            ("single", "sn01", false, false, 6),
+            ("single", "sn02", false, false, 4),
+            ("single", "custom01", false, false, 4),
+            ("single", "sn01", true, false, 4),
+            ("single", "sn01", false, true, 4),
+            ("leader", "sn01", false, false, 4),
+            ("replay", "sn01", false, false, 4),
+            ("single", "sn10", false, false, 4),
+        ] {
+            let mut app = app_for(
+                LaunchRequest {
+                    mode: mode.into(),
+                    stage_id: id.into(),
+                    spawn_room_npcs: npc,
+                    ..default()
+                },
+                MatchEnd {
+                    settled: true,
+                    result: bits,
+                    ..default()
+                },
+                NetState {
+                    status: if in_room {
+                        NetStatus::InRoom
+                    } else {
+                        NetState::default().status
+                    },
+                    ..default()
+                },
+            );
+            let world = app.world_mut();
+            assert_eq!(
+                world
+                    .query_filtered::<Entity, With<ResultNextStageButton>>()
+                    .iter(world)
+                    .count(),
+                0
+            );
+            world.spawn((ResultNextStageButton, Interaction::Pressed));
+            app.update();
+            assert_eq!(app.world().resource::<LaunchRequest>().stage_id, id);
+            assert!(matches!(
+                app.world().resource::<NextState<AppState>>(),
+                NextState::Unchanged
+            ));
+        }
+    }
+
+    #[test]
+    fn solo_settlement_shows_elapsed_best_and_preserves_record_on_resize() {
+        use super::super::battle_result::{timing::BestTimes, BattleResultPlugin, OfflineScores};
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+            .init_state::<AppState>()
+            .init_resource::<crate::plugins::network_plugin::NetState>()
+            .insert_resource(UiFont(Handle::default()))
+            .insert_resource(LaunchRequest {
+                mode: "single".into(),
+                stage_id: "sn01".into(),
+                ..default()
+            })
+            .init_resource::<KillScore>()
+            .insert_resource(MatchEnd {
+                result: 4,
+                settled: true,
+                elapsed: 125.375,
+                ..default()
+            })
+            .init_resource::<OfflineScores>()
+            .add_plugins(BattleResultPlugin)
+            .add_systems(
+                Update,
+                setup_result_panel
+                    .run_if(in_state(AppState::Result))
+                    .after(super::super::battle_result::timing::CaptureSettlementTime),
+            );
+        let window = app.world_mut().spawn(Window::default()).id();
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::Result);
+        for resolution in [(1280, 720), (872, 393), (412, 915)] {
+            app.world_mut()
+                .get_mut::<Window>(window)
+                .unwrap()
+                .resolution = resolution.into();
+            app.update();
+            let world = app.world_mut();
+            let texts: Vec<_> = world
+                .query::<&Text>()
+                .iter(world)
+                .map(|t| t.0.clone())
+                .collect();
+            assert!(texts.contains(&"本局用时  2:05.375".into()));
+            assert!(texts.contains(&"历史最佳  2:05.375".into()));
+            assert!(texts.contains(&"新纪录".into()));
+            assert_eq!(world.resource::<BestTimes>().best("sn01"), Some(125375));
+        }
+    }
+
+    #[test]
+    fn final_settlement_keeps_network_roster_and_only_offers_local_navigation() {
+        use super::super::battle_result::{BattleResultPlugin, NetworkBattleResult, OfflineScores};
+        use super::super::network_plugin::NetState;
+        let mut net = NetState::default();
+        net.player_id = "guest".into();
+        net.mode = "leader".into();
+        net.stage = "sn06".into();
+        net.remote_actor_names
+            .insert("guest".into(), "本机剑客".into());
+        net.remote_actor_names
+            .insert("npc".into(), "对战守卫".into());
+        net.remote_kills.insert("guest".into(), 8);
+        net.remote_kills.insert("npc".into(), 3);
+        net.battle_result = Some(NetworkBattleResult {
+            terminal: true,
+            winner_player_id: Some("guest".into()),
+            ..default()
+        });
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+            .init_state::<AppState>()
+            .insert_resource(net)
+            .insert_resource(UiFont(Handle::default()))
+            .init_resource::<LaunchRequest>()
+            .init_resource::<KillScore>()
+            .init_resource::<MatchEnd>()
+            .init_resource::<OfflineScores>()
+            .add_plugins(BattleResultPlugin)
+            .add_systems(
+                Update,
+                setup_result_panel
+                    .run_if(in_state(AppState::Result))
+                    .after(super::super::battle_result::timing::CaptureSettlementTime),
+            );
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::Playing);
+        app.update();
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::Result);
+        app.update();
+        let world = app.world_mut();
+        let texts: Vec<_> = world
+            .query::<&Text>()
+            .iter(world)
+            .map(|t| t.0.as_str())
+            .collect();
+        assert!(texts.contains(&"本机剑客 · 你"));
+        assert!(texts.contains(&"对战守卫"));
+        assert!(texts.iter().any(|text| text.contains("四方阵")));
+        assert!(texts.contains(&"个人战绩 · 累计击杀排行"));
+        assert!(!texts.iter().any(|text| text.contains("蝴蝶")));
+        assert_eq!(
+            world
+                .query_filtered::<Entity, With<ResultBackToMenuButton>>()
+                .iter(world)
+                .count(),
+            1
+        );
+        assert_eq!(
+            world
+                .query_filtered::<Entity, With<ResultRetryButton>>()
+                .iter(world)
+                .count(),
+            0
+        );
+        assert_eq!(
+            world
+                .query_filtered::<Entity, With<theme::CinematicBackdrop>>()
+                .iter(world)
+                .count(),
+            1
+        );
+        let window = world
+            .spawn(Window {
+                resolution: (412, 915).into(),
+                ..default()
+            })
+            .id();
+        app.update();
+        for (resolution, expected) in [
+            (
+                (872, 393),
+                super::super::battle_result::SettlementLayout::Landscape,
+            ),
+            (
+                (412, 915),
+                super::super::battle_result::SettlementLayout::Portrait,
+            ),
+        ] {
+            app.world_mut()
+                .get_mut::<Window>(window)
+                .unwrap()
+                .resolution = resolution.into();
+            app.update();
+            let world = app.world_mut();
+            let layouts: Vec<_> = world
+                .query::<&ResultLayout>()
+                .iter(world)
+                .map(|layout| layout.0)
+                .collect();
+            assert_eq!(layouts, [expected]);
+            assert!(world
+                .query::<&Text>()
+                .iter(world)
+                .any(|t| t.0 == "本机剑客 · 你"));
+            assert_eq!(
+                world
+                    .query_filtered::<Entity, With<ResultBackToMenuButton>>()
+                    .iter(world)
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
     fn result_title_maps_bits() {
         assert_eq!(result_title(4), "胜利");
         assert_eq!(result_title(2), "失败");
         assert_eq!(result_title(1), "平局");
         assert_eq!(result_title(4 | 2), "胜利");
         assert_eq!(result_title(0), "战局结束");
-        assert_eq!(result_reason(4), "敌方已全部击败");
-        assert_eq!(result_reason(2), "我方已无人生还");
-        assert_eq!(result_reason(1), "任务时限已到");
     }
 
     #[test]
@@ -5652,14 +6481,6 @@ mod tests {
     }
 
     #[test]
-    fn format_elapsed_minutes_seconds() {
-        assert_eq!(format_elapsed(0.0), "0:00");
-        assert_eq!(format_elapsed(59.9), "0:59");
-        assert_eq!(format_elapsed(60.0), "1:00");
-        assert_eq!(format_elapsed(125.0), "2:05");
-    }
-
-    #[test]
     fn escort_hud_reports_authority_state_and_local_carry_priority() {
         let request = LaunchRequest {
             mode: "escort".into(),
@@ -5680,6 +6501,7 @@ mod tests {
         let dropped = mode_hud_text(
             &request,
             &net,
+            None,
             &KillScore::default(),
             &MatchEnd::default(),
             false,
@@ -5691,6 +6513,7 @@ mod tests {
         let carrying = mode_hud_text(
             &request,
             &net,
+            None,
             &KillScore::default(),
             &MatchEnd::default(),
             true,
@@ -5708,12 +6531,73 @@ mod tests {
     }
 
     #[test]
+    fn real_sn13_hud_shows_solo_player_captain_identity() {
+        let (level, _) = crate::plugins::stage_plugin::solo_identity_tests::sn13();
+        let request = LaunchRequest {
+            stock_camp: 2,
+            ..default()
+        };
+        let text = mode_hud_text(
+            &request,
+            &crate::plugins::network_plugin::NetState::default(),
+            Some(&level),
+            &KillScore::default(),
+            &MatchEnd::default(),
+            false,
+        );
+        assert_eq!(text, "你是队长");
+        assert!(mode_hud_text(
+            &request,
+            &crate::plugins::network_plugin::NetState::default(),
+            None,
+            &KillScore::default(),
+            &MatchEnd::default(),
+            false
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn radar_captain_keeps_authored_star_and_team_color() {
+        let mut images = Assets::<Image>::default();
+        let texture = images.add(Image::default());
+        let assets = RadarAssets {
+            star: Some(texture.clone()),
+            ..default()
+        };
+        for hostile in [false, true] {
+            let mut image = ImageNode::default();
+            set_radar_contact_image(&mut image, RadarMarkerKind::Star, hostile, &assets);
+            assert_eq!(image.image, texture);
+            assert_eq!(
+                image.color,
+                if hostile {
+                    Color::srgb(1.0, 0.18, 0.13)
+                } else {
+                    Color::srgb(0.2, 1.0, 0.4)
+                }
+            );
+        }
+    }
+
+    #[test]
     fn radar_view_up_and_threat_bearings_follow_camera_in_all_quadrants() {
         for yaw in [0.0, 0.7, 1.57, 3.14, -1.57] {
             let camera = Quat::from_euler(EulerRot::YXZ, yaw, -0.6, 0.0);
             let forward = camera * Vec3::NEG_Z;
-            let screen_forward = Vec2::new(forward.x, -forward.z).normalize();
-            assert!((radar_view_rotation(camera) * screen_forward).abs_diff_eq(Vec2::NEG_Y, 0.0001));
+            let right = camera * Vec3::X;
+
+            let screen_forward = Vec2::new(-forward.x, -forward.z).normalize();
+            let screen_right = Vec2::new(-right.x, -right.z).normalize();
+            let map = radar_view_rotation(camera);
+            assert!(
+                (map * screen_forward).abs_diff_eq(Vec2::NEG_Y, 0.0001),
+                "view forward must stay at the top of the radar"
+            );
+            assert!(
+                (map * screen_right).abs_diff_eq(Vec2::X, 0.0001),
+                "camera-right must stay on the right; left/right must not mirror"
+            );
         }
         assert!(!radar_is_hostile(1, 1));
         assert!(radar_is_hostile(1, 2));
@@ -5725,7 +6609,8 @@ mod tests {
         for _ in 0..100 {
             add_radar_threat(&mut strengths, Vec3::X * 60.0);
         }
-        assert_eq!(strengths[RADAR_THREAT_SECTORS / 4], 1.0);
+
+        assert_eq!(strengths[RADAR_THREAT_SECTORS * 3 / 4], 1.0);
         assert_eq!(strengths.iter().filter(|&&value| value > 0.0).count(), 1);
         for (hostile, expected) in [
             (true, Color::srgb(1.0, 0.18, 0.13)),
@@ -5890,7 +6775,8 @@ mod tests {
             let marker = map_world_to_local_radar(target, origin, 100.0, radius).unwrap();
             let pixel = radar_texture_rect(target, bounds, dimensions, radius).center();
             assert!(marker.abs_diff_eq((pixel - rect.min) / rect.size() * 100.0, 0.001));
-            assert_eq!(marker, Vec2::new(75.0, 50.0));
+
+            assert_eq!(marker, Vec2::new(25.0, 50.0));
             assert!(map_world_to_local_radar(Vec3::X * radius, origin, 100.0, radius).is_none());
         }
         let far = Vec3::X * RADAR_WORLD_RADIUS;
@@ -6727,6 +7613,73 @@ mod tests {
     }
 
     #[test]
+    fn round_countdown_actual_text_is_centered_below_radar_at_all_scales() {
+        use crate::plugins::ui_scale_plugin::EffectiveUiScale;
+        use bevy::text::TextLayoutInfo;
+        for (width, height) in [(1280, 720), (872, 393), (412, 915)] {
+            let (mut app, font) = hud_text_layout_app(width, height);
+            app.add_plugins(bevy::state::app::StatesPlugin)
+                .init_state::<AppState>()
+                .insert_resource(UiFont(font))
+                .init_resource::<LaunchRequest>()
+                .init_resource::<MatchEnd>()
+                .init_resource::<crate::plugins::network_plugin::NetState>()
+                .init_resource::<EffectiveUiScale>()
+                .add_plugins(super::super::countdown_hud::CountdownHudPlugin);
+            app.world_mut().spawn(Window {
+                resolution: (width, height).into(),
+                ..default()
+            });
+            app.world_mut().resource_mut::<Time<Virtual>>().pause();
+            app.world_mut()
+                .resource_mut::<NextState<AppState>>()
+                .set(AppState::Playing);
+            for safe in [
+                SafeAreaInsets::default(),
+                SafeAreaInsets {
+                    top: 12.0,
+                    right: 34.0,
+                    ..default()
+                },
+            ] {
+                app.insert_resource(safe);
+                for unit in [0.55, 1.0, 1.5] {
+                    app.world_mut().resource_mut::<UiScale>().0 = unit;
+                    app.world_mut().resource_mut::<EffectiveUiScale>().0 = unit;
+                    for seconds in [59940.0, 900.0, 9.0] {
+                        app.world_mut()
+                            .resource_mut::<crate::plugins::network_plugin::NetState>()
+                            .round_remaining_seconds = Some(seconds);
+                        for _ in 0..3 {
+                            app.update();
+                        }
+                        let world = app.world_mut();
+                        let value = super::super::countdown_hud::format_round_remaining(seconds);
+                        let (entity, _) = world
+                            .query::<(Entity, &Text)>()
+                            .iter(world)
+                            .find(|(_, t)| t.0 == value)
+                            .unwrap();
+                        let computed = world.get::<ComputedNode>(entity).unwrap();
+                        let shaped = world.get::<TextLayoutInfo>(entity).unwrap();
+                        assert!(!shaped.glyphs.is_empty());
+                        let transform = world.get::<UiGlobalTransform>(entity).unwrap().affine();
+                        let size = shaped.size * shaped.scale_factor;
+                        let actual = transform.transform_point2(
+                            computed.content_box().min + Vec2::new(size.x * 0.5, 0.0),
+                        );
+                        let window = world.query::<&Window>().single(world).unwrap();
+                        let (center, diameter) = radar_screen_geometry(window, safe, None);
+                        let expected = Vec2::new(center.x, center.y + diameter * 0.5 + 5.0);
+                        assert!(actual.abs_diff_eq(expected, 1.5),
+                            "{width}x{height} scale={unit} {value}: rendered={actual:?}, expected={expected:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn nameplate_actual_text_layout_is_centered_at_all_scales() {
         use bevy::ecs::system::RunSystemOnce;
         use bevy::text::TextLayoutInfo;
@@ -6998,7 +7951,8 @@ mod tests {
             .x += 3.0;
         app.update();
         let new_crop = app.world().get::<ImageNode>(root).unwrap().rect.unwrap();
-        assert!(new_crop.center().x > old_crop.center().x);
+
+        assert!(new_crop.center().x < old_crop.center().x);
         assert!(new_crop.size().abs_diff_eq(old_crop.size(), 0.001));
         let marker_node = app
             .world_mut()

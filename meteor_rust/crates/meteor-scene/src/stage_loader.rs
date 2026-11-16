@@ -82,6 +82,8 @@ pub struct WaypointGraph {
 
     pub link_types: std::collections::HashMap<(usize, usize), u8>,
     pub center: [f32; 3],
+
+    pub navigation_bounds: Option<[[f32; 3]; 2]>,
     pub disabled: std::collections::HashSet<usize>,
 }
 
@@ -100,14 +102,24 @@ impl WaypointGraph {
         id < self.points.len() && !self.disabled.contains(&id)
     }
     pub fn navigation_links(&self, id: usize) -> Vec<(usize, f32)> {
-        if !self.is_enabled(id) {
+        let Some(point) = self.points.get(id) else {
             return Vec::new();
-        }
-        self.points[id]
+        };
+        point
             .links
             .iter()
             .copied()
             .filter(|(target, _)| self.is_enabled(*target))
+            .map(|(target, cost)| {
+                (
+                    target,
+                    if self.link_types.get(&(id, target)) == Some(&1) {
+                        cost * 2.0
+                    } else {
+                        cost
+                    },
+                )
+            })
             .collect()
     }
 
@@ -206,6 +218,7 @@ pub fn parse_waypoint_graph(text: &str, center: [f32; 3]) -> WaypointGraph {
         points,
         link_types,
         center,
+        navigation_bounds: None,
         disabled: Default::default(),
     }
 }
@@ -276,6 +289,19 @@ mod tests {
         assert_eq!(graph.points[0].size, 1.0);
         assert_eq!(graph.points[0].links, vec![(1, 5.0)]);
         assert_eq!(graph.points[1].links, vec![(0, 5.0)]);
+    }
+
+    #[test]
+    fn navigation_only_blocks_disabled_destinations_and_doubles_jump_cost() {
+        let mut graph = parse_waypoint_graph(
+            "WayPoints 2\nPos 0 0 30\nSize 10\nLink 1\n1 1 5.0\nPos 10 0 30\nSize 10\nLink 1\n0 0 5.0\n",
+            [0.0; 3],
+        );
+        graph.set_enabled(0, false);
+        assert_eq!(graph.navigation_links(0), vec![(1, 10.0)]);
+        assert_eq!(graph.navigation_links(1), vec![]);
+        assert_eq!(graph.points[0].links, vec![(1, 5.0)]);
+        assert!(graph.navigation_links(99).is_empty());
     }
 
     #[test]

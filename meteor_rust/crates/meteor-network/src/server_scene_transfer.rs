@@ -19,8 +19,8 @@ impl Portal {
     fn contains(&self, p: RoleVec3) -> bool {
         p.x >= self.min[0] - 0.5
             && p.x <= self.max[0] + 0.5
-            && p.y >= self.min[1] - 0.5
-            && p.y <= self.max[1] + 1.8
+            && p.y >= self.min[1] - meteor_core::constants::CHARACTER_CONTACT_HEIGHT - 0.5
+            && p.y <= self.max[1] + 0.5
             && p.z >= self.min[2] - 0.5
             && p.z <= self.max[2] + 0.5
     }
@@ -76,7 +76,8 @@ fn load(root: &Path, room: &Room) -> Result<SceneTransfers, String> {
     let text = |path: &str| -> Result<String, String> {
         Ok(encoding_rs::GB18030.decode(&read(path)?).0.into_owned())
     };
-    let desc = meteor_asset::des::parse_stage_description(&text("sn22/sn22.des")?);
+    let mut desc = meteor_asset::des::parse_stage_description(&text("sn22/sn22.des")?);
+    desc.apply_ticket_mask(1u32.wrapping_shl(mode_rule_id(&room.mode).unwrap_or(1) as u32));
     let mut source = Vec::new();
     for name in ["Def.h", "box.pst", "desk.pst", "chair.pst", "jug.pst"] {
         source.push(text(&format!("PScriptLib/{name}"))?);
@@ -101,6 +102,13 @@ fn load(root: &Path, room: &Room) -> Result<SceneTransfers, String> {
     runtime
         .host_mut()
         .set_game_mode(i64::from(mode_rule_id(&room.mode).unwrap_or(1)));
+    runtime.host_mut().exclude_instances(
+        desc.dummies
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| !d.ticket_admitted)
+            .map(|(i, _)| i),
+    );
     runtime.start()?;
     let model =
         meteor_asset::gmdl::decode_gmdl(&read("cmodel/tp001.gmb")?).map_err(|e| e.to_string())?;
@@ -115,7 +123,7 @@ fn load(root: &Path, room: &Room) -> Result<SceneTransfers, String> {
     }
     let mut portals = Vec::new();
     let mut destinations = HashMap::new();
-    for d in &desc.dummies {
+    for d in desc.dummies.iter().filter(|d| d.ticket_admitted) {
         let forward = rotate(d.quaternion, Point::new(0.0, -1.0, 0.0));
         destinations.insert(
             d.name.clone(),
@@ -346,6 +354,7 @@ mod tests {
             s.handle(
                 conn,
                 Message::Hello {
+                    balance_revision: meteor_combat::battle_rules::RULES_CAPABILITY,
                     name: format!("player{conn}"),
                     resume_token: None,
                     character_id: 0,
@@ -447,7 +456,14 @@ mod tests {
     #[test]
     fn sn22_guest_transfer_updates_authority_and_blocks_inflight_inputs_until_applied() {
         let mut s = setup("leader", 2);
-        let source = portal(&s, "D_tpEC01");
+        let mut source = portal(&s, "D_tpEC01");
+
+        let gate = s.scene_transfers["room1"]
+            .portals
+            .iter()
+            .find(|p| p.name == "D_tpEC01")
+            .unwrap();
+        source.y = gate.min[1] - 3.0;
         upload(&mut s, 2, 1, source);
         let events = tick(&mut s);
         let room = &s.rooms["room1"];
@@ -545,11 +561,10 @@ mod tests {
     fn sn22_team_callback_rules_and_round_reset() {
         let mut s = setup("deathmatch", 3);
 
-        s.scene_transfers
-            .get_mut("room1")
-            .unwrap()
+        assert!(s.scene_transfers["room1"]
             .portals
-            .retain(|p| !p.name.starts_with("D_tpEC"));
+            .iter()
+            .all(|p| !p.name.starts_with("D_tpEC")));
         for (id, team) in [("p1", 1), ("p2", 2), ("p3", 1)] {
             s.rooms
                 .get_mut("room1")

@@ -65,6 +65,129 @@ pub fn find_waypoint_path(points: &[Waypoint], start_id: usize, goal_id: usize) 
     path[1..].to_vec()
 }
 
+pub fn find_original_waypoint_path(
+    positions: &[[f32; 3]],
+    start: usize,
+    goal: usize,
+    budget: usize,
+    mut links: impl FnMut(usize) -> Vec<(usize, f32)>,
+) -> Option<Vec<usize>> {
+    if start >= positions.len() || goal >= positions.len() {
+        return None;
+    }
+    #[derive(Clone, Copy)]
+    struct Node {
+        id: usize,
+        g: f32,
+        f: f32,
+        parent: Option<usize>,
+    }
+
+    fn push_up(heap: &mut [usize], nodes: &[Node], mut hole: usize, top: usize, value: usize) {
+        while hole > top {
+            let parent = (hole - 1) / 2;
+            if nodes[heap[parent]].f <= nodes[value].f {
+                break;
+            }
+            heap[hole] = heap[parent];
+            hole = parent;
+        }
+        heap[hole] = value;
+    }
+    fn adjust(heap: &mut [usize], nodes: &[Node], top: usize, value: usize) {
+        let mut hole = top;
+        let mut right = 2 * hole + 2;
+        while right < heap.len() {
+            let child = if nodes[heap[right]].f > nodes[heap[right - 1]].f {
+                right - 1
+            } else {
+                right
+            };
+            heap[hole] = heap[child];
+            hole = child;
+            right = 2 * hole + 2;
+        }
+        if right == heap.len() {
+            heap[hole] = heap[right - 1];
+            hole = right - 1;
+        }
+        push_up(heap, nodes, hole, top, value);
+    }
+    let heuristic = |id: usize| {
+        positions[id]
+            .iter()
+            .zip(positions[goal])
+            .map(|(a, b)| (a - b) * (a - b))
+            .sum::<f32>()
+            .sqrt()
+    };
+    let mut nodes = vec![Node {
+        id: start,
+        g: 0.0,
+        f: heuristic(start),
+        parent: None,
+    }];
+    let mut open = vec![0usize];
+    let mut best = vec![None; positions.len()];
+    best[start] = Some(0usize);
+    let mut current = 0;
+    for _ in 0..=budget {
+        if open.is_empty() {
+            return None;
+        }
+        current = open[0];
+        let tail = open.pop().unwrap();
+        if !open.is_empty() {
+            adjust(&mut open, &nodes, 0, tail);
+        }
+        let node = nodes[current];
+        if node.id == goal {
+            break;
+        }
+        for (next, cost) in links(node.id) {
+            if next >= positions.len() || node.parent.is_some_and(|p| nodes[p].id == next) {
+                continue;
+            }
+            let g = node.g + cost;
+            if let Some(old) = best[next] {
+                if nodes[old].g <= g {
+                    continue;
+                }
+                if let Some(index) = open.iter().position(|entry| *entry == old) {
+                    open.remove(index);
+                    if open.len() >= 2 {
+                        for parent in (0..=(open.len() - 2) / 2).rev() {
+                            let value = open[parent];
+                            adjust(&mut open, &nodes, parent, value);
+                        }
+                    }
+                }
+            }
+            let index = nodes.len();
+            nodes.push(Node {
+                id: next,
+                g,
+                f: g + heuristic(next),
+                parent: Some(current),
+            });
+            best[next] = Some(index);
+            open.push(index);
+            let hole = open.len() - 1;
+            push_up(&mut open, &nodes, hole, 0, index);
+        }
+    }
+    let mut path = Vec::new();
+    loop {
+        path.push(nodes[current].id);
+        let Some(parent) = nodes[current].parent else {
+            break;
+        };
+        current = parent;
+    }
+    path.reverse();
+    Some(path)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BehaviorMode {
     Idle,
@@ -86,6 +209,8 @@ pub enum BehaviorMode {
     Kill,
 
     Dodge,
+
+    GetItem,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -234,5 +359,60 @@ mod tests {
             decide_behavior(ctx(10.0, 0.8, true, false)),
             BehaviorMode::Follow
         );
+    }
+}
+
+#[cfg(test)]
+mod original_path_tests {
+    use super::find_original_waypoint_path;
+
+    #[test]
+    fn euclidean_heuristic_can_choose_a_different_route_than_dijkstra() {
+        let positions = [[0., 0., 0.], [100., 0., 0.], [0., 0., 0.], [0., 0., 0.]];
+        let route = find_original_waypoint_path(&positions, 0, 3, 999, |id| match id {
+            0 => vec![(1, 1.), (2, 3.)],
+            1 => vec![(3, 1.)],
+            2 => vec![(3, 1.)],
+            _ => vec![],
+        });
+        assert_eq!(route, Some(vec![0, 2, 3]));
+    }
+
+    #[test]
+    fn budget_counts_one_more_pop_and_keeps_last_popped_chain() {
+        let positions = vec![[0.; 3]; 1002];
+        let route =
+            find_original_waypoint_path(&positions, 0, 1001, 999, |id| vec![(id + 1, 1.)]).unwrap();
+        assert_eq!(route, (0..1000).collect::<Vec<_>>());
+        assert_eq!(
+            find_original_waypoint_path(&positions, 0, 1, 0, |_| vec![(1, 1.)]),
+            Some(vec![0])
+        );
+        assert_eq!(
+            find_original_waypoint_path(&positions, 0, 1, 1, |_| vec![]),
+            None
+        );
+    }
+
+    #[test]
+    fn equal_f_heap_uses_right_child_on_pop() {
+        let positions = [[0.; 3]; 6];
+        let route = find_original_waypoint_path(&positions, 0, 5, 2, |id| match id {
+            0 => vec![(1, 1.), (2, 1.), (3, 1.), (4, 1.)],
+            _ => vec![],
+        });
+        assert_eq!(route, Some(vec![0, 3]));
+    }
+
+    #[test]
+    fn improved_closed_node_is_reopened() {
+        let positions = [[0.; 3], [0.; 3], [10., 0., 0.], [0.; 3]];
+        let route = find_original_waypoint_path(&positions, 0, 3, 999, |id| match id {
+            0 => vec![(1, 5.), (2, 1.)],
+            1 => vec![(3, 100.)],
+            2 => vec![(1, 1.)],
+            _ => vec![],
+        });
+        assert_eq!(route, Some(vec![0, 2, 1, 3]));
     }
 }

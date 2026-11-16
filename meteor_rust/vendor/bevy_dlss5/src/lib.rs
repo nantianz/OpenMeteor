@@ -1,5 +1,3 @@
-#![doc = include_str!("../README.md")]
-
 mod bridge;
 mod ngx;
 pub mod patch;

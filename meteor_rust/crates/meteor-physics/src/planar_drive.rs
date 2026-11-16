@@ -167,12 +167,21 @@ pub fn apply_drag(velocity: [f32; 3], params: &DriveParams) -> [f32; 3] {
 }
 
 pub fn tick_ground(velocity: [f32; 3], dir: [f32; 3], params: &DriveParams) -> [f32; 3] {
-    let speed = length(velocity);
-    let accel = input_accel(speed, dir, params);
+    integrate_velocity(velocity, dir, [0.0; 3], [0.0; 3], params)
+}
+
+pub fn integrate_velocity(
+    velocity: [f32; 3],
+    dir: [f32; 3],
+    gravity: [f32; 3],
+    external_velocity: [f32; 3],
+    params: &DriveParams,
+) -> [f32; 3] {
+    let accel = input_accel(length(velocity), dir, params);
     let mut v = apply_friction(velocity, dir, params);
-    v[0] += accel[0] * params.dt;
-    v[1] += accel[1] * params.dt;
-    v[2] += accel[2] * params.dt;
+    for axis in 0..3 {
+        v[axis] = (v[axis] + external_velocity[axis]) + (accel[axis] + gravity[axis]) * params.dt;
+    }
     apply_drag(v, params)
 }
 
@@ -189,6 +198,68 @@ mod tests {
         }
     }
 
+    #[test]
+    fn mode1_gravity_and_external_match_original_integrated_velocity() {
+        let cases = [
+            (
+                30.0,
+                [5.2330255508, 0.0000000000, -5.5541257858],
+                [0.6857818238, 0.0000000000, -0.7278071793],
+                [0.0000000000, 0.0000000000, 0.0000000000],
+                [7.4894009399, -3.3304529572, -7.9483383179],
+            ),
+            (
+                60.0,
+                [7.6077303886, 0.0000000000, -8.0716323853],
+                [0.6857981347, 0.0000000000, -0.7277918098],
+                [0.0000000000, 0.0000000000, 0.0000000000],
+                [8.6147854614, -1.7106214142, -9.1410919189],
+            ),
+            (
+                120.0,
+                [8.1673831940, 0.0000000000, -8.6660680771],
+                [0.6857613478, 0.0000000000, -0.7278264724],
+                [0.0000000000, 0.0000000000, 0.0000000000],
+                [8.6589138794, -0.8688862038, -9.1881655884],
+            ),
+            (
+                30.0,
+                [5.2330255508, 0.0000000000, -5.5541257858],
+                [0.6857818238, 0.0000000000, -0.7278071793],
+                [1.2000000000, 0.0000000000, -0.6000000000],
+                [8.5707073975, -3.3105601501, -8.4638827515],
+            ),
+            (
+                60.0,
+                [7.6077303886, 0.0000000000, -8.0716323853],
+                [0.6857981347, 0.0000000000, -0.7277918098],
+                [1.2000000000, 0.0000000000, -0.6000000000],
+                [9.7491421509, -1.7054903412, -9.6937710571],
+            ),
+            (
+                120.0,
+                [8.1673831940, 0.0000000000, -8.6660680771],
+                [0.6857613478, 0.0000000000, -0.7278264724],
+                [1.2000000000, 0.0000000000, -0.6000000000],
+                [9.8264511108, -0.8675953674, -9.7647161865],
+            ),
+        ];
+        for (fps, velocity, direction, external, expected) in cases {
+            let actual = integrate_velocity(
+                velocity,
+                direction,
+                [0.0, crate::jump::GRAVITY, 0.0],
+                external,
+                &ground(1.0 / fps),
+            );
+            for axis in 0..3 {
+                assert!(
+                    (actual[axis] - expected[axis]).abs() < 0.00002,
+                    "fps={fps} external={external:?} actual={actual:?} expected={expected:?}"
+                );
+            }
+        }
+    }
     #[test]
     fn constants_match_source_units() {
         assert!((GROUND_SPEED_LIMIT - 21.6).abs() < 1e-4);

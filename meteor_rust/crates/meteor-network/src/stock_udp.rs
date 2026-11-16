@@ -92,6 +92,7 @@ pub enum StockControlPacket {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StockDiscoveryInfo {
+    pub rebalance_enabled: Option<bool>,
     pub fields_0_to_6: [u8; 7],
     pub port: u16,
     pub field_0e: u8,
@@ -146,7 +147,27 @@ impl StockDiscoveryInfo {
         Ok(bytes)
     }
 
+    pub fn encode_rules_room_summary(&self) -> Result<Vec<u8>, StockPacketError> {
+        let mut bytes = b"MRD4".to_vec();
+        bytes.extend(
+            serde_json::to_vec(&(self.encode_unicode_room_summary()?, self.rebalance_enabled))
+                .map_err(|_| StockPacketError::InvalidDiscoveryInfo)?,
+        );
+        Ok(bytes)
+    }
+
     pub fn decode_room_summary(bytes: &[u8]) -> Result<Self, StockPacketError> {
+        if let Some(json) = bytes.strip_prefix(b"MRD4") {
+            let (legacy, enabled): (Vec<u8>, Option<bool>) =
+                serde_json::from_slice(json).map_err(|_| StockPacketError::InvalidDiscoveryInfo)?;
+
+            if !legacy.starts_with(b"MRD2") {
+                return Err(StockPacketError::InvalidDiscoveryInfo);
+            }
+            let mut info = Self::decode_room_summary(&legacy)?;
+            info.rebalance_enabled = enabled;
+            return Ok(info);
+        }
         if let Some(json) = bytes.strip_prefix(b"MRD2") {
             let (legacy, name): (Vec<u8>, String) =
                 serde_json::from_slice(json).map_err(|_| StockPacketError::InvalidDiscoveryInfo)?;
@@ -201,6 +222,7 @@ impl StockDiscoveryInfo {
             server_name: server_name.into(),
             server_address: server_address.into(),
             tail: Some(0),
+            rebalance_enabled: None,
             stage_id: None,
         }
     }
@@ -273,6 +295,7 @@ impl StockDiscoveryInfo {
             server_name,
             server_address,
             tail,
+            rebalance_enabled: None,
             stage_id: None,
         })
     }
@@ -1140,6 +1163,7 @@ mod tests {
 
             server_address: "192.168.2.203".into(),
             tail: Some(0),
+            rebalance_enabled: None,
             stage_id: None,
         };
         let encoded_info = info.encode().unwrap();

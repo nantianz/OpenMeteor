@@ -216,6 +216,21 @@ pub fn original_directory_active() -> bool {
     ORIGINAL_DIRECTORY.get().is_some()
 }
 
+pub fn runtime_texture_source_active() -> bool {
+    if registered_pack_count() > 0 {
+        return true;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if NATIVE_REPOSITORY.get().is_some() {
+        return true;
+    }
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    if ORIGINAL_DIRECTORY.get().is_some() {
+        return true;
+    }
+    false
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 static NATIVE_REPOSITORY: OnceLock<crate::pack_repository::PackRepository> = OnceLock::new();
 

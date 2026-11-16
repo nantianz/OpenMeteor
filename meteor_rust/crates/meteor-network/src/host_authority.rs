@@ -2,7 +2,7 @@ use std::collections::{BTreeSet, VecDeque};
 
 pub const TICK_RATE: u32 = 60;
 
-pub const MAX_FRAME_DT: f32 = 0.25;
+pub const MAX_FRAME_DT: f32 = meteor_core::MAX_FRAME_DT;
 
 pub const HOST_EVENT_ID_BASE: u64 = 1_000_000;
 
@@ -362,11 +362,12 @@ mod tests {
     #[test]
     fn tick_rate_and_frame_clamp() {
         assert_eq!(TICK_RATE, 60);
-        assert_eq!(MAX_FRAME_DT, 0.25);
+        assert_eq!(MAX_FRAME_DT, 0.2);
 
         assert!((clamp_frame_dt(0.016) - 0.016).abs() < 1e-5);
+        assert_eq!(clamp_frame_dt(0.1), 0.1);
 
-        assert_eq!(clamp_frame_dt(1.0), 0.25);
+        assert_eq!(clamp_frame_dt(1.0), 0.2);
 
         assert_eq!(clamp_frame_dt(-0.1), 0.0);
     }

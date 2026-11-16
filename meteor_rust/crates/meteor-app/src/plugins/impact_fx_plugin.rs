@@ -1,6 +1,7 @@
 use crate::app_state::{AppState, Settings};
 use crate::plugins::camera_plugin::GameplayCamera;
 use crate::plugins::network_plugin::NetState;
+use crate::plugins::stage_plugin::LocalFighter;
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
@@ -14,7 +15,7 @@ use bevy::render::render_resource::{
     AsBindGroup, BlendComponent, BlendFactor, BlendOperation, BlendState, RenderPipelineDescriptor,
     SpecializedMeshPipelineError,
 };
-use bevy::shader::{Shader, ShaderRef};
+use bevy::shader::{Shader, ShaderDefVal, ShaderRef};
 
 const RECOVER_SECONDS: f64 = 0.070;
 const OVERSHOOT_SECONDS: f64 = 0.070;
@@ -62,12 +63,23 @@ impl Material for SparkMaterial {
         AlphaMode::Blend
     }
 
+    fn enable_shadows() -> bool {
+        false
+    }
+
     fn specialize(
         _pipeline: &MaterialPipeline,
         descriptor: &mut RenderPipelineDescriptor,
         _layout: &bevy::render::mesh::MeshVertexBufferLayoutRef,
         _key: MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
+        if descriptor
+            .vertex
+            .shader_defs
+            .contains(&ShaderDefVal::Bool("PREPASS_PIPELINE".into(), true))
+        {
+            return Ok(());
+        }
         descriptor.primitive.cull_mode = None;
         if let Some(depth) = descriptor.depth_stencil.as_mut() {
             depth.depth_write_enabled = Some(false);
@@ -660,6 +672,7 @@ fn update_impact_fx(
     mut sparks: ResMut<SparkBurstRuntime>,
     mut impacts: MessageReader<CombatImpactEvent>,
     fighters: ImpactFighterQuery<'_, '_>,
+    local_fighter: Query<Entity, With<LocalFighter>>,
     mut cameras: ImpactCameraQuery<'_, '_>,
     mut spark_visibility: Query<&mut Visibility, With<SparkBurstMesh>>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -689,10 +702,19 @@ fn update_impact_fx(
         return;
     }
 
+    if !settings.hit_shake {
+        state.trauma = 0.0;
+    }
     let multiplayer_match = net.round_active;
+    let local = local_fighter.iter().next();
     for impact in impacts.read() {
         state.ripple_impact = 1.0;
-        state.trauma = state.trauma.max(trauma_for(impact.kind)).min(1.0);
+
+        let involves_local =
+            local.is_some_and(|entity| entity == impact.attacker || entity == impact.defender);
+        if settings.hit_shake && involves_local {
+            state.trauma = state.trauma.max(trauma_for(impact.kind)).min(1.0);
+        }
         if !multiplayer_match && settings.hit_stop {
             begin_hitstop(&mut state, impact.kind, now);
         }
@@ -890,7 +912,12 @@ mod tests {
     }
 
     fn emit_test_impact(app: &mut App, kind: CombatImpactKind) {
-        let actor = app.world_mut().spawn_empty().id();
+        let local = app
+            .world_mut()
+            .query_filtered::<Entity, With<LocalFighter>>()
+            .iter(app.world())
+            .next();
+        let actor = local.unwrap_or_else(|| app.world_mut().spawn(LocalFighter).id());
         app.world_mut().write_message(CombatImpactEvent {
             kind,
             attacker: actor,
@@ -900,6 +927,41 @@ mod tests {
             contact: Vec3::Y * 2.2,
             direction: Vec3::X,
         });
+    }
+
+    fn emit_npc_vs_npc_impact(app: &mut App, kind: CombatImpactKind) {
+        let attacker = app.world_mut().spawn_empty().id();
+        let defender = app.world_mut().spawn_empty().id();
+        app.world_mut().write_message(CombatImpactEvent {
+            kind,
+            attacker,
+            defender,
+            reaction_pose: None,
+            effect_strategy: None,
+            contact: Vec3::Y * 2.2,
+            direction: Vec3::X,
+        });
+    }
+
+    #[test]
+    fn npc_vs_npc_impact_does_not_shake_camera() {
+        for kind in [
+            CombatImpactKind::Hit,
+            CombatImpactKind::Guard,
+            CombatImpactKind::Kill,
+        ] {
+            let (mut app, camera, base) = impact_test_app();
+
+            app.world_mut().spawn(LocalFighter);
+            emit_npc_vs_npc_impact(&mut app, kind);
+            impact_step(&mut app);
+            let eye = app.world().get::<Transform>(camera).unwrap().translation;
+            assert!(
+                eye.distance(base) < 1e-6,
+                "{kind:?} NPC↔NPC must not shake the camera"
+            );
+            assert_eq!(app.world().resource::<ImpactSimulationScale>().trauma, 0.0);
+        }
     }
 
     #[test]
@@ -996,6 +1058,76 @@ mod tests {
                 .particles
                 .iter()
                 .any(Option::is_some));
+        }
+    }
+
+    #[test]
+    fn disabling_shake_clears_offset_and_preserves_other_impact_effects() {
+        for online in [false, true] {
+            let (mut app, camera, base) = impact_test_app();
+            app.world_mut().resource_mut::<NetState>().round_active = online;
+            emit_test_impact(&mut app, CombatImpactKind::Guard);
+            impact_step(&mut app);
+            assert!(
+                app.world()
+                    .get::<Transform>(camera)
+                    .unwrap()
+                    .translation
+                    .distance(base)
+                    > 1e-5
+            );
+            app.world_mut().resource_mut::<Settings>().hit_shake = false;
+            impact_step(&mut app);
+            for kind in [
+                CombatImpactKind::Guard,
+                CombatImpactKind::Hit,
+                CombatImpactKind::Kill,
+            ] {
+                emit_test_impact(&mut app, kind);
+                impact_step(&mut app);
+                let state = app.world().resource::<ImpactSimulationScale>();
+                assert_eq!(state.trauma, 0.0);
+                assert_eq!(state.applied_offset, Vec3::ZERO);
+                assert!(
+                    app.world()
+                        .get::<Transform>(camera)
+                        .unwrap()
+                        .translation
+                        .distance(base)
+                        < 1e-6
+                );
+                assert_eq!(state.scale == 1.0, online);
+                assert!(state.ripple_impact > 0.0);
+                let sparks = app.world().resource::<SparkBurstRuntime>();
+                assert!(sparks.particles.iter().any(Option::is_some));
+                assert_eq!(
+                    *app.world()
+                        .get::<Visibility>(sparks.entity.unwrap())
+                        .unwrap(),
+                    Visibility::Visible
+                );
+            }
+
+            app.world_mut().resource_mut::<Settings>().hit_shake = true;
+            impact_step(&mut app);
+            assert!(
+                app.world()
+                    .get::<Transform>(camera)
+                    .unwrap()
+                    .translation
+                    .distance(base)
+                    < 1e-6
+            );
+            emit_test_impact(&mut app, CombatImpactKind::Hit);
+            impact_step(&mut app);
+            assert!(
+                app.world()
+                    .get::<Transform>(camera)
+                    .unwrap()
+                    .translation
+                    .distance(base)
+                    > 1e-5
+            );
         }
     }
 

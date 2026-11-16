@@ -5,6 +5,7 @@ const PLACEHOLDER: &[u8] = &[
 ];
 
 pub const ASSETS: &[(&str, &[u8])] = &[
+    #[cfg(not(feature = "original-directory-default"))]
     ("fonts/ui.ttf", bevy::text::DEFAULT_FONT_DATA),
     ("ui/cinematic-title-reborn-matte.png", PLACEHOLDER),
     ("ui/cinematic-fortress.png", PLACEHOLDER),

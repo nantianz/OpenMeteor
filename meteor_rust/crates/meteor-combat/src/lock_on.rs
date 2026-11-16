@@ -16,6 +16,14 @@ pub const TRACK_TURN_RESPONSE: f32 = 20.0;
 
 pub const AUTO_CAMERA_LOCK_DISABLED_STRATEGIES: [u8; 3] = [2, 3, 6];
 
+pub fn track_acquire_range(strategy_id: u8) -> f32 {
+    if strategy_id == 6 {
+        600.0 * 0.12
+    } else {
+        LOCK_ACQUIRE_RANGE
+    }
+}
+
 pub fn weapon_equip_clears_lock(strategy_id: u8) -> bool {
     AUTO_CAMERA_LOCK_DISABLED_STRATEGIES.contains(&strategy_id)
 }
@@ -55,19 +63,29 @@ pub fn tracked_head_yaw(
 }
 
 pub fn locked_attack_facing_yaw(player: (f32, f32, f32), target: (f32, f32, f32)) -> Option<f32> {
+    locked_facing_yaw(player, target, None)
+}
+
+pub fn locked_facing_yaw(
+    player: (f32, f32, f32),
+    target: (f32, f32, f32),
+    target_yaw: Option<f32>,
+) -> Option<f32> {
     let dx = target.0 - player.0;
     let dy = target.1 - player.1;
     let dz = target.2 - player.2;
     let dist3 = (dx * dx + dy * dy + dz * dz).sqrt();
-    let planar = (dx * dx + dz * dz).sqrt();
+    let planar_sq = dx * dx + dz * dz;
     if dist3 >= LOCK_ATTACK_FACE_RANGE {
         return None;
     }
     if dy.abs() >= LOCK_ATTACK_FACE_HEIGHT {
         return None;
     }
-    if planar < 1e-6 {
-        return None;
+    if planar_sq < 1e-5 * meteor_core::MODEL_SCALE * meteor_core::MODEL_SCALE {
+        return target_yaw
+            .filter(|yaw| yaw.is_finite())
+            .map(|yaw| (-yaw.sin()).atan2(yaw.cos()));
     }
     Some(dx.atan2(dz))
 }
@@ -188,12 +206,14 @@ impl LockOnSystem {
         self.track_timer = 0.0;
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn update(
         &mut self,
         dt: f32,
         player: (f32, f32, f32),
         player_yaw: f32,
         candidates: &[LockCandidate],
+        strategy_id: u8,
         is_attacking: bool,
         entry_blend: bool,
     ) {
@@ -211,7 +231,13 @@ impl LockOnSystem {
                 .unwrap_or(true);
             if self.track_timer <= 0.0 || track_invalid {
                 self.track_timer = TRACK_REFRESH_SECONDS;
-                self.track_target = pick_lock_target(player, player_yaw, candidates).map(|c| c.id);
+                self.track_target = pick_target_in_range(
+                    player,
+                    player_yaw,
+                    candidates,
+                    track_acquire_range(strategy_id),
+                )
+                .map(|c| c.id);
             }
         }
 
@@ -233,17 +259,28 @@ pub fn pick_lock_target(
     player_yaw: f32,
     candidates: &[LockCandidate],
 ) -> Option<LockCandidate> {
+    pick_target_in_range(player, player_yaw, candidates, LOCK_ACQUIRE_RANGE)
+}
+
+fn pick_target_in_range(
+    player: (f32, f32, f32),
+    player_yaw: f32,
+    candidates: &[LockCandidate],
+    range: f32,
+) -> Option<LockCandidate> {
     let fx = player_yaw.sin();
     let fz = player_yaw.cos();
     let mut best: Option<LockCandidate> = None;
     let mut best_dot = 0.0f32;
     for f in candidates {
         let dx = f.x - player.0;
+        let dy = f.y - player.1;
         let dz = f.z - player.2;
-        let dist = (dx * dx + dz * dz).sqrt();
-        if dist > LOCK_ACQUIRE_RANGE {
+        let dist3 = (dx * dx + dy * dy + dz * dz).sqrt();
+        if dist3 > range {
             continue;
         }
+        let dist = (dx * dx + dz * dz).sqrt();
         if dist < MIN_PICK_DISTANCE {
             continue;
         }
@@ -316,6 +353,28 @@ mod tests {
         assert!(!locked_attack_gate_failed((0.0, 0.0, 0.0), (1.0, 0.0, 0.0)));
     }
 
+    #[cfg(feature = "original-assets")]
+    #[test]
+    fn overlapping_facing_matches_executed_exe_matrix_fallback() {
+        let samples: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../analysis/contact-parity-fix-20260927/facing-oracle.json"
+        ))
+        .unwrap();
+        for row in samples.as_array().unwrap() {
+            let yaw = row["targetYaw"].as_f64().unwrap() as f32;
+            let distance =
+                row["sourceDistance"].as_f64().unwrap() as f32 * meteor_core::MODEL_SCALE;
+            let forward = row["forward"].as_array().unwrap();
+            let expected =
+                (forward[0].as_f64().unwrap() as f32).atan2(-(forward[1].as_f64().unwrap() as f32));
+            let actual =
+                locked_facing_yaw((0.0, 0.0, 0.0), (distance, 0.0, 0.0), Some(yaw)).unwrap();
+            let delta = actual - expected;
+            assert!(delta.sin().atan2(delta.cos()).abs() < 1e-5, "{row}");
+        }
+        assert!(locked_facing_yaw((0.0, 0.0, 0.0), (0.0, 13.0, 0.0), Some(0.7)).is_none());
+    }
+
     #[test]
     fn pick_prefers_front_angle_only() {
         let player = (0.0f32, 0.0f32, 0.0f32);
@@ -335,6 +394,66 @@ mod tests {
         let player = (0.0f32, 0.0f32, 0.0f32);
         let cands = vec![candidate(9, 0.0, -3.0)];
         assert!(pick_lock_target(player, 0.0, &cands).is_none());
+    }
+
+    #[cfg(feature = "original-assets")]
+    #[test]
+    fn acquisition_matches_executed_exe_3d_range_for_q_attack_and_track() {
+        let oracle: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../analysis/lock-height-20260927/range-oracle.json"
+        ))
+        .unwrap();
+        let world = |v: &serde_json::Value| {
+            (
+                v[0].as_f64().unwrap() as f32 * meteor_core::MODEL_SCALE,
+                v[2].as_f64().unwrap() as f32 * meteor_core::MODEL_SCALE,
+                -v[1].as_f64().unwrap() as f32 * meteor_core::MODEL_SCALE,
+            )
+        };
+        for row in oracle["samples"].as_array().unwrap() {
+            let player = world(&row["playerSource"]);
+            let (x, y, z) = world(&row["targetSource"]);
+            let candidates = [LockCandidate {
+                id: 7,
+                x,
+                y,
+                z,
+                team: 2,
+            }];
+            let expected = row["accepted"].as_bool().unwrap().then_some(7);
+            let mut q = LockOnSystem::new();
+            q.toggle(1, player, 0.0, &candidates);
+            assert_eq!(q.lock_target, expected, "Q: {row}");
+            let mut attack = LockOnSystem::new();
+            attack.acquire_on_attack(true, 1, player, 0.0, &candidates);
+            assert_eq!(attack.lock_target, expected, "attack: {row}");
+            let mut track = LockOnSystem::new();
+            track.update(0.1, player, 0.0, &candidates, 0, false, false);
+            assert_eq!(track.track_target, expected, "Track: {row}");
+        }
+    }
+
+    #[test]
+    fn high_candidate_cannot_hide_valid_target_but_height_does_not_rank_angles() {
+        let mut high = candidate(1, 0.0, 3.0);
+        high.y = 60.0;
+        let side = candidate(2, 3.0, 3.0);
+        assert_eq!(
+            pick_lock_target((0.0, 0.0, 0.0), 0.0, &[high, side])
+                .unwrap()
+                .id,
+            2,
+        );
+
+        high.y = 18.0;
+        assert_eq!(
+            pick_lock_target((0.0, 0.0, 0.0), 0.0, &[side, high])
+                .unwrap()
+                .id,
+            1,
+        );
+        high.z = 0.0;
+        assert!(pick_lock_target((0.0, 0.0, 0.0), 0.0, &[high]).is_none());
     }
 
     #[test]
@@ -402,6 +521,7 @@ mod tests {
             (0.0, 0.0, 0.0),
             0.0,
             &[candidate(8, 0.0, 3.0)],
+            0,
             false,
             false,
         );
@@ -413,7 +533,7 @@ mod tests {
         let mut sys = LockOnSystem::new();
         sys.lock_target = Some(7);
         let far = candidate(7, 500.0, 0.0);
-        sys.update(0.1, (0.0, 0.0, 0.0), 0.0, &[far], true, true);
+        sys.update(0.1, (0.0, 0.0, 0.0), 0.0, &[far], 0, true, true);
         assert!(sys.lock_target.is_none());
 
         sys.lock_target = Some(8);
@@ -424,7 +544,7 @@ mod tests {
             z: 2.0,
             team: 2,
         };
-        sys.update(0.1, (0.0, 0.0, 0.0), 0.0, &[high], true, true);
+        sys.update(0.1, (0.0, 0.0, 0.0), 0.0, &[high], 0, true, true);
         assert!(sys.lock_target.is_none());
     }
 }

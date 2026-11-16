@@ -201,10 +201,7 @@ pub fn is_crouch_walk_pose_id(id: u16) -> bool {
 }
 
 pub fn can_keep_locomotion_phase(from_id: u16, to_id: u16) -> bool {
-    if !is_walk_pose_id(from_id) || !is_walk_pose_id(to_id) {
-        return false;
-    }
-    is_crouch_walk_pose_id(from_id) == is_crouch_walk_pose_id(to_id)
+    from_id == to_id && is_walk_pose_id(from_id)
 }
 
 pub fn is_jump_pose_id(id: u16) -> bool {
@@ -304,6 +301,52 @@ pub struct WalkOptions {
     pub weapon_form: u8,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct TurnInPlace {
+    pub degrees: f32,
+    idle_seconds: f32,
+}
+
+impl Default for TurnInPlace {
+    fn default() -> Self {
+        Self {
+            degrees: 0.0,
+            idle_seconds: f32::INFINITY,
+        }
+    }
+}
+
+impl TurnInPlace {
+    pub fn begin_frame(&mut self, wall_dt: f32) {
+        self.degrees = 0.0;
+        self.idle_seconds += wall_dt.max(0.0);
+    }
+
+    pub fn ground_pose(&mut self, x: f32, z: f32, current: u16, opts: WalkOptions) -> u16 {
+        let idle = walk_pose_for_input(0.0, 0.0, opts);
+        let right = walk_pose_for_input(1.0, 0.0, opts);
+        let left = walk_pose_for_input(-1.0, 0.0, opts);
+
+        if cardinal_from_input(x, z).is_some() || ![idle, right, left].contains(&current) {
+            return walk_pose_for_input(x, z, opts);
+        }
+        if self.degrees != 0.0 {
+            self.idle_seconds = 0.0;
+            if self.degrees > 1.0 {
+                return right;
+            }
+            if self.degrees < -1.0 {
+                return left;
+            }
+        }
+        if self.idle_seconds <= 0.2 {
+            current
+        } else {
+            idle
+        }
+    }
+}
+
 pub fn walk_pose_for_input(x: f32, z: f32, opts: WalkOptions) -> u16 {
     let card = cardinal_from_input(x, z);
 
@@ -379,6 +422,68 @@ pub fn is_grounded_state(state: FighterState) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn turn_in_place_matches_angle_gate_and_stock_idle_timeout() {
+        let opts = WalkOptions::default();
+        let mut turn = TurnInPlace::default();
+        for delta in [-1.0, -0.5, 0.0, 0.5, 1.0] {
+            turn.begin_frame(1.0 / 60.0);
+            turn.degrees = delta;
+            assert_eq!(turn.ground_pose(0.0, 0.0, pose::IDLE, opts), pose::IDLE);
+        }
+        turn.degrees = 1.001;
+        assert_eq!(turn.ground_pose(0.0, 0.0, pose::IDLE, opts), pose::WALK_R);
+        turn.degrees = -1.001;
+        assert_eq!(turn.ground_pose(0.0, 0.0, pose::WALK_R, opts), pose::WALK_L);
+        turn.begin_frame(0.2);
+        assert_eq!(turn.ground_pose(0.0, 0.0, pose::WALK_L, opts), pose::WALK_L);
+
+        turn.degrees = 0.25;
+        assert_eq!(turn.ground_pose(0.0, 0.0, pose::WALK_L, opts), pose::WALK_L);
+        turn.begin_frame(0.201);
+        assert_eq!(turn.ground_pose(0.0, 0.0, pose::WALK_L, opts), pose::IDLE);
+    }
+
+    #[test]
+    fn turn_in_place_respects_movement_pose_ownership_and_stance() {
+        for opts in [
+            WalkOptions::default(),
+            WalkOptions {
+                crouching: true,
+                ..Default::default()
+            },
+            WalkOptions {
+                strategy_id: Some(2),
+                aiming: true,
+                ..Default::default()
+            },
+            WalkOptions {
+                strategy_id: Some(0),
+                locked: true,
+                ..Default::default()
+            },
+        ] {
+            let mut turn = TurnInPlace::default();
+            turn.degrees = 2.0;
+            let idle = walk_pose_for_input(0.0, 0.0, opts);
+            assert_eq!(
+                turn.ground_pose(0.0, 0.0, idle, opts),
+                walk_pose_for_input(1.0, 0.0, opts)
+            );
+            assert_eq!(
+                turn.ground_pose(0.0, 1.0, idle, opts),
+                walk_pose_for_input(0.0, 1.0, opts)
+            );
+
+            assert_eq!(turn.ground_pose(0.0, 0.0, 200, opts), idle);
+        }
+        let mut turn = TurnInPlace::default();
+        assert_eq!(
+            turn.ground_pose(0.0, 0.0, pose::WALK_R, WalkOptions::default()),
+            pose::IDLE
+        );
+    }
 
     #[test]
     fn cardinal_matches_exe_priority() {
@@ -644,11 +749,14 @@ mod tests {
     }
 
     #[test]
-    fn locomotion_phase_preserved_only_same_family() {
-        assert!(can_keep_locomotion_phase(140, 141));
-
+    fn locomotion_phase_preserved_only_same_pose() {
+        assert!(can_keep_locomotion_phase(140, 140));
+        assert!(can_keep_locomotion_phase(146, 146));
+        assert!(!can_keep_locomotion_phase(140, 141));
+        assert!(!can_keep_locomotion_phase(141, 142));
+        assert!(!can_keep_locomotion_phase(141, 144));
+        assert!(!can_keep_locomotion_phase(145, 146));
         assert!(!can_keep_locomotion_phase(144, 145));
-
         assert!(!can_keep_locomotion_phase(0, 141));
     }
 

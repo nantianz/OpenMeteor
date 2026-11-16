@@ -59,6 +59,7 @@ impl SceneItemInstance {
 pub struct SceneHost {
     instances: Vec<SceneItemInstance>,
     by_name: HashMap<String, usize>,
+    excluded: std::collections::HashSet<usize>,
     effects: Vec<SceneNetOp>,
     output: Vec<String>,
     net_event: bool,
@@ -95,6 +96,18 @@ impl SceneHost {
         }
     }
 
+    pub fn exclude_instances(&mut self, indices: impl IntoIterator<Item = usize>) {
+        for index in indices {
+            if let Some(instance) = self.instances.get_mut(index) {
+                self.by_name.remove(&instance.name.to_lowercase());
+                for key in ["active", "visible", "collision", "damage", "interactive"] {
+                    instance.set(key, PstValue::Num(0.0));
+                }
+                self.excluded.insert(index);
+            }
+        }
+    }
+
     pub fn instances(&self) -> &[SceneItemInstance] {
         &self.instances
     }
@@ -104,10 +117,15 @@ impl SceneHost {
     }
 
     pub fn instance(&self, index: usize) -> Option<&SceneItemInstance> {
-        self.instances.get(index)
+        self.instances
+            .get(index)
+            .filter(|_| !self.excluded.contains(&index))
     }
 
     pub fn instance_mut(&mut self, index: usize) -> Option<&mut SceneItemInstance> {
+        if self.excluded.contains(&index) {
+            return None;
+        }
         self.instances.get_mut(index)
     }
 
@@ -137,6 +155,15 @@ impl SceneHost {
 
     pub fn take_net_batches(&mut self) -> Vec<Vec<SceneNetOp>> {
         self.committed_net_batches.drain(..).collect()
+    }
+
+    fn record_net_op(&mut self, op: SceneNetOp) {
+        if let Some(ops) = self.net_ops.as_mut() {
+            if ops.len() == 63 {
+                self.committed_net_batches.push_back(std::mem::take(ops));
+            }
+            ops.push(op);
+        }
     }
 
     pub fn set_character_team(&mut self, character_id: i64, team: i64) {
@@ -210,7 +237,7 @@ impl SceneHost {
         match reference {
             PstValue::Num(n) => {
                 let index = n.trunc() as usize;
-                self.instances.get(index).map(|_| index)
+                self.instance(index).map(|_| index)
             }
             PstValue::Str(key) => self.resolve_name(key),
             _ => None,
@@ -316,15 +343,11 @@ impl PstHost for SceneHost {
 
                 if self.net_event {
                     if let (Some(ref_index), Some(f)) = (ref_index, field) {
-                        if let Some(ops) = self.net_ops.as_mut() {
-                            if ops.len() < 64 {
-                                ops.push(SceneNetOp::Set {
-                                    ref_index,
-                                    field: field_to_string(f),
-                                    args: args[2..].to_vec(),
-                                });
-                            }
-                        }
+                        self.record_net_op(SceneNetOp::Set {
+                            ref_index,
+                            field: field_to_string(f),
+                            args: args[2..].to_vec(),
+                        });
                     }
                 }
                 result
@@ -346,10 +369,13 @@ impl PstHost for SceneHost {
             }
             "CreateEffect" => {
                 let reference = args.first().cloned().unwrap_or(PstValue::Num(0.0));
+                let Some(ref_index) = self.entry(&reference) else {
+                    return PstValue::Num(0.0);
+                };
                 let effect = field_to_string(args.get(1).unwrap_or(&PstValue::Num(0.0)));
                 let extra = args.get(2).map(|v| v.as_f64()).unwrap_or(0.0);
                 let op = SceneNetOp::Effect {
-                    ref_index: reference.as_f64() as usize,
+                    ref_index,
                     effect,
                     extra,
                 };
@@ -358,11 +384,7 @@ impl PstHost for SceneHost {
                     self.effects.remove(0);
                 }
                 if self.net_event {
-                    if let Some(ops) = self.net_ops.as_mut() {
-                        if ops.len() < 64 {
-                            ops.push(op);
-                        }
-                    }
+                    self.record_net_op(op);
                 }
                 PstValue::Num(1.0)
             }
@@ -505,6 +527,9 @@ impl SceneScriptRuntime {
     }
 
     pub fn has_item_callback(&self, name: &str, event_name: &str) -> bool {
+        if self.runtime.host().resolve_name(name).is_none() {
+            return false;
+        }
         self.callback_names(name).iter().any(|candidate| {
             self.runtime
                 .has_function(&format!("{candidate}_{event_name}"))
@@ -529,6 +554,27 @@ impl SceneScriptRuntime {
             }
         }
         Ok(PstValue::Num(0.0))
+    }
+
+    pub fn reconcile_item_callback(
+        &mut self,
+        name: &str,
+        event: &str,
+        args: &[PstValue],
+    ) -> Result<PstValue, String> {
+        let host = self.runtime.host_mut();
+        let effects = std::mem::take(&mut host.effects);
+        let batches = std::mem::take(&mut host.committed_net_batches);
+        let net_ops = host.net_ops.take();
+        let net_event = host.net_event;
+        host.net_event = false;
+        let result = self.call_item(name, event, args);
+        let host = self.runtime.host_mut();
+        host.effects = effects;
+        host.committed_net_batches = batches;
+        host.net_ops = net_ops;
+        host.net_event = net_event;
+        result
     }
 
     pub fn set_item_property(&mut self, name: &str, key: &str, value: PstValue) -> bool {
@@ -591,6 +637,47 @@ impl SceneScriptRuntime {
     }
 }
 
+#[test]
+fn ticket_exclusion_blocks_numeric_writes_and_callbacks_without_renumbering() {
+    let instances = ["D_removed01", "D_kept01"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| SceneItemInstance {
+            index,
+            name: name.into(),
+            props: HashMap::new(),
+        })
+        .collect();
+    let mut runtime = SceneScriptRuntime::load(
+        r#"
+        int calls = 0;
+        Scene_OnInit() { SetSceneItem(0, "attribute", "active", 1); SetSceneItem(1, "pose", 2, 0); }
+        D_removed01_OnIdle(int id) { calls = calls + 1; }
+        ReadCalls() { return calls; }
+    "#,
+        instances,
+        10000,
+    )
+    .unwrap();
+    runtime.host_mut().exclude_instances([0]);
+    for _ in 0..2 {
+        runtime.start().unwrap();
+        runtime.update(0.2).unwrap();
+    }
+    assert_eq!(runtime.host().resolve_name("D_removed1"), None);
+    assert!(!runtime.has_item_callback("D_removed01", "OnIdle"));
+    assert_eq!(
+        runtime.host().instances()[0].get("active"),
+        PstValue::Num(0.0)
+    );
+    assert_eq!(runtime.host().resolve_name("D_kept01"), Some(1));
+    assert_eq!(
+        runtime.host().instance(1).unwrap().get("pose"),
+        PstValue::Num(2.0)
+    );
+    assert_eq!(runtime.call("ReadCalls", &[]).unwrap(), PstValue::Num(0.0));
+}
+
 #[cfg(feature = "original-assets")]
 #[cfg(test)]
 mod tests {
@@ -608,6 +695,7 @@ mod tests {
         SceneScriptRuntime::load(source, instances, 250_000).expect("load")
     }
 
+    #[test]
     #[test]
     fn static_set_scene_item_applies_attributes() {
         let instances = vec![instance("D_BBox01", 0), instance("D_St01", 1)];
@@ -925,10 +1013,10 @@ Scene_OnCharacterEvent(character, event)
             .map(|(index, dummy)| SceneItemInstance {
                 name: dummy.name.clone(),
                 index,
-                props: HashMap::from([(
-                    "active".into(),
-                    PstValue::Num(dummy.visible as i32 as f64),
-                )]),
+                props: HashMap::from([
+                    ("active".into(), PstValue::Num(1.0)),
+                    ("visible".into(), PstValue::Num(dummy.visible as i32 as f64)),
+                ]),
             })
             .collect();
         assert!(!instances.is_empty(), "sn01 has scene items");
@@ -1212,5 +1300,89 @@ mod net_op_tests {
             runtime.host().instance(0).expect("door").get("hp"),
             PstValue::Num(374.0)
         );
+    }
+    #[test]
+    fn large_scene_transaction_flushes_without_losing_final_writes_or_effects() {
+        let mut host = SceneHost::new(vec![SceneItemInstance {
+            name: "D_gate".into(),
+            index: 0,
+            props: Default::default(),
+        }]);
+        host.builtin("NetEvent", &[PstValue::Num(1.0)]);
+        for pose in 0..130 {
+            host.builtin(
+                "SetSceneItem",
+                &[
+                    PstValue::Num(0.0),
+                    PstValue::Str("pose".into()),
+                    PstValue::Num(pose as f64),
+                ],
+            );
+        }
+        host.builtin(
+            "CreateEffect",
+            &[PstValue::Num(0.0), PstValue::Str("WonBRK".into())],
+        );
+        host.builtin("NetEvent", &[PstValue::Num(0.0)]);
+        let batches = host.take_net_batches();
+        assert_eq!(
+            batches.iter().map(Vec::len).collect::<Vec<_>>(),
+            [63, 63, 5]
+        );
+        assert_eq!(batches.iter().flatten().count(), 131);
+        let mut guest = SceneHost::new(vec![SceneItemInstance {
+            name: "D_gate".into(),
+            index: 0,
+            props: Default::default(),
+        }]);
+        for op in batches.iter().flatten() {
+            guest.apply_net_op(op);
+        }
+        assert_eq!(guest.instance(0).unwrap().get("pose").as_f64(), 129.0);
+        assert!(
+            matches!(guest.take_effects().as_slice(), [SceneNetOp::Effect { effect, .. }] if effect == "WonBRK")
+        );
+        assert!(guest.take_net_batches().is_empty());
+    }
+
+    #[test]
+    fn named_scene_effect_resolves_the_same_instance_as_numeric_reference() {
+        let mut host = SceneHost::new(
+            ["D_unrelated", "D_sn02st01"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, name)| SceneItemInstance {
+                    name: name.into(),
+                    index,
+                    props: Default::default(),
+                })
+                .collect(),
+        );
+        host.builtin("NetEvent", &[PstValue::Num(1.0)]);
+        for reference in [PstValue::Str("D_sn02st01".into()), PstValue::Num(1.0)] {
+            host.builtin(
+                "CreateEffect",
+                &[
+                    reference,
+                    PstValue::Str("FuTi-UP".into()),
+                    PstValue::Num(1.0),
+                ],
+            );
+        }
+        host.builtin(
+            "CreateEffect",
+            &[
+                PstValue::Str("missing".into()),
+                PstValue::Str("FuTi-UP".into()),
+            ],
+        );
+        host.builtin("NetEvent", &[PstValue::Num(0.0)]);
+        let ops = host.take_net_ops();
+        assert_eq!(ops.len(), 2);
+        assert_eq!(ops[0], ops[1]);
+        assert!(
+            matches!(&ops[0], SceneNetOp::Effect { ref_index: 1, effect, extra } if effect == "FuTi-UP" && *extra == 1.0)
+        );
+        assert_eq!(host.take_effects(), ops);
     }
 }

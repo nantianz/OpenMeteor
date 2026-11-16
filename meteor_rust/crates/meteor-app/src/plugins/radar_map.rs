@@ -12,7 +12,7 @@ pub(super) fn terrain_image(
     let height = ((max_z - min_z) * scale).round().max(2.0) as u32;
     let project = |p: Vec3| {
         Vec2::new(
-            (p.x - min_x) / (max_x - min_x) * (width - 1) as f32,
+            (max_x - p.x) / (max_x - min_x) * (width - 1) as f32,
             (max_z - p.z) / (max_z - min_z) * (height - 1) as f32,
         )
     };
@@ -136,8 +136,9 @@ mod tests {
         let image = terrain_image(&mesh, (0.0, 20.0, 0.0, 10.0));
         assert_eq!((image.width, image.height), (1024, 512));
         let pixel = |x: usize, y: usize| &image.rgba[(y * 1024 + x) * 4..(y * 1024 + x) * 4 + 4];
-        assert_eq!(pixel(10, 10), &[26, 30, 37, 235]);
-        assert_eq!(pixel(1000, 490), &[10, 17, 23, 215]);
+
+        assert_eq!(pixel(1000, 10), &[26, 30, 37, 235]);
+        assert_eq!(pixel(10, 490), &[10, 17, 23, 215]);
     }
 }
 

@@ -43,6 +43,7 @@ bitflags = "2"
 
 encoding_rs = "0.8"
 serde_json.workspace = true
+sha2 = "0.10"
 serde.workspace = true
 
 wgpu = { version = "=29.0.4", default-features = false }
@@ -70,8 +71,8 @@ bytes = "1"
 bevy = { workspace = true, features = ["system_clipboard"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
 
-sha2 = "0.10"
 
 
 
@@ -97,6 +98,8 @@ getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
 
 [dev-dependencies]
 
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 naga = { version = "29.0.4", features = ["wgsl-in"] }
@@ -115,6 +118,9 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["NSD
 [features]
 original-assets = []
 
+
+original-directory-default = []
+
 perf-diagnostics = []
 dlss5 = ["dep:bevy_dlss5"]
 
@@ -126,3 +132,6 @@ wgpu-hal = { version = "=29.0.4", optional = true, default-features = false, fea
 
 [target.'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'.dependencies]
 bevy_dlss5 = { path = "../../vendor/bevy_dlss5", optional = true }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+rfd = "0.17.2"

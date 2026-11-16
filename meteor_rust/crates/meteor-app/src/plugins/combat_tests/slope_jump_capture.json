@@ -1,0 +1,279 @@
+{
+  "source": "meteor_rust/logs-slope-jump-20261004-000652-2kk8QL/jump.jsonl",
+  "sha256": "2bf15f90b3ac2331608d5e2545a50c7c0e2869bd7603ed81163e01dca7f31abd",
+  "stage": "sn13",
+  "entries": [
+    {
+      "tick": 3797,
+      "seconds": 43.724810584,
+      "fighter": {
+        "character": 0,
+        "weapon": 5
+      },
+      "air": {
+        "airborne": true,
+        "external": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "groundBlendPending": false,
+        "groundContact": false,
+        "groundY": 15.063895225524902,
+        "jumpCharge": false,
+        "jumpHold": 0.0664011687040329,
+        "launch": {
+          "clingArmed": false,
+          "lifted": false,
+          "peakLift": 1.332921028137207,
+          "pose": 0,
+          "prevRootZ": 0.0035665035247802734,
+          "verticalPose": 157
+        },
+        "ledgeFall": false,
+        "mode": "Ballistic",
+        "noSupport": true,
+        "pendingLedgeFall": false,
+        "planar": [
+          -36.097434997558594,
+          -34.8051643371582
+        ],
+        "recoveryMode": null,
+        "root": {
+          "jumpPrev": [
+            0.0,
+            0.0
+          ],
+          "jumpPrevPose": 157,
+          "jumpStarted": false,
+          "lateVisualSnap": false,
+          "pin": [
+            0.0,
+            0.0,
+            0.0035665035247802734
+          ],
+          "pinPose": 157,
+          "pinZ": 0.0035665035247802734,
+          "stand": [
+            0.0,
+            0.0
+          ]
+        },
+        "steep": false,
+        "time": 0.2993386685848236,
+        "verticalContact": false,
+        "verticalSpeed": 0.06276677548885345
+      },
+      "motion": {
+        "facing": 3.8630337715148926,
+        "finite": true,
+        "mode": "Airborne",
+        "velocity": [
+          -36.098350524902344,
+          0.06274110078811646,
+          -34.8053092956543
+        ]
+      },
+      "wall": {
+        "active": false,
+        "contact": false,
+        "external": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "kickPose": 157,
+        "normal": [
+          0.17208744585514069,
+          0.9695871472358704,
+          0.17403079569339752
+        ],
+        "pose": 161,
+        "remaining": 0.0
+      },
+      "state": "Jump",
+      "pose": {
+        "end": 804,
+        "fallHold": false,
+        "frame": 792.985107421875,
+        "id": 157,
+        "loops": false,
+        "sequence": 96,
+        "start": 788
+      },
+      "actor": {
+        "entity": 8589933128,
+        "global": null,
+        "local": {
+          "finite": true,
+          "position": [
+            -123.92554473876953,
+            15.510290145874023,
+            -123.04703521728516
+          ],
+          "rotation": [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ],
+          "scale": [
+            1.0,
+            1.0,
+            1.0
+          ]
+        }
+      },
+      "keys": [
+        "KeyW"
+      ],
+      "visualPin": {
+        "active": true,
+        "baseline": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "pose": 157,
+        "release": false,
+        "xy": true,
+        "z": true
+      }
+    },
+    {
+      "tick": 3874,
+      "seconds": 44.366618834,
+      "fighter": {
+        "character": 0,
+        "weapon": 5
+      },
+      "air": {
+        "airborne": true,
+        "external": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "groundBlendPending": true,
+        "groundContact": true,
+        "groundY": 23.088333129882812,
+        "jumpCharge": false,
+        "jumpHold": 0.0,
+        "launch": {
+          "clingArmed": false,
+          "lifted": false,
+          "peakLift": 0.39310646057128906,
+          "pose": 0,
+          "prevRootZ": 0.0035665035247802734,
+          "verticalPose": 157
+        },
+        "ledgeFall": false,
+        "mode": "Ballistic",
+        "noSupport": false,
+        "pendingLedgeFall": false,
+        "planar": [
+          -39.054229736328125,
+          -44.350215911865234
+        ],
+        "recoveryMode": null,
+        "root": {
+          "jumpPrev": [
+            0.0,
+            0.0
+          ],
+          "jumpPrevPose": 157,
+          "jumpStarted": false,
+          "lateVisualSnap": false,
+          "pin": [
+            0.0,
+            0.0,
+            0.0035665035247802734
+          ],
+          "pinPose": 157,
+          "pinZ": 0.0035665035247802734,
+          "stand": [
+            0.0,
+            0.0
+          ]
+        },
+        "steep": false,
+        "time": 0.31680527329444885,
+        "verticalContact": true,
+        "verticalSpeed": 0.5430572032928467
+      },
+      "motion": {
+        "facing": 3.8383498191833496,
+        "finite": true,
+        "mode": "Airborne",
+        "velocity": [
+          -39.053077697753906,
+          14.892107963562012,
+          -44.35142135620117
+        ]
+      },
+      "wall": {
+        "active": false,
+        "contact": false,
+        "external": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "kickPose": 157,
+        "normal": [
+          0.17208744585514069,
+          0.9695871472358704,
+          0.17403079569339752
+        ],
+        "pose": 161,
+        "remaining": 0.0
+      },
+      "state": "Jump",
+      "pose": {
+        "end": 804,
+        "fallHold": false,
+        "frame": 793.50146484375,
+        "id": 157,
+        "loops": false,
+        "sequence": 98,
+        "start": 788
+      },
+      "actor": {
+        "entity": 8589933128,
+        "global": null,
+        "local": {
+          "finite": true,
+          "position": [
+            -145.29638671875,
+            23.088335037231445,
+            -146.621826171875
+          ],
+          "rotation": [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ],
+          "scale": [
+            1.0,
+            1.0,
+            1.0
+          ]
+        }
+      },
+      "keys": [],
+      "visualPin": {
+        "active": true,
+        "baseline": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "pose": 157,
+        "release": false,
+        "xy": true,
+        "z": true
+      }
+    }
+  ]
+}

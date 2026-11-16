@@ -1,5 +1,7 @@
-use crate::app_state::Settings;
+use crate::app_state::{AppState, Settings};
+use crate::components::fighter::DeathRespawn;
 use crate::plugins::camera_plugin::GameplayCamera;
+use crate::plugins::stage_plugin::LocalFighter;
 use bevy::camera::CameraOutputMode;
 use bevy::core_pipeline::{schedule::Core3d, Core3dSystems, FullscreenShader};
 use bevy::prelude::*;
@@ -26,6 +28,9 @@ const DISPLAY_POST_PROCESS_SHADER: Handle<Shader> =
 struct DisplayProjection {
     brightness: f32,
     contrast: f32,
+    sharpness: f32,
+    input_size: UVec2,
+    output_size: UVec2,
     resolution_override: Option<UVec2>,
 }
 
@@ -66,9 +71,18 @@ fn display_projection(
     } else {
         94.0
     };
+    let sharpness = if settings.sharpness.is_finite() {
+        settings.sharpness.clamp(0.0, 1.0)
+    } else {
+        0.3
+    };
+    let input_size = resolution_override.unwrap_or(physical_size);
     DisplayProjection {
         brightness: (brightness_value / 94.0).max(0.45),
         contrast: (contrast_value / 94.0).max(0.55),
+        sharpness,
+        input_size,
+        output_size: physical_size,
         resolution_override,
     }
 }
@@ -77,7 +91,12 @@ fn display_projection(
 struct ViewportPostProcessSettings {
     brightness: f32,
     contrast: f32,
-    padding: Vec2,
+    sharpness: f32,
+    grayscale: f32,
+    input_size: Vec2,
+    output_size: Vec2,
+
+    underwater: Vec4,
 }
 
 #[derive(Component, Clone, Copy, PartialEq, ExtractComponent)]
@@ -166,7 +185,7 @@ impl Plugin for DisplaySettingsPlugin {
             ExtractComponentPlugin::<RenderScaleResolution>::default(),
             ExtractComponentPlugin::<GameplayCamera>::default(),
         ))
-        .add_systems(Update, sync_display_settings);
+        .add_systems(PostUpdate, sync_display_settings);
 
         let actual_resolution = ActualRenderResolution::default();
         app.insert_resource(actual_resolution.clone());
@@ -211,6 +230,10 @@ type DisplayCameraQuery<'w, 's> = Query<
 
 fn sync_display_settings(
     settings: Res<Settings>,
+    state: Res<State<AppState>>,
+    underwater: Option<Res<crate::plugins::stage_material::water::interaction::UnderwaterView>>,
+    frame: Option<Res<crate::plugins::stage_material::FrameUniforms>>,
+    local: Query<&DeathRespawn, With<LocalFighter>>,
     window: Query<&Window, With<PrimaryWindow>>,
     mut commands: Commands,
     cameras: DisplayCameraQuery<'_, '_>,
@@ -220,12 +243,37 @@ fn sync_display_settings(
     };
     let physical = UVec2::new(window.physical_width(), window.physical_height());
     let projection = display_projection(&settings, physical, window.scale_factor());
+
+    let dead = matches!(state.get(), AppState::Playing | AppState::Paused)
+        && local.iter().any(|death| death.active);
+    let submerged =
+        if settings.water_enhance && matches!(state.get(), AppState::Playing | AppState::Paused) {
+            underwater.as_deref().copied().unwrap_or_default()
+        } else {
+            Default::default()
+        };
     let post = ViewportPostProcessSettings {
         brightness: projection.brightness,
         contrast: projection.contrast,
-        padding: Vec2::ZERO,
+        sharpness: projection.sharpness,
+        grayscale: if dead { 1.0 } else { 0.0 },
+        input_size: projection.input_size.as_vec2(),
+        output_size: projection.output_size.as_vec2(),
+        underwater: Vec4::new(
+            submerged.kind,
+            submerged.depth,
+            if submerged.kind > 0.0 {
+                frame.as_deref().map_or(0.0, |frame| frame.seconds as f32)
+            } else {
+                0.0
+            },
+            0.0,
+        ),
     };
-    let needs_post = projection.resolution_override.is_some()
+    let needs_post = dead
+        || submerged.kind > 0.0
+        || projection.resolution_override.is_some()
+        || projection.sharpness > f32::EPSILON
         || (projection.brightness - 1.0).abs() > f32::EPSILON
         || (projection.contrast - 1.0).abs() > f32::EPSILON;
 
@@ -517,7 +565,11 @@ mod tests {
             .insert(ViewportPostProcessSettings {
                 brightness: 1.1,
                 contrast: 0.9,
-                padding: Vec2::ZERO,
+                sharpness: 0.0,
+                grayscale: 0.0,
+                input_size: Vec2::splat(64.0),
+                output_size: Vec2::splat(64.0),
+                underwater: Vec4::ZERO,
             });
         let node = app
             .world_mut()
@@ -765,17 +817,28 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
 
-        for (scale, brightness, contrast, width, height) in [
-            (1.0, 94.0, 94.0, 64, 64),
-            (0.65, 47.0, 141.0, 64, 64),
-            (0.5, 94.0, 94.0, 128, 64),
-            (1.0, 94.0, 94.0, 128, 64),
-            (0.8, 94.0, 94.0, 64, 64),
+        let local = app
+            .world_mut()
+            .spawn((LocalFighter, DeathRespawn::default()))
+            .id();
+        for (scale, brightness, contrast, width, height, dead) in [
+            (1.0, 94.0, 94.0, 64, 64, false),
+            (1.0, 94.0, 94.0, 64, 64, true),
+            (1.0, 94.0, 94.0, 64, 64, false),
+            (0.65, 47.0, 141.0, 64, 64, true),
+            (0.5, 94.0, 94.0, 128, 64, true),
+            (1.0, 94.0, 94.0, 128, 64, false),
+            (0.8, 94.0, 94.0, 64, 64, false),
         ] {
+            app.world_mut()
+                .get_mut::<DeathRespawn>(local)
+                .unwrap()
+                .active = dead;
             *app.world_mut().resource_mut::<Settings>() = Settings {
                 render_scale: scale,
                 brightness,
                 contrast,
+                sharpness: 0.0,
                 ..default()
             };
             app.world_mut()
@@ -809,6 +872,11 @@ mod tests {
             let expected: Vec<u8> = [0.25_f32, 0.5, 0.75]
                 .into_iter()
                 .map(|linear| {
+                    let linear = if dead {
+                        0.2126 * 0.25 + 0.7152 * 0.5 + 0.0722 * 0.75
+                    } else {
+                        linear
+                    };
                     let srgb = 1.055 * linear.powf(1.0 / 2.4) - 0.055;
                     let value = ((srgb * (brightness / 94.0) - 0.5) * (contrast / 94.0) + 0.5)
                         .clamp(0.0, 1.0);
@@ -847,7 +915,12 @@ mod tests {
                     && data[overlay] > 245
                     && data[overlay + 1] < 5
                     && data[overlay + 2] < 5
-                    && data[mesh + 1] > data[mesh].saturating_add(40);
+                    && if dead {
+                        data[mesh].abs_diff(data[mesh + 1]) <= 2
+                            && data[mesh].abs_diff(data[mesh + 2]) <= 2
+                    } else {
+                        data[mesh + 1] > data[mesh].saturating_add(40)
+                    };
                 let reported = *app
                     .world()
                     .resource::<ActualRenderResolution>()
@@ -886,7 +959,10 @@ mod tests {
         let projection = display_projection(&Settings::default(), UVec2::new(1920, 1080), 2.0);
         assert_eq!(projection.brightness, 1.0);
         assert_eq!(projection.contrast, 1.0);
+        assert!((projection.sharpness - 0.3).abs() < 1e-6);
         assert_eq!(projection.resolution_override, None);
+        assert_eq!(projection.input_size, UVec2::new(1920, 1080));
+        assert_eq!(projection.output_size, UVec2::new(1920, 1080));
     }
 
     #[test]
@@ -897,6 +973,8 @@ mod tests {
         };
         let projection = display_projection(&settings, UVec2::new(1920, 1080), 2.0);
         assert_eq!(projection.resolution_override, Some(UVec2::new(1248, 702)));
+        assert_eq!(projection.input_size, UVec2::new(1248, 702));
+        assert_eq!(projection.output_size, UVec2::new(1920, 1080));
 
         let capped = display_projection(&Settings::default(), UVec2::new(3000, 1500), 3.0);
         assert_eq!(capped.resolution_override, Some(UVec2::new(2000, 1000)));
@@ -945,7 +1023,9 @@ mod tests {
         assert!(shader.contains("srgb_to_linear"));
         assert!(shader.contains("srgb * settings.brightness"));
         assert!(shader.contains("(srgb - vec3<f32>(0.5)) * settings.contrast"));
-        assert!(shader.contains("        in.uv,"));
+        assert!(!shader.contains("fn fsr_easu"));
+        assert!(shader.contains("fn cas_rcas"));
+        assert!(shader.contains("settings.sharpness"));
     }
 
     #[test]
@@ -967,13 +1047,106 @@ mod tests {
     }
 
     #[test]
+    fn headless_submersion_tints_scene_output() {
+        use bevy::app::PluginsState;
+        use bevy::render::gpu_readback::{Readback, ReadbackComplete};
+        use bevy::render::render_resource::{PollType, TextureUsages};
+        use std::sync::{Arc, Mutex};
+
+        let mut app = App::new();
+        app.add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: None,
+                    exit_condition: bevy::window::ExitCondition::DontExit,
+                    ..default()
+                })
+                .set(bevy::render::RenderPlugin {
+                    synchronous_pipeline_compilation: true,
+                    ..default()
+                })
+                .disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>()
+                .disable::<bevy::winit::WinitPlugin>()
+                .disable::<bevy::audio::AudioPlugin>(),
+        )
+        .insert_state(AppState::Playing)
+        .insert_resource(Settings::default())
+        .add_plugins(DisplaySettingsPlugin);
+        let mut image = Image::new_target_texture(64, 64, TextureFormat::Rgba8UnormSrgb, None);
+        image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
+        let target = app.world_mut().resource_mut::<Assets<Image>>().add(image);
+        let camera = app
+            .world_mut()
+            .spawn((
+                GameplayCamera,
+                Camera3d::default(),
+                Camera {
+                    clear_color: ClearColorConfig::Custom(Color::linear_rgb(0.2, 0.35, 0.5)),
+                    ..default()
+                },
+                bevy::camera::RenderTarget::Image(target.clone().into()),
+                Msaa::Off,
+                bevy::core_pipeline::tonemapping::Tonemapping::None,
+                ViewportPostProcessSettings {
+                    brightness: 1.0,
+                    contrast: 1.0,
+                    sharpness: 0.0,
+                    grayscale: 0.0,
+                    input_size: Vec2::splat(64.0),
+                    output_size: Vec2::splat(64.0),
+                    underwater: Vec4::ZERO,
+                },
+            ))
+            .id();
+        let pixels = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let output = pixels.clone();
+        app.world_mut().spawn(Readback::texture(target)).observe(
+            move |event: On<ReadbackComplete>| *output.lock().unwrap() = event.data.clone(),
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while app.plugins_state() != PluginsState::Ready {
+            assert!(std::time::Instant::now() < deadline);
+            bevy::tasks::tick_global_task_pools_on_main_thread();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        app.finish();
+        app.cleanup();
+        let capture = |app: &mut App| {
+            for _ in 0..16 {
+                app.update();
+                app.world()
+                    .resource::<RenderDevice>()
+                    .poll(PollType::Poll)
+                    .unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(3));
+            }
+            pixels.lock().unwrap().clone()
+        };
+        let dry = capture(&mut app);
+        app.world_mut()
+            .get_mut::<ViewportPostProcessSettings>(camera)
+            .unwrap()
+            .underwater = Vec4::new(1.0, 1.0, 0.0, 0.0);
+        let wet = capture(&mut app);
+        let middle = (32 * 64 + 32) * 4;
+        assert_eq!(dry.len(), 64 * 64 * 4);
+        assert!(
+            wet[middle + 2] < dry[middle + 2] - 8,
+            "underwater blue attenuation"
+        );
+        assert!(wet[middle + 1] > wet[middle], "clear water remains teal");
+    }
+
+    #[test]
     fn production_sync_installs_and_removes_camera_components() {
         let mut app = App::new();
         app.insert_resource(Settings {
             render_scale: 0.65,
+            sharpness: 0.0,
             ..default()
         })
-        .add_systems(Update, sync_display_settings);
+        .insert_resource(State::new(AppState::Playing))
+        .add_systems(PostUpdate, sync_display_settings);
         app.world_mut().spawn((PrimaryWindow, Window::default()));
         let camera = app.world_mut().spawn(GameplayCamera).id();
 
@@ -984,12 +1157,196 @@ mod tests {
             .is_some());
         assert!(app.world().get::<RenderScaleResolution>(camera).is_some());
 
-        *app.world_mut().resource_mut::<Settings>() = Settings::default();
+        *app.world_mut().resource_mut::<Settings>() = Settings {
+            sharpness: 0.0,
+            ..default()
+        };
         app.update();
         assert!(app
             .world()
             .get::<ViewportPostProcessSettings>(camera)
             .is_none());
         assert!(app.world().get::<RenderScaleResolution>(camera).is_none());
+    }
+
+    #[test]
+    fn default_sharpness_keeps_post_process_installed() {
+        let mut app = App::new();
+        app.insert_resource(Settings::default())
+            .insert_resource(State::new(AppState::Playing))
+            .add_systems(PostUpdate, sync_display_settings);
+        app.world_mut().spawn((PrimaryWindow, Window::default()));
+        let camera = app.world_mut().spawn(GameplayCamera).id();
+        app.update();
+        let post = app
+            .world()
+            .get::<ViewportPostProcessSettings>(camera)
+            .expect("default sharpness installs CAS pass");
+        assert!((post.sharpness - 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn submerged_camera_enables_scene_only_post_process_and_toggle_clears_it() {
+        use crate::plugins::stage_material::water::interaction::UnderwaterView;
+        let mut app = App::new();
+        app.insert_resource(Settings {
+            sharpness: 0.0,
+            water_enhance: true,
+            ..default()
+        })
+        .insert_resource(State::new(AppState::Playing))
+        .insert_resource(UnderwaterView {
+            kind: 2.0,
+            depth: 0.8,
+        })
+        .add_systems(PostUpdate, sync_display_settings);
+        app.world_mut().spawn((PrimaryWindow, Window::default()));
+        let camera = app.world_mut().spawn(GameplayCamera).id();
+        let ui = app
+            .world_mut()
+            .spawn(super::super::camera_plugin::UiCamera)
+            .id();
+        app.update();
+        let post = app
+            .world()
+            .get::<ViewportPostProcessSettings>(camera)
+            .unwrap();
+        assert_eq!(post.underwater.x, 2.0);
+        assert_eq!(post.underwater.y, 0.8);
+        assert!(app.world().get::<ViewportPostProcessSettings>(ui).is_none());
+        app.world_mut().resource_mut::<Settings>().water_enhance = false;
+        app.update();
+        assert!(app
+            .world()
+            .get::<ViewportPostProcessSettings>(camera)
+            .is_none());
+        app.world_mut().resource_mut::<Settings>().water_enhance = true;
+        app.insert_resource(State::new(AppState::Menu));
+        app.update();
+        assert!(app
+            .world()
+            .get::<ViewportPostProcessSettings>(camera)
+            .is_none());
+    }
+
+    #[test]
+    fn death_grayscale_tracks_local_lifecycle_and_leaves_ui_untouched() {
+        let mut app = App::new();
+        app.insert_resource(Settings {
+            sharpness: 0.0,
+            ..default()
+        })
+        .insert_resource(State::new(AppState::Playing))
+        .add_systems(PostUpdate, sync_display_settings);
+        app.world_mut().spawn((PrimaryWindow, Window::default()));
+        let camera = app.world_mut().spawn(GameplayCamera).id();
+        let ui = app
+            .world_mut()
+            .spawn(super::super::camera_plugin::UiCamera)
+            .id();
+
+        app.world_mut().spawn(DeathRespawn {
+            active: true,
+            ..default()
+        });
+        let local = app
+            .world_mut()
+            .spawn((LocalFighter, DeathRespawn::default()))
+            .id();
+        app.update();
+        assert!(app
+            .world()
+            .get::<ViewportPostProcessSettings>(camera)
+            .is_none());
+
+        app.add_systems(
+            Update,
+            |mut local: Query<&mut DeathRespawn, With<LocalFighter>>| {
+                for mut death in &mut local {
+                    death.active = true;
+                }
+            },
+        );
+        for state in [AppState::Playing, AppState::Paused] {
+            app.insert_resource(State::new(state));
+            app.update();
+            assert_eq!(
+                app.world()
+                    .get::<ViewportPostProcessSettings>(camera)
+                    .unwrap()
+                    .grayscale,
+                1.0
+            );
+            assert!(app.world().get::<ViewportPostProcessSettings>(ui).is_none());
+        }
+
+        for state in [
+            AppState::Loading,
+            AppState::Result,
+            AppState::Menu,
+            AppState::Room,
+            AppState::NetRoom,
+            AppState::Settings,
+            AppState::Error,
+            AppState::StudioSplash,
+        ] {
+            app.insert_resource(State::new(state));
+            app.update();
+            assert!(app
+                .world()
+                .get::<ViewportPostProcessSettings>(camera)
+                .is_none());
+        }
+        app.insert_resource(State::new(AppState::Playing));
+        app.update();
+        app.world_mut().despawn(local);
+        app.update();
+        assert!(app
+            .world()
+            .get::<ViewportPostProcessSettings>(camera)
+            .is_none());
+    }
+
+    #[test]
+    fn revival_restores_color_without_resetting_display_preferences() {
+        let mut app = App::new();
+        app.insert_resource(Settings {
+            render_scale: 0.65,
+            brightness: 47.0,
+            contrast: 141.0,
+            ..default()
+        })
+        .insert_resource(State::new(AppState::Playing))
+        .add_systems(PostUpdate, sync_display_settings);
+        app.world_mut().spawn((PrimaryWindow, Window::default()));
+        let local = app
+            .world_mut()
+            .spawn((
+                LocalFighter,
+                DeathRespawn {
+                    active: true,
+                    timer: 0.0,
+                    ..default()
+                },
+            ))
+            .id();
+        let camera = app.world_mut().spawn(GameplayCamera).id();
+        for dead in [true, false, true, false] {
+            app.world_mut()
+                .get_mut::<DeathRespawn>(local)
+                .unwrap()
+                .active = dead;
+            app.update();
+            let post = app
+                .world()
+                .get::<ViewportPostProcessSettings>(camera)
+                .unwrap();
+            assert_eq!(post.grayscale, if dead { 1.0 } else { 0.0 });
+            assert_eq!(
+                (post.brightness, post.contrast, post.sharpness),
+                (0.5, 1.5, 0.3)
+            );
+            assert!(app.world().get::<RenderScaleResolution>(camera).is_some());
+        }
     }
 }

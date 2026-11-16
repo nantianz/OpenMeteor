@@ -45,7 +45,10 @@ pub fn ignores_character_collision(pose_id: u16, explicit_ignore: bool) -> bool 
     if explicit_ignore {
         return true;
     }
-    is_dodge_pose_id(pose_id) || IGNORE_CHARACTER_COLLISION_POSES.contains(&pose_id)
+
+    matches!(pose_id, 112 | 113)
+        || is_dodge_pose_id(pose_id)
+        || IGNORE_CHARACTER_COLLISION_POSES.contains(&pose_id)
 }
 
 pub trait CharacterView {
@@ -715,6 +718,40 @@ mod tests {
         assert_eq!(CHARACTER_PUSH_SPEED, 20.0 * MODEL_SCALE);
         assert_eq!(CHARACTER_GROUND_CONTACT_DISTANCE, 4.0 * MODEL_SCALE);
         assert_eq!(IGNORE_CHARACTER_COLLISION_POSES.len(), 73);
+    }
+
+    #[test]
+    fn prone_body_passes_without_fixed_push_and_standing_restores_contact() {
+        let mut views = [0.0, 2.0].map(|x| StubView {
+            pos: (x, 0.0, 0.0),
+            pose: 0,
+            guard: false,
+            air: false,
+            visible: true,
+            alive: true,
+        });
+        let mut sys = CharacterContactSystem::new();
+        for pose in [112, 113, 119, 120, 0] {
+            views[1].pose = pose;
+            sys.begin_frame(vec![0, 1]);
+            let (x, z, _) = sys.resolve_xz(0, (0.0, 0.0), (4.0, 0.0), &views);
+            sys.finish_frame(1.0 / 60.0);
+            if matches!(pose, 112 | 113) {
+                assert_eq!((x, z), (4.0, 0.0));
+                assert!(sys.contact_velocities.is_empty());
+            } else {
+                assert!(x < 1.0, "contact must return after prone pose {pose}");
+            }
+            sys.end_frame();
+        }
+
+        views[1].pose = 0;
+        sys.begin_frame(vec![0, 1]);
+        sys.resolve_xz(0, (0.0, 0.0), (4.0, 0.0), &views);
+        views[1].pose = 113;
+        sys.discard_ineligible_pushes(&views);
+        sys.finish_frame(1.0 / 60.0);
+        assert!(sys.contact_velocities.is_empty());
     }
 
     #[test]

@@ -37,9 +37,10 @@ pub(crate) struct ServerRoute {
 }
 impl ServerRoute {
     fn new(fallback: String) -> Self {
+        let finished = fallback.is_empty();
         Self {
             selected: fallback,
-            finished: false,
+            finished,
             started_at: 0.0,
             results: Arc::new(Mutex::new([None, None])),
         }
@@ -97,6 +98,9 @@ pub(crate) fn install(app: &mut App) {
     .add_systems(Update, poll.before(crate::plugins::UiTouchActionSet));
 }
 fn begin_probes(time: Res<Time<Real>>, mut route: ResMut<ServerRoute>) {
+    if route.finished {
+        return;
+    }
     route.started_at = time.elapsed_secs_f64();
     #[cfg(not(target_arch = "wasm32"))]
     let overridden = std::env::var("METEOR_WS").is_ok_and(|v| !v.trim().is_empty());
@@ -269,6 +273,19 @@ fn poll(time: Res<Time<Real>>, mut route: ResMut<ServerRoute>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn empty_server_does_not_start_probes_or_select_an_endpoint() {
+        let mut app = App::new();
+        app.init_resource::<Time<Real>>()
+            .insert_resource(ServerRoute::new(String::new()))
+            .add_systems(Startup, begin_probes)
+            .add_systems(Update, poll);
+        app.update();
+        let route = app.world().resource::<ServerRoute>();
+        assert!(!route.pending());
+        assert!(route.selected.is_empty());
+        assert!(route.results.lock().unwrap().iter().all(Option::is_none));
+    }
     fn ok(rtt: f64) -> Option<Result<Measurement, String>> {
         Some(Ok(Measurement {
             connect_ms: 50.0,

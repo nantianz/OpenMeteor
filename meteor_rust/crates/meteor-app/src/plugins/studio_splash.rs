@@ -303,6 +303,9 @@ fn animate(
     time: Res<Time<Real>>,
     state: Res<State<AppState>>,
     clock: Option<ResMut<IntroClock>>,
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))] water: Option<
+        Res<super::stage_material::water::startup::WaterStartup>,
+    >,
     mut next: ResMut<NextState<AppState>>,
     mut logos: Query<
         (&MaterialNode<LogoMaterial>, &mut UiTransform),
@@ -317,6 +320,10 @@ fn animate(
     let Some(mut clock) = clock else {
         return;
     };
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    if water.is_some_and(|water| !water.ready) {
+        return;
+    }
 
     clock.0 += time.delta_secs().min(0.05);
     let t = clock.0;
@@ -464,6 +471,24 @@ mod tests {
             .0
             .clone();
         assert!(app.world().resource::<Assets<Font>>().get(&font).is_some());
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        {
+            use super::super::stage_material::water::startup::WaterStartup;
+            app.init_resource::<WaterStartup>();
+            for _ in 0..240 {
+                app.update();
+            }
+            assert_eq!(
+                *app.world().resource::<State<AppState>>().get(),
+                AppState::StudioSplash
+            );
+            assert_eq!(
+                app.world().resource::<IntroClock>().0,
+                0.0,
+                "intro waits for automatic baking"
+            );
+            app.world_mut().resource_mut::<WaterStartup>().ready = true;
+        }
         app.update();
         assert_eq!(
             *app.world().resource::<State<AppState>>().get(),

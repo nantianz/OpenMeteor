@@ -177,7 +177,15 @@ pub fn prepare_match_assets(
     };
     match &shared.phase {
         LoadPhase::Loading => return,
-        LoadPhase::Ready(active) if active == &key => return,
+        LoadPhase::Ready(active)
+            if active == &key
+                && crate::pack_manifest::match_packs_resident(
+                    &request.stage_id,
+                    meteor_asset::runtime_assets::contains_pack,
+                ) =>
+        {
+            return
+        }
         LoadPhase::Failed(active, error) if active == &key => {
             error!("WASM assets failed for {active}: {error}");
             next_state.set(AppState::Error);
@@ -267,7 +275,13 @@ pub fn match_assets_ready(request: Res<LaunchRequest>, loader: Res<WasmAssetLoad
     loader
         .0
         .lock()
-        .map(|shared| matches!(&shared.phase, LoadPhase::Ready(active) if active == &key))
+        .map(|shared| {
+            matches!(&shared.phase, LoadPhase::Ready(active) if active == &key)
+                && crate::pack_manifest::match_packs_resident(
+                    &request.stage_id,
+                    meteor_asset::runtime_assets::contains_pack,
+                )
+        })
         .unwrap_or(false)
 }
 

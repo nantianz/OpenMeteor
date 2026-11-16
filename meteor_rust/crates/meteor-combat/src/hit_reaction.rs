@@ -438,7 +438,6 @@ pub fn tick_hit_react(
                     && !fighter.is_airborne()
                 {
                     return Some(enter_down_state(
-                        fighter,
                         id,
                         carried_minimum(attack_target_value(&hr)),
                     ));
@@ -462,9 +461,7 @@ pub fn tick_hit_react(
             Some(hr)
         }
         HitReactKind::Down => {
-            hr.down_remaining -= t;
-
-            hr.down_remaining = hr.down_remaining.max(0.0);
+            hr.down_remaining = 0.0;
             if let Some(id) = hr.pose_id {
                 if fighter.pose_id() != id && fighter.has_pose(id) {
                     fighter.play_pose(id, true);
@@ -474,7 +471,8 @@ pub fn tick_hit_react(
         }
         HitReactKind::GetUp => {
             hr.lock_remaining -= t;
-            if fighter.is_pose_finished() || hr.lock_remaining <= 0.0 {
+
+            if hr.pose_id.is_none() || fighter.is_pose_finished() {
                 return None;
             }
             Some(hr)
@@ -483,17 +481,12 @@ pub fn tick_hit_react(
     }
 }
 
-fn enter_down_state(
-    fighter: &mut impl ReactionFighter,
-    pose_id: u16,
-    minimum_seconds: f32,
-) -> HitReact {
-    let down_remaining = DOWN_MIN_SECONDS.max(minimum_seconds);
+fn enter_down_state(pose_id: u16, minimum_seconds: f32) -> HitReact {
     let mut hr = HitReact::new(HitReactKind::Down, Some(pose_id));
     hr.lock_remaining = 0.0;
-    hr.down_remaining = down_remaining;
+    hr.down_remaining = 0.0;
     hr.authored_minimum = minimum_seconds.max(0.0);
-    fighter.play_pose(pose_id, true);
+
     hr
 }
 
@@ -641,6 +634,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn getup_waits_for_playback_after_legacy_timeout() {
+        let mut fighter = StubFighter::new();
+        fighter.pose = 35;
+        let mut reaction = getup_reaction_for_pose(35, 11623, 11630);
+
+        for _ in 0..60 {
+            reaction = tick_hit_react(&mut fighter, reaction, 1.0 / 60.0)
+                .expect("unfinished getup must retain input ownership");
+        }
+        assert!(reaction.lock_remaining <= 0.0);
+        fighter.finished = true;
+        assert!(tick_hit_react(&mut fighter, reaction, 0.0).is_none());
+    }
+
+    #[test]
+    fn getup_completion_does_not_wait_for_estimate_and_missing_clip_exits() {
+        let mut fighter = StubFighter::new();
+        fighter.pose = 119;
+        fighter.finished = true;
+        let reaction = getup_reaction_for_pose(119, 11607, 11614);
+        assert!(reaction.lock_remaining > 0.0);
+        assert!(tick_hit_react(&mut fighter, reaction, 0.0).is_none());
+
+        fighter.finished = false;
+        let missing = HitReact::new(HitReactKind::GetUp, None);
+        assert!(tick_hit_react(&mut fighter, missing, 0.0).is_none());
+    }
+
     fn attack_block() -> AttackBlock {
         AttackBlock {
             start: 0,
@@ -682,6 +704,22 @@ mod tests {
             tick_hit_react(&mut fighter, hr, 0.0).is_some(),
             "authored minimum still holds"
         );
+    }
+
+    #[test]
+    fn getup_waits_for_playback_even_after_estimated_duration() {
+        let mut fighter = StubFighter::new();
+        fighter.pose = 120;
+        let hr = getup_reaction_for_pose(120, 11623, 11630);
+        let hr = tick_hit_react(&mut fighter, hr, 1.0)
+            .expect("unfinished getup must retain ownership after the old timeout");
+        assert!(hr.lock_remaining < 0.0);
+        fighter.finished = true;
+        assert!(tick_hit_react(&mut fighter, hr, 0.0).is_none());
+
+        let missing = HitReact::new(HitReactKind::GetUp, None);
+        fighter.finished = false;
+        assert!(tick_hit_react(&mut fighter, missing, 0.0).is_none());
     }
 
     #[test]
@@ -865,8 +903,9 @@ mod tests {
         f.finished = true;
         let down = tick_hit_react(&mut f, waiting, 0.0).unwrap();
         assert_eq!(down.kind, HitReactKind::Down);
-        assert_eq!(down.down_remaining, 0.8);
+        assert_eq!(down.down_remaining, 0.0);
         assert_eq!(down.authored_minimum, 0.8);
+        assert!(f.finished, "entering mode 11 preserves the finished pose");
     }
 
     #[test]

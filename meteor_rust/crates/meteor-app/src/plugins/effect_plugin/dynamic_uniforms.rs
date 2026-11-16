@@ -36,6 +36,19 @@ pub(super) fn set_particle_color(
     }
 }
 
+pub(super) fn advance_uv(
+    materials: &mut Assets<PonEfMaterial>,
+    handle: &Handle<PonEfMaterial>,
+    delta: Vec2,
+) {
+    if delta == Vec2::ZERO {
+        return;
+    }
+    if let Some(material) = materials.get_mut_untracked(handle) {
+        material.params.uv_offset = (material.params.uv_offset + delta).rem_euclid(Vec2::ONE);
+    }
+}
+
 #[derive(Resource, Default)]
 struct ExtractedParams {
     values: Vec<(u64, PonEfMaterialParams)>,
@@ -70,6 +83,7 @@ impl Page {
                 values: std::array::from_fn(|_| PonEfMaterialParams {
                     color: Vec4::ZERO,
                     has_texture: 0,
+                    uv_offset: Vec2::ZERO,
                 }),
             }),
             free: (0..PARAMS_PER_PAGE).rev().collect(),
@@ -235,6 +249,7 @@ fn extract_params(
                     values: std::array::from_fn(|i| PonEfMaterialParams {
                         color: colors[i],
                         has_texture: material.params.has_texture,
+                        uv_offset: Vec2::ZERO,
                     }),
                 },
             );
@@ -399,7 +414,7 @@ mod tests {
             .replace("#{MATERIAL_BIND_GROUP}", "0")
             + "\n@vertex fn test_vertex(@builtin(vertex_index) i: u32) -> VertexOutput {\n\
                 let positions = array<vec2<f32>, 3>(vec2(-1.0,-1.0), vec2(3.0,-1.0), vec2(-1.0,3.0));\n\
-                var o: VertexOutput; o.position=vec4<f32>(positions[i],0.0,1.0); o.uv=vec2<f32>(0.5); return o; }";
+                var o: VertexOutput; o.position=vec4<f32>(positions[i],0.0,1.0); o.uv=vec2<f32>(0.25); return o; }";
         let shader = device.create_and_validate_shader_module(ShaderModuleDescriptor {
             label: None,
             source: ShaderSource::Wgsl(source.into()),
@@ -438,8 +453,8 @@ mod tests {
         let texture_desc = TextureDescriptor {
             label: None,
             size: Extent3d {
-                width: 1,
-                height: 1,
+                width: 2,
+                height: 2,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -453,13 +468,20 @@ mod tests {
             queue,
             &texture_desc,
             TextureDataOrder::LayerMajor,
-            &[255, 128, 64, 255],
+            &[
+                255, 128, 64, 255, 64, 255, 128, 255, 128, 64, 255, 255, 32, 192, 96, 255,
+            ],
         );
         let texture_view = texture.create_view(&default());
-        let sampler = device.create_sampler(&default());
+        let sampler = device.create_sampler(&SamplerDescriptor {
+            address_mode_u: AddressMode::Repeat,
+            address_mode_v: AddressMode::Repeat,
+            ..default()
+        });
         let target = device.create_texture(&TextureDescriptor {
             size: Extent3d {
                 width: ids.len() as u32,
+                height: 1,
                 ..texture_desc.size
             },
             usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
@@ -567,7 +589,15 @@ mod tests {
                 .unwrap()
                 .1;
             let texel = if params.has_texture == 1 {
-                Vec4::new(1.0, 128.0 / 255.0, 64.0 / 255.0, 1.0)
+                let uv = (Vec2::splat(0.25) + params.uv_offset).rem_euclid(Vec2::ONE);
+                let index = (uv.y * 2.0) as usize * 2 + (uv.x * 2.0) as usize;
+                [
+                    Vec4::new(255.0, 128.0, 64.0, 255.0),
+                    Vec4::new(64.0, 255.0, 128.0, 255.0),
+                    Vec4::new(128.0, 64.0, 255.0, 255.0),
+                    Vec4::new(32.0, 192.0, 96.0, 255.0),
+                ][index]
+                    / 255.0
             } else {
                 Vec4::ONE
             };
@@ -650,6 +680,10 @@ mod tests {
                                     0.25 + burst as f32 / 24.0,
                                 ),
                                 has_texture: ((i + burst) % 2) as u32,
+                                uv_offset: Vec2::new(
+                                    (i % 2) as f32 * 0.5,
+                                    (burst % 2) as f32 * 0.5,
+                                ),
                             },
                         )
                     })
@@ -717,6 +751,7 @@ mod tests {
                 params: PonEfMaterialParams {
                     color: Vec4::ONE,
                     has_texture: 1,
+                    uv_offset: Vec2::ZERO,
                 },
                 texture: Some(first.clone()),
                 blend: PonEfBlendMode::SrcAlphaOne,
@@ -826,6 +861,7 @@ mod tests {
                         PonEfMaterialParams {
                             color: Vec4::new(1.0, 0.0, 0.0, tick as f32 / 60.0),
                             has_texture: u32::from(tick > 30),
+                            uv_offset: Vec2::ZERO,
                         },
                     ),
                     (
@@ -833,6 +869,7 @@ mod tests {
                         PonEfMaterialParams {
                             color: Vec4::Y,
                             has_texture: 0,
+                            uv_offset: Vec2::ZERO,
                         },
                     ),
                 ];

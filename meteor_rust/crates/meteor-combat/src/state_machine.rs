@@ -60,6 +60,10 @@ pub fn can_interrupt(state: FighterState, action: Action) -> bool {
 pub trait FighterView {
     fn guard_held(&self) -> bool;
 
+    fn can_guard(&self) -> bool {
+        true
+    }
+
     fn in_guard_state(&self) -> bool;
 
     fn pose_id(&self) -> u16;
@@ -184,7 +188,7 @@ impl<F: FighterView> StateMachine<F> {
         }
         let crossed_name_boundary = state == FighterState::Name;
         let mut state = state;
-        if state == FighterState::Name && self.fighter.guard_held() {
+        if state == FighterState::Name && self.fighter.guard_held() && self.fighter.can_guard() {
             state = FighterState::Guard;
         }
         if state == self.current {
@@ -334,6 +338,9 @@ impl<F: FighterView> StateMachine<F> {
                 {
                     return true;
                 }
+                if !self.fighter.can_guard() {
+                    return false;
+                }
                 if self.current == FighterState::Name {
                     self.transition(FighterState::Guard);
                 }
@@ -437,12 +444,10 @@ impl<F: FighterView> StateMachine<F> {
                 true
             }
             Action::Cure => {
-                if self.current != FighterState::Name || self.fighter.is_airborne() {
+                if self.current != FighterState::Name {
                     return false;
                 }
-                if self.fighter.weapon_action_vetoed() {
-                    return false;
-                }
+
                 self.transition(FighterState::Cure);
                 self.locked = true;
                 true
@@ -681,6 +686,7 @@ mod tests {
 
     struct StubFighter {
         guard_held: bool,
+        can_guard: bool,
         in_guard: bool,
         pose: u16,
         finished: bool,
@@ -707,6 +713,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 guard_held: false,
+                can_guard: true,
                 in_guard: false,
                 pose: 0,
                 finished: false,
@@ -739,6 +746,9 @@ mod tests {
     }
 
     impl FighterView for StubFighter {
+        fn can_guard(&self) -> bool {
+            self.can_guard
+        }
         fn guard_held(&self) -> bool {
             self.guard_held
         }
@@ -830,6 +840,25 @@ mod tests {
         assert_eq!(sm.current, FighterState::Jump);
         assert!(!sm.handle_input(Action::Idle));
         assert_eq!(sm.current, FighterState::Jump);
+    }
+
+    #[test]
+    fn weapon_guard_veto_blocks_press_and_reentry_but_keeps_getup() {
+        let mut f = StubFighter::new();
+        f.can_guard = false;
+        f.guard_held = true;
+        let mut sm = StateMachine::new(f);
+        assert!(!sm.handle_input(Action::Guard));
+        assert_eq!(sm.current, FighterState::Name);
+        sm.transition(FighterState::Jump);
+        sm.transition(FighterState::Name);
+        assert_eq!(sm.current, FighterState::Name);
+        assert!(!sm.fighter.in_guard);
+        sm.transition(FighterState::Fake);
+        assert!(sm.handle_input(Action::Guard));
+        assert_eq!(sm.current, FighterState::BeHit);
+        assert_eq!(sm.linked_recovery_pose_id, Some(35));
+        assert!(sm.handle_input(Action::GuardRelease));
     }
 
     #[test]
@@ -1003,6 +1032,21 @@ mod tests {
         assert_eq!(fake.current, FighterState::Fake);
         assert_eq!(fake.fighter.pose, 117);
         assert_eq!(fake.fighter.last_play_hard, Some(true));
+    }
+
+    #[test]
+    fn cure_uses_controller_mode_without_extra_weapon_or_ground_contact_gates() {
+        let mut fighter = StubFighter::new();
+        fighter.airborne = true;
+        fighter.ground_contact = Some(false);
+        fighter.veto = true;
+        let mut sm = StateMachine::new(fighter);
+        assert!(sm.handle_input(Action::Cure));
+        assert_eq!(sm.current, FighterState::Cure);
+
+        let mut sm = StateMachine::new(StubFighter::new());
+        sm.current = FighterState::Jump;
+        assert!(!sm.handle_input(Action::Cure));
     }
 
     #[test]

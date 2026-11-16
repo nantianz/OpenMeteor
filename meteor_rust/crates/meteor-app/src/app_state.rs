@@ -50,6 +50,7 @@ pub struct LaunchRequest {
     pub stock_health_item: bool,
     pub stock_update_item: bool,
     pub stock_special_item: bool,
+    pub balance_rules: bool,
 
     pub stock_camp: u32,
 
@@ -78,6 +79,7 @@ impl Default for LaunchRequest {
             stock_health_item: true,
             stock_update_item: true,
             stock_special_item: true,
+            balance_rules: false,
             stock_camp: 0,
             spawn_room_npcs: false,
             error: None,
@@ -133,17 +135,45 @@ pub struct Settings {
     pub texture_quality: u8,
     pub hit_effects: bool,
     pub hit_stop: bool,
+
+    pub hit_shake: bool,
+
+    pub hit_sway: bool,
+
+    pub character_motion: bool,
+
+    pub new_character_models: bool,
     pub volumetric_fog: bool,
     pub target_fps: u32,
     pub brightness: f32,
     pub contrast: f32,
+
+    pub sharpness: f32,
     pub gamma: f32,
+
+    pub dynamic_shadows: bool,
+
+    pub scene_normal_maps: bool,
+
+    pub hd_scene: bool,
+
+    pub water_enhance: bool,
+
+    pub water_live_reflections: bool,
+
+    pub environment_lighting: bool,
+
+    pub dlss5_neural_rendering: bool,
     pub music_enabled: bool,
 
     pub music_volume: f32,
 
     pub audio_volume: f32,
     pub auto_camera: bool,
+
+    pub camera_fov: f32,
+
+    pub first_person: bool,
     pub lock_flag: bool,
     pub show_names: bool,
     pub reverse_mouse: bool,
@@ -168,16 +198,31 @@ impl Default for Settings {
             texture_quality: 0,
             hit_effects: false,
             hit_stop: false,
+            hit_shake: true,
+            hit_sway: false,
+            character_motion: true,
+            new_character_models: true,
             volumetric_fog: false,
             target_fps: 0,
             brightness: 94.0,
             contrast: 94.0,
+            sharpness: 0.3,
             gamma: 49.0,
+            dynamic_shadows: false,
+            scene_normal_maps: true,
+            hd_scene: true,
+            water_enhance: true,
+            water_live_reflections: false,
+            environment_lighting: false,
+
+            dlss5_neural_rendering: false,
 
             music_enabled: !cfg!(target_arch = "wasm32"),
             music_volume: 50.0,
             audio_volume: 50.0,
             auto_camera: true,
+            camera_fov: Self::CAMERA_FOV_DEFAULT,
+            first_person: false,
             lock_flag: true,
             show_names: true,
             reverse_mouse: false,
@@ -190,8 +235,20 @@ impl Default for Settings {
 }
 
 impl Settings {
+    pub const CAMERA_FOV_DEFAULT: f32 = 60.0;
+    pub const CAMERA_FOV_MIN: f32 = 40.0;
+    pub const CAMERA_FOV_MAX: f32 = 100.0;
     pub const MOUSE_SPEED_MIN: f32 = 1.0;
     pub const MOUSE_SPEED_MAX: f32 = 300.0;
+
+    pub fn camera_fov_degrees(&self) -> f32 {
+        if self.camera_fov.is_finite() {
+            self.camera_fov
+                .clamp(Self::CAMERA_FOV_MIN, Self::CAMERA_FOV_MAX)
+        } else {
+            Self::CAMERA_FOV_DEFAULT
+        }
+    }
 
     pub fn music_volume_linear(&self) -> f32 {
         (self.music_volume / 100.0).clamp(0.0, 1.0)
@@ -278,7 +335,6 @@ pub struct Keymap {
     pub jump: InputBinding,
     pub crouch: InputBinding,
     pub guard: InputBinding,
-    pub run: InputBinding,
     pub attack: InputBinding,
 
     pub qi_burst: InputBinding,
@@ -309,7 +365,6 @@ impl Default for Keymap {
             jump: InputBinding::Key(KeyCode::Space),
             crouch: InputBinding::Key(KeyCode::KeyC),
             guard: InputBinding::Mouse(MouseButton::Right),
-            run: InputBinding::Key(KeyCode::ControlLeft),
             attack: InputBinding::Mouse(MouseButton::Left),
             qi_burst: InputBinding::Key(KeyCode::KeyF),
 
@@ -339,7 +394,6 @@ pub enum KeyField {
     Jump,
     Crouch,
     Guard,
-    Run,
     Attack,
     QiBurst,
     Fake,
@@ -367,7 +421,6 @@ impl KeyField {
             Self::Jump => "跳跃",
             Self::Crouch => "蹲下",
             Self::Guard => "防御",
-            Self::Run => "疾跑",
             Self::Attack => "攻击",
             Self::QiBurst => "爆气（消耗 60 怒气）",
             Self::Fake => "假死",
@@ -395,7 +448,6 @@ impl KeyField {
             Self::Jump => keymap.jump,
             Self::Crouch => keymap.crouch,
             Self::Guard => keymap.guard,
-            Self::Run => keymap.run,
             Self::Attack => keymap.attack,
             Self::QiBurst => keymap.qi_burst,
             Self::Fake => keymap.fake,
@@ -427,7 +479,6 @@ impl KeyField {
             Self::Jump => keymap.jump = binding,
             Self::Crouch => keymap.crouch = binding,
             Self::Guard => keymap.guard = binding,
-            Self::Run => keymap.run = binding,
             Self::Attack => keymap.attack = binding,
             Self::QiBurst => keymap.qi_burst = binding,
             Self::Fake => keymap.fake = binding,
@@ -446,7 +497,7 @@ impl KeyField {
         }
     }
 
-    pub const BINDING_ACTIONS: [KeyField; 22] = [
+    pub const BINDING_ACTIONS: [KeyField; 21] = [
         Self::MoveUp,
         Self::MoveDown,
         Self::MoveLeft,
@@ -454,7 +505,6 @@ impl KeyField {
         Self::Jump,
         Self::Crouch,
         Self::Guard,
-        Self::Run,
         Self::Attack,
         Self::QiBurst,
         Self::Fake,
@@ -686,15 +736,29 @@ fn settings_text(settings: &Settings, keymap: &Keymap) -> String {
 texture_quality={}
 hit_effects={}
 hit_stop={}
+hit_shake={}
+hit_sway={}
+character_motion={}
+new_character_models={}
 volumetric_fog={}
 target_fps={}
 brightness={}
 contrast={}
+sharpness={}
 gamma={}
+dynamic_shadows={}
+scene_normal_maps={}
+hd_scene={}
+water_enhance={}
+water_live_reflections={}
+environment_lighting={}
+dlss5_neural_rendering={}
 music_enabled={}
 music_volume={}
 audio_volume={}
 auto_camera={}
+camera_fov={}
+first_person={}
 lock_flag={}
 show_names={}
 reverse_mouse={}
@@ -707,15 +771,29 @@ touch_controls={}
         settings.texture_quality,
         u8::from(settings.hit_effects),
         u8::from(settings.hit_stop),
+        u8::from(settings.hit_shake),
+        u8::from(settings.hit_sway),
+        u8::from(settings.character_motion),
+        u8::from(settings.new_character_models),
         u8::from(settings.volumetric_fog),
         settings.target_fps,
         settings.brightness,
         settings.contrast,
+        settings.sharpness,
         settings.gamma,
+        u8::from(settings.dynamic_shadows),
+        u8::from(settings.scene_normal_maps),
+        u8::from(settings.hd_scene),
+        u8::from(settings.water_enhance),
+        u8::from(settings.water_live_reflections),
+        u8::from(settings.environment_lighting),
+        u8::from(settings.dlss5_neural_rendering),
         u8::from(settings.music_enabled),
         settings.music_volume,
         settings.audio_volume,
         u8::from(settings.auto_camera),
+        settings.camera_fov_degrees(),
+        u8::from(settings.first_person),
         u8::from(settings.lock_flag),
         u8::from(settings.show_names),
         u8::from(settings.reverse_mouse),
@@ -766,7 +844,6 @@ fn key_field_storage_key(field: KeyField) -> &'static str {
         KeyField::Jump => "jump",
         KeyField::Crouch => "crouch",
         KeyField::Guard => "guard",
-        KeyField::Run => "run",
         KeyField::Attack => "attack",
         KeyField::QiBurst => "qi_burst",
         KeyField::Fake => "fake",
@@ -808,6 +885,10 @@ pub fn load_settings() -> (Settings, Keymap) {
 fn parse_settings(text: &str) -> (Settings, Keymap) {
     let mut settings = Settings::default();
     let mut keymap = Keymap::default();
+    let has_hd_scene = text.lines().any(|line| {
+        line.split_once('=')
+            .is_some_and(|(key, _)| key.trim() == "hd_scene")
+    });
     for line in text.lines() {
         let Some((key, value)) = line.split_once('=') else {
             continue;
@@ -829,11 +910,27 @@ fn parse_settings(text: &str) -> (Settings, Keymap) {
             }
             "hit_effects" => settings.hit_effects = parse_bool(value),
             "hit_stop" => settings.hit_stop = parse_bool(value),
+            "hit_shake" => settings.hit_shake = parse_bool(value),
+            "hit_sway" => settings.hit_sway = parse_bool(value),
+            "character_motion" => settings.character_motion = parse_bool(value),
+            "new_character_models" => settings.new_character_models = parse_bool(value),
             "volumetric_fog" => settings.volumetric_fog = parse_bool(value),
             "target_fps" => settings.target_fps = value.parse().unwrap_or(settings.target_fps),
             "brightness" => settings.brightness = value.parse().unwrap_or(settings.brightness),
             "contrast" => settings.contrast = value.parse().unwrap_or(settings.contrast),
+            "sharpness" => {
+                settings.sharpness = value.parse().unwrap_or(settings.sharpness).clamp(0.0, 1.0);
+            }
             "gamma" => settings.gamma = value.parse().unwrap_or(settings.gamma),
+            "dynamic_shadows" => settings.dynamic_shadows = parse_bool(value),
+            "scene_normal_maps" => settings.scene_normal_maps = parse_bool(value),
+            "hd_scene" => settings.hd_scene = parse_bool(value),
+
+            "sn06_remastered_textures" if !has_hd_scene => settings.hd_scene = parse_bool(value),
+            "water_enhance" => settings.water_enhance = parse_bool(value),
+            "water_live_reflections" => settings.water_live_reflections = parse_bool(value),
+            "environment_lighting" => settings.environment_lighting = parse_bool(value),
+            "dlss5_neural_rendering" => settings.dlss5_neural_rendering = parse_bool(value),
             "music_enabled" => settings.music_enabled = parse_bool(value),
             "music_volume" => {
                 settings.music_volume = value.parse().unwrap_or(settings.music_volume);
@@ -842,6 +939,11 @@ fn parse_settings(text: &str) -> (Settings, Keymap) {
                 settings.audio_volume = value.parse().unwrap_or(settings.audio_volume);
             }
             "auto_camera" => settings.auto_camera = parse_bool(value),
+            "camera_fov" => {
+                settings.camera_fov = value.parse().unwrap_or(settings.camera_fov);
+                settings.camera_fov = settings.camera_fov_degrees();
+            }
+            "first_person" => settings.first_person = parse_bool(value),
             "lock_flag" => settings.lock_flag = parse_bool(value),
             "show_names" => settings.show_names = parse_bool(value),
             "reverse_mouse" => settings.reverse_mouse = parse_bool(value),
@@ -873,7 +975,6 @@ fn parse_settings(text: &str) -> (Settings, Keymap) {
             "jump" => apply_binding_value(&mut keymap, KeyField::Jump, value),
             "crouch" => apply_binding_value(&mut keymap, KeyField::Crouch, value),
             "guard" => apply_binding_value(&mut keymap, KeyField::Guard, value),
-            "run" => apply_binding_value(&mut keymap, KeyField::Run, value),
             "attack" => apply_binding_value(&mut keymap, KeyField::Attack, value),
             "qi_burst" | "hit_attack" => apply_binding_value(&mut keymap, KeyField::QiBurst, value),
             "fake" => apply_binding_value(&mut keymap, KeyField::Fake, value),
@@ -919,9 +1020,21 @@ pub enum SettingsBoolField {
     BorderlessWindow,
     HitEffects,
     HitStop,
+    HitShake,
+    HitSway,
+    CharacterMotion,
+    NewCharacterModels,
     VolumetricFog,
+    DynamicShadows,
+    SceneNormalMaps,
+    HdScene,
+    WaterEnhance,
+    WaterLiveReflections,
+    EnvironmentLighting,
+    Dlss5NeuralRendering,
     MusicEnabled,
     AutoCamera,
+    FirstPerson,
     LockFlag,
     ShowNames,
     ReverseMouse,
@@ -946,10 +1059,12 @@ pub enum SettingsSelectField {
 pub enum SettingsRangeField {
     Brightness,
     Contrast,
+    Sharpness,
     Gamma,
     MusicVolume,
     AudioVolume,
     MouseSpeed,
+    CameraFov,
 }
 
 #[derive(Component, Debug, Clone, Copy)]
@@ -982,6 +1097,7 @@ pub struct LoadedStageInfo {
 
 #[derive(Resource, Debug, Clone, Default)]
 pub struct LoadedStageAssets {
+    pub ticket_mask: Option<u32>,
     pub gmb: Option<Vec<u8>>,
     pub des: Option<Vec<u8>>,
     pub cob: Option<Vec<u8>>,
@@ -1151,6 +1267,9 @@ pub enum StockItemRule {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct MenuStockItemRuleButton(pub StockItemRule);
 
+#[derive(Component)]
+pub struct MenuBalanceRulesButton;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StockConfigField {
     GameNum,
@@ -1216,6 +1335,25 @@ mod keymap_tests {
     use super::*;
 
     #[test]
+    fn legacy_run_binding_is_ignored_and_not_saved() {
+        let (settings, mut keymap) = parse_settings("run=Mouse0\njump=ControlLeft\n");
+        assert_eq!(keymap.attack, InputBinding::Mouse(MouseButton::Left));
+        assert_eq!(keymap.jump, InputBinding::Key(KeyCode::ControlLeft));
+        assign_key_binding(
+            &mut keymap,
+            KeyField::MoveUp,
+            InputBinding::Key(KeyCode::ControlLeft),
+        );
+        assert_eq!(keymap.move_up, InputBinding::Key(KeyCode::ControlLeft));
+        assert_eq!(keymap.jump, InputBinding::Key(KeyCode::KeyW));
+        let saved = settings_text(&settings, &keymap);
+        assert!(!saved.lines().any(|line| line.starts_with("run=")));
+        let (_, restored) = parse_settings(&saved);
+        assert_eq!(restored.move_up, keymap.move_up);
+        assert_eq!(restored.jump, keymap.jump);
+    }
+
+    #[test]
     fn debug_panel_binding_swaps_and_restores_from_saved_value() {
         let mut keymap = Keymap::default();
         assert_eq!(keymap.debug_panel.label(), "～");
@@ -1267,6 +1405,101 @@ mod keymap_tests {
 #[cfg(test)]
 mod graphics_settings_persistence_tests {
     #[test]
+    fn camera_fov_defaults_round_trips_and_rejects_invalid_projection_angles() {
+        assert_eq!(super::parse_settings("auto_camera=1\n").0.camera_fov, 60.0);
+        for degrees in [40.0, 60.0, 85.0, 100.0] {
+            let settings = super::Settings {
+                camera_fov: degrees,
+                ..Default::default()
+            };
+            let text = super::settings_text(&settings, &super::Keymap::default());
+            assert_eq!(super::parse_settings(&text).0.camera_fov, degrees);
+        }
+        for (value, expected) in [
+            ("0", 40.0),
+            ("180", 100.0),
+            ("NaN", 60.0),
+            ("inf", 60.0),
+            ("-inf", 60.0),
+            ("bad", 60.0),
+        ] {
+            assert_eq!(
+                super::parse_settings(&format!("camera_fov={value}\n"))
+                    .0
+                    .camera_fov,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn scene_normals_default_on_and_round_trip() {
+        assert!(
+            super::parse_settings("music_volume=10\n")
+                .0
+                .scene_normal_maps
+        );
+        for enabled in [false, true] {
+            let settings = super::Settings {
+                scene_normal_maps: enabled,
+                ..Default::default()
+            };
+            let loaded =
+                super::parse_settings(&super::settings_text(&settings, &super::Keymap::default()))
+                    .0;
+            assert_eq!(loaded.scene_normal_maps, enabled);
+        }
+    }
+
+    #[test]
+    fn hd_scene_default_on_and_round_trip() {
+        assert!(super::parse_settings("music_volume=10\n").0.hd_scene);
+        for enabled in [false, true] {
+            let settings = super::Settings {
+                hd_scene: enabled,
+                ..Default::default()
+            };
+            let loaded =
+                super::parse_settings(&super::settings_text(&settings, &super::Keymap::default()))
+                    .0;
+            assert_eq!(loaded.hd_scene, enabled);
+        }
+        assert!(
+            !super::parse_settings("sn06_remastered_textures=0\n")
+                .0
+                .hd_scene
+        );
+        for text in [
+            "hd_scene=1\nsn06_remastered_textures=0\n",
+            "sn06_remastered_textures=0\nhd_scene=1\n",
+        ] {
+            assert!(super::parse_settings(text).0.hd_scene);
+        }
+    }
+
+    #[test]
+    fn water_enhance_default_on_live_reflection_opt_in_and_round_trip() {
+        assert!(super::parse_settings("music_volume=10\n").0.water_enhance);
+        assert!(
+            !super::parse_settings("music_volume=10\n")
+                .0
+                .water_live_reflections
+        );
+        for enabled in [false, true] {
+            let settings = super::Settings {
+                water_enhance: enabled,
+                water_live_reflections: enabled,
+                ..Default::default()
+            };
+            let loaded =
+                super::parse_settings(&super::settings_text(&settings, &super::Keymap::default()))
+                    .0;
+            assert_eq!(loaded.water_enhance, enabled);
+            assert_eq!(loaded.water_live_reflections, enabled);
+        }
+    }
+
+    #[test]
     fn hit_stop_is_opt_in_and_persisted() {
         let (legacy, _) = super::parse_settings("hit_effects=1\n");
         assert!(legacy.hit_effects);
@@ -1279,6 +1512,117 @@ mod graphics_settings_persistence_tests {
             let (loaded, _) =
                 super::parse_settings(&super::settings_text(&settings, &super::Keymap::default()));
             assert_eq!(loaded.hit_stop, enabled);
+        }
+    }
+
+    #[test]
+    fn hit_shake_preserves_legacy_behavior_and_persists_independently() {
+        assert!(super::Settings::default().hit_shake);
+        assert!(
+            super::parse_settings("hit_effects=1\nhit_stop=0\n")
+                .0
+                .hit_shake
+        );
+        for effects in [false, true] {
+            for shake in [false, true] {
+                let settings = super::Settings {
+                    hit_effects: effects,
+                    hit_shake: shake,
+                    hit_stop: false,
+                    ..Default::default()
+                };
+                let (loaded, _) = super::parse_settings(&super::settings_text(
+                    &settings,
+                    &super::Keymap::default(),
+                ));
+                assert_eq!(loaded.hit_effects, effects);
+                assert_eq!(loaded.hit_shake, shake);
+                assert!(!loaded.hit_stop);
+            }
+        }
+    }
+
+    #[test]
+    fn first_person_is_opt_in_and_persisted() {
+        assert!(!super::parse_settings("auto_camera=1\n").0.first_person);
+        for enabled in [true, false] {
+            let settings = super::Settings {
+                first_person: enabled,
+                ..Default::default()
+            };
+            let (loaded, _) =
+                super::parse_settings(&super::settings_text(&settings, &super::Keymap::default()));
+            assert_eq!(loaded.first_person, enabled);
+        }
+    }
+
+    #[test]
+    fn hit_sway_is_opt_in_and_persisted_independently() {
+        assert!(
+            !super::parse_settings("hit_effects=1\nhit_stop=1\n")
+                .0
+                .hit_sway
+        );
+        for enabled in [false, true] {
+            let settings = super::Settings {
+                hit_sway: enabled,
+                ..Default::default()
+            };
+            let (loaded, _) =
+                super::parse_settings(&super::settings_text(&settings, &super::Keymap::default()));
+            assert_eq!(loaded.hit_sway, enabled);
+            assert!(!loaded.hit_effects);
+            assert!(!loaded.hit_stop);
+        }
+    }
+
+    #[test]
+    fn character_motion_is_persisted_and_defaults_on_for_prepared_visuals() {
+        assert!(super::parse_settings("hit_sway=0\n").0.character_motion);
+        for enabled in [false, true] {
+            let settings = super::Settings {
+                character_motion: enabled,
+                ..Default::default()
+            };
+            let (loaded, _) =
+                super::parse_settings(&super::settings_text(&settings, &super::Keymap::default()));
+            assert_eq!(loaded.character_motion, enabled);
+            assert!(!loaded.hit_sway);
+        }
+    }
+
+    #[test]
+    fn new_character_models_defaults_on_and_persists_independently_of_motion() {
+        assert!(
+            super::parse_settings("character_motion=0\n")
+                .0
+                .new_character_models
+        );
+        for enabled in [false, true] {
+            let settings = super::Settings {
+                new_character_models: enabled,
+                character_motion: false,
+                ..Default::default()
+            };
+            let (loaded, _) =
+                super::parse_settings(&super::settings_text(&settings, &super::Keymap::default()));
+            assert_eq!(loaded.new_character_models, enabled);
+            assert!(!loaded.character_motion);
+        }
+    }
+
+    #[test]
+    fn dlss5_neural_rendering_is_opt_in_and_persisted() {
+        let (legacy, _) = super::parse_settings("music_volume=10\n");
+        assert!(!legacy.dlss5_neural_rendering);
+        for enabled in [false, true] {
+            let settings = super::Settings {
+                dlss5_neural_rendering: enabled,
+                ..Default::default()
+            };
+            let (loaded, _) =
+                super::parse_settings(&super::settings_text(&settings, &super::Keymap::default()));
+            assert_eq!(loaded.dlss5_neural_rendering, enabled);
         }
     }
     use super::*;

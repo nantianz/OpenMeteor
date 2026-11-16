@@ -1,3 +1,6 @@
+#[cfg(not(target_arch = "wasm32"))]
+mod stock_scene;
+
 use bevy::prelude::*;
 use meteor_asset::pos::AttackBlock;
 use meteor_combat::hit_reaction::{
@@ -283,6 +286,10 @@ enum NetOutbound {
     #[cfg(not(target_arch = "wasm32"))]
     StockNpcHit(Entity, StockHitRequest),
     #[cfg(not(target_arch = "wasm32"))]
+    StockNpcWeaponDrop(Entity, StockWeaponDropCommand),
+    #[cfg(not(target_arch = "wasm32"))]
+    StockNpcWeaponRest(Entity, u32, [f32; 3]),
+    #[cfg(not(target_arch = "wasm32"))]
     StockAngerSpend {
         actor: Option<Entity>,
         key: (u32, u16),
@@ -291,6 +298,8 @@ enum NetOutbound {
     },
     #[cfg(not(target_arch = "wasm32"))]
     StockSceneManifest(Vec<StockAuthoredSceneItem>),
+    #[cfg(not(target_arch = "wasm32"))]
+    StockSceneTransfer(u32, RoleState),
     #[cfg(not(target_arch = "wasm32"))]
     StockEnvironmentGeometry(meteor_scene::hazards::StageHazards),
     #[cfg(not(target_arch = "wasm32"))]
@@ -313,6 +322,8 @@ enum NetInbound {
     #[cfg(not(target_arch = "wasm32"))]
     StockNpcEvent(Entity, StockGameEvent),
     #[cfg(not(target_arch = "wasm32"))]
+    StockNpcWeaponEvent(Entity, StockGameEvent),
+    #[cfg(not(target_arch = "wasm32"))]
     StockVitals {
         actor: Option<Entity>,
         vitals: StockVitalsEvent,
@@ -325,6 +336,9 @@ enum NetInbound {
 }
 
 pub(super) fn default_web_address() -> String {
+    if env!("METEOR_BUILD_WS").is_empty() {
+        return String::new();
+    }
     #[cfg(target_arch = "wasm32")]
     if env!("METEOR_BUILD_WS") == "/ws" {
         if let Some(window) = web_sys::window() {
@@ -474,6 +488,7 @@ pub struct NetState {
     pub stage: String,
 
     pub friendly_fire: bool,
+    pub battle_rules: meteor_combat::battle_rules::BattleRules,
     pub match_epoch: Option<u32>,
     pub round_epoch: Option<u32>,
     pub last_full_snapshot_tick: Option<u32>,
@@ -483,6 +498,10 @@ pub struct NetState {
     pub pending_objective_end: Option<i32>,
 
     pub round_active: bool,
+
+    pub round_remaining_seconds: Option<f32>,
+
+    pub round_time_minutes: Option<u32>,
     pub battle_result: Option<super::battle_result::NetworkBattleResult>,
     pub stock_round_number: u32,
     pub stock_round_start_wins: [u32; 2],
@@ -505,9 +524,13 @@ pub struct NetState {
     pub pending_stock_kills: Vec<(String, String)>,
 
     pub pending_stock_scene_items: Vec<StockSceneItemPickup>,
+
+    pub pending_escort_pickups: Vec<String>,
     pub pending_status_effects: Vec<(Option<Entity>, meteor_network::role_state::PropertyEffect)>,
 
     pub pending_stock_scene_grounded: Vec<StockSceneItemGrounded>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) stock_scene_frame: Option<StockSceneFrame>,
 
     pub remote_pose_sequences: std::collections::HashMap<String, (u16, u16)>,
 
@@ -527,13 +550,23 @@ pub struct NetState {
 
     pub pending_respawns: Vec<String>,
 
+    pub pending_remote_death_clears: Vec<String>,
+
     pub pending_spawn_relocations: std::collections::HashSet<String>,
+
+    pub pending_spawn_pads:
+        std::collections::HashMap<String, Option<meteor_network::spawn::SpawnPad>>,
 
     pub escort_flag: Option<EscortFlagSnapshot>,
     pub(crate) escort_definition:
         Option<std::sync::Arc<meteor_network::escort_definition::EscortDefinition>>,
 
     pub pending_scene_ops: Vec<SceneOp>,
+    pub stock_runtime_generation: Option<u32>,
+    pub stock_scene_hit_peers: std::collections::HashSet<String>,
+    pub projectile_sync_enabled: bool,
+    pub pending_projectiles: Vec<meteor_network::runtime_sync::ProjectileState>,
+    pub pending_projectile_owner_clears: Vec<String>,
     pub(crate) pending_scene_prop_hits: Vec<Message>,
     pub(crate) pending_scene_transfers: Vec<SceneTransfer>,
     pub(crate) applied_scene_transfers: std::collections::HashMap<String, SceneTransfer>,
@@ -563,6 +596,10 @@ pub struct NetState {
     pub radar_star_players: std::collections::HashSet<String>,
 
     pub chat_messages: std::collections::VecDeque<(String, String)>,
+
+    pub pending_system_notices: Vec<String>,
+
+    pub(crate) pending_stock_entry_notices: std::collections::HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -678,6 +715,7 @@ impl Default for NetState {
             mode: String::new(),
             stage: String::new(),
             friendly_fire: false,
+            battle_rules: Default::default(),
             stock_npc_actors: Default::default(),
             stock_npc_ready: Default::default(),
             pending_npc_hits: Vec::new(),
@@ -696,6 +734,8 @@ impl Default for NetState {
             wire_format: NetWireFormat::from_environment(),
             pending_objective_end: None,
             round_active: false,
+            round_remaining_seconds: None,
+            round_time_minutes: None,
             battle_result: None,
             stock_round_number: 1,
             stock_round_start_wins: [0, 0],
@@ -710,8 +750,11 @@ impl Default for NetState {
             pending_remote_vitals: Default::default(),
             pending_stock_kills: Vec::new(),
             pending_stock_scene_items: Vec::new(),
+            pending_escort_pickups: Vec::new(),
             pending_status_effects: Vec::new(),
             pending_stock_scene_grounded: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            stock_scene_frame: None,
             remote_pose_sequences: std::collections::HashMap::new(),
             remote_pose_ids: std::collections::HashMap::new(),
             remote_actor_profiles: std::collections::HashMap::new(),
@@ -723,10 +766,17 @@ impl Default for NetState {
             pending_hits: Vec::new(),
             pending_remote_hits: Vec::new(),
             pending_respawns: Vec::new(),
+            pending_remote_death_clears: Vec::new(),
             pending_spawn_relocations: Default::default(),
+            pending_spawn_pads: Default::default(),
             escort_flag: None,
             escort_definition: None,
             pending_scene_ops: Vec::new(),
+            stock_runtime_generation: None,
+            stock_scene_hit_peers: Default::default(),
+            projectile_sync_enabled: false,
+            pending_projectiles: Vec::new(),
+            pending_projectile_owner_clears: Vec::new(),
             pending_scene_prop_hits: Vec::new(),
             pending_scene_transfers: Vec::new(),
             applied_scene_transfers: std::collections::HashMap::new(),
@@ -743,12 +793,40 @@ impl Default for NetState {
             stock_vips: [None, None],
             radar_star_players: std::collections::HashSet::new(),
             chat_messages: std::collections::VecDeque::new(),
+            pending_system_notices: Vec::new(),
+            pending_stock_entry_notices: Default::default(),
         }
+    }
+}
+
+fn queue_projectile_state(
+    net: &mut NetState,
+    state: meteor_network::runtime_sync::ProjectileState,
+) {
+    if !state.valid() || state.player_id == net.player_id {
+        return;
+    }
+
+    if let Some(previous) = net
+        .pending_projectiles
+        .iter_mut()
+        .find(|previous| previous.player_id == state.player_id && previous.id == state.id)
+    {
+        if meteor_network::runtime_sync::newer(state.sequence, previous.sequence)
+            || previous.sequence == state.sequence && !state.active
+        {
+            *previous = state;
+        }
+    } else if net.pending_projectiles.len() < 512 {
+        net.pending_projectiles.push(state);
     }
 }
 
 impl NetState {
     pub fn is_scene_authority(&self) -> bool {
+        if self.is_stock_udp() {
+            return self.is_stock_host();
+        }
         self.members
             .first()
             .is_some_and(|member| member.player_id == self.player_id)
@@ -836,6 +914,45 @@ impl NetTx {
             let _ = tx.send(message);
         }
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn send_stock_scene_transfer(&self, actor_id: u32, position: Vec3, yaw: f32) {
+        let mut state = decode_request1_state(&[0; 20]).unwrap();
+        state.position = RoleVec3 {
+            x: position.x,
+            y: position.y,
+            z: position.z,
+        };
+        state.forward = RoleVec3 {
+            x: yaw.sin(),
+            y: 0.0,
+            z: yaw.cos(),
+        };
+        if let Some(tx) = &self.active {
+            let _ = tx.send(NetOutbound::StockSceneTransfer(actor_id, state));
+        }
+    }
+
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn capture_scene_transfers_for_test() -> (Self, impl Fn() -> Vec<(u32, RoleState)>) {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let capture = move || {
+            receiver
+                .try_iter()
+                .filter_map(|message| match message {
+                    NetOutbound::StockSceneTransfer(actor, state) => Some((actor, state)),
+                    _ => None,
+                })
+                .collect()
+        };
+        (
+            Self {
+                active: Some(sender),
+                connecting: None,
+            },
+            capture,
+        )
+    }
+
     pub fn send_control(&self, message: Message) {
         if let Some(tx) = &self.active {
             let _ = tx.send(NetOutbound::Control(message));
@@ -877,6 +994,25 @@ impl NetTx {
         if let Some(tx) = &self.active {
             let _ = tx.send(NetOutbound::StockWeaponDropRest(id, position));
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn send_stock_npc_weapon_rest(&self, entity: Entity, id: u32, position: [f32; 3]) {
+        if let Some(tx) = &self.active {
+            let _ = tx.send(NetOutbound::StockNpcWeaponRest(entity, id, position));
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn send_stock_npc_weapon_drop(
+        &self,
+        entity: Entity,
+        command: StockWeaponDropCommand,
+    ) -> bool {
+        self.active.as_ref().is_some_and(|tx| {
+            tx.send(NetOutbound::StockNpcWeaponDrop(entity, command))
+                .is_ok()
+        })
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -926,6 +1062,26 @@ pub(crate) fn control_test_channel() -> (NetTx, impl Fn() -> Vec<Message>) {
             rx.try_iter()
                 .filter_map(|outbound| match outbound {
                     NetOutbound::Control(message) => Some(message),
+                    _ => None,
+                })
+                .collect()
+        },
+    )
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) fn npc_drop_test_channel() -> (NetTx, impl Fn() -> Vec<(Entity, StockWeaponDropCommand)>)
+{
+    let (tx, rx) = std::sync::mpsc::channel();
+    (
+        NetTx {
+            active: Some(tx),
+            connecting: None,
+        },
+        move || {
+            rx.try_iter()
+                .filter_map(|outbound| match outbound {
+                    NetOutbound::StockNpcWeaponDrop(entity, command) => Some((entity, command)),
                     _ => None,
                 })
                 .collect()
@@ -1348,7 +1504,7 @@ impl PendingNetActions {
         }
     }
 
-    fn take(&mut self) -> Vec<String> {
+    pub(crate) fn take(&mut self) -> Vec<String> {
         std::mem::take(&mut self.actions)
     }
 }
@@ -1388,6 +1544,9 @@ pub(crate) struct RemoteContactSegment {
     pub(crate) valid: bool,
 
     pub(crate) role_driven: bool,
+
+    pub(crate) pending_stock_state: bool,
+    pub(crate) skip_stock_motion: bool,
     pub(crate) state_age: f32,
     pub(crate) hit_age: f32,
 }
@@ -1399,6 +1558,8 @@ impl Default for RemoteContactSegment {
             to: Vec3::ZERO,
             valid: false,
             role_driven: false,
+            pending_stock_state: false,
+            skip_stock_motion: false,
             state_age: 0.0,
             hit_age: 10.0,
         }
@@ -1407,6 +1568,8 @@ impl Default for RemoteContactSegment {
 
 #[derive(Component, Debug, Clone)]
 pub struct PendingRemoteHit {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub stock_request: Option<StockHitRequest>,
     pub damage: f32,
     pub pose_id: u16,
     pub attack_index: u32,
@@ -1451,12 +1614,111 @@ impl Default for StockLanDiscoveryState {
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct NetworkFrameApply;
 
+#[derive(Resource, Default)]
+struct StockPostHitStates {
+    states: Vec<(String, RoleState, u32)>,
+    chains: Vec<(String, meteor_network::role_state::PoseChain, u32)>,
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) fn install_stock_observer_projection_for_test(app: &mut App) {
+    app.init_resource::<StockPostHitStates>().add_systems(
+        Update,
+        (
+            defer_stock_post_hit_states,
+            net_apply_snapshot,
+            net_handle_remote_hits,
+            restore_stock_post_hit_states,
+            net_apply_snapshot,
+            net_smooth_remote_fighters,
+        )
+            .chain()
+            .in_set(NetworkFrameApply),
+    );
+    app.init_resource::<NetInputSequence>().add_systems(
+        Update,
+        net_send_hits
+            .after(super::fighter_frame::SerialFighterSet)
+            .after(crate::plugins::character_contact_plugin::CharacterContactFinishSet)
+            .before(crate::plugins::FighterFrameSet::CameraFinalize),
+    );
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) fn feed_stock_observer_event_for_test(world: &mut World, event: StockGameEvent) {
+    world.resource_scope(|_world, mut net: Mut<NetState>| {
+        handle_stock_game_event(
+            &mut net,
+            &mut LaunchRequest::default(),
+            &mut MatchEnd::default(),
+            &mut NetTx::default(),
+            &mut NextState::default(),
+            AppState::Playing,
+            event,
+        );
+    });
+}
+
+fn uses_stock_projection(net: Res<NetState>) -> bool {
+    net.is_stock_udp()
+}
+
+fn uses_web_projection(net: Res<NetState>) -> bool {
+    !net.is_stock_udp()
+}
+
+fn defer_stock_post_hit_states(
+    mut net: ResMut<NetState>,
+    mut deferred: ResMut<StockPostHitStates>,
+) {
+    if !net.is_stock_udp() || net.pending_remote_hits.is_empty() {
+        return;
+    }
+    let mut first_hit = std::collections::HashMap::<String, u32>::new();
+    for (id, hit) in &net.pending_remote_hits {
+        let tick = hit.tick.unwrap_or(0);
+        first_hit
+            .entry(id.clone())
+            .and_modify(|first| *first = (*first).min(tick))
+            .or_insert(tick);
+    }
+    for (id, state, tick) in std::mem::take(&mut net.pending_role_states) {
+        if first_hit.get(&id).is_some_and(|first| tick > *first) {
+            if net.remote_actor_profiles.contains_key(&id)
+                && !net.pending_role_entries.contains(&id)
+            {
+                net.pending_role_entries.push(id.clone());
+            }
+            deferred.states.push((id, state, tick));
+        } else {
+            net.pending_role_states.push((id, state, tick));
+        }
+    }
+    for (id, chain, tick) in std::mem::take(&mut net.pending_pose_chains) {
+        if first_hit.get(&id).is_some_and(|first| tick > *first) {
+            deferred.chains.push((id, chain, tick));
+        } else {
+            net.pending_pose_chains.push((id, chain, tick));
+        }
+    }
+}
+
+fn restore_stock_post_hit_states(
+    mut net: ResMut<NetState>,
+    mut deferred: ResMut<StockPostHitStates>,
+) {
+    net.pending_role_states.append(&mut deferred.states);
+    net.pending_pose_chains.append(&mut deferred.chains);
+}
+
 impl Plugin for NetworkPlugin {
     fn build(&self, app: &mut App) {
         super::native_text_input::install(app);
         room_browser::install(app);
         asset_barrier::install(app);
+        install_net_key_actions(app);
         app.init_resource::<NetState>()
+            .init_resource::<StockPostHitStates>()
             .init_resource::<NetTx>()
             .init_resource::<NetRx>()
             .init_resource::<NetInputSequence>()
@@ -1508,14 +1770,17 @@ impl Plugin for NetworkPlugin {
             .add_systems(
                 Update,
                 (
-                    collect_net_key_actions,
                     net_apply_stock_vitals,
                     net_apply_stock_scores,
+                    defer_stock_post_hit_states,
                     net_apply_snapshot,
                     sync_network_escort_carrier,
-                    net_smooth_remote_fighters,
+                    net_smooth_remote_fighters.run_if(uses_web_projection),
                     net_handle_hit,
                     net_handle_remote_hits,
+                    restore_stock_post_hit_states,
+                    net_apply_snapshot.run_if(uses_stock_projection),
+                    net_smooth_remote_fighters.run_if(uses_stock_projection),
                     net_apply_authority_respawns,
                     net_apply_remote_vitals,
                     net_apply_scene_transfers,
@@ -1523,7 +1788,7 @@ impl Plugin for NetworkPlugin {
                     .chain()
                     .in_set(NetworkFrameApply)
                     .before(crate::plugins::FighterFrameSet::SkeletonSample)
-                    .run_if(in_state(AppState::Playing)),
+                    .run_if(super::ui_plugin::gameplay_hud_visibility::scene_session_active),
             )
             .add_systems(
                 Update,
@@ -1539,7 +1804,7 @@ impl Plugin for NetworkPlugin {
                     .after(crate::plugins::combat_plugin::CombatPoseResolveSet)
                     .after(crate::plugins::character_contact_plugin::CharacterContactFinishSet)
                     .before(crate::plugins::FighterFrameSet::CameraFinalize)
-                    .run_if(in_state(AppState::Playing)),
+                    .run_if(super::ui_plugin::gameplay_hud_visibility::scene_session_active),
             )
             .add_systems(
                 OnEnter(AppState::NetRoom),
@@ -1597,7 +1862,7 @@ impl Plugin for NetworkPlugin {
                 stock_npc_bridge::sync_npc_roles
                     .after(net_poll)
                     .after(crate::plugins::combat_plugin::CombatPoseResolveSet)
-                    .run_if(in_state(AppState::Playing)),
+                    .run_if(super::ui_plugin::gameplay_hud_visibility::scene_session_active),
             )
             .init_resource::<NativeNetThread>()
             .add_systems(
@@ -1639,6 +1904,15 @@ impl Plugin for NetworkPlugin {
     }
 }
 
+fn install_net_key_actions(app: &mut App) {
+    app.add_systems(
+        Update,
+        collect_net_key_actions
+            .after(crate::plugins::input_plugin::capture_local_command_input)
+            .run_if(in_state(AppState::Playing)),
+    );
+}
+
 fn collect_net_key_actions(
     net: Res<NetState>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -1655,9 +1929,9 @@ fn collect_net_key_actions(
         return;
     }
     use crate::plugins::input_plugin::LocalCombatInputEdge as Edge;
+
     let bindings = [
         (Edge::QiBurst, keymap.qi_burst),
-        (Edge::Cure, keymap.cure),
         (Edge::WeaponSwitch, keymap.weapon_switch),
         (Edge::DropWeapon, keymap.drop_weapon),
         (Edge::DropItem, keymap.drop_item),
@@ -1670,7 +1944,8 @@ fn collect_net_key_actions(
     ) {
         let action = match edge {
             Edge::QiBurst => "qi_burst",
-            Edge::Cure => "cure",
+
+            Edge::Cure => continue,
             Edge::WeaponSwitch => "switch_weapon",
             Edge::DropWeapon => "drop_weapon",
             Edge::DropItem => "drop_item",
@@ -1705,6 +1980,7 @@ struct StockConnectionConfig {
     game_time_minutes: u32,
     life_adjust_percent: u32,
     item_rules: StockRoomItemRules,
+    battle_rules: meteor_combat::battle_rules::BattleRules,
     camp: u32,
     stage_id: String,
     escort_definition: Option<std::sync::Arc<meteor_network::escort_definition::EscortDefinition>>,
@@ -1718,6 +1994,12 @@ fn begin_network_connection(
     native_thread: &mut NativeNetThread,
     request: &LaunchRequest,
 ) -> Result<(), String> {
+    if default_web_address().is_empty()
+        && !net.address.starts_with("udp://")
+        && !net.address.starts_with("udp-host://")
+    {
+        return Err("此发行包未配置公网服务器，请使用局域网对战".into());
+    }
     info!(
         "net: begin connection address={} stage={} character={} weapon={} worker={}",
         net.address,
@@ -1726,6 +2008,11 @@ fn begin_network_connection(
         request.weapon,
         native_thread.handle.is_some()
     );
+    let battle_rules = if net.address.starts_with("udp-host://") {
+        load_host_battle_rules(request.balance_rules)?
+    } else {
+        Default::default()
+    };
     let escort_definition = if request.stock_rule == 2 && net.address.starts_with("udp") {
         Some(super::escort_assets::load_escort(&request.stage_id)?)
     } else {
@@ -1742,6 +2029,7 @@ fn begin_network_connection(
     net.intentional_disconnect = false;
     let address = net.address.clone();
     let hello = Message::Hello {
+        balance_revision: meteor_combat::battle_rules::RULES_CAPABILITY,
         name: request.player_name.clone(),
         resume_token: (!net.session_token.is_empty()).then(|| net.session_token.clone()),
         character_id: request.character_id,
@@ -1755,6 +2043,7 @@ fn begin_network_connection(
         game_num: request.stock_game_num,
         game_time_minutes: request.stock_game_time_minutes,
         life_adjust_percent: request.stock_life_adjust_percent,
+        battle_rules,
         item_rules: StockRoomItemRules {
             hide_item: request.stock_hide_item,
             health_item: request.stock_health_item,
@@ -1784,6 +2073,7 @@ fn begin_network_connection(
     let (to_socket_tx, to_socket_rx) = mpsc::channel();
     let (to_app_tx, to_app_rx) = mpsc::channel();
     let hello = Message::Hello {
+        balance_revision: meteor_combat::battle_rules::RULES_CAPABILITY,
         name: request.player_name.clone(),
         resume_token: (!net.session_token.is_empty()).then(|| net.session_token.clone()),
         character_id: request.character_id,
@@ -1819,6 +2109,9 @@ fn menu_net_button(
     #[cfg(target_arch = "wasm32")] mut wasm_transport: NonSendMut<WasmNetTransport>,
     #[cfg(not(target_arch = "wasm32"))] dialog: Option<Res<StockConnectionDialog>>,
 ) {
+    if default_web_address().is_empty() {
+        return;
+    }
     #[cfg(not(target_arch = "wasm32"))]
     if dialog.is_some_and(|dialog| dialog.is_open()) {
         return;
@@ -1863,7 +2156,21 @@ fn menu_net_button(
         }
         web_room_join(Some(room), &request)
     } else if create {
-        web_room_join(None, &request)
+        let rules = match load_host_battle_rules(request.balance_rules) {
+            Ok(rules) => rules,
+            Err(error) => {
+                net.error = Some(error);
+                return;
+            }
+        };
+        let mut message = web_room_join(None, &request);
+        if let Message::RoomCreate {
+            rules: room_rules, ..
+        } = &mut message
+        {
+            room_rules.battle_rules = Some(rules);
+        }
+        message
     } else {
         return;
     };
@@ -2264,12 +2571,20 @@ fn validate_stock_selection(request: &LaunchRequest) -> Result<(), String> {
     if request.stock_rule != 1 && !(1..=2).contains(&request.stock_camp) {
         return Err("劫镖/护城/暗杀/死斗必须选择流星队或蝴蝶队".into());
     }
+    if meteor_scene::stage_registry::is_official_stage_id(&request.stage_id)
+        && !meteor_network::modes::original_stage_supports_rule(
+            &request.stage_id,
+            request.stock_rule,
+        )
+    {
+        return Err("原版资源不支持此规则与地图组合".into());
+    }
     if request.stock_rule == 2 {
         #[cfg(not(target_arch = "wasm32"))]
         super::escort_assets::load_escort(&request.stage_id)?;
         #[cfg(target_arch = "wasm32")]
-        if !request.stage_id.eq_ignore_ascii_case("sn03") {
-            return Err("公网劫镖只支持 sn03".into());
+        if !meteor_network::modes::is_escort_stage(&request.stage_id) {
+            return Err("公网劫镖支持 sn02、sn03".into());
         }
     }
     if request.stock_rule == 3 && !matches!(request.stage_id.as_str(), "sn04" | "sn11" | "sn12") {
@@ -2368,7 +2683,9 @@ fn menu_public_battle_button(
     mut selections: Query<&mut UiSelectionState, With<MenuPublicBattleButton>>,
     mut request: ResMut<LaunchRequest>,
 ) {
-    if pressed
+    if default_web_address().is_empty() {
+        request.public_battle = false;
+    } else if pressed
         .iter()
         .any(|interaction| *interaction == Interaction::Pressed)
     {
@@ -2380,10 +2697,33 @@ fn menu_public_battle_button(
 }
 
 fn menu_stock_item_rule_buttons(
+    balance_pressed: Query<
+        &Interaction,
+        (
+            Changed<Interaction>,
+            With<crate::app_state::MenuBalanceRulesButton>,
+        ),
+    >,
+    mut balance_buttons: Query<
+        &mut UiSelectionState,
+        (
+            With<crate::app_state::MenuBalanceRulesButton>,
+            Without<MenuStockItemRuleButton>,
+        ),
+    >,
     pressed: Query<(&Interaction, &MenuStockItemRuleButton), Changed<Interaction>>,
-    mut buttons: Query<(&MenuStockItemRuleButton, &mut UiSelectionState)>,
+    mut buttons: Query<
+        (&MenuStockItemRuleButton, &mut UiSelectionState),
+        Without<crate::app_state::MenuBalanceRulesButton>,
+    >,
     mut request: ResMut<LaunchRequest>,
 ) {
+    if balance_pressed.iter().any(|i| *i == Interaction::Pressed) {
+        request.balance_rules = !request.balance_rules;
+    }
+    for mut selection in &mut balance_buttons {
+        selection.selected = request.balance_rules;
+    }
     for (interaction, rule) in &pressed {
         if *interaction != Interaction::Pressed {
             continue;
@@ -2456,6 +2796,11 @@ fn stock_config_value_label(field: StockConfigField, request: &LaunchRequest) ->
 }
 
 fn stock_stage_allowed_for_rule(rule: i32, stage_id: &str) -> bool {
+    if meteor_scene::stage_registry::is_official_stage_id(stage_id)
+        && !meteor_network::modes::original_stage_supports_rule(stage_id, rule)
+    {
+        return false;
+    }
     match rule {
         2 => {
             #[cfg(not(target_arch = "wasm32"))]
@@ -2464,7 +2809,7 @@ fn stock_stage_allowed_for_rule(rule: i32, stage_id: &str) -> bool {
             }
             #[cfg(target_arch = "wasm32")]
             {
-                stage_id.eq_ignore_ascii_case("sn03")
+                meteor_network::modes::is_escort_stage(stage_id)
             }
         }
         3 => matches!(
@@ -2789,17 +3134,36 @@ fn run_stock_host_connection(
                 return;
             }
         };
+    let resource = stock_resource_registry();
     let mut server = StockGameServer::with_rule_and_combat_resources(
         server_transport,
         stock_asset_catalog(),
         stock.rule,
-        stock_combat_resources(),
+        resource
+            .as_ref()
+            .map(meteor_asset::res::MeteorRes::combat_table)
+            .unwrap_or_default(),
     );
+    if let Some(resource) = &resource {
+        server.set_scene_item_registry(resource);
+    }
     server.set_round_limit(stock.game_num);
+    server
+        .transport_mut()
+        .set_max_players(stock_host_player_limit(
+            stock_read_legacy_file("server.cfg").as_deref(),
+        ));
     server.set_round_time_minutes(stock.game_time_minutes);
     server.set_life_adjust_percent(stock.life_adjust_percent);
     server.set_item_rules(stock.item_rules);
+    server.set_battle_rules(stock.battle_rules);
     server.set_scene_frame(stock_scene_frame(&stock.stage_id));
+    let des_path = meteor_scene::stage_loader::stage_asset_paths(&stock.stage_id).des;
+    if let Some(bytes) = stock_read_legacy_file(&des_path) {
+        let desc =
+            meteor_asset::des::parse_stage_description(&crate::text_codec::decode_text(&bytes));
+        server.set_spawn_pad_counts(meteor_network::spawn::counts(&desc));
+    }
     server.set_stage_id(stock.stage_id);
     if let Some(definition) = stock.escort_definition {
         server.set_escort_definition(definition);
@@ -2819,8 +3183,30 @@ fn stock_connect_record(name: &str) -> meteor_network::stock_udp::StockConnectRe
     let password = std::env::var("METEOR_STOCK_PASSWORD").unwrap_or_default();
     let checksum = meteor_network::stock_udp::stock_integrity_checksum(stock_read_legacy_file);
     let mut record = meteor_network::stock_udp::StockConnectRecord::new(password, checksum);
+    if let Ok(cdkey) = std::env::var("METEOR_STOCK_CDKEY") {
+        if !cdkey.is_empty() {
+            record.cdkey = cdkey;
+        }
+    }
     record.player_name = name.to_owned();
     record
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn stock_host_player_limit(config: Option<&[u8]>) -> i32 {
+    let Some(config) = config else {
+        return 16;
+    };
+    String::from_utf8_lossy(config)
+        .lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            (words.next()? == "player_num")
+                .then(|| words.next().and_then(|value| value.parse::<i32>().ok()))
+                .flatten()
+        })
+        .last()
+        .map_or(16, |value| i32::from(value as i16))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2845,10 +3231,26 @@ fn stock_scene_frame(stage_id: &str) -> StockSceneFrame {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn stock_combat_resources() -> meteor_asset::res::CombatResourceTable {
+fn stock_scene_objects(stage_id: &str, flags: u32) -> Option<stock_scene::StockSceneObjectMap> {
+    if !meteor_scene::stage_registry::is_official_stage_id(stage_id) {
+        return None;
+    }
+    let descriptor = stock_read_legacy_file(&format!("{stage_id}/{stage_id}.des"))?;
+    let descriptor =
+        meteor_asset::des::parse_stage_description(&crate::text_codec::decode_text(&descriptor));
+    let resource = stock_resource_registry()?;
+    Some(stock_scene::StockSceneObjectMap::new(
+        &descriptor,
+        &resource,
+        flags,
+    ))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn stock_resource_registry() -> Option<meteor_asset::res::MeteorRes> {
+    let parse = |bytes: Vec<u8>| meteor_asset::res::parse_meteor_res(&bytes).ok();
     meteor_asset::runtime_assets::read_legacy_path("Meteor.res")
-        .and_then(|bytes| meteor_asset::res::parse_meteor_res(&bytes).ok())
-        .map(|resource| resource.combat_table())
+        .and_then(parse)
         .or_else(|| {
             let current = std::env::current_dir().ok()?;
             crate::plugins::audio_plugin::resource_roots(&current)
@@ -2856,10 +3258,15 @@ fn stock_combat_resources() -> meteor_asset::res::CombatResourceTable {
                 .find_map(|root| {
                     crate::resource_io::read(root.join("Meteor.res"))
                         .ok()
-                        .and_then(|bytes| meteor_asset::res::parse_meteor_res(&bytes).ok())
-                        .map(|resource| resource.combat_table())
+                        .and_then(parse)
                 })
         })
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+fn stock_combat_resources() -> meteor_asset::res::CombatResourceTable {
+    stock_resource_registry()
+        .map(|resource| resource.combat_table())
         .unwrap_or_default()
 }
 
@@ -3019,10 +3426,28 @@ fn run_stock_client_loop(
             return;
         }
     };
+    client.set_runtime_sync_enabled(true);
+    if let Some(server) = hosted_server.as_mut() {
+        let catalog = meteor_network::combat_authority::AttackCatalog::from_mpk()
+            .ok()
+            .or_else(|| {
+                let cwd = std::env::current_dir().ok()?;
+                crate::plugins::audio_plugin::resource_roots(&cwd)
+                    .into_iter()
+                    .find_map(|root| {
+                        meteor_network::combat_authority::AttackCatalog::from_origin_res(&root).ok()
+                    })
+            });
+        if let (Ok(owner), Some(catalog)) = (client.transport().local_addr(), catalog) {
+            server.enable_runtime_sync(owner, std::sync::Arc::new(catalog));
+        }
+    }
+    let mut scene_hit_serial = 0u32;
     let mut npc_bridge = stock_npc_bridge::Bridge::default();
     let mut scene_frame = hosted_server
         .as_ref()
         .and_then(StockGameServer::scene_frame);
+    let mut scene_objects: Option<stock_scene::StockSceneObjectMap> = None;
     let mut anger_revision = 0;
     let mut role_pacer = meteor_network::stock_game::StockRoleSendPacer::default();
     let started = std::time::Instant::now();
@@ -3111,6 +3536,29 @@ fn run_stock_client_loop(
                         }
                     }
                 }
+                NetOutbound::StockNpcWeaponDrop(entity, command) => {
+                    match npc_bridge.send_weapon_drop(entity, command, now_ms) {
+                        Ok(Some(event)) => {
+                            let _ = to_app.send(NetInbound::StockNpcWeaponEvent(entity, event));
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            let _ = to_app.send(NetInbound::Control(Message::Error {
+                                code: "stock_npc_weapon_drop".into(),
+                                text: error.to_string(),
+                            }));
+                        }
+                    }
+                }
+                NetOutbound::StockNpcWeaponRest(entity, id, position) => {
+                    if let Err(error) = npc_bridge.confirm_weapon_rest(entity, id, position, now_ms)
+                    {
+                        let _ = to_app.send(NetInbound::Control(Message::Error {
+                            code: "stock_npc_weapon_rest".into(),
+                            text: error.to_string(),
+                        }));
+                    }
+                }
                 NetOutbound::StockNpcHit(entity, hit) => {
                     if let Err(error) = npc_bridge.send_hit(entity, hit, now_ms) {
                         let _ = to_app.send(NetInbound::Control(Message::Error {
@@ -3144,8 +3592,29 @@ fn run_stock_client_loop(
                         server.replace_environment_geometry(geometry);
                     }
                 }
-                NetOutbound::StockSceneManifest(items) => {
+                NetOutbound::StockSceneTransfer(actor_id, state) => {
                     if let Some(server) = hosted_server.as_mut() {
+                        let state = scene_frame.map_or(state, |frame| frame.to_stock(state));
+                        let event = meteor_network::stock_protocol::StockSceneTransferEvent::from_role_state(state);
+                        if let Err(error) = server.transfer_scene_actor(actor_id, event, now_ms) {
+                            let _ = to_app.send(NetInbound::Control(Message::Error {
+                                code: "stock_scene_transfer".into(),
+                                text: error.to_string(),
+                            }));
+                        }
+                    }
+                }
+                NetOutbound::StockSceneManifest(mut items) => {
+                    if let Some(server) = hosted_server.as_mut() {
+                        if let Some(objects) = &scene_objects {
+                            items.retain_mut(|item| {
+                                let Some(reference) = item.scene_reference else {
+                                    return true;
+                                };
+                                item.scene_reference = objects.wire_index(reference);
+                                item.scene_reference.is_some()
+                            });
+                        }
                         if let Err(error) = server.replace_authored_scene_items(items, now_ms) {
                             let _ = to_app.send(NetInbound::Control(Message::Error {
                                 code: "stock_scene_manifest".into(),
@@ -3155,15 +3624,14 @@ fn run_stock_client_loop(
                     }
                 }
                 NetOutbound::StockWeaponDropRest(id, position) => {
-                    if let Err(error) = client.confirm_weapon_drop_collision(
-                        id,
-                        RoleVec3 {
-                            x: position[0],
-                            y: position[1],
-                            z: position[2],
-                        },
-                        now_ms,
-                    ) {
+                    let position = RoleVec3 {
+                        x: position[0],
+                        y: position[1],
+                        z: position[2],
+                    };
+                    let position =
+                        scene_frame.map_or(position, |frame| frame.position_to_stock(position));
+                    if let Err(error) = client.confirm_weapon_drop_collision(id, position, now_ms) {
                         let _ = to_app.send(NetInbound::Control(Message::Error {
                             code: "stock_weapon_drop_rest".into(),
                             text: error.to_string(),
@@ -3200,8 +3668,61 @@ fn run_stock_client_loop(
                     });
                     return;
                 }
+                NetOutbound::Control(Message::ScenePropHit {
+                    reference,
+                    pose_id,
+                    frame,
+                    ..
+                }) => {
+                    if let Some(generation) = client.runtime_generation() {
+                        scene_hit_serial = scene_hit_serial.wrapping_add(1).max(1);
+                        let packet = meteor_network::runtime_sync::RuntimePacket::SceneHit {
+                            generation,
+                            serial: scene_hit_serial,
+                            actor_id: 0,
+                            reference,
+                            pose_id,
+                            frame,
+                            damage: 0,
+                        };
+                        if let Err(error) = client.send_runtime(packet, now_ms) {
+                            let _ = to_app.send(NetInbound::Control(Message::Error {
+                                code: "stock_scene_hit".into(),
+                                text: error.to_string(),
+                            }));
+                        }
+                    }
+                }
+                NetOutbound::Control(Message::ProjectileState { state, .. }) => {
+                    if let Some(generation) = client.runtime_generation() {
+                        if let Err(error) = client.send_runtime(
+                            meteor_network::runtime_sync::RuntimePacket::Projectile {
+                                generation,
+                                state,
+                            },
+                            now_ms,
+                        ) {
+                            let _ = to_app.send(NetInbound::Control(Message::Error {
+                                code: "stock_projectile".into(),
+                                text: error.to_string(),
+                            }));
+                        }
+                    }
+                }
                 NetOutbound::Control(Message::SceneOps { ops, .. }) => {
-                    let event = stock_scene_ops_from_message(&ops, now_ms);
+                    let mut event = stock_scene_ops_from_message(&ops, now_ms);
+                    if let Some(objects) = &scene_objects {
+                        event.operations.retain_mut(|operation| {
+                            let Some(reference) = objects.wire_index(operation.reference) else {
+                                return false;
+                            };
+                            operation.reference = reference;
+                            true
+                        });
+                    }
+                    debug!(target: "meteor_app::scene_sync",
+                        "event56 send actor={:?} source_ops={} wire_ops={} operations={:?}",
+                        client.actor_id(), ops.len(), event.operations.len(), event.operations);
                     if let Err(error) = client.send_scene_ops(&event, now_ms) {
                         let _ = to_app.send(NetInbound::Control(Message::Error {
                             code: "stock_scene_ops".into(),
@@ -3254,8 +3775,33 @@ fn run_stock_client_loop(
                 for mut event in events {
                     match &mut event {
                         StockGameEvent::StageConfig(config) => {
-                            scene_frame =
-                                Some(stock_scene_frame(&config.stage_id.to_ascii_lowercase()));
+                            let stage = config.stage_id.to_ascii_lowercase();
+                            scene_frame = Some(stock_scene_frame(&stage));
+                            scene_objects = stock_scene_objects(&stage, config.field_c);
+                        }
+                        StockGameEvent::SceneOps(ops) => {
+                            if let Some(objects) = &scene_objects {
+                                ops.operations.retain_mut(|operation| {
+                                    let Some(reference) = objects.script_index(operation.reference)
+                                    else {
+                                        return false;
+                                    };
+                                    operation.reference = reference;
+                                    true
+                                });
+                            }
+                        }
+                        StockGameEvent::SceneState(state) => {
+                            if let Some(objects) = &scene_objects {
+                                state.objects.retain_mut(|object| {
+                                    let Some(reference) = objects.script_index(object.reference)
+                                    else {
+                                        return false;
+                                    };
+                                    object.reference = reference;
+                                    true
+                                });
+                            }
                         }
                         StockGameEvent::RoleStates(records) => {
                             if let Some(frame) = scene_frame {
@@ -3433,9 +3979,12 @@ fn run_connection(
                     | NetOutbound::StockHit(_)
                     | NetOutbound::StockNpcRoster(_)
                     | NetOutbound::StockNpcHit(_, _)
+                    | NetOutbound::StockNpcWeaponDrop(_, _)
+                    | NetOutbound::StockNpcWeaponRest(_, _, _)
                     | NetOutbound::StockAngerSpend { .. }
                     | NetOutbound::StockEnvironmentGeometry(_)
                     | NetOutbound::StockSceneManifest(_)
+                    | NetOutbound::StockSceneTransfer(_, _)
                     | NetOutbound::StockWeaponDropRest(_, _)
                     | NetOutbound::StockWeaponDrop(_)
                     | NetOutbound::StockWeaponSwitch(_) => continue,
@@ -3581,6 +4130,12 @@ fn run_connection(
 #[allow(clippy::too_many_arguments)]
 fn net_poll(
     #[cfg(not(target_arch = "wasm32"))] mut stock_anger: ResMut<PendingStockAnger>,
+    #[cfg(not(target_arch = "wasm32"))] mut dialogue: Option<
+        ResMut<super::ui_plugin::DialogueState>,
+    >,
+    #[cfg(not(target_arch = "wasm32"))] mut dialogue_view: Option<
+        ResMut<super::ui_plugin::DialoguePresentation>,
+    >,
     mut net: ResMut<NetState>,
     mut rx: ResMut<NetRx>,
     mut tx: ResMut<NetTx>,
@@ -3681,6 +4236,10 @@ fn net_poll(
                     }
                 }
                 #[cfg(not(target_arch = "wasm32"))]
+                Ok(NetInbound::StockNpcWeaponEvent(entity, event)) => {
+                    project_npc_weapon_event(&mut net, entity, event);
+                }
+                #[cfg(not(target_arch = "wasm32"))]
                 Ok(NetInbound::StockNpcEvent(entity, event)) => {
                     stock_npc_bridge::apply_event(&mut net, entity, event);
                 }
@@ -3688,6 +4247,12 @@ fn net_poll(
                 Ok(NetInbound::StockGame(event)) => {
                     match &event {
                         StockGameEvent::RoundRestart => {
+                            if let Some(dialogue) = dialogue.as_deref_mut() {
+                                *dialogue = Default::default();
+                            }
+                            if let Some(view) = dialogue_view.as_deref_mut() {
+                                *view = Default::default();
+                            }
                             for state in stock_anger.0.values_mut() {
                                 state.pending.clear();
                                 state.keys.clear();
@@ -3795,6 +4360,51 @@ fn net_poll(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn project_npc_weapon_event(net: &mut NetState, entity: Entity, event: StockGameEvent) {
+    let reference = |id| format!("D_wpStockNpcThrow{}_{id}", entity.to_bits());
+    match event {
+        StockGameEvent::WeaponThrown(thrown) => {
+            let Some(model) =
+                stock_weapon_from_item_id(thrown.item_id).and_then(|(weapon, variant)| {
+                    crate::plugins::character_plugin::weapon_model_stem(weapon, variant)
+                })
+            else {
+                return;
+            };
+            let drop = AuthorityWeaponDrop {
+                reference: reference(thrown.throw_id),
+                model,
+                position: [
+                    thrown.position.x,
+                    thrown.position.y + 6.0,
+                    thrown.position.z,
+                ],
+                velocity: Some([
+                    thrown.forward.x * 12.0,
+                    thrown.forward.y * 12.0,
+                    thrown.forward.z * 12.0,
+                ]),
+                settled: false,
+                pickup_ready: false,
+            };
+            net.dynamic_weapon_drops
+                .insert(drop.reference.clone(), drop.clone());
+            if net.pending_weapon_drops.len() >= 64 {
+                net.pending_weapon_drops.remove(0);
+            }
+            net.pending_weapon_drops.push(drop);
+        }
+        StockGameEvent::WeaponSettled { throw_id, .. } => {
+            let reference = reference(throw_id);
+            net.dynamic_weapon_drops.remove(&reference);
+            net.pending_weapon_drops
+                .retain(|drop| drop.reference != reference);
+        }
+        _ => {}
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn handle_stock_game_event(
     net: &mut NetState,
     request: &mut LaunchRequest,
@@ -3816,7 +4426,13 @@ fn handle_stock_game_event(
                     .iter_mut()
                     .find(|member| member.player_id == player_id)
                 {
-                    member.name = name;
+                    member.name = name.clone();
+                }
+                if net.pending_stock_entry_notices.remove(&player_id) {
+                    crate::plugins::system_notice::queue_net_notice(
+                        net,
+                        crate::plugins::system_notice::format_enter(&name),
+                    );
                 }
             }
         }
@@ -3854,6 +4470,9 @@ fn handle_stock_game_event(
                 );
             }
         }
+        StockGameEvent::BattleRules(rules) => {
+            net.battle_rules = rules;
+        }
         StockGameEvent::TransportConnected {
             peer: _,
             transport_id,
@@ -3861,6 +4480,10 @@ fn handle_stock_game_event(
             info!("net: stock transport connected id={transport_id}");
             net_tx.activate();
             net.transport_connected = true;
+            net.stock_runtime_generation = None;
+            net.projectile_sync_enabled = false;
+            net.stock_scene_hit_peers.clear();
+            net.pending_projectiles.clear();
             net.player_id = actor_key(transport_id);
             net.client_id = net.player_id.clone();
             net.error = None;
@@ -3868,6 +4491,12 @@ fn handle_stock_game_event(
         StockGameEvent::RoleEntered(entered) => {
             let player_id = actor_key(entered.actor_id);
             let is_local = player_id == net.player_id;
+            let first_entry = !net.remote_actor_profiles.contains_key(&player_id);
+            let known_name = is_local
+                || net
+                    .remote_actor_names
+                    .get(&player_id)
+                    .is_some_and(|name| !name.trim().is_empty());
             let name = net
                 .remote_actor_names
                 .get(&player_id)
@@ -3883,8 +4512,20 @@ fn handle_stock_game_event(
             net.remote_actor_profiles.insert(player_id.clone(), profile);
             net.remote_actor_teams
                 .insert(player_id.clone(), entered.camp as i32);
-            net.remote_actor_names
-                .insert(player_id.clone(), name.clone());
+            if known_name {
+                net.remote_actor_names
+                    .insert(player_id.clone(), name.clone());
+            }
+            if first_entry {
+                if known_name {
+                    crate::plugins::system_notice::queue_net_notice(
+                        net,
+                        crate::plugins::system_notice::format_enter(&name),
+                    );
+                } else {
+                    net.pending_stock_entry_notices.insert(player_id.clone());
+                }
+            }
             if !is_local {
                 info!(
                     "net: stock remote role entered actor={} hero={} camp={} checksum={:#x}",
@@ -3925,6 +4566,15 @@ fn handle_stock_game_event(
                 net.mode = request.mode.clone();
                 net.stage = request.stage_id.clone();
                 net.round_active = true;
+                if net.round_time_minutes.is_none() {
+                    net.round_time_minutes = Some(request.stock_game_time_minutes.max(1));
+                }
+                if net.round_remaining_seconds.is_none() {
+                    let minutes = net
+                        .round_time_minutes
+                        .unwrap_or(request.stock_game_time_minutes);
+                    net.round_remaining_seconds = Some(minutes.saturating_mul(60) as f32);
+                }
 
                 if matches!(current, AppState::Menu | AppState::NetRoom) {
                     next_state.set(AppState::Loading);
@@ -3933,6 +4583,21 @@ fn handle_stock_game_event(
         }
         StockGameEvent::RoleLeft(left) => {
             let player_id = actor_key(left.actor_id);
+            net.pending_stock_entry_notices.remove(&player_id);
+            net.stock_scene_hit_peers.remove(&player_id);
+            net.pending_projectiles
+                .retain(|state| state.player_id != player_id);
+            net.pending_projectile_owner_clears.push(player_id.clone());
+            let leave_name = crate::plugins::system_notice::resolve_actor_name(
+                net,
+                request,
+                &crate::app_state::RoomState::default(),
+                &player_id,
+            );
+            crate::plugins::system_notice::queue_net_notice(
+                net,
+                crate::plugins::system_notice::format_leave(&leave_name),
+            );
             if player_id != net.player_id
                 && !net
                     .pending_remote_despawns
@@ -3957,6 +4622,9 @@ fn handle_stock_game_event(
         }
         StockGameEvent::StageConfig(config) => {
             let stage_id = config.stage_id.to_ascii_lowercase();
+            if meteor_scene::stage_registry::is_official_stage_id(&stage_id) {
+                net.stock_scene_frame = Some(stock_scene_frame(&stage_id));
+            }
             info!(
                 "net: stock stage config stage={stage_id} fields={}/{}/{} local={}",
                 config.field_a, config.field_b, config.field_c, request.stage_id
@@ -3977,6 +4645,32 @@ fn handle_stock_game_event(
                     }
                 }
             }
+        }
+        StockGameEvent::SceneTransfer(event) => {
+            let state = stock_scene_frame(&net.stage).to_scene(event.role_state());
+            let serial = net
+                .pending_scene_transfers
+                .iter()
+                .chain(net.applied_scene_transfers.values())
+                .map(|transfer| transfer.serial)
+                .max()
+                .unwrap_or(0)
+                .wrapping_add(1)
+                .max(1);
+            queue_scene_transfer(
+                net,
+                net_tx,
+                SceneTransfer {
+                    room_id: net.room_id.clone(),
+                    match_epoch: 0,
+                    round_epoch: 0,
+                    serial,
+                    tick: net.last_role_snapshot_tick.unwrap_or(0),
+                    player_id: net.player_id.clone(),
+                    position: [state.position.x, state.position.y, state.position.z],
+                    yaw: state.forward.x.atan2(state.forward.z),
+                },
+            );
         }
         StockGameEvent::RoleRate(hz) => apply_session_role_rate(net, hz),
         StockGameEvent::WeaponEquipped(equipped) => {
@@ -4047,6 +4741,15 @@ fn handle_stock_game_event(
                 }
             } else {
                 CombatReactionWire {
+                    rebalance_effect: if net.battle_rules.enabled() {
+                        event
+                            .context
+                            .checked_sub(meteor_combat::rebalance_effects::STOCK_EFFECT_CONTEXT)
+                            .filter(|v| (1..=3).contains(v))
+                            .unwrap_or(0) as u8
+                    } else {
+                        0
+                    },
                     target_move: motion,
                     target_value: minimum,
                     target_pose: Some(event.pose_id as u16),
@@ -4084,6 +4787,16 @@ fn handle_stock_game_event(
             let target = actor_key(actor_id);
             let deaths = net.stock_deaths.entry(target.clone()).or_default();
             *deaths = deaths.saturating_add(1);
+            let target_name = crate::plugins::system_notice::resolve_actor_name(
+                net,
+                request,
+                &crate::app_state::RoomState::default(),
+                &target,
+            );
+            crate::plugins::system_notice::queue_net_notice(
+                net,
+                crate::plugins::system_notice::format_death(&target_name),
+            );
             let hit = AuthorityHit {
                 stock_guard_bucket: None,
                 damage: 0.0,
@@ -4143,6 +4856,18 @@ fn handle_stock_game_event(
                 .as_ref()
                 .and_then(|flag| flag.carrier_id.clone())
             {
+                if dropped {
+                    let name = crate::plugins::system_notice::resolve_actor_name(
+                        net,
+                        request,
+                        &crate::app_state::RoomState::default(),
+                        &previous,
+                    );
+                    crate::plugins::system_notice::queue_net_notice(
+                        net,
+                        crate::plugins::system_notice::format_flag_lost(&name),
+                    );
+                }
                 net.radar_star_players.remove(&previous);
             }
             let position = record.role_position();
@@ -4154,6 +4879,7 @@ fn handle_stock_game_event(
             });
         }
         StockGameEvent::EscortTaken(taken) => {
+            net.pending_escort_pickups.push(actor_key(taken.actor_id));
             if let Some(previous) = net
                 .escort_flag
                 .as_ref()
@@ -4167,6 +4893,16 @@ fn handle_stock_game_event(
                 .as_ref()
                 .map_or(stock_escort_home(net), |flag| flag.position);
             net.radar_star_players.insert(player_id.clone());
+            let name = crate::plugins::system_notice::resolve_actor_name(
+                net,
+                request,
+                &crate::app_state::RoomState::default(),
+                &player_id,
+            );
+            crate::plugins::system_notice::queue_net_notice(
+                net,
+                crate::plugins::system_notice::format_flag_taken(&name),
+            );
             net.escort_flag = Some(EscortFlagSnapshot {
                 position,
                 carrier_id: Some(player_id),
@@ -4182,6 +4918,10 @@ fn handle_stock_game_event(
             {
                 net.radar_star_players.remove(&previous);
             }
+            crate::plugins::system_notice::queue_net_notice(
+                net,
+                crate::plugins::system_notice::format_flag_returned(),
+            );
             net.escort_flag = Some(EscortFlagSnapshot {
                 position: stock_escort_home(net),
                 carrier_id: None,
@@ -4190,9 +4930,12 @@ fn handle_stock_game_event(
             });
         }
         StockGameEvent::SceneItemsGrounded { records, spawned } => {
+            let frame = net.stock_scene_frame;
             net.pending_stock_scene_grounded
                 .extend(records.into_iter().map(|record| {
                     let position = record.role_position();
+                    let position =
+                        frame.map_or(position, |frame| frame.position_to_scene(position));
                     StockSceneItemGrounded {
                         record_id: record.record_id,
                         category: record.category,
@@ -4218,6 +4961,9 @@ fn handle_stock_game_event(
         StockGameEvent::SceneItemTaken { event, record } => {
             let position = record.map(|record| {
                 let position = record.role_position();
+                let position = net
+                    .stock_scene_frame
+                    .map_or(position, |frame| frame.position_to_scene(position));
                 [position.x, position.y, position.z]
             });
             net.pending_stock_scene_items.push(StockSceneItemPickup {
@@ -4232,7 +4978,23 @@ fn handle_stock_game_event(
                 net.pending_stock_scene_items.drain(..excess);
             }
         }
-        StockGameEvent::WeaponThrown(thrown) => {
+        StockGameEvent::SceneItemRemoved(event) => {
+            let reference = format!("D_wpStock{}", event.record_id);
+            net.dynamic_weapon_drops.remove(&reference);
+            net.pending_weapon_drops
+                .retain(|drop| drop.reference != reference);
+            net.pending_stock_scene_grounded
+                .retain(|record| record.record_id != event.record_id);
+            net.pending_stock_scene_items
+                .retain(|record| record.record_id != event.record_id);
+        }
+        StockGameEvent::WeaponThrown(mut thrown) => {
+            if actor_key(thrown.actor_id) != net.player_id {
+                if let Some(frame) = net.stock_scene_frame {
+                    thrown.position = frame.position_to_scene(thrown.position);
+                    thrown.forward.z = -thrown.forward.z;
+                }
+            }
             if let Some((weapon, variant)) = stock_weapon_from_item_id(thrown.item_id) {
                 if let Some(model) =
                     crate::plugins::character_plugin::weapon_model_stem(weapon, variant)
@@ -4268,28 +5030,113 @@ fn handle_stock_game_event(
             net.dynamic_weapon_drops
                 .remove(&format!("D_wpStockThrow{throw_id}"));
         }
-        StockGameEvent::SceneOps(event) => {
-            if !net.is_stock_host() || net.mode != "siege" {
-                net.pending_scene_ops.extend(scene_ops_from_stock(&event));
+        StockGameEvent::Runtime(packet) => {
+            use meteor_network::runtime_sync::RuntimePacket;
+            match packet {
+                RuntimePacket::Welcome {
+                    generation,
+                    features,
+                } => {
+                    net.projectile_sync_enabled =
+                        features & meteor_network::runtime_sync::PROJECTILES != 0;
+                    if features & meteor_network::runtime_sync::SCENE_HITS != 0 {
+                        if net.stock_runtime_generation != Some(generation) {
+                            net.pending_projectiles.clear();
+                            net.pending_scene_prop_hits.clear();
+                        }
+                        net.stock_runtime_generation = Some(generation);
+                    }
+                }
+                RuntimePacket::Peer { actor_id } => {
+                    net.stock_scene_hit_peers.insert(actor_key(actor_id));
+                }
+                RuntimePacket::SceneHit {
+                    generation,
+                    actor_id,
+                    reference,
+                    pose_id,
+                    frame,
+                    damage,
+                    ..
+                } if net.is_stock_host()
+                    && net.stock_runtime_generation == Some(generation)
+                    && net.round_active =>
+                {
+                    net.pending_scene_prop_hits.push(Message::ScenePropHit {
+                        room_id: net.room_id.clone(),
+                        match_epoch: net.match_epoch.unwrap_or(0),
+                        round_epoch: net.round_epoch.unwrap_or(0),
+                        player_id: actor_key(actor_id),
+                        reference,
+                        pose_id,
+                        frame,
+                        damage,
+                    });
+                }
+                RuntimePacket::Projectile { generation, state }
+                    if net.stock_runtime_generation == Some(generation) =>
+                {
+                    queue_projectile_state(net, state);
+                }
+                _ => {}
             }
+        }
+        StockGameEvent::SceneState(event) => {
+            net.pending_scene_ops.extend(
+                event
+                    .objects
+                    .into_iter()
+                    .flat_map(|object| stock_scene::snapshot_ops(object, object.reference)),
+            );
+        }
+        StockGameEvent::SceneOps(event) => {
+            debug!(target: "meteor_app::scene_sync",
+                "event56 receive player={} stage={} mode={} operations={:?}",
+                net.player_id, net.stage, net.mode, event.operations);
+            net.pending_scene_ops.extend(scene_ops_from_stock(&event));
         }
         StockGameEvent::RoundEnd => {
             net.round_active = false;
             net.battle_result = Some(stock_battle_result(net, false));
+        }
+        StockGameEvent::RoundTimer {
+            remaining_seconds,
+            ended,
+        } => {
+            net.round_remaining_seconds = Some(remaining_seconds as f32);
+            if remaining_seconds > 0 {
+                let minutes = remaining_seconds.div_ceil(60).max(1);
+                net.round_time_minutes = Some(minutes);
+                if (1..=999).contains(&minutes) {
+                    request.stock_game_time_minutes = minutes;
+                }
+            }
+            if ended {
+                net.round_active = false;
+            }
         }
         StockGameEvent::RoundRestart => {
             net.battle_result = None;
             net.stock_round_number = net.stock_round_number.saturating_add(1);
             net.stock_round_start_wins = net.stock_team_wins;
             net.round_active = true;
+            let minutes = net
+                .round_time_minutes
+                .unwrap_or(request.stock_game_time_minutes)
+                .max(1);
+            net.round_time_minutes = Some(minutes);
+            net.round_remaining_seconds = Some(minutes.saturating_mul(60) as f32);
             net.pending_hits.clear();
             net.pending_remote_hits.clear();
             net.pending_npc_hits.clear();
+            net.pending_remote_death_clears.clear();
             net.pending_scene_ops.clear();
+            net.pending_projectiles.clear();
             net.pending_scene_prop_hits.clear();
             net.pending_scene_transfers.clear();
             net.applied_scene_transfers.clear();
             net.pending_stock_scene_items.clear();
+            net.pending_escort_pickups.clear();
             net.pending_status_effects.clear();
             net.pending_stock_scene_grounded.clear();
             net.dynamic_weapon_drops.clear();
@@ -4304,18 +5151,16 @@ fn handle_stock_game_event(
             });
             if !net.player_id.is_empty() {
                 net.pending_respawns.push(net.player_id.clone());
-                net.pending_spawn_relocations.insert(net.player_id.clone());
             }
             net.pending_respawns.extend(
                 net.stock_npc_actors
                     .values()
                     .map(|id| format!("stock-{id}")),
             );
-            net.pending_spawn_relocations
-                .extend(net.pending_respawns.iter().cloned());
+
             *end = MatchEnd::default();
 
-            if current == AppState::Playing && request.stock_rule == 3 {
+            if current == AppState::Playing && matches!(request.stock_rule, 2 | 3) {
                 next_state.set(AppState::Loading);
             }
         }
@@ -4351,6 +5196,11 @@ fn handle_stock_game_event(
                 f32::from(vitals.anger),
             ]);
         }
+        StockGameEvent::SpawnPad(pad) => {
+            let actor = net.player_id.clone();
+            net.pending_spawn_pads.insert(actor.clone(), pad);
+            net.pending_respawns.push(actor);
+        }
         StockGameEvent::LocalRespawn => {
             if !net.player_id.is_empty() {
                 net.pending_respawns.push(net.player_id.clone());
@@ -4367,7 +5217,16 @@ fn handle_stock_game_event(
                         .values()
                         .any(|id| *id == respawn.actor_id))
             {
-                net.pending_respawns.push(player_id);
+                net.pending_respawns.push(player_id.clone());
+            }
+
+            if player_id != net.player_id
+                && !net
+                    .stock_npc_actors
+                    .values()
+                    .any(|id| *id == respawn.actor_id)
+            {
+                net.pending_remote_death_clears.push(player_id);
             }
         }
         StockGameEvent::PeerDisconnected { peer: _, reason } => {
@@ -4427,6 +5286,7 @@ fn hard_disconnect(net: &mut NetState, next_state: &mut NextState<AppState>, cur
     net.battle_pending = false;
     net.status = NetStatus::Disconnected;
     net.transport_connected = false;
+    net.battle_rules = Default::default();
     net.friendly_fire = false;
     net.match_epoch = None;
     net.round_epoch = None;
@@ -4434,8 +5294,10 @@ fn hard_disconnect(net: &mut NetState, next_state: &mut NextState<AppState>, cur
     net.last_role_snapshot_tick = None;
     net.pending_stock_vitals = None;
     net.pending_remote_vitals.clear();
+    net.pending_remote_death_clears.clear();
     net.pending_stock_kills.clear();
     net.pending_stock_scene_items.clear();
+    net.pending_escort_pickups.clear();
     net.pending_status_effects.clear();
     net.pending_stock_scene_grounded.clear();
     net.stock_deaths.clear();
@@ -4443,6 +5305,8 @@ fn hard_disconnect(net: &mut NetState, next_state: &mut NextState<AppState>, cur
     net.stock_vips = [None, None];
     net.radar_star_players.clear();
     net.round_active = false;
+    net.round_remaining_seconds = None;
+    net.round_time_minutes = None;
     net.pending_pose_chains.clear();
     net.remote_chain_ticks.clear();
     net.error = Some("自动重连已停止，请重新进入联机大厅".into());
@@ -4465,6 +5329,7 @@ fn handle_net_message(
 ) {
     match message {
         Message::Welcome {
+            balance_revision,
             player_id,
             room_id,
             members,
@@ -4507,6 +5372,7 @@ fn handle_net_message(
                 net.round_epoch = None;
                 net.round_active = false;
                 net.pending_scene_ops.clear();
+                net.pending_projectiles.clear();
                 net.pending_scene_prop_hits.clear();
                 net.pending_scene_transfers.clear();
                 net.applied_scene_transfers.clear();
@@ -4528,6 +5394,12 @@ fn handle_net_message(
 
             if !resumed {
                 if let Some(join) = net.pending_web_join.take() {
+                    if matches!(&join, Message::RoomCreate { rules, .. } if rules.battle_rules.as_ref().is_some_and(|rules| rules.enabled()))
+                        && balance_revision != meteor_combat::battle_rules::RULES_CAPABILITY
+                    {
+                        net.error = Some("服务器不支持再平衡 JSON 规则，请更新服务器".into());
+                        return;
+                    }
                     let select_team = matches!(join, Message::RoomCreate { .. })
                         && (cfg!(target_arch = "wasm32") || request.public_battle)
                         && request.stock_rule != 1
@@ -4581,6 +5453,12 @@ fn handle_net_message(
                     .and_then(serde_json::Value::as_u64)
                     .and_then(|value| u32::try_from(value).ok())
             });
+            net.battle_rules = room
+                .get("rules")
+                .and_then(|r| r.get("battleRules"))
+                .cloned()
+                .and_then(|r| serde_json::from_value(r).ok())
+                .unwrap_or_default();
             net.friendly_fire = room
                 .get("rules")
                 .and_then(|rules| rules.get("friendlyFire"))
@@ -4600,6 +5478,10 @@ fn handle_net_message(
                 .unwrap_or(false);
             net.lobby = serde_json::from_value(room.clone()).unwrap_or_default();
             net.pending_scene_ops = scene_state;
+            net.projectile_sync_enabled = false;
+            net_tx.send_control(Message::ProjectileSubscribe {
+                room_id: net.room_id.clone(),
+            });
             #[cfg(target_arch = "wasm32")]
             persist_browser_session(net, sequence.0);
         }
@@ -4621,6 +5503,9 @@ fn handle_net_message(
             }
         }
         Message::RoomPlayerLeft { player_id } => {
+            net.pending_projectiles
+                .retain(|state| state.player_id != player_id);
+            net.pending_projectile_owner_clears.push(player_id.clone());
             if player_id != net.player_id && !net.pending_remote_despawns.contains(&player_id) {
                 net.pending_remote_despawns.push(player_id.clone());
             }
@@ -4672,6 +5557,7 @@ fn handle_net_message(
                 request.character_id = me.character_id;
                 request.weapon = me.weapon;
             }
+            net.battle_rules = rules.battle_rules.unwrap_or_default();
             if let Some(friendly_fire) = rules.friendly_fire {
                 net.friendly_fire = friendly_fire;
             }
@@ -4757,10 +5643,34 @@ fn handle_net_message(
             net.round_active = true;
             net.role_uplink_hz = ROLE_UPLINK_HZ;
             net.pending_objective_end = None;
+            if !resumed {
+                let roster: Vec<_> = net
+                    .members
+                    .iter()
+                    .map(|member| (member.player_id.clone(), member.name.clone()))
+                    .collect();
+                for (player_id, name) in roster {
+                    let display = if name.trim().is_empty() {
+                        crate::plugins::system_notice::resolve_actor_name(
+                            net,
+                            request,
+                            &crate::app_state::RoomState::default(),
+                            &player_id,
+                        )
+                    } else {
+                        name
+                    };
+                    crate::plugins::system_notice::queue_net_notice(
+                        net,
+                        crate::plugins::system_notice::format_enter(&display),
+                    );
+                }
+            }
             let in_place_resume = resumed && current_state == AppState::Playing;
             if !in_place_resume {
                 if !resumed && !late_joined {
                     net.pending_scene_ops.clear();
+                    net.pending_projectiles.clear();
                     net.pending_scene_prop_hits.clear();
                     net.pending_scene_transfers.clear();
                     net.applied_scene_transfers.clear();
@@ -4777,6 +5687,7 @@ fn handle_net_message(
                 net.stock_equipped_weapons.clear();
                 net.remote_actor_teams.clear();
                 net.remote_actor_names.clear();
+                net.pending_stock_entry_notices.clear();
                 net.network_npc_ids.clear();
                 net.pending_remote_despawns.clear();
                 net.last_full_snapshot_tick = None;
@@ -4796,6 +5707,8 @@ fn handle_net_message(
         Message::RoundStart {
             match_epoch,
             round_epoch,
+            round,
+            round_time,
             ..
         } => {
             let restart = net.round_epoch.is_some()
@@ -4822,11 +5735,29 @@ fn handle_net_message(
                 net.remote_pose_sequences.clear();
                 net.remote_pose_ids.clear();
             }
+            if restart && net.mode == "escort" && current_state == AppState::Playing {
+                net.pending_escort_pickups.clear();
+                next_state.set(AppState::Loading);
+            }
             net.match_epoch = match_epoch.or(net.match_epoch);
             net.round_epoch = round_epoch.or(net.round_epoch);
             net.round_active = !net.battle_pending;
+            let minutes = if round_time > 0 {
+                round_time as u32
+            } else {
+                request.stock_game_time_minutes.max(1)
+            };
+            net.round_time_minutes = Some(minutes);
+            net.round_remaining_seconds = Some(minutes.saturating_mul(60) as f32);
+            if (1..=999).contains(&minutes) {
+                request.stock_game_time_minutes = minutes;
+            }
             net.escort_flag = None;
             net.pending_objective_end = None;
+            crate::plugins::system_notice::queue_net_notice(
+                net,
+                crate::plugins::system_notice::format_new_round(Some(round)),
+            );
         }
         Message::RoundEnd {
             match_epoch,
@@ -4919,6 +5850,25 @@ fn handle_net_message(
                 if net.pending_pose_chains.len() > 1024 {
                     net.pending_pose_chains.remove(0);
                 }
+            }
+        }
+        Message::ProjectileSubscribe { room_id }
+            if room_id == net.room_id && !net.is_stock_udp() =>
+        {
+            net.projectile_sync_enabled = true;
+        }
+        Message::ProjectileState {
+            room_id,
+            match_epoch,
+            round_epoch,
+            state,
+        } => {
+            if net.status == NetStatus::InRoom
+                && room_id == net.room_id
+                && net.match_epoch == Some(match_epoch)
+                && net.round_epoch == Some(round_epoch)
+            {
+                queue_projectile_state(net, state);
             }
         }
         Message::ScenePropHit {
@@ -5120,6 +6070,27 @@ fn handle_net_message(
             tick,
             ..
         } => {
+            let attacker_name = attacker_id.as_ref().map(|id| {
+                crate::plugins::system_notice::resolve_actor_name(
+                    net,
+                    request,
+                    &crate::app_state::RoomState::default(),
+                    id,
+                )
+            });
+            let target_name = crate::plugins::system_notice::resolve_actor_name(
+                net,
+                request,
+                &crate::app_state::RoomState::default(),
+                &target_id,
+            );
+            crate::plugins::system_notice::queue_net_notice(
+                net,
+                crate::plugins::system_notice::format_kill_or_death(
+                    attacker_name.as_deref(),
+                    &target_name,
+                ),
+            );
             let hit = AuthorityHit {
                 stock_guard_bucket: None,
                 damage: 0.0,
@@ -5193,6 +6164,7 @@ fn handle_net_message(
             net.escort_flag = None;
             net.pending_objective_end = None;
             net.pending_scene_ops.clear();
+            net.pending_projectiles.clear();
             net.pending_scene_prop_hits.clear();
             net.pending_scene_transfers.clear();
             net.applied_scene_transfers.clear();
@@ -5220,6 +6192,80 @@ fn handle_net_message(
             if net.chat_messages.len() > 20 {
                 net.chat_messages.pop_front();
             }
+        }
+        Message::EscortTaken {
+            player_id,
+            position,
+            ..
+        } => {
+            net.pending_escort_pickups.push(player_id.clone());
+            if let Some(previous) = net
+                .escort_flag
+                .as_ref()
+                .and_then(|flag| flag.carrier_id.clone())
+            {
+                net.radar_star_players.remove(&previous);
+            }
+            net.radar_star_players.insert(player_id.clone());
+            let name = crate::plugins::system_notice::resolve_actor_name(
+                net,
+                request,
+                &crate::app_state::RoomState::default(),
+                &player_id,
+            );
+            crate::plugins::system_notice::queue_net_notice(
+                net,
+                crate::plugins::system_notice::format_flag_taken(&name),
+            );
+            net.escort_flag = Some(EscortFlagSnapshot {
+                position,
+                carrier_id: Some(player_id),
+                state: "carried".into(),
+                return_in: None,
+            });
+        }
+        Message::EscortDropped {
+            player_id,
+            position,
+            return_seconds,
+            ..
+        } => {
+            let name = crate::plugins::system_notice::resolve_actor_name(
+                net,
+                request,
+                &crate::app_state::RoomState::default(),
+                &player_id,
+            );
+            crate::plugins::system_notice::queue_net_notice(
+                net,
+                crate::plugins::system_notice::format_flag_lost(&name),
+            );
+            net.radar_star_players.remove(&player_id);
+            net.escort_flag = Some(EscortFlagSnapshot {
+                position,
+                carrier_id: None,
+                state: "dropped".into(),
+                return_in: Some(return_seconds),
+            });
+        }
+        Message::EscortReturned { position, .. } => {
+            if let Some(previous) = net
+                .escort_flag
+                .as_ref()
+                .and_then(|flag| flag.carrier_id.clone())
+            {
+                net.radar_star_players.remove(&previous);
+            }
+            crate::plugins::system_notice::queue_net_notice(
+                net,
+                crate::plugins::system_notice::format_flag_returned(),
+            );
+            net.escort_flag = Some(EscortFlagSnapshot {
+                position,
+                carrier_id: None,
+                state: "home".into(),
+                return_in: None,
+            });
         }
         Message::Error { code, text } => {
             warn!("net: {code}: {text}");
@@ -5489,10 +6535,11 @@ pub struct SceneTransfer {
 impl SceneTransfer {
     fn current(&self, net: &NetState) -> bool {
         net.status == NetStatus::InRoom
-            && !net.is_stock_udp()
             && self.room_id == net.room_id
-            && Some(self.match_epoch) == net.match_epoch
-            && Some(self.round_epoch) == net.round_epoch
+            && ((net.is_stock_udp() && self.match_epoch == 0 && self.round_epoch == 0)
+                || (!net.is_stock_udp()
+                    && Some(self.match_epoch) == net.match_epoch
+                    && Some(self.round_epoch) == net.round_epoch))
     }
 
     fn ack(&self) -> Message {
@@ -5518,7 +6565,7 @@ fn queue_scene_transfer(net: &mut NetState, tx: &NetTx, transfer: SceneTransfer)
         .get(&transfer.player_id)
         .is_some_and(|last| last.current(net) && last.serial >= transfer.serial)
     {
-        if transfer.player_id == net.player_id {
+        if !net.is_stock_udp() && transfer.player_id == net.player_id {
             tx.send_control(transfer.ack());
         }
         return;
@@ -5543,6 +6590,7 @@ type TransferFighters<'w, 's> = Query<
     'w,
     's,
     (
+        Entity,
         &'static mut Transform,
         &'static mut MotionState,
         Option<&'static LocalFighter>,
@@ -5555,6 +6603,7 @@ type TransferFighters<'w, 's> = Query<
 >;
 
 fn net_apply_scene_transfers(
+    mut commands: Commands,
     mut net: ResMut<NetState>,
     tx: Res<NetTx>,
     mut fighters: TransferFighters,
@@ -5564,25 +6613,25 @@ fn net_apply_scene_transfers(
             continue;
         }
         let mut applied = false;
-        for (mut transform, mut motion, local, remote, air, target, segment) in &mut fighters {
+        for (entity, mut transform, mut motion, local, remote, mut air, target, segment) in
+            &mut fighters
+        {
             if !(local.is_some() && net.player_id == transfer.player_id)
                 && !remote.is_some_and(|r| r.player_id == transfer.player_id)
             {
                 continue;
             }
 
-            transform.translation = Vec3::from_array(transfer.position);
-            transform.rotation = Quat::from_rotation_y(transfer.yaw);
-            motion.facing = transfer.yaw;
-            motion.velocity = Vec3::ZERO;
-            if let Some(mut air) = air {
-                air.air.vertical_speed = 0.0;
-                air.air.planar_x = 0.0;
-                air.air.planar_z = 0.0;
-                air.ground_external_velocity = Vec3::ZERO;
-                air.landed_planar = Vec2::ZERO;
-                air.ground_y = transfer.position[1];
-            }
+            super::stage_plugin::apply_scene_transfer_transform(
+                &mut transform,
+                Some(&mut motion),
+                air.as_deref_mut(),
+                Vec3::from_array(transfer.position),
+                transfer.yaw,
+            );
+            commands
+                .entity(entity)
+                .insert(super::camera_plugin::CameraFollowReset);
             if let Some(mut target) = target {
                 target.translation = transform.translation;
                 target.yaw = transfer.yaw;
@@ -5597,7 +6646,7 @@ fn net_apply_scene_transfers(
             break;
         }
         if applied {
-            if transfer.player_id == net.player_id {
+            if !net.is_stock_udp() && transfer.player_id == net.player_id {
                 tx.send_control(transfer.ack());
             }
             net.applied_scene_transfers
@@ -5637,6 +6686,222 @@ fn queue_role_state(net: &mut NetState, id: String, state: RoleState, tick: u32)
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod scene_transfer_tests {
     use super::*;
+
+    #[test]
+    fn scene_transfer_camera_uses_destination_before_same_frame_mouse_input() {
+        use super::super::camera_plugin::{self, CameraBasis, CameraFollowReset, ThirdPersonState};
+        use bevy::input::mouse::MouseMotion;
+
+        for fps in [30.0, 60.0, 120.0] {
+            let mut app = App::new();
+            crate::plugins::configure_fighter_frame_sets(&mut app);
+            let mut time: Time = Time::default();
+            time.advance_by(std::time::Duration::from_secs_f32(1.0 / fps));
+            app.insert_resource(time)
+                .insert_resource(NetState {
+                    status: NetStatus::InRoom,
+                    room_id: "r".into(),
+                    player_id: "guest".into(),
+                    match_epoch: Some(1),
+                    round_epoch: Some(1),
+                    ..Default::default()
+                })
+                .init_resource::<NetTx>()
+                .init_resource::<crate::app_state::Settings>()
+                .init_resource::<crate::app_state::Keymap>()
+                .init_resource::<ButtonInput<KeyCode>>()
+                .init_resource::<ButtonInput<MouseButton>>()
+                .init_resource::<CameraBasis>()
+                .init_resource::<LockOnController>()
+                .init_resource::<crate::plugins::stage_collider::StageCollider>()
+                .add_systems(Update, net_apply_scene_transfers.in_set(NetworkFrameApply));
+            camera_plugin::install_camera_input_for_test(&mut app);
+            let camera = camera_plugin::install_follow_camera_for_test(&mut app);
+            app.world_mut()
+                .resource_mut::<ButtonInput<MouseButton>>()
+                .press(MouseButton::Left);
+            let local = app
+                .world_mut()
+                .spawn((
+                    LocalFighter,
+                    Transform::from_xyz(5.0, -40.0, 7.0),
+                    SmState::default(),
+                    MotionState {
+                        facing: -2.0,
+                        velocity: Vec3::ONE,
+                        movement_mode: meteor_core::MovementMode::Idle,
+                    },
+                    FighterAir::default(),
+                ))
+                .id();
+            app.update();
+            let (_, pitch, distance) = app
+                .world()
+                .get::<ThirdPersonState>(camera)
+                .unwrap()
+                .debug_snapshot();
+            let transfer = SceneTransfer {
+                room_id: "r".into(),
+                match_epoch: 1,
+                round_epoch: 1,
+                serial: 1,
+                tick: 10,
+                player_id: "guest".into(),
+                position: [120.0, 50.0, -180.0],
+                yaw: 1.25,
+            };
+            app.world_mut()
+                .resource_mut::<NetState>()
+                .pending_scene_transfers
+                .push(transfer.clone());
+            app.world_mut()
+                .resource_mut::<Messages<MouseMotion>>()
+                .write(MouseMotion {
+                    delta: Vec2::new(126.0, 0.0),
+                });
+            app.update();
+            let expected = transfer.yaw - std::f32::consts::FRAC_PI_2;
+            assert!(
+                (app.world().get::<MotionState>(local).unwrap().facing - expected).abs() < 1e-5
+            );
+            assert!((app.world().resource::<CameraBasis>().yaw - expected).abs() < 1e-5);
+            let eye = app.world().get::<Transform>(camera).unwrap();
+            let forward = eye.rotation * Vec3::NEG_Z;
+            let horizontal = Vec2::new(forward.x, forward.z).normalize();
+            assert!(horizontal.distance(Vec2::new(expected.sin(), expected.cos())) < 1e-5);
+            let cam = app.world().get::<ThirdPersonState>(camera).unwrap();
+            assert!(
+                cam.follow_focus_for_test().distance(
+                    Vec3::from_array(transfer.position) + Vec3::Y * camera_plugin::LOOK_HEIGHT
+                ) < 1e-4
+            );
+            let (_, actual_pitch, actual_distance) = cam.debug_snapshot();
+            assert_eq!((actual_pitch, actual_distance), (pitch, distance));
+            assert!(app.world().get::<CameraFollowReset>(local).is_none());
+
+            let remote = app
+                .world_mut()
+                .spawn((
+                    RemoteFighter {
+                        player_id: "host".into(),
+                    },
+                    Transform::default(),
+                    MotionState {
+                        facing: 0.0,
+                        velocity: Vec3::ZERO,
+                        movement_mode: meteor_core::MovementMode::Idle,
+                    },
+                ))
+                .id();
+            let before = *app.world().get::<Transform>(camera).unwrap();
+            app.world_mut()
+                .resource_mut::<NetState>()
+                .pending_scene_transfers
+                .push(SceneTransfer {
+                    player_id: "host".into(),
+                    serial: 2,
+                    yaw: -2.0,
+                    ..transfer
+                });
+            app.update();
+            let after = app.world().get::<Transform>(camera).unwrap();
+            assert!(after.translation.distance(before.translation) < 1e-5);
+            assert!(after.rotation.dot(before.rotation).abs() > 0.99999);
+            assert!(app.world().get::<CameraFollowReset>(remote).is_some());
+        }
+    }
+
+    #[test]
+    fn stock_scene_transfer_event_applies_centered_matrix_without_ack_or_pose_reset() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut app = App::new();
+        app.insert_resource(NetState {
+            status: NetStatus::InRoom,
+            address: "udp://127.0.0.1:5230".into(),
+            room_id: "stock-udp".into(),
+            player_id: "stock-42".into(),
+            stage: "sn22".into(),
+            round_active: true,
+            ..Default::default()
+        })
+        .insert_resource(NetTx {
+            active: Some(sender),
+            connecting: None,
+        })
+        .add_systems(Update, net_apply_scene_transfers);
+        let local = app
+            .world_mut()
+            .spawn((
+                LocalFighter,
+                Transform::default(),
+                MotionState {
+                    movement_mode: meteor_core::MovementMode::Idle,
+                    velocity: Vec3::ONE,
+                    facing: 0.0,
+                },
+                Health {
+                    current: 123.0,
+                    max: 1000.0,
+                },
+                PoseRuntime::idle(),
+                FighterAir::default(),
+            ))
+            .id();
+        let expected = Vec3::new(31.0, 2.0, -46.0);
+        let mut state = decode_request1_state(&[0; 20]).unwrap();
+        state.position = RoleVec3 {
+            x: expected.x,
+            y: expected.y,
+            z: expected.z,
+        };
+        state.forward = RoleVec3 {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+        };
+        let event = meteor_network::stock_protocol::StockSceneTransferEvent::from_role_state(
+            stock_scene_frame("sn22").to_stock(state),
+        );
+        app.world_mut()
+            .resource_scope(|world, mut net: Mut<NetState>| {
+                let mut request = LaunchRequest::default();
+                let mut end = MatchEnd::default();
+                let mut next = NextState::default();
+                handle_stock_game_event(
+                    &mut net,
+                    &mut request,
+                    &mut end,
+                    &mut world.resource_mut::<NetTx>(),
+                    &mut next,
+                    AppState::Playing,
+                    StockGameEvent::SceneTransfer(event),
+                );
+            });
+        app.update();
+        assert!(
+            app.world()
+                .get::<Transform>(local)
+                .unwrap()
+                .translation
+                .distance(expected)
+                < 0.0001
+        );
+        assert!(
+            (app.world().get::<MotionState>(local).unwrap().facing - std::f32::consts::FRAC_PI_2)
+                .abs()
+                < 0.0001
+        );
+        assert_eq!(
+            app.world().get::<MotionState>(local).unwrap().velocity,
+            Vec3::ZERO
+        );
+        assert_eq!(app.world().get::<Health>(local).unwrap().current, 123.0);
+        assert_eq!(app.world().get::<PoseRuntime>(local).unwrap().pose_id, 0);
+        assert!(
+            receiver.try_recv().is_err(),
+            "stock event 77 has no WS acknowledgment"
+        );
+    }
 
     #[test]
     fn scene_transfer_applies_only_target_and_acks_after_ecs_then_ignores_replay() {
@@ -5926,6 +7191,46 @@ fn weapon_id_from_web_name(weapon: &str) -> u8 {
     meteor_network::protocol::weapon_id_from_web_name(weapon)
 }
 
+fn load_host_battle_rules(
+    enabled: bool,
+) -> Result<meteor_combat::battle_rules::BattleRules, String> {
+    use meteor_combat::battle_rules::BattleRules;
+    if !enabled {
+        return Ok(BattleRules::ORIGINAL);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let explicit = std::env::var_os("METEOR_BALANCE_RULES").map(std::path::PathBuf::from);
+        let path = explicit.clone().or_else(|| {
+            let mut candidates = vec![
+                std::path::PathBuf::from("config/balance-rules.json"),
+                std::path::PathBuf::from("meteor_rust/config/balance-rules.json"),
+            ];
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(parent) = exe.parent() {
+                    candidates.push(parent.join("config/balance-rules.json"));
+                }
+            }
+            candidates.into_iter().find(|path| path.is_file())
+        });
+        if let Some(path) = path {
+            use std::io::Read;
+            let mut json = String::new();
+            std::fs::File::open(&path)
+                .map_err(|error| format!("无法读取再平衡配置 {}: {error}", path.display()))?
+                .take((meteor_combat::battle_rules::MAX_RULES_JSON_BYTES + 1) as u64)
+                .read_to_string(&mut json)
+                .map_err(|error| format!("无法读取再平衡配置 {}: {error}", path.display()))?;
+            let rules = BattleRules::from_json(&json)?;
+            if !rules.enabled() {
+                return Err("已开启再平衡，但 JSON 的 rebalance 为空".into());
+            }
+            return Ok(rules);
+        }
+    }
+    Ok(BattleRules::bundled())
+}
+
 fn web_room_join(room: Option<&RoomSummary>, request: &LaunchRequest) -> Message {
     let Some(room) = room else {
         let public_battle = cfg!(target_arch = "wasm32") || request.public_battle;
@@ -5944,6 +7249,11 @@ fn web_room_join(room: Option<&RoomSummary>, request: &LaunchRequest) -> Message
             password: String::new(),
             rules: if public_battle {
                 meteor_network::protocol::RoomRulesWire {
+                    battle_rules: Some(if request.balance_rules {
+                        meteor_combat::battle_rules::BattleRules::bundled()
+                    } else {
+                        Default::default()
+                    }),
                     round_time: Some(request.stock_game_time_minutes),
                     game_num: Some(request.stock_game_num),
                     life_adjust: Some(request.stock_life_adjust_percent),
@@ -6087,19 +7397,23 @@ fn v6_role_input(
 fn net_send_stock_weapon_switch(
     net: Res<NetState>,
     net_tx: Option<Res<NetTx>>,
-    mut previous_slot: Local<Option<u8>>,
+    mut previous_equipment: Local<Option<(u8, u8, u8)>>,
     local: Query<&Fighter, (With<LocalFighter>, Without<RemoteFighter>)>,
 ) {
     if net.status != NetStatus::InRoom || !net.round_active || !net.is_stock_udp() {
-        *previous_slot = None;
+        *previous_equipment = None;
         return;
     }
     let Ok(fighter) = local.single() else {
         return;
     };
-    let slot = fighter.weapon_slot.min(1);
-    let changed = previous_slot.is_some_and(|previous| previous != slot);
-    *previous_slot = Some(slot);
+    let equipment = (
+        fighter.weapon_slot.min(1),
+        fighter.weapon,
+        fighter.weapon_variant,
+    );
+    let changed = previous_equipment.is_some_and(|previous| previous != equipment);
+    *previous_equipment = Some(equipment);
     if !changed {
         return;
     }
@@ -6411,7 +7725,7 @@ type EscortCarrierFighterQuery<'w, 's> = Query<
     With<Fighter>,
 >;
 
-fn net_apply_stock_vitals(
+pub(crate) fn net_apply_stock_vitals(
     mut net: ResMut<NetState>,
     mut local: Query<(&mut Health, &mut Qi), With<LocalFighter>>,
     mut npcs: Query<(&mut Health, &mut Qi), Without<LocalFighter>>,
@@ -6442,9 +7756,16 @@ fn net_apply_remote_vitals(
         &mut Health,
         &mut Qi,
         &mut RemoteVitalsStatus,
+        &mut DeathRespawn,
+        &mut TargetHitClock,
     )>,
 ) {
-    for (remote, mut health, mut qi, mut status) in &mut remotes {
+    let mut death_clears = std::mem::take(&mut net.pending_remote_death_clears);
+    for (remote, mut health, mut qi, mut status, mut death, mut hit_clock) in &mut remotes {
+        if let Some(index) = death_clears.iter().position(|id| id == &remote.player_id) {
+            death_clears.swap_remove(index);
+            clear_remote_death_for_revive(&mut death, &mut hit_clock);
+        }
         let Some([current, max, anger]) = net.pending_remote_vitals.remove(&remote.player_id)
         else {
             continue;
@@ -6454,7 +7775,19 @@ fn net_apply_remote_vitals(
         qi.current = anger.clamp(0.0, qi.max);
         status.health_known = true;
         status.anger_known = true;
+
+        if health.current > 0.0 && death.active {
+            clear_remote_death_for_revive(&mut death, &mut hit_clock);
+        }
     }
+    net.pending_remote_death_clears = death_clears;
+}
+
+fn clear_remote_death_for_revive(death: &mut DeathRespawn, hit_clock: &mut TargetHitClock) {
+    death.active = false;
+    death.timer = 0.0;
+    hit_clock.reset_spawn();
+    hit_clock.clear_hit();
 }
 
 fn stock_battle_result(
@@ -6616,9 +7949,26 @@ mod battle_result_tests {
 fn net_apply_stock_scores(
     mut net: ResMut<NetState>,
     mut score: ResMut<crate::components::fighter::KillScore>,
+    request: Res<crate::app_state::LaunchRequest>,
 ) {
     let events = std::mem::take(&mut net.pending_stock_kills);
     for (attacker_id, target_id) in events {
+        let attacker_name = crate::plugins::system_notice::resolve_actor_name(
+            &net,
+            &request,
+            &crate::app_state::RoomState::default(),
+            &attacker_id,
+        );
+        let target_name = crate::plugins::system_notice::resolve_actor_name(
+            &net,
+            &request,
+            &crate::app_state::RoomState::default(),
+            &target_id,
+        );
+        crate::plugins::system_notice::queue_net_notice(
+            &mut net,
+            crate::plugins::system_notice::format_kill_or_death(Some(&attacker_name), &target_name),
+        );
         if attacker_id == net.player_id {
             score.player_kills = score.player_kills.saturating_add(1);
         }
@@ -6816,7 +8166,31 @@ fn net_apply_snapshot(
                 mut window,
             )) = fighters.get_mut(entity)
             {
-                fighter.weapon = snap.weapon;
+                let (weapon, variant) = net
+                    .stock_equipped_weapons
+                    .get(&remote_id)
+                    .copied()
+                    .filter(|_| net.is_stock_udp())
+                    .unwrap_or((
+                        snap.weapon,
+                        if fighter.weapon == snap.weapon {
+                            fighter.weapon_variant
+                        } else {
+                            0
+                        },
+                    ));
+                let slot = usize::from(fighter.weapon_slot.min(1));
+                if fighter.weapon_slots[slot] != weapon
+                    || fighter.weapon_slot_variants[slot] != variant
+                {
+                    fighter.weapon_slots[slot] = weapon;
+                    fighter.weapon_slot_variants[slot] = variant;
+                    commands
+                        .entity(entity)
+                        .insert(crate::components::fighter::WeaponVariantChanged);
+                }
+                fighter.weapon = weapon;
+                fighter.weapon_variant = variant;
                 let last_hit_tick = generation
                     .as_deref()
                     .and_then(|generation| generation.last_hit_tick);
@@ -6895,6 +8269,7 @@ fn net_apply_snapshot(
             max: snap.max_hp,
         };
         let mut pose = PoseRuntime {
+            action_id: None,
             pose_id: snap.pose_id,
             frame: snap.pose_frame as f32,
             start: snap.pose_start,
@@ -6902,6 +8277,7 @@ fn net_apply_snapshot(
             loop_start: snap.pose_loop_start,
             loop_end: snap.pose_loop_end,
             loops: snap.pose_loops,
+            link_past_end: false,
             pose_instance_id: 0,
         };
         if let Some(character_assets) = assets
@@ -7149,6 +8525,9 @@ fn net_apply_snapshot(
                 pose.frame = 0.0;
             }
         }
+        if transition.apply && !hit_owns_generation {
+            pose.link_past_end = state.state_words.playback_arg & 1 != 0;
+        }
         net.remote_pose_sequences.insert(
             remote_id.clone(),
             (transition.ground_sequence, transition.applied_sequence),
@@ -7171,6 +8550,7 @@ fn net_apply_snapshot(
             if let Ok(mut segment) = contact_segments.get_mut(entity) {
                 segment.role_driven = true;
                 segment.state_age = 0.0;
+                segment.pending_stock_state |= net.is_stock_udp();
             }
 
             if last_hit_tick.is_some_and(|hit_tick| state_tick > hit_tick)
@@ -7245,8 +8625,14 @@ fn net_smooth_remote_fighters(
     for (entity, mut transform, mut motion, mut target, mut segment) in &mut remotes {
         let display_start = transform.translation;
         let target_start = target.translation;
+
+        segment.skip_stock_motion = std::mem::take(&mut segment.pending_stock_state);
         let (contact_start, contact_end) = if segment.role_driven {
-            segment.state_age += dt.max(0.0);
+            if segment.skip_stock_motion {
+                segment.state_age = 0.0;
+            } else {
+                segment.state_age += dt.max(0.0);
+            }
             segment.hit_age += dt.max(0.0);
             let correction = target.translation - transform.translation;
             let correction_factor = meteor_network::role_state::role_position_correction_factor(
@@ -7258,10 +8644,13 @@ fn net_smooth_remote_fighters(
             transform.translation = transform
                 .translation
                 .lerp(target.translation, correction_factor);
-            motion.facing = lerp_remote_yaw(
-                motion.facing,
-                target.yaw,
-                meteor_network::role_state::role_yaw_correction_factor(dt, segment.hit_age),
+            motion.facing = meteor_network::role_state::yaw_from_forward(
+                meteor_network::role_state::correct_role_forward(
+                    meteor_network::role_state::forward_from_yaw(motion.facing),
+                    meteor_network::role_state::forward_from_yaw(target.yaw),
+                    dt,
+                    segment.hit_age,
+                ),
             );
 
             let physical_start = transform.translation;
@@ -7275,7 +8664,11 @@ fn net_smooth_remote_fighters(
                 },
                 dt,
             );
-            let physical_delta = Vec3::new(delta.x, delta.y, delta.z);
+            let physical_delta = if segment.skip_stock_motion {
+                Vec3::ZERO
+            } else {
+                Vec3::new(delta.x, delta.y, delta.z)
+            };
             transform.translation += physical_delta;
 
             target.translation += physical_delta;
@@ -7324,10 +8717,27 @@ struct NetworkReactionView<'a> {
     air: &'a FighterAir,
     assets: &'a CharacterAssets,
     strategy_id: u8,
+    observer_entry: bool,
 }
 
 impl NetworkReactionView<'_> {
     fn apply_pose(&mut self, pose_id: u16, hard_cut: bool) {
+        if self.observer_entry {
+            self.assets.apply_pose_with_blend(
+                self.pose,
+                self.blend,
+                pose_id,
+                true,
+                Some(0.05),
+                crate::components::fighter::EntryBlendKind::Chained,
+                false,
+                true,
+                None,
+            );
+            self.pose.loops = false;
+            self.pose.link_past_end = false;
+            return;
+        }
         self.assets.apply_pose_with_blend(
             self.pose,
             self.blend,
@@ -7339,6 +8749,7 @@ impl NetworkReactionView<'_> {
             false,
             Some(self.strategy_id),
         );
+        self.pose.link_past_end = true;
     }
 }
 
@@ -7456,9 +8867,11 @@ fn set_network_reaction_state(
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn net_handle_hit(
+    mut commands: Commands,
     assets: Option<Res<CharacterAssetsSet>>,
     mut net: ResMut<NetState>,
     mut impacts: MessageWriter<crate::plugins::impact_fx_plugin::CombatImpactEvent>,
+    #[cfg(not(target_arch = "wasm32"))] mut trace: Option<ResMut<super::combat_trace::CombatTrace>>,
     mut query: Query<
         (
             Entity,
@@ -7531,6 +8944,50 @@ fn net_handle_hit(
             if !hit.impact && !hit.terminal {
                 continue;
             }
+            let effect = hit.reaction.as_ref().map_or(0, |r| r.rebalance_effect);
+            if !was_dead
+                && health.current > 0.0
+                && net.battle_rules.enabled()
+                && (1..=3).contains(&effect)
+            {
+                let character_assets = assets
+                    .as_deref()
+                    .and_then(|a| a.0.get(&format!("p{}", fighter.character_id)));
+                if effect == meteor_combat::rebalance_effects::INVALID_HIT {
+                    let recovering = matches!(
+                        combat.state,
+                        meteor_core::FighterState::BeHit | meteor_core::FighterState::Down
+                    );
+                    reaction_runtime.clear();
+                    if recovering {
+                        *attack_motion = FighterAttackMotion::default();
+                        motion.velocity = Vec3::ZERO;
+                        *sm = SmState::default();
+                        combat.state = if air.air.airborne {
+                            meteor_core::FighterState::Jump
+                        } else {
+                            meteor_core::FighterState::Name
+                        };
+                        sm.current = combat.state;
+                        *blend = EntryBlend::default();
+                        if let Some(a) = character_assets {
+                            a.apply_pose(&mut pose, if air.air.airborne { 180 } else { 0 }, true);
+                        }
+                        commands.entity(entity).remove::<WeaponSwitchActive>();
+                    }
+                    commands
+                        .entity(entity)
+                        .insert(super::rebalance_plugin::BalanceGlow::immunity());
+                } else if effect == meteor_combat::rebalance_effects::ARMOR_START {
+                    if let Some(pose_id) = hit.reaction.as_ref().and_then(|r| r.target_pose) {
+                        commands
+                            .entity(entity)
+                            .insert(super::rebalance_plugin::BalanceGlow::armor(pose_id));
+                    }
+                }
+
+                continue;
+            }
             let attacker = hit.attacker_id.as_deref().and_then(|attacker_id| {
                 remotes.iter().find_map(|(entity, remote, transform)| {
                     (remote.player_id == attacker_id).then_some((entity, transform.translation))
@@ -7590,6 +9047,19 @@ fn net_handle_hit(
                 transform.translation.z,
                 motion.facing,
             );
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(trace) = trace.as_deref_mut() {
+                trace.event(serde_json::json!({
+                    "kind": "authority-reaction-entry", "entity": entity.to_bits(),
+                    "local": local.is_some(), "tick": hit.tick, "guarded": hit.guarded,
+                    "incomingPose": attack.target_pose, "targetMinimum": attack.target_value,
+                    "guardMinimum": attack.defense_value, "incomingMove": attack.target_move,
+                    "previousPose": pose.pose_id, "previousFrame": pose.frame,
+                    "previousMinimum": reaction_runtime.current.as_ref().map(|r| r.minimum_remaining),
+                    "previousKind": reaction_runtime.current.as_ref().map(|r| format!("{:?}", r.kind)),
+                    "velocity": motion.velocity.to_array(), "airborne": air.air.airborne,
+                }));
+            }
             *attack_motion = FighterAttackMotion::default();
             let strategy_id = weapon_to_strategy(fighter.weapon);
             let poses: Vec<u16> = character_assets.poses.keys().copied().collect();
@@ -7601,6 +9071,7 @@ fn net_handle_hit(
                 air: &air,
                 assets: character_assets,
                 strategy_id,
+                observer_entry: false,
             };
             if killed {
                 let reaction = begin_death(&mut view, Some(&attack));
@@ -7645,6 +9116,7 @@ const REMOTE_HIT_ROOT_SECONDS: f32 = 0.4;
 
 #[allow(clippy::type_complexity)]
 fn net_handle_remote_hits(
+    mut commands: Commands,
     assets: Option<Res<CharacterAssetsSet>>,
     mut net: ResMut<NetState>,
     mut impacts: MessageWriter<crate::plugins::impact_fx_plugin::CombatImpactEvent>,
@@ -7713,6 +9185,58 @@ fn net_handle_remote_hits(
         {
             if remote.player_id != target_id {
                 continue;
+            }
+            let effect = hit.reaction.as_ref().map_or(0, |r| r.rebalance_effect);
+            if effect != 0
+                && hit.tick.is_some_and(|tick| {
+                    generation.role_state_tick.is_some_and(|newer| newer > tick)
+                        || generation.last_hit_tick.is_some_and(|newer| newer > tick)
+                })
+            {
+                continue;
+            }
+            if !death.active && net.battle_rules.enabled() && (1..=3).contains(&effect) {
+                if let Some(hp) = hit.health {
+                    health.current = hp.clamp(0.0, health.max);
+                }
+                if health.current > 0.0 {
+                    if effect == meteor_combat::rebalance_effects::INVALID_HIT {
+                        let recovering = matches!(
+                            combat.state,
+                            meteor_core::FighterState::BeHit | meteor_core::FighterState::Down
+                        );
+                        reaction_runtime.clear();
+                        window.remaining = 0.0;
+                        if recovering {
+                            combat.state = if air.air.airborne {
+                                meteor_core::FighterState::Jump
+                            } else {
+                                meteor_core::FighterState::Name
+                            };
+                            *blend = EntryBlend::default();
+                            if let Some(a) = assets
+                                .as_deref()
+                                .and_then(|a| a.0.get(&format!("p{}", fighter.character_id)))
+                            {
+                                a.apply_pose(
+                                    &mut pose,
+                                    if air.air.airborne { 180 } else { 0 },
+                                    true,
+                                );
+                            }
+                        }
+                        commands
+                            .entity(entity)
+                            .insert(super::rebalance_plugin::BalanceGlow::immunity());
+                    } else if effect == meteor_combat::rebalance_effects::ARMOR_START {
+                        if let Some(pose_id) = hit.reaction.as_ref().and_then(|r| r.target_pose) {
+                            commands
+                                .entity(entity)
+                                .insert(super::rebalance_plugin::BalanceGlow::armor(pose_id));
+                        }
+                    }
+                    continue;
+                }
             }
             let (attacker_entity, attacker_position) =
                 attacker.unwrap_or((entity, transform.translation + Vec3::NEG_Z));
@@ -7790,6 +9314,7 @@ fn net_handle_remote_hits(
                 air,
                 assets: character_assets,
                 strategy_id,
+                observer_entry: !lethal,
             };
             if lethal {
                 let _ = begin_death(&mut view, Some(&attack));
@@ -7869,7 +9394,9 @@ fn net_apply_authority_respawns(
     assets: Option<Res<crate::plugins::character_plugin::CharacterAssetsSet>>,
     mut lock: ResMut<LockOnController>,
     mut camera_basis: ResMut<crate::plugins::camera_plugin::CameraBasis>,
+    mut item_buffs: ResMut<crate::plugins::item_plugin::ItemBuffs>,
     stage: super::stage_plugin::RespawnStage,
+    next_state: Option<Res<NextState<AppState>>>,
     mut query: AuthorityRespawnQuery<'_, '_>,
     mut statuses: Query<(
         &mut crate::components::fighter::FighterStatusEffects,
@@ -7877,6 +9404,13 @@ fn net_apply_authority_respawns(
     )>,
 ) {
     if net.wire_format != NetWireFormat::V4 || net.pending_respawns.is_empty() {
+        return;
+    }
+
+    if next_state
+        .as_deref()
+        .is_some_and(|next| matches!(next, NextState::Pending(AppState::Loading)))
+    {
         return;
     }
     let mut respawns = std::mem::take(&mut net.pending_respawns);
@@ -7916,9 +9450,27 @@ fn net_apply_authority_respawns(
         let Some(actor) = actor.filter(|id| respawns.contains(id)) else {
             continue;
         };
-        if relocations.contains(&actor) || death.active {
+        let assigned = net.pending_spawn_pads.get(&actor).copied();
+        let assigned_position = match assigned.flatten() {
+            Some(pad) => {
+                if !stage.ready() {
+                    continue;
+                }
+                Some(stage.resolve_stock(
+                    pad.group,
+                    Some(pad.index as usize),
+                    transform.translation,
+                    motion.facing,
+                ))
+            }
+            None => None,
+        };
+        if assigned.is_some() || relocations.contains(&actor) || death.active {
             if let Ok((mut status, mut worn)) = statuses.get_mut(entity) {
                 status.clear(&mut worn);
+            }
+            if local.is_some() {
+                *item_buffs = crate::plugins::item_plugin::ItemBuffs::default();
             }
         }
         health.current = health.max;
@@ -7942,7 +9494,10 @@ fn net_apply_authority_respawns(
             wall.as_deref_mut(),
         );
         commands.entity(entity).remove::<WeaponSwitchActive>();
-        if relocations.contains(&actor) {
+        commands
+            .entity(entity)
+            .remove::<super::rebalance_plugin::BalanceGlow>();
+        if assigned_position.is_some() || (assigned.is_none() && relocations.contains(&actor)) {
             let member_index = net
                 .members
                 .iter()
@@ -7950,7 +9505,8 @@ fn net_apply_authority_respawns(
             let team = member_index
                 .and_then(|index| net.members[index].team)
                 .or_else(|| mission.map(|mission| u32::from(mission.team)));
-            let pad_index = (!net.is_stock_udp())
+            let original_pads = net.is_stock_udp();
+            let pad_index = (!original_pads)
                 .then(|| {
                     member_index.map(|index| {
                         net.members[..index]
@@ -7960,7 +9516,24 @@ fn net_apply_authority_respawns(
                     })
                 })
                 .flatten();
-            let (position, facing) = stage.resolve(team, pad_index, death.spawn_pos, motion.facing);
+            let (position, facing) = assigned_position.unwrap_or_else(|| {
+                if net.is_stock_udp() {
+                    stage.resolve_stock(
+                        team.unwrap_or(0),
+                        None,
+                        transform.translation,
+                        motion.facing,
+                    )
+                } else {
+                    stage.resolve(
+                        team,
+                        pad_index,
+                        death.spawn_pos,
+                        motion.facing,
+                        original_pads,
+                    )
+                }
+            });
             transform.translation = position;
 
             death.spawn_pos = position;
@@ -7970,7 +9543,7 @@ fn net_apply_authority_respawns(
         death.active = false;
         death.timer = 0.0;
         target_hit_clock.reset_spawn();
-        target_hit_clock.reset();
+        target_hit_clock.clear_hit();
         if local.is_some() {
             lock.system.clear();
             lock.lock_entity = None;
@@ -7979,6 +9552,7 @@ fn net_apply_authority_respawns(
         }
         respawns.retain(|id| id != &actor);
         relocations.remove(&actor);
+        net.pending_spawn_pads.remove(&actor);
     }
 
     net.pending_respawns = respawns;
@@ -8032,26 +9606,16 @@ fn net_send_hits(
     mut commands: Commands,
     net: Res<NetState>,
     net_tx: Option<Res<NetTx>>,
+    #[cfg(not(target_arch = "wasm32"))] mut trace: Option<ResMut<super::combat_trace::CombatTrace>>,
     mut sequence: ResMut<NetInputSequence>,
-    assets: Option<Res<CharacterAssetsSet>>,
     self_effects: Query<(), With<PendingSelfEffect>>,
-    local: Query<(&Fighter, &Transform), (With<LocalFighter>, Without<RemoteFighter>)>,
     hits: Query<
-        (
-            Entity,
-            &RemoteFighter,
-            &Fighter,
-            &Transform,
-            &MotionState,
-            &PendingRemoteHit,
-        ),
+        (Entity, &RemoteFighter, &PendingRemoteHit),
         (Changed<PendingRemoteHit>, Without<LocalFighter>),
     >,
 ) {
-    #[cfg(target_arch = "wasm32")]
-    let _ = (&assets, &local);
     if !net.round_active {
-        for (entity, _, _, _, _, _) in &hits {
+        for (entity, _, _) in &hits {
             commands.entity(entity).remove::<PendingRemoteHit>();
         }
         return;
@@ -8059,55 +9623,25 @@ fn net_send_hits(
     let Some(tx) = net_tx else {
         return;
     };
-    for (entity, remote, remote_fighter, remote_transform, remote_motion, hit) in &hits {
+    for (entity, remote, hit) in &hits {
         #[cfg(not(target_arch = "wasm32"))]
         if net.is_stock_udp() {
-            let stock_hit = (|| {
-                let target_actor_id = remote.player_id.strip_prefix("stock-")?.parse().ok()?;
-                let (local_fighter, local_transform) = local.single().ok()?;
-                let assets = assets.as_deref()?;
-                let local_assets = assets.0.get(&format!("p{}", local_fighter.character_id))?;
-                let attack = local_assets
-                    .poses
-                    .get(&hit.pose_id)?
-                    .attacks
-                    .get(usize::try_from(hit.attack_index).ok()?)?;
-                let remote_poses = assets
-                    .0
-                    .get(&format!("p{}", remote_fighter.character_id))?
-                    .poses
-                    .keys()
-                    .copied()
-                    .collect::<Vec<_>>();
-                let bucket = facing_bucket(
-                    local_transform.translation.x,
-                    local_transform.translation.z,
-                    remote_transform.translation.x,
-                    remote_transform.translation.z,
-                    remote_motion.facing,
-                );
-                Some(StockHitRequest::from_attack(
-                    target_actor_id,
-                    hit.pose_id,
-                    local_fighter.weapon,
-                    attack,
-                    bucket,
-                    &remote_poses,
-                ))
-            })();
-            if let Some(stock_hit) = stock_hit {
+            if let Some(stock_hit) = hit.stock_request {
                 tx.send_stock_hit(stock_hit);
+                if let Some(trace) = trace.as_deref_mut() {
+                    trace.event(serde_json::json!({"kind":"hit-uplink", "target":remote.player_id,
+                        "pose":hit.pose_id,"frame":hit.frame,"attackIndex":hit.attack_index,
+                        "targetActor":stock_hit.target_actor_id,"reaction":stock_hit.target_pose()}));
+                }
             } else {
                 warn!(
-                    "stock UDP hit skipped: missing actor/POS attack mapping for {} pose {} attack {}",
+                    "stock UDP hit skipped: missing collision-time request for {} pose {} attack {}",
                     remote.player_id, hit.pose_id, hit.attack_index
                 );
             }
             commands.entity(entity).remove::<PendingRemoteHit>();
             continue;
         }
-        #[cfg(target_arch = "wasm32")]
-        let _ = (remote_fighter, remote_transform, remote_motion);
         send_web_hit(
             &tx,
             &mut sequence,
@@ -8116,8 +9650,22 @@ fn net_send_hits(
             hit,
             !self_effects.is_empty(),
         );
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(trace) = trace.as_deref_mut() {
+            trace.event(
+                serde_json::json!({"kind":"hit-uplink", "target":remote.player_id,
+                "pose":hit.pose_id,"frame":hit.frame,"attackIndex":hit.attack_index,
+                "wire":format!("{:?}",net.wire_format)}),
+            );
+        }
         commands.entity(entity).remove::<PendingRemoteHit>();
     }
+}
+
+#[cfg(test)]
+pub(crate) fn install_hit_sender_for_test(app: &mut App) {
+    app.init_resource::<NetInputSequence>()
+        .add_systems(PostUpdate, net_send_hits);
 }
 
 fn send_web_hit(
@@ -8357,6 +9905,7 @@ fn net_room_leave_button(
     net.reconnect_attempt = 0;
     net.reconnect_at = None;
     net.status = NetStatus::Disconnected;
+    net.battle_rules = Default::default();
     net.friendly_fire = false;
     net.match_epoch = None;
     net.round_epoch = None;
@@ -8524,9 +10073,43 @@ fn stock_asset_client(
         )
     }
 }
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "network_plugin/spawn_pad_tests.rs"]
+mod spawn_pad_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "network_plugin/stock_respawn_tests.rs"]
+mod stock_respawn_tests;
+
 #[cfg(feature = "original-assets")]
 #[cfg(test)]
 mod tests {
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn empty_server_build_rejects_ws_before_starting_a_worker() {
+        use super::*;
+        if !env!("METEOR_BUILD_WS").is_empty() {
+            return;
+        }
+        let mut net = NetState {
+            address: "ws://127.0.0.1:5230/ws".into(),
+            ..Default::default()
+        };
+        let mut tx = NetTx::default();
+        let mut rx = NetRx::default();
+        let mut worker = NativeNetThread::default();
+        assert!(default_web_address().is_empty());
+        assert!(begin_network_connection(
+            &mut net,
+            &mut tx,
+            &mut rx,
+            &mut worker,
+            &LaunchRequest::default()
+        )
+        .is_err());
+        assert!(worker.handle.is_none());
+        assert!(rx.0.is_none());
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn stock_environment_death_routes_player_npc_observer_without_kill_credit() {
@@ -8583,14 +10166,34 @@ mod tests {
                     connecting: None,
                 });
             app.world_mut()
+                .resource_mut::<StageHazardRuntime>()
+                .0
+                .world_bounds = Some(meteor_scene::hazards::Aabb {
+                min: [-5.0; 3],
+                max: [5.0; 3],
+            });
+            app.world_mut()
                 .run_system_once(publish_stock_environment_geometry)
                 .unwrap();
+            let messages: Vec<_> = rx.try_iter().collect();
             assert_eq!(
-                rx.try_iter()
+                messages
+                    .iter()
                     .filter(|m| matches!(m, NetOutbound::StockEnvironmentGeometry(_)))
                     .count(),
                 expected
             );
+            if expected == 1 {
+                let bounds = messages
+                    .iter()
+                    .find_map(|message| match message {
+                        NetOutbound::StockEnvironmentGeometry(geometry) => geometry.world_bounds,
+                        _ => None,
+                    })
+                    .unwrap();
+                assert_eq!(bounds.min, [-5.0; 3]);
+                assert_eq!(bounds.max, [5.0; 3]);
+            }
         }
     }
 
@@ -8641,8 +10244,8 @@ mod tests {
         apply_stock_discovered_room, cleanup_network_session, menu_stock_lan_discovery,
         net_send_stock_weapon_switch, normalize_stock_stage_for_rule, stock_config_value_label,
         stock_mode_from_rule, stock_stage_allowed_for_rule, validate_stock_selection,
-        NativeNetThread, StockDiscoveredRoom, StockLanDiscoveryState, StockSceneItemPickup,
-        StockServerTransport,
+        NativeNetThread, StockDiscoveredRoom, StockLanDiscoveryState, StockSceneItemGrounded,
+        StockSceneItemPickup, StockServerTransport,
     };
     use crate::app_state::{AppState, LaunchRequest, MenuScreen, StockConfigField};
     use crate::components::fighter::{
@@ -8656,8 +10259,8 @@ mod tests {
     };
     use crate::plugins::stage_plugin::LocalFighter;
     use bevy::prelude::{
-        App, ButtonInput, Entity, IntoScheduleConfigs, KeyCode, MouseButton, NextState, Quat, Time,
-        Transform, Update, Vec3, With,
+        default, App, ButtonInput, Entity, IntoScheduleConfigs, KeyCode, MouseButton, NextState,
+        Quat, State, Time, Transform, Update, Vec3, With,
     };
     #[cfg(not(target_arch = "wasm32"))]
     use meteor_network::escort::SN03;
@@ -8802,6 +10405,8 @@ mod tests {
                     event,
                 );
             }
+            assert_eq!(net.pending_system_notices, vec!["德玛西亚 进入战场"]);
+            assert!(net.pending_stock_entry_notices.is_empty());
             assert_eq!(net.remote_actor_names["stock-2"], "德玛西亚");
             assert_eq!(
                 net.members
@@ -9289,6 +10894,26 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
+    fn stock_lan_capacity_reads_signed_server_config_without_platform_clamping() {
+        assert_eq!(super::stock_host_player_limit(None), 16);
+        assert_eq!(
+            super::stock_host_player_limit(Some(b"rule 1\r\nplayer_num 20\r\n")),
+            20
+        );
+        assert_eq!(super::stock_host_player_limit(Some(b"player_num 0\n")), 0);
+        assert_eq!(super::stock_host_player_limit(Some(b"player_num -1\n")), -1);
+        assert_eq!(
+            super::stock_host_player_limit(Some(b"player_num 65535\n")),
+            -1
+        );
+        assert_eq!(
+            super::stock_host_player_limit(Some(b"player_num invalid\n")),
+            16
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
     fn stock_join_sends_menu_name_in_the_connect_datagram() {
         use meteor_network::stock_udp::{StockConnectRecord, StockControlPacket};
         let server = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -9302,6 +10927,7 @@ mod tests {
             super::run_stock_connection_with_password(
                 &address,
                 Message::Hello {
+                    balance_revision: meteor_combat::battle_rules::RULES_CAPABILITY,
                     name: "Rust测试".into(),
                     resume_token: None,
                     character_id: 4,
@@ -9352,6 +10978,7 @@ mod tests {
             super::run_stock_connection(
                 &target,
                 Message::Hello {
+                    balance_revision: meteor_combat::battle_rules::RULES_CAPABILITY,
                     name: "Rust测试".into(),
                     resume_token: None,
                     character_id: 4,
@@ -9448,6 +11075,7 @@ mod tests {
                 super::run_stock_connection(
                     &target,
                     Message::Hello {
+                        balance_revision: meteor_combat::battle_rules::RULES_CAPABILITY,
                         name: "LAN coordinate check".into(),
                         resume_token: None,
                         character_id: hero,
@@ -9611,10 +11239,14 @@ mod tests {
         app.world_mut()
             .resource_mut::<ButtonInput<KeyCode>>()
             .press(KeyCode::KeyF);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyT);
         app.update();
         assert_eq!(
             app.world_mut().resource_mut::<PendingNetActions>().take(),
-            vec!["qi_burst", "drop_item"]
+            vec!["qi_burst", "drop_item"],
+            "Cure waits for its animation completion instead of the key edge"
         );
     }
 
@@ -9650,6 +11282,35 @@ mod tests {
     }
 
     #[test]
+    fn cure_key_and_ordered_touch_do_not_send_before_animation_completion() {
+        use crate::plugins::input_plugin::{LocalCombatInput, LocalCombatInputEdge};
+        let mut app = App::new();
+        app.insert_resource(NetState {
+            status: NetStatus::InRoom,
+            round_active: true,
+            ..Default::default()
+        })
+        .init_resource::<crate::app_state::Keymap>()
+        .insert_resource(LocalCombatInput {
+            edges: vec![LocalCombatInputEdge::Cure],
+            ..Default::default()
+        })
+        .init_resource::<ButtonInput<KeyCode>>()
+        .init_resource::<ButtonInput<MouseButton>>()
+        .init_resource::<PendingNetActions>()
+        .add_systems(Update, collect_net_key_actions);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyT);
+        app.update();
+        assert!(app
+            .world_mut()
+            .resource_mut::<PendingNetActions>()
+            .take()
+            .is_empty());
+    }
+
+    #[test]
     fn network_input_and_character_contact_schedule_has_no_cycle() {
         use bevy::ecs::schedule::Schedules;
         use bevy::state::app::AppExtStates;
@@ -9675,6 +11336,149 @@ mod tests {
         if let Err(error) = result {
             panic!("Update schedule must be acyclic: {error}");
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn one_g_press_does_not_drop_the_weapon_picked_up_next_frame() {
+        use crate::plugins::input_plugin::*;
+        use crate::plugins::item_plugin::{apply_stock_scene_item_pickups, ItemBuffs};
+        use bevy::ecs::system::RunSystemOnce;
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut app = App::new();
+        app.insert_resource(bevy::state::state::State::new(AppState::Playing))
+            .insert_resource(NetState {
+                status: NetStatus::InRoom,
+                address: "udp://127.0.0.1:5230".into(),
+                player_id: "stock-1".into(),
+                round_active: true,
+                ..Default::default()
+            })
+            .insert_resource(NetTx {
+                active: Some(sender),
+                connecting: None,
+            })
+            .init_resource::<NetInputSequence>()
+            .init_resource::<PendingNetActions>()
+            .init_resource::<Time<bevy::time::Real>>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .init_resource::<crate::app_state::Keymap>()
+            .init_resource::<LocalCommandInput>()
+            .init_resource::<LocalCrouchInput>()
+            .init_resource::<LocalGuardInput>()
+            .init_resource::<LocalCombatInput>()
+            .init_resource::<LocalJumpInput>()
+            .init_resource::<DesktopDodgeInput>()
+            .init_resource::<SyntheticInputStream>()
+            .init_resource::<ItemBuffs>()
+            .init_resource::<crate::plugins::stage_plugin::StageScriptRuntime>()
+            .add_message::<bevy::window::WindowEvent>();
+
+        super::install_net_key_actions(&mut app);
+        app.add_systems(Update, capture_local_command_input)
+            .add_systems(
+                Update,
+                net_send_pending_actions.after(collect_net_key_actions),
+            );
+        let player = app
+            .world_mut()
+            .spawn((
+                Fighter {
+                    character_id: 0,
+                    player_slot: 0,
+                    weapon: 6,
+                    weapon_slots: [6, 5],
+                    weapon_slot: 0,
+                    weapon_slot_variants: [0, 0],
+                    weapon_variant: 0,
+                },
+                Transform::default(),
+                MotionState {
+                    movement_mode: meteor_core::MovementMode::Idle,
+                    velocity: Vec3::ZERO,
+                    facing: 0.0,
+                },
+                LocalFighter,
+                Health {
+                    current: 100.0,
+                    max: 100.0,
+                },
+                Qi::default(),
+                crate::components::fighter::WornEffect::default(),
+                crate::components::fighter::Concealment::default(),
+            ))
+            .id();
+        let binding = app
+            .world()
+            .resource::<crate::app_state::Keymap>()
+            .drop_weapon;
+        let press = |app: &mut App| {
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .press(KeyCode::KeyG);
+            app.world_mut()
+                .resource_mut::<SyntheticInputStream>()
+                .push_action(binding, SyntheticAction::DropWeapon, true, None);
+        };
+        press(&mut app);
+        app.update();
+        assert!(
+            matches!(receiver.try_recv(), Ok(NetOutbound::StockWeaponDrop(command))
+            if command.item_id == 5)
+        );
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(
+            app.world().get::<Fighter>(player).unwrap().weapon_slots,
+            [6, 0]
+        );
+
+        app.world_mut()
+            .resource_mut::<NetState>()
+            .pending_stock_scene_items
+            .push(super::StockSceneItemPickup {
+                actor_id: 1,
+                record_id: 42,
+                category: 1,
+                item_id: 3,
+                position: None,
+            });
+        app.world_mut()
+            .run_system_once(apply_stock_scene_item_pickups)
+            .unwrap();
+        let picked = app.world().get::<Fighter>(player).unwrap().weapon_slots;
+        assert_ne!(picked[1], 0);
+        for _ in 0..3 {
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .clear();
+            app.update();
+            assert!(
+                receiver.try_recv().is_err(),
+                "one press must send only one drop"
+            );
+            assert_eq!(
+                app.world().get::<Fighter>(player).unwrap().weapon_slots,
+                picked
+            );
+        }
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release(KeyCode::KeyG);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .clear();
+        press(&mut app);
+        app.update();
+        assert!(
+            matches!(receiver.try_recv(), Ok(NetOutbound::StockWeaponDrop(command))
+            if command.item_id == 3)
+        );
+        assert_eq!(
+            app.world().get::<Fighter>(player).unwrap().weapon_slots,
+            [6, 0]
+        );
     }
 
     #[test]
@@ -9749,6 +11553,7 @@ mod tests {
             &mut end,
             &mut next,
             Message::Welcome {
+                balance_revision: meteor_combat::battle_rules::RULES_CAPABILITY,
                 player_id: String::new(),
                 room_id: String::new(),
                 members: Vec::new(),
@@ -9982,6 +11787,7 @@ mod tests {
             &mut end,
             &mut next,
             Message::Welcome {
+                balance_revision: meteor_combat::battle_rules::RULES_CAPABILITY,
                 player_id: "p-new".into(),
                 room_id: String::new(),
                 members: Vec::new(),
@@ -10469,7 +12275,7 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn stock_committed_slot_change_emits_zero_length_request19_command() {
+    fn stock_committed_slot_change_emits_equipment_command() {
         let (sender, receiver) = std::sync::mpsc::channel();
         let mut app = App::new();
         app.insert_resource(NetState {
@@ -10514,6 +12320,20 @@ mod tests {
             receiver.try_recv(),
             Ok(NetOutbound::StockWeaponSwitch(5))
         ));
+        app.update();
+        assert!(
+            receiver.try_recv().is_err(),
+            "unchanged equipment is not resent"
+        );
+        app.world_mut()
+            .get_mut::<Fighter>(player)
+            .unwrap()
+            .weapon_variant = 1;
+        app.update();
+        assert!(
+            matches!(receiver.try_recv(), Ok(NetOutbound::StockWeaponSwitch(14))),
+            "same-slot refinement must update the observer's model identity"
+        );
     }
 
     #[test]
@@ -10806,6 +12626,70 @@ mod tests {
     }
 
     #[test]
+    fn stock_new_role_frame_corrects_without_extra_physical_travel() {
+        let mut app = App::new();
+        let dt = 1.0 / 60.0;
+        let mut time: Time = Time::default();
+        time.advance_by(std::time::Duration::from_secs_f32(dt));
+        app.insert_resource(time)
+            .add_systems(Update, net_smooth_remote_fighters);
+        let entity = app
+            .world_mut()
+            .spawn((
+                RemoteFighter {
+                    player_id: "peer".into(),
+                },
+                Transform::default(),
+                MotionState {
+                    movement_mode: meteor_core::MovementMode::Run,
+                    velocity: Vec3::new(3.0, 0.0, 0.0),
+                    facing: 0.0,
+                },
+                RemoteTransformTarget {
+                    translation: Vec3::new(2.0, 0.0, 0.0),
+                    yaw: std::f32::consts::FRAC_PI_2,
+                },
+                RemoteContactSegment {
+                    role_driven: true,
+                    pending_stock_state: true,
+                    ..Default::default()
+                },
+            ))
+            .id();
+        app.update();
+        let segment = app.world().get::<RemoteContactSegment>(entity).unwrap();
+        assert!(
+            !segment.valid,
+            "new stock state must not add a physical contact segment"
+        );
+        assert!(segment.skip_stock_motion);
+        assert!(
+            (app.world().get::<MotionState>(entity).unwrap().facing - 0.15264933).abs() < 1e-6,
+            "stock blends forward vectors, not angles"
+        );
+
+        assert!(!segment.pending_stock_state);
+        assert_eq!(segment.state_age, 0.0);
+        assert!(
+            app.world().get::<Transform>(entity).unwrap().translation.x > 0.0,
+            "display correction still runs on the state frame"
+        );
+        assert_eq!(
+            app.world()
+                .get::<RemoteTransformTarget>(entity)
+                .unwrap()
+                .translation
+                .x,
+            2.0
+        );
+        app.update();
+        let segment = app.world().get::<RemoteContactSegment>(entity).unwrap();
+        assert!(!segment.skip_stock_motion);
+        assert!(segment.valid);
+        assert!((segment.to.x - segment.from.x - 3.0 * dt).abs() < 1e-5);
+    }
+
+    #[test]
     fn role_correction_never_pushes_but_velocity_extrapolation_does() {
         let mut app = App::new();
         let dt = 1.0 / 30.0;
@@ -10879,6 +12763,76 @@ mod tests {
         assert!(physical_segment.valid);
         assert!((physical_segment.to.x - physical_segment.from.x - 3.0 * dt).abs() < 1e-5);
         assert_eq!(physical_segment.state_age, dt);
+    }
+
+    #[test]
+    fn remote_weapon_snapshot_refreshes_inventory_without_rebuilding_unchanged_state() {
+        let mut app = App::new();
+        app.insert_resource(NetState::default())
+            .add_systems(Update, net_apply_snapshot);
+        app.world_mut()
+            .resource_mut::<NetState>()
+            .pending_snapshots
+            .push(("peer".into(), fighter_snapshot(0), Some(1)));
+        app.update();
+        let entity = app
+            .world_mut()
+            .query_filtered::<Entity, With<RemoteFighter>>()
+            .single(app.world())
+            .unwrap();
+        for (tick, weapon, changed) in [(2, 7, true), (3, 7, false), (4, 6, true)] {
+            let mut snap = fighter_snapshot(0);
+            snap.weapon = weapon;
+            app.world_mut()
+                .resource_mut::<NetState>()
+                .pending_snapshots
+                .push(("peer".into(), snap, Some(tick)));
+            app.update();
+            let fighter = app.world().get::<Fighter>(entity).unwrap();
+            assert_eq!((fighter.weapon, fighter.weapon_slots[0]), (weapon, weapon));
+            assert_eq!(fighter.weapon_slots[1], 5, "preserve spare slot");
+            assert_eq!(
+                app.world()
+                    .get::<crate::components::fighter::WeaponVariantChanged>(entity)
+                    .is_some(),
+                changed
+            );
+            app.world_mut()
+                .entity_mut(entity)
+                .remove::<crate::components::fighter::WeaponVariantChanged>();
+        }
+    }
+
+    #[test]
+    fn stock_weapon_event_survives_older_class_only_snapshot() {
+        let mut app = App::new();
+        app.insert_resource(NetState {
+            address: "udp://127.0.0.1:5230".into(),
+            ..NetState::default()
+        })
+        .add_systems(Update, net_apply_snapshot);
+        app.world_mut()
+            .resource_mut::<NetState>()
+            .pending_snapshots
+            .push(("peer".into(), fighter_snapshot(0), Some(1)));
+        app.update();
+        {
+            let mut net = app.world_mut().resource_mut::<NetState>();
+            net.stock_equipped_weapons.insert("peer".into(), (7, 2));
+            net.pending_snapshots
+                .push(("peer".into(), fighter_snapshot(0), Some(2)));
+        }
+        app.update();
+        let fighter = app
+            .world_mut()
+            .query::<&Fighter>()
+            .single(app.world())
+            .unwrap();
+        assert_eq!((fighter.weapon, fighter.weapon_variant), (7, 2));
+        assert_eq!(
+            (fighter.weapon_slots[0], fighter.weapon_slot_variants[0]),
+            (7, 2)
+        );
     }
 
     #[test]
@@ -11036,6 +12990,7 @@ mod tests {
         let request = LaunchRequest::default();
         let rooms = vec![
             RoomSummary {
+                battle_rules: None,
                 room_id: "running".into(),
                 name: "running".into(),
                 mode: Some("leader".into()),
@@ -11049,6 +13004,7 @@ mod tests {
                 owner_name: None,
             },
             RoomSummary {
+                battle_rules: None,
                 room_id: "full".into(),
                 name: "full".into(),
                 mode: Some("leader".into()),
@@ -11062,6 +13018,7 @@ mod tests {
                 owner_name: None,
             },
             RoomSummary {
+                battle_rules: None,
                 room_id: "open".into(),
                 name: "open".into(),
                 mode: Some("deathmatch".into()),
@@ -11102,6 +13059,7 @@ mod tests {
             if name == "孟星魂🦋" && room_name == "好友切磋")
         );
         let room = RoomSummary {
+            battle_rules: None,
             room_id: "room".into(),
             name: "房间".into(),
             mode: None,
@@ -11122,6 +13080,9 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn public_battle_toggle_excludes_udp_host_and_preserves_private_creation() {
+        if env!("METEOR_BUILD_WS").is_empty() {
+            return;
+        }
         use super::*;
         let mut app = App::new();
         app.init_resource::<LaunchRequest>()
@@ -11164,6 +13125,63 @@ mod tests {
         app.update();
         let pending = app.world().resource::<super::PendingStockConnection>();
         assert_eq!(pending.0.as_ref().unwrap().0, "udp-host://0.0.0.0:5230");
+    }
+
+    #[test]
+    fn json_rules_client_adopts_host_without_local_config() {
+        use super::*;
+        use meteor_combat::battle_rules::BattleRules;
+        let rules = BattleRules::from_json(r#"{"schemaVersion":2,"rebalance":{"guardChipPercent":15,"guardChipPoses":"all","poseOverrides":[{"poseId":257,"damagePercent":45},{"poseId":258,"damagePercent":45}]}}"#).unwrap();
+        let mut server = meteor_network::server::RoomServer::new();
+        for id in 1..=2 {
+            server.connect(id);
+            server.handle(
+                id,
+                Message::Hello {
+                    balance_revision: meteor_combat::battle_rules::RULES_CAPABILITY,
+                    name: format!("p{id}"),
+                    resume_token: None,
+                    character_id: 0,
+                    weapon: 6,
+                },
+            );
+        }
+        let host = LaunchRequest {
+            public_battle: true,
+            ..Default::default()
+        };
+        let mut create = web_room_join(None, &host);
+        if let Message::RoomCreate { rules: wire, .. } = &mut create {
+            wire.battle_rules = Some(rules.clone());
+        }
+        server.handle(1, create);
+        let room = server.room_summaries().remove(0);
+        let mut guest = LaunchRequest::default();
+        assert!(!guest.balance_rules);
+        let dispatch = server.handle(2, web_room_join(Some(&room), &guest));
+        let mut net = NetState {
+            status: NetStatus::Connecting,
+            ..Default::default()
+        };
+        for state in dispatch.to_sender {
+            handle_net_message(
+                &mut net,
+                &mut guest,
+                &mut MatchEnd::default(),
+                &mut NextState::default(),
+                state,
+                &mut NetTx::default(),
+                &mut NetInputSequence::default(),
+                &mut PendingNetActions::default(),
+                AppState::Menu,
+            );
+        }
+        assert_eq!(net.battle_rules, rules);
+        assert_eq!(net.status, NetStatus::InRoom);
+        assert!(
+            !guest.balance_rules,
+            "joining must not overwrite the user's future host preference"
+        );
     }
 
     #[test]
@@ -11283,6 +13301,11 @@ mod tests {
             MenuStockItemRuleButton(StockItemRule::Health),
             UiSelectionState::new(true),
         ));
+        app.world_mut().spawn((
+            Interaction::Pressed,
+            crate::app_state::MenuBalanceRulesButton,
+            UiSelectionState::new(false),
+        ));
         app.update();
         let request = app.world().resource::<LaunchRequest>();
         assert_eq!(request.stock_camp, 2);
@@ -11297,6 +13320,10 @@ mod tests {
         assert_eq!(
             (rules.game_num, rules.round_time, rules.life_adjust),
             (Some(10), Some(15), Some(300))
+        );
+        assert_eq!(
+            rules.battle_rules,
+            Some(meteor_combat::battle_rules::BattleRules::bundled())
         );
         assert_eq!(rules.health_item, Some(false));
         assert_eq!(rules.special_item, Some(true));
@@ -11872,7 +13899,7 @@ mod tests {
     }
 
     #[test]
-    fn soft_locomotion_switches_reach_remote_through_request1() {
+    fn blended_locomotion_switches_reach_remote_through_request1() {
         use meteor_network::role_state::{
             decide_pose_transition, decode_request1_state, encode_request1_state,
             role_state_from_runtime, RemotePoseRuntime,
@@ -11892,16 +13919,28 @@ mod tests {
             velocity: Vec3::ZERO,
             facing: 0.0,
         };
-        for target in [141, 142, 143, 140, 140] {
-            assert!(meteor_physics::locomotion::can_keep_locomotion_phase(
-                pose.pose_id,
-                target
-            ));
+        let mut blend = EntryBlend::default();
+        for target in [141, 142, 144, 145, 146, 147, 140, 140] {
             let changed = pose.pose_id != target;
             let instance = pose.pose_instance_id;
             pose.frame = pose.start as f32 + 2.0;
-            character.apply_pose(&mut pose, target, false);
-            assert_eq!(pose.frame, pose.start as f32 + 2.0);
+            if changed {
+                character.apply_pose_with_blend(
+                    &mut pose,
+                    &mut blend,
+                    target,
+                    true,
+                    None,
+                    crate::components::fighter::EntryBlendKind::Generic,
+                    false,
+                    false,
+                    Some(0),
+                );
+                assert_eq!(pose.frame, pose.start as f32);
+                assert!((blend.duration - 0.12).abs() < 1e-6);
+            } else {
+                assert_eq!(pose.frame, pose.start as f32 + 2.0);
+            }
             assert_eq!(pose.pose_instance_id, instance + u32::from(changed));
             let state = role_state_from_runtime(local_request1_runtime(
                 &pose,
@@ -12047,6 +14086,7 @@ mod tests {
                 effect_strategy: None,
                 motion_scale: Some(1.5),
                 reaction: Some(CombatReactionWire {
+                    rebalance_effect: 0,
                     target_move: 1.5,
                     target_value: 0.5,
                     target_pose: Some(93),
@@ -12096,7 +14136,7 @@ mod tests {
                     },
                     MotionState {
                         movement_mode: meteor_core::MovementMode::Idle,
-                        velocity: Vec3::new(6.0, 0.0, -2.0),
+                        velocity: Vec3::new(6.0, 3.0, -2.0),
                         facing: 0.0,
                     },
                     FighterAir::default(),
@@ -12127,6 +14167,7 @@ mod tests {
         assert_eq!(reaction.current.as_ref().unwrap().pose_id, Some(93));
         assert_eq!(reaction.current.as_ref().unwrap().motion_scale, 1.5);
         assert_eq!((reaction.carry_x, reaction.carry_z), (6.0, -2.0));
+        assert_eq!(reaction.vertical_velocity, 3.0);
         assert!(
             !app.world()
                 .get::<FighterAttackMotion>(entity)
@@ -12152,7 +14193,7 @@ mod tests {
         app.world_mut()
             .get_mut::<MotionState>(entity)
             .unwrap()
-            .velocity = Vec3::new(6.0, 0.0, -2.0);
+            .velocity = Vec3::new(6.0, -3.0, -2.0);
         super::stock_npc_bridge::apply_event(
             &mut app.world_mut().resource_mut::<NetState>(),
             entity,
@@ -12169,6 +14210,10 @@ mod tests {
             (reaction.carry_x, reaction.carry_z),
             (0.0, 0.0),
             "LAN NPCs must match offline NPCs: no local-player carry on fist 417"
+        );
+        assert_eq!(
+            reaction.vertical_velocity, -3.0,
+            "NPC primary vertical speed survives authority BeHit"
         );
         app.world_mut().get_mut::<Fighter>(entity).unwrap().weapon = 5;
         for (selector, expected) in [(0, None), (1, Some(83)), (2, Some(84)), (3, Some(85))] {
@@ -12232,7 +14277,70 @@ mod tests {
     }
 
     #[test]
+    fn observer_guard_entry_uses_stock_fade_while_owner_keeps_local_entry() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        let character =
+            crate::plugins::character_plugin::load_character_asset_for_test(&[root], "p0")
+                .expect("original p0");
+        let attack = &character.poses[&245].attacks[0];
+        let poses: Vec<_> = character.poses.keys().copied().collect();
+        for observer in [false, true] {
+            let mut pose = PoseRuntime::idle();
+            character.apply_pose(&mut pose, 55, true);
+            let mut blend = EntryBlend::default();
+            let mut combat = CombatState::default();
+            let mut health = Health::default();
+            let air = FighterAir::default();
+            let mut view = super::NetworkReactionView {
+                pose: &mut pose,
+                blend: &mut blend,
+                combat: &mut combat,
+                health: &mut health,
+                air: &air,
+                assets: &character,
+                strategy_id: 0,
+                observer_entry: observer,
+            };
+            let reaction = meteor_combat::hit_reaction::begin_guard_hit(
+                &mut view,
+                Some(attack),
+                meteor_combat::hit_reaction::FacingBucket::Right,
+                &poses,
+                0,
+                Some(55),
+                0,
+            )
+            .unwrap();
+            assert_eq!(reaction.pose_id, Some(80));
+            assert_eq!(pose.pose_id, 80);
+            assert_eq!(blend.duration, if observer { 0.05 } else { 0.01 });
+            assert_eq!(pose.link_past_end, !observer);
+            if observer {
+                assert_eq!(
+                    blend.kind,
+                    crate::components::fighter::EntryBlendKind::Chained
+                );
+                assert!(!pose.loops);
+            }
+        }
+    }
+
+    #[test]
     fn authority_hit_installs_one_authored_remote_reaction_window() {
+        check_authority_remote_hit_window(false, false);
+    }
+
+    #[test]
+    fn stock_hit_then_role_state_in_one_poll_preserves_the_reaction() {
+        check_authority_remote_hit_window(true, false);
+    }
+
+    #[test]
+    fn stock_first_role_state_after_identity_keeps_same_poll_hit() {
+        check_authority_remote_hit_window(true, true);
+    }
+
+    fn check_authority_remote_hit_window(same_poll: bool, first_state: bool) {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
         if !root.exists() {
             eprintln!("origin_res missing, skipping");
@@ -12262,6 +14370,7 @@ mod tests {
                     effect_strategy: None,
                     motion_scale: Some(1.5),
                     reaction: Some(CombatReactionWire {
+                        rebalance_effect: 0,
                         target_move: 1.5,
                         target_value: 0.5,
                         target_pose: Some(93),
@@ -12275,7 +14384,18 @@ mod tests {
             ..NetState::default()
         })
         .add_message::<crate::plugins::impact_fx_plugin::CombatImpactEvent>()
-        .add_systems(Update, (net_apply_snapshot, net_handle_remote_hits).chain());
+        .init_resource::<super::StockPostHitStates>()
+        .add_systems(
+            Update,
+            (
+                super::defer_stock_post_hit_states,
+                net_apply_snapshot,
+                net_handle_remote_hits,
+                super::restore_stock_post_hit_states,
+                net_apply_snapshot.run_if(super::uses_stock_projection),
+            )
+                .chain(),
+        );
         app.world_mut().spawn((
             LocalFighter,
             Fighter {
@@ -12289,7 +14409,7 @@ mod tests {
             },
             Transform::default(),
         ));
-        let entity = app
+        let mut entity = app
             .world_mut()
             .spawn((
                 RemoteFighter {
@@ -12331,13 +14451,67 @@ mod tests {
             ))
             .id();
 
-        app.update();
+        if same_poll {
+            app.world_mut()
+                .entity_mut(entity)
+                .insert(RemoteContactSegment::default());
+        }
+        if first_state {
+            app.world_mut().despawn(entity);
+            let mut net = app.world_mut().resource_mut::<NetState>();
+            net.remote_actor_profiles.insert("remote".into(), (0, 6));
+            net.stock_room_max_health = 1000.0;
+        }
+        if same_poll {
+            let mut net = app.world_mut().resource_mut::<NetState>();
+            net.address = "udp://127.0.0.1:5230".into();
 
-        assert_eq!(app.world().get::<Health>(entity).unwrap().current, 900.0);
+            net.pending_remote_hits[0].1.health = None;
+            net.pending_remote_hits[0].1.damage = 0.0;
+            net.pending_role_states.push((
+                "remote".into(),
+                role_state_from_runtime(RoleStateRuntime {
+                    position: RoleVec3 {
+                        x: 0.1,
+                        y: 0.2,
+                        z: 1.0,
+                    },
+                    velocity: RoleVec3::ZERO,
+                    pose_id: 93,
+                    pose_sequence: 1,
+                    forward: RoleVec3 {
+                        x: 0.0,
+                        y: 0.0,
+                        z: 1.0,
+                    },
+                    grounded: false,
+                    guard_route: false,
+                    playback_arg: 0,
+                }),
+                13,
+            ));
+        }
+        app.update();
+        if first_state {
+            entity = app
+                .world_mut()
+                .query_filtered::<Entity, With<RemoteFighter>>()
+                .single(app.world())
+                .expect("identity bootstraps before hit application");
+        }
+
+        assert_eq!(
+            app.world().get::<Health>(entity).unwrap().current,
+            if same_poll { 1000.0 } else { 900.0 }
+        );
         assert_eq!(app.world().get::<PoseRuntime>(entity).unwrap().pose_id, 93);
         assert_eq!(
             app.world().get::<EntryBlend>(entity).unwrap().duration,
-            0.12
+            0.05
+        );
+        assert!(
+            !app.world().get::<PoseRuntime>(entity).unwrap().loops,
+            "stock observer hit uses playbackArg=0, not the local minimum loop"
         );
         let reaction = app.world().get::<FighterHitReaction>(entity).unwrap();
         assert_eq!(reaction.current.as_ref().unwrap().pose_id, Some(93));
@@ -12357,6 +14531,23 @@ mod tests {
                 .get("remote"),
             Some(&(1, 1))
         );
+
+        if same_poll {
+            assert!(
+                app.world()
+                    .get::<RemoteContactSegment>(entity)
+                    .unwrap()
+                    .pending_stock_state,
+                "accepted stock event2 must arm its one-frame physical skip"
+            );
+            assert!(app
+                .world()
+                .get::<RemoteTransformTarget>(entity)
+                .unwrap()
+                .translation
+                .abs_diff_eq(Vec3::new(0.1, 0.2, 1.0), 1e-6));
+            return;
+        }
 
         let mut same_tick_pre_hit = fighter_snapshot(0);
         same_tick_pre_hit.x = 99.0;
@@ -12567,6 +14758,7 @@ mod tests {
                     effect_strategy: None,
                     motion_scale: Some(1.5),
                     reaction: Some(CombatReactionWire {
+                        rebalance_effect: 0,
                         target_pose: Some(93),
                         ..CombatReactionWire::default()
                     }),
@@ -12643,6 +14835,7 @@ mod tests {
         })
         .init_resource::<LockOnController>()
         .init_resource::<CameraBasis>()
+        .init_resource::<crate::plugins::item_plugin::ItemBuffs>()
         .add_systems(Update, net_apply_authority_respawns);
 
         let mut pose = PoseRuntime::idle();
@@ -12820,6 +15013,7 @@ mod tests {
                 let mut app = App::new();
                 app.init_resource::<LockOnController>()
                     .init_resource::<CameraBasis>()
+                    .init_resource::<crate::plugins::item_plugin::ItemBuffs>()
                     .insert_resource(LoadedStageAssets {
                         des: Some(des.clone()),
                         ..Default::default()
@@ -12939,7 +15133,7 @@ mod tests {
                     .mesh
                     .as_ref()
                     .unwrap();
-                let authored = desc.scene_objects.iter().chain(&desc.dummies).any(|pad| {
+                let authored = desc.dummies.iter().find(|pad| {
                     let name = pad.name_attr.as_deref().unwrap_or("").to_ascii_lowercase();
                     if !name
                         .strip_prefix(prefix)
@@ -12951,9 +15145,19 @@ mod tests {
                     let z = -(pad.position.y - center[1]) * meteor_core::constants::MODEL_SCALE;
                     (actual.x - x).abs() < 1e-4 && (actual.z - z).abs() < 1e-4
                 });
+                let pad = authored.unwrap_or_else(|| {
+                    panic!("{prefix} respawn at {actual:?} must come from the original DES")
+                });
+                let quaternion = pad.quaternion;
+                let authored_right =
+                    Quat::from_xyzw(quaternion.x, quaternion.y, quaternion.z, quaternion.w)
+                        .normalize()
+                        * Vec3::X;
+                let authored_heading =
+                    Vec3::new(authored_right.y, 0.0, authored_right.x).normalize();
+                let facing = app.world().get::<MotionState>(entity).unwrap().facing;
                 assert!(
-                    authored,
-                    "{prefix} respawn at {actual:?} must come from the original DES"
+                    (Quat::from_rotation_y(facing) * Vec3::Z).distance(authored_heading) < 0.005
                 );
                 assert!(actual.distance(corpse) > 10.0);
                 assert_eq!(
@@ -13114,6 +15318,7 @@ mod tests {
                 .init_resource::<MatchEnd>()
                 .init_resource::<LockOnController>()
                 .init_resource::<CameraBasis>()
+                .init_resource::<crate::plugins::item_plugin::ItemBuffs>()
                 .insert_resource(NetState {
                     status: NetStatus::InRoom,
                     player_id: "local".into(),
@@ -13248,82 +15453,91 @@ mod tests {
     }
 
     #[test]
-    fn production_role_snapshot_updates_motion_without_overwriting_metadata() {
-        let state = role_state_from_runtime(RoleStateRuntime {
-            position: RoleVec3 {
-                x: 4.0,
-                y: 1.5,
-                z: -2.0,
-            },
-            forward: RoleVec3 {
-                x: 1.0,
-                y: 0.0,
-                z: 0.0,
-            },
-            velocity: RoleVec3 {
-                x: 3.0,
-                y: 0.5,
-                z: -1.0,
-            },
-            pose_id: 24,
-            grounded: false,
-            guard_route: false,
-            playback_arg: 0,
-            pose_sequence: 9,
-        });
-        let mut app = App::new();
-        app.insert_resource(NetState {
-            pending_role_states: vec![("p2".into(), state, 1)],
-            ..NetState::default()
-        })
-        .add_systems(Update, net_apply_snapshot);
-        let entity = app
-            .world_mut()
-            .spawn((
-                RemoteFighter {
-                    player_id: "p2".into(),
+    fn production_role_snapshot_updates_motion_in_play_and_network_menus() {
+        for menu_state in [AppState::Playing, AppState::Paused, AppState::Settings] {
+            let state = role_state_from_runtime(RoleStateRuntime {
+                position: RoleVec3 {
+                    x: 4.0,
+                    y: 1.5,
+                    z: -2.0,
                 },
-                Fighter {
-                    character_id: 3,
-                    player_slot: 1,
-                    weapon: 10,
-                    weapon_slots: [10, 5],
-                    weapon_slot: 0,
-                    weapon_slot_variants: [0, 0],
-                    weapon_variant: 0,
+                forward: RoleVec3 {
+                    x: 1.0,
+                    y: 0.0,
+                    z: 0.0,
                 },
-                Health {
-                    current: 600.0,
-                    max: 1000.0,
+                velocity: RoleVec3 {
+                    x: 3.0,
+                    y: 0.5,
+                    z: -1.0,
                 },
-                PoseRuntime::idle(),
-                MotionState {
-                    movement_mode: meteor_core::MovementMode::Idle,
-                    velocity: Vec3::ZERO,
-                    facing: 0.0,
-                },
-                DeathRespawn::default(),
-                FighterAir::default(),
-                RemoteTransformTarget {
-                    translation: Vec3::ZERO,
-                    yaw: 0.0,
-                },
-                Transform::default(),
-            ))
-            .id();
+                pose_id: 24,
+                grounded: false,
+                guard_route: false,
+                playback_arg: 0,
+                pose_sequence: 9,
+            });
+            let mut app = App::new();
+            app.insert_resource(bevy::state::state::State::new(menu_state))
+                .insert_resource(NetState {
+                    status: NetStatus::InRoom,
+                    pending_role_states: vec![("p2".into(), state, 1)],
+                    ..NetState::default()
+                })
+                .add_systems(
+                    Update,
+                    net_apply_snapshot.run_if(
+                        super::super::ui_plugin::gameplay_hud_visibility::scene_session_active,
+                    ),
+                );
+            let entity = app
+                .world_mut()
+                .spawn((
+                    RemoteFighter {
+                        player_id: "p2".into(),
+                    },
+                    Fighter {
+                        character_id: 3,
+                        player_slot: 1,
+                        weapon: 10,
+                        weapon_slots: [10, 5],
+                        weapon_slot: 0,
+                        weapon_slot_variants: [0, 0],
+                        weapon_variant: 0,
+                    },
+                    Health {
+                        current: 600.0,
+                        max: 1000.0,
+                    },
+                    PoseRuntime::idle(),
+                    MotionState {
+                        movement_mode: meteor_core::MovementMode::Idle,
+                        velocity: Vec3::ZERO,
+                        facing: 0.0,
+                    },
+                    DeathRespawn::default(),
+                    FighterAir::default(),
+                    RemoteTransformTarget {
+                        translation: Vec3::ZERO,
+                        yaw: 0.0,
+                    },
+                    Transform::default(),
+                ))
+                .id();
 
-        app.update();
+            app.update();
 
-        let target = app.world().get::<RemoteTransformTarget>(entity).unwrap();
-        assert_eq!(target.translation, Vec3::new(4.0, 1.5, -2.0));
-        assert!((target.yaw - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
-        assert_eq!(app.world().get::<PoseRuntime>(entity).unwrap().pose_id, 24);
-        assert_eq!(app.world().get::<Health>(entity).unwrap().current, 600.0);
-        assert_eq!(app.world().get::<Fighter>(entity).unwrap().weapon, 10);
-        let motion = app.world().get::<MotionState>(entity).unwrap();
-        assert_eq!(motion.velocity, Vec3::new(3.0, 0.5, -1.0));
-        assert_eq!(motion.movement_mode, meteor_core::MovementMode::Airborne);
-        assert!(app.world().get::<FighterAir>(entity).unwrap().air.airborne);
+            let target = app.world().get::<RemoteTransformTarget>(entity).unwrap();
+            assert_eq!(target.translation, Vec3::new(4.0, 1.5, -2.0));
+            assert!((target.yaw - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
+            assert_eq!(app.world().get::<PoseRuntime>(entity).unwrap().pose_id, 24);
+            assert_eq!(app.world().get::<Health>(entity).unwrap().current, 600.0);
+            assert_eq!(app.world().get::<Fighter>(entity).unwrap().weapon, 10);
+            let motion = app.world().get::<MotionState>(entity).unwrap();
+            assert_eq!(motion.velocity, Vec3::new(3.0, 0.5, -1.0));
+            assert_eq!(motion.movement_mode, meteor_core::MovementMode::Airborne);
+            assert!(app.world().get::<FighterAir>(entity).unwrap().air.airborne);
+        }
     }
 
     #[test]
@@ -13485,12 +15699,14 @@ mod tests {
                 run_stock_host_connection(
                     &address,
                     Message::Hello {
+                        balance_revision: meteor_combat::battle_rules::RULES_CAPABILITY,
                         name: "host".into(),
                         resume_token: None,
                         character_id: 0,
                         weapon: 6,
                     },
                     StockConnectionConfig {
+                        battle_rules: Default::default(),
                         password: String::new(),
                         room_name: format!("generation-{generation}"),
                         rule: 1,
@@ -13566,12 +15782,14 @@ mod tests {
             run_stock_host_connection(
                 "127.0.0.1:0",
                 Message::Hello {
+                    balance_revision: meteor_combat::battle_rules::RULES_CAPABILITY,
                     name: "host".into(),
                     resume_token: None,
                     character_id: 0,
                     weapon: 6,
                 },
                 StockConnectionConfig {
+                    battle_rules: Default::default(),
                     password: String::new(),
                     room_name: "自定义房间".into(),
                     rule: 3,
@@ -13768,6 +15986,36 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn stock_rule_selection_matches_original_mode_and_stage_gates() {
+        for stage in meteor_scene::stage_registry::official_stages() {
+            for rule in 1..=5 {
+                let expected = meteor_network::modes::original_stage_supports_rule(&stage.id, rule);
+                assert_eq!(
+                    stock_stage_allowed_for_rule(rule, &stage.id),
+                    expected,
+                    "map {} / Rule {rule}",
+                    stage.id
+                );
+                let selection = LaunchRequest {
+                    stage_id: stage.id.clone(),
+                    stage_name: stage.name.clone(),
+                    stock_rule: rule,
+                    stock_camp: if rule == 1 { 0 } else { 1 },
+                    ..Default::default()
+                };
+                assert_eq!(
+                    validate_stock_selection(&selection).is_ok(),
+                    expected,
+                    "host preflight {} / Rule {rule}",
+                    stage.id
+                );
+                let mut normalized = selection;
+                normalize_stock_stage_for_rule(&mut normalized);
+                assert!(stock_stage_allowed_for_rule(rule, &normalized.stage_id));
+                if expected {
+                    assert_eq!(normalized.stage_id, stage.id);
+                }
+            }
+        }
         let mut request = LaunchRequest::default();
         assert_eq!((request.stock_rule, request.stock_camp), (1, 0));
         assert_eq!(request.stock_life_adjust_percent, 200);
@@ -13791,6 +16039,12 @@ mod tests {
         assert!(stock_stage_allowed_for_rule(2, &request.stage_id));
         assert_eq!(stock_mode_from_rule(request.stock_rule), "escort");
         assert!(validate_stock_selection(&request).is_ok());
+        request.stage_id = "sn02".into();
+        assert!(stock_stage_allowed_for_rule(2, "sn02"));
+        assert!(
+            validate_stock_selection(&request).is_ok(),
+            "SN02 has IPItem01 and shared safe"
+        );
 
         request.stock_rule = 3;
         normalize_stock_stage_for_rule(&mut request);
@@ -13808,6 +16062,21 @@ mod tests {
             stock_config_value_label(StockConfigField::LifeAdjust, &request),
             "200%"
         );
+        for (rule, stage) in [
+            (1, "sn09"),
+            (1, "sn11"),
+            (4, "sn11"),
+            (4, "sn22"),
+            (5, "sn11"),
+        ] {
+            request.stock_rule = rule;
+            request.stock_camp = if rule == 1 { 0 } else { 1 };
+            request.stage_id = stage.into();
+            assert!(!stock_stage_allowed_for_rule(rule, stage));
+            assert!(validate_stock_selection(&request).is_err());
+            normalize_stock_stage_for_rule(&mut request);
+            assert!(stock_stage_allowed_for_rule(rule, &request.stage_id));
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -14043,6 +16312,7 @@ mod tests {
                 endpoint: "192.168.1.20:5230".parse().unwrap(),
                 info,
                 last_seen_ms: 10,
+                round_trip_ms: 0,
             });
             app.insert_resource(request)
                 .insert_resource(discovery)
@@ -14167,6 +16437,7 @@ mod tests {
                 "192.168.2.203",
             ),
             last_seen_ms: 10,
+            round_trip_ms: 0,
         };
         room.info.fields_0_to_6[5] = 1;
         apply_stock_discovered_room(&mut request, &room);
@@ -14294,7 +16565,12 @@ mod tests {
             AppState::Playing,
             StockGameEvent::SceneOps(stock.clone()),
         );
-        assert!(net.pending_scene_ops.is_empty());
+        assert_eq!(
+            net.pending_scene_ops, message_ops,
+            "siege filtering needs DES names and belongs to the ready stage runtime"
+        );
+        net.pending_scene_ops.clear();
+        net.pending_projectiles.clear();
         net.mode = "deathmatch".into();
         handle_stock_game_event(
             &mut net,
@@ -14310,6 +16586,7 @@ mod tests {
             "ordinary host must apply remote transactions"
         );
         net.pending_scene_ops.clear();
+        net.pending_projectiles.clear();
         net.address = "udp://127.0.0.1:37105".into();
         handle_stock_game_event(
             &mut net,
@@ -14381,6 +16658,60 @@ mod tests {
         assert_eq!(net.pending_objective_end, Some(2));
         assert_eq!(net.pending_respawns, ["stock-1"]);
         assert!(!end.settled);
+    }
+
+    #[test]
+    fn escort_round_restart_reloads_scene_and_clears_previous_pickup_callbacks() {
+        for udp in [false, true] {
+            let mut net = NetState {
+                status: NetStatus::InRoom,
+                stage: "sn02".into(),
+                mode: "escort".into(),
+                player_id: "p1".into(),
+                match_epoch: Some(1),
+                round_epoch: Some(1),
+                pending_escort_pickups: vec!["p1".into()],
+                ..Default::default()
+            };
+            let mut request = LaunchRequest {
+                stock_rule: 2,
+                stage_id: "sn02".into(),
+                ..Default::default()
+            };
+            let mut next = NextState::<AppState>::default();
+            if udp {
+                handle_stock_game_event(
+                    &mut net,
+                    &mut request,
+                    &mut MatchEnd::default(),
+                    &mut NetTx::default(),
+                    &mut next,
+                    AppState::Playing,
+                    StockGameEvent::RoundRestart,
+                );
+            } else {
+                handle_net_message(
+                    &mut net,
+                    &mut request,
+                    &mut MatchEnd::default(),
+                    &mut next,
+                    Message::RoundStart {
+                        match_epoch: Some(1),
+                        round_epoch: Some(2),
+                        round: 2,
+                        round_time: 15,
+                        game_num: 3,
+                        team_wins: None,
+                    },
+                    &mut NetTx::default(),
+                    &mut NetInputSequence::default(),
+                    &mut PendingNetActions::default(),
+                    AppState::Playing,
+                );
+            }
+            assert!(matches!(next, NextState::Pending(AppState::Loading)));
+            assert!(net.pending_escort_pickups.is_empty());
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -14478,10 +16809,12 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn stock_ordinary_scene_pickup_is_queued_with_event29_position() {
+        let frame = meteor_network::stock_protocol::StockSceneFrame([100.0, 200.0, 50.0]);
         let mut net = NetState {
             status: NetStatus::InRoom,
             player_id: "stock-1".into(),
             round_active: true,
+            stock_scene_frame: Some(frame),
             ..Default::default()
         };
         let mut request = LaunchRequest::default();
@@ -14492,11 +16825,11 @@ mod tests {
             77,
             1,
             2,
-            RoleVec3 {
+            frame.position_to_stock(RoleVec3 {
                 x: 1.25,
                 y: 2.5,
                 z: -3.75,
-            },
+            }),
         );
 
         handle_stock_game_event(
@@ -14512,7 +16845,7 @@ mod tests {
             },
         );
         assert_eq!(net.pending_stock_scene_grounded.len(), 1);
-        let observed = record.role_position();
+        let observed = frame.position_to_scene(record.role_position());
         let observed = [observed.x, observed.y, observed.z];
         assert_eq!(net.pending_stock_scene_grounded[0].position, observed);
 
@@ -14544,6 +16877,54 @@ mod tests {
                 position: Some(observed),
             }]
         );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn stock_event70_removes_dynamic_view_and_queued_spawn_without_a_pickup() {
+        let mut net = NetState::default();
+        let mut request = LaunchRequest::default();
+        let mut end = MatchEnd::default();
+        let mut tx = NetTx::default();
+        let mut next_state = NextState::<AppState>::default();
+        let drop = AuthorityWeaponDrop {
+            reference: "D_wpStock77".into(),
+            model: "W0_0".into(),
+            position: [1.0, 2.0, 3.0],
+            velocity: None,
+            settled: true,
+            pickup_ready: true,
+        };
+        net.dynamic_weapon_drops
+            .insert(drop.reference.clone(), drop.clone());
+        net.pending_weapon_drops.push(drop);
+        net.pending_stock_scene_grounded
+            .push(StockSceneItemGrounded {
+                record_id: 77,
+                category: 1,
+                item_id: 6,
+                position: [1.0, 2.0, 3.0],
+                spawned: true,
+            });
+        handle_stock_game_event(
+            &mut net,
+            &mut request,
+            &mut end,
+            &mut tx,
+            &mut next_state,
+            AppState::Playing,
+            StockGameEvent::SceneItemRemoved(
+                meteor_network::stock_protocol::StockSceneItemRemovedEvent {
+                    record_id: 77,
+                    category: 1,
+                    item_id: 6,
+                },
+            ),
+        );
+        assert!(net.dynamic_weapon_drops.is_empty());
+        assert!(net.pending_weapon_drops.is_empty());
+        assert!(net.pending_stock_scene_grounded.is_empty());
+        assert!(net.pending_stock_scene_items.is_empty());
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -14673,6 +17054,83 @@ mod tests {
         assert_eq!(net.role_uplink_hz, 18);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn stock_hit_uplink_retains_hit_time_direction_and_weapon() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        let character =
+            crate::plugins::character_plugin::load_character_asset_for_test(&[root], "p0").unwrap();
+        let expected = meteor_network::stock_protocol::StockHitRequest::from_attack(
+            1,
+            316,
+            9,
+            &character.poses[&316].attacks[0],
+            meteor_combat::hit_reaction::facing_bucket(0.0, 0.0, 0.0, 1.0, 0.0),
+            &character.poses.keys().copied().collect::<Vec<_>>(),
+        );
+        let (tx, received) = super::stock_hit_test_channel();
+        let mut app = App::new();
+        app.insert_resource(NetState {
+            status: NetStatus::InRoom,
+            address: "udp://127.0.0.1:5230".into(),
+            player_id: "stock-2".into(),
+            round_active: true,
+            ..Default::default()
+        })
+        .insert_resource(tx)
+        .init_resource::<NetInputSequence>()
+        .insert_resource(crate::plugins::character_plugin::CharacterAssetsSet(
+            std::collections::HashMap::from([("p0".into(), character)]),
+        ))
+        .add_systems(Update, net_send_hits);
+        let fighter = Fighter {
+            character_id: 0,
+            player_slot: 0,
+            weapon: 6,
+            weapon_slots: [6, 9],
+            weapon_slot: 0,
+            weapon_variant: 0,
+            weapon_slot_variants: [0, 0],
+        };
+
+        app.world_mut().spawn((
+            LocalFighter,
+            fighter.clone(),
+            Transform::from_xyz(20.0, 0.0, -20.0),
+        ));
+        app.world_mut().spawn((
+            RemoteFighter {
+                player_id: "stock-1".into(),
+            },
+            fighter,
+            Transform::from_xyz(0.0, 0.0, 1.0),
+            MotionState {
+                facing: std::f32::consts::PI,
+                movement_mode: meteor_core::MovementMode::Idle,
+                velocity: Vec3::ZERO,
+            },
+            super::PendingRemoteHit {
+                stock_request: Some(expected),
+                damage: 1.0,
+                pose_id: 316,
+                attack_index: 0,
+                frame: 4518.0,
+                cursor: 8.0,
+                attack_origin: Vec3::ZERO,
+                attack_forward: Vec3::Z,
+            },
+        ));
+        app.update();
+        let sent = received();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            sent[0].1, expected,
+            "request5 must retain the collision-time direction and weapon"
+        );
+        app.update();
+        assert!(received().is_empty(), "one collision must send once");
+    }
+
     #[test]
     fn ninja_self_effect_uplink_follows_damage_on_the_same_reliable_route() {
         use super::{net_send_self_effects, PendingSelfEffect};
@@ -14723,6 +17181,8 @@ mod tests {
                 velocity: Vec3::ZERO,
             },
             super::PendingRemoteHit {
+                #[cfg(not(target_arch = "wasm32"))]
+                stock_request: None,
                 damage: 650.0,
                 pose_id: 468,
                 attack_index: 0,
@@ -14904,6 +17364,7 @@ mod tests {
             ..Default::default()
         })
         .insert_resource(crate::components::fighter::KillScore::default())
+        .init_resource::<crate::app_state::LaunchRequest>()
         .add_systems(Update, net_apply_stock_scores);
         app.update();
 
@@ -14928,4 +17389,6 @@ mod tests {
             "a reliable event edge must not be applied twice"
         );
     }
+    include!("network_plugin/stock_impact_feedback_tests.rs");
+    include!("network_plugin/rebalance_tests.rs");
 }

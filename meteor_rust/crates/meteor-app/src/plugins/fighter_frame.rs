@@ -47,10 +47,6 @@ pub(crate) fn installed(app: &App) -> bool {
     app.world().contains_resource::<RegisteredFighters>()
 }
 
-fn playing(state: Option<Res<State<crate::app_state::AppState>>>) -> bool {
-    state.is_none_or(|state| *state.get() == crate::app_state::AppState::Playing)
-}
-
 pub(crate) fn install(app: &mut App) {
     app.init_resource::<RegisteredFighters>()
         .init_resource::<ActiveFighter>()
@@ -106,10 +102,14 @@ pub(crate) fn install(app: &mut App) {
                 .after(FighterFrameSet::PoseDecision)
                 .after(super::network_plugin::NetworkFrameApply)
                 .before(FighterFrameSet::Locomotion)
-                .run_if(playing),
+                .run_if(super::ui_plugin::gameplay_hud_visibility::scene_session_active),
         );
     #[cfg(not(target_arch = "wasm32"))]
     super::combat_trace::install(app);
+    #[cfg(not(target_arch = "wasm32"))]
+    super::landing_trace::install(app);
+    #[cfg(not(target_arch = "wasm32"))]
+    super::jump_trace::install(app);
 }
 
 fn run_fighters(world: &mut World) {

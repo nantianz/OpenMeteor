@@ -15,9 +15,14 @@ pub(super) struct CombatTrace {
     start: Option<Instant>,
     done: bool,
     rows: u64,
+    trigger_poses: Vec<u16>,
 }
 
 impl CombatTrace {
+    pub(super) fn tracks_pose(&self, pose: u16) -> bool {
+        self.trigger_poses.contains(&pose)
+    }
+
     pub(super) fn event(&mut self, mut row: serde_json::Value) {
         let Some(start) = self.start else {
             return;
@@ -69,18 +74,33 @@ pub(super) fn install(app: &mut App) {
             return;
         }
     };
+    let trigger_poses: Vec<u16> = std::env::var("METEOR_COMBAT_TRACE_POSES")
+        .ok()
+        .map(|value| {
+            value
+                .split(',')
+                .filter_map(|id| id.trim().parse().ok())
+                .collect()
+        })
+        .filter(|poses: &Vec<u16>| !poses.is_empty())
+        .unwrap_or_else(|| vec![417, 419]);
     let mut trace = CombatTrace {
         output: BufWriter::new(file),
         start: None,
         done: false,
         rows: 0,
+        trigger_poses,
     };
     let _ = writeln!(
         trace.output,
         "{}",
-        serde_json::json!({"kind":"capture", "schemaVersion":2,"maxRows":250000, "pid":std::process::id(), "clock":"QueryPerformanceCounter", "units":"world (source * 0.12), Y up", "seconds":120, "trigger":"first pose 417 or 419", "exe":std::env::current_exe().ok()})
+        serde_json::json!({"kind":"capture", "schemaVersion":2,"maxRows":250000, "pid":std::process::id(), "clock":"QueryPerformanceCounter", "units":"world (source * 0.12), Y up", "seconds":120, "triggerPoses":trace.trigger_poses, "exe":std::env::current_exe().ok()})
     );
     let _ = trace.output.flush();
+    eprintln!(
+        "COMBAT TRACE armed: {path:?}; records 120s after first {:?}",
+        trace.trigger_poses
+    );
     app.insert_resource(trace)
         .add_systems(
             FighterUpdate,
@@ -107,17 +127,17 @@ pub(super) fn install(app: &mut App) {
                 .after(super::character_contact_plugin::finish_character_contact_frame)
                 .before(FighterFrameSet::AttackFacing),
         );
-    eprintln!("COMBAT TRACE armed: {path:?}; records 120s after first 417/419");
 }
 
 fn record(world: &mut World, stage: &str) {
     if world.resource::<CombatTrace>().done {
         return;
     }
+    let trigger_poses = world.resource::<CombatTrace>().trigger_poses.clone();
     let triggered = world
         .query::<&PoseRuntime>()
         .iter(world)
-        .any(|pose| matches!(pose.pose_id, 417 | 419));
+        .any(|pose| trigger_poses.contains(&pose.pose_id));
     if world.resource::<CombatTrace>().start.is_none() {
         if !triggered {
             return;
@@ -165,6 +185,11 @@ fn record(world: &mut World, stage: &str) {
         serde_json::json!({
             "entity":entity.to_bits(), "character":fighter.character_id, "weapon":fighter.weapon,
             "local":world.get::<super::stage_plugin::LocalFighter>(entity).is_some(),
+            "npc":world.get::<super::stage_plugin::MissionNpc>(entity).map(|npc| serde_json::json!({"id":npc.id,"name":npc.name,"think":npc.think,"behavior":format!("{:?}",npc.forced_behavior)})),
+            "npcAiPaused":world.get::<super::stage_plugin::NpcPerformance>(entity).map(|performance| performance.pause_remaining == f32::INFINITY),
+            "ai":(stage == "after-contact" && active == Some(entity.to_bits())).then(|| world.get::<crate::components::fighter::AiIntent>(entity).map(|ai| format!("{ai:?}"))).flatten(),
+            "patrol":(stage == "after-contact" && active == Some(entity.to_bits())).then(|| world.get::<super::ai_plugin::NpcPatrol>(entity).map(|ai| format!("{ai:?}"))).flatten(),
+            "profile":world.get::<super::stage_plugin::NpcCombatProfile>(entity).map(|profile| format!("{profile:?}")),
             "position":transform.map(|t| t.translation.to_array()),
             "pose":pose.map(|p| p.pose_id), "frame":pose.map(|p| p.frame),
             "sequence":pose.map(|p| p.pose_instance_id),
@@ -174,6 +199,15 @@ fn record(world: &mut World, stage: &str) {
             "blend":world.get::<EntryBlend>(entity).map(|b| serde_json::json!({"duration":b.duration,"elapsed":b.elapsed,"target":b.to_frame,"kind":format!("{:?}",b.kind)})),
             "state":world.get::<SmState>(entity).map(|s| format!("{s:?}")),
             "reaction":world.get::<FighterHitReaction>(entity).map(|s| format!("{s:?}")),
+            "reactionClock":world.get::<FighterHitReaction>(entity).map(|s| serde_json::json!({
+                "held":s.entry_blend_held, "rootExpectedPose":s.root_expected_pose_id,
+                "current":s.current.as_ref().map(|r| serde_json::json!({
+                    "kind":format!("{:?}",r.kind), "pose":r.pose_id,
+                    "minimum":r.minimum_remaining, "authoredMinimum":r.authored_minimum,
+                    "lock":r.lock_remaining, "down":r.down_remaining,
+                    "playToEnd":r.play_to_end_pose_id, "rewinds":r.rewind_count,
+                })),
+            })),
             "air":world.get::<super::movement_plugin::FighterAir>(entity).map(|s| serde_json::json!({"air":format!("{:?}", s.air), "groundContact":s.ground_contact,"externalVelocity":s.ground_external_velocity.to_array(),"steep":s.carry_decay_steep,"noSupport":s.carry_no_support})),
             "lock":world.get::<LockTarget>(entity).map(|s| format!("{s:?}")),
             "remoteTarget":world.get::<super::network_plugin::RemoteTransformTarget>(entity).map(|s| serde_json::json!({"position":s.translation.to_array(),"yaw":s.yaw})),
@@ -183,6 +217,8 @@ fn record(world: &mut World, stage: &str) {
         })
     }).collect();
     let row = serde_json::json!({"kind":"actors", "stage":stage, "qpcMs":qpc_ms(), "ms":elapsed*1000.0, "active":active, "actors":actors, "pairs":pairs,
+        "clock":world.get_resource::<super::FrameClock>().map(|c| serde_json::json!({"simDt":c.sim_dt,"wallDt":c.wall_dt,"wallStep":c.wall_step})),
+        "elapsed":world.get_resource::<Time>().map(|t| t.elapsed_secs_f64()),
         "keys":world.get_resource::<ButtonInput<KeyCode>>().map(|keys| serde_json::json!({"held":keys.get_pressed().map(|key| format!("{key:?}")).collect::<Vec<_>>(),"pressed":keys.get_just_pressed().map(|key| format!("{key:?}")).collect::<Vec<_>>(),"released":keys.get_just_released().map(|key| format!("{key:?}")).collect::<Vec<_>>()})),
         "mouse":world.get_resource::<ButtonInput<MouseButton>>().map(|keys| serde_json::json!({"held":keys.get_pressed().map(|key| format!("{key:?}")).collect::<Vec<_>>(),"pressed":keys.get_just_pressed().map(|key| format!("{key:?}")).collect::<Vec<_>>()}))});
     let mut trace = world.resource_mut::<CombatTrace>();
@@ -232,6 +268,7 @@ mod tests {
             start: None,
             done: false,
             rows: 0,
+            trigger_poses: vec![258],
         });
         for (slot, pose, x) in [(0, 417, 0.0), (1, 100, 1.0)] {
             world.spawn((
@@ -252,6 +289,17 @@ mod tests {
                 Health::new(),
             ));
         }
+        record(&mut world, "before-contact");
+        assert!(
+            world.resource::<CombatTrace>().start.is_none(),
+            "unselected attacks must not start a capture"
+        );
+        world
+            .query::<&mut PoseRuntime>()
+            .iter_mut(&mut world)
+            .next()
+            .unwrap()
+            .pose_id = 258;
         record(&mut world, "before-contact");
         world
             .resource_mut::<CombatTrace>()

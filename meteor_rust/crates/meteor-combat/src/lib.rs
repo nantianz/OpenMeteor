@@ -1,4 +1,5 @@
 pub mod attack_window;
+pub mod battle_rules;
 pub mod combo_engine;
 pub mod death;
 pub mod hit_reaction;
@@ -7,6 +8,7 @@ pub mod hitbox;
 pub mod lock_on;
 pub mod qi_burst;
 pub mod ranged_weapons;
+pub mod rebalance_effects;
 pub mod state_machine;
 pub mod status_effects;
 pub mod weapon_strategy;

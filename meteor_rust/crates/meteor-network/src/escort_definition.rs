@@ -91,19 +91,23 @@ impl EscortDefinition {
         {
             return Err("镖物碰撞网格无效".into());
         }
-        let zone = |name: &str| -> Result<SafeZone, String> {
-            let objects: Vec<_> = desc
-                .scene_objects
-                .iter()
-                .filter(|o| {
-                    o.name_attr
-                        .as_deref()
-                        .is_some_and(|n| n.eq_ignore_ascii_case(name))
-                })
-                .collect();
-            let [object] = objects.as_slice() else {
-                return Err(format!("劫镖地图必须配置唯一 {name} 安全区"));
+        let mut safe_zones = Vec::new();
+        for object in &desc.scene_objects {
+            let team = match object
+                .name_attr
+                .as_deref()
+                .map(str::to_ascii_lowercase)
+                .as_deref()
+            {
+                Some("safea") => 1,
+                Some("safeb") => 2,
+                Some("safe") => 0,
+                _ => continue,
             };
+            if !object.admits_ticket(1 << 2) {
+                continue;
+            }
+            let name = object.name_attr.as_deref().expect("safe zone name");
             let mesh = stage_mesh
                 .objects
                 .iter()
@@ -127,7 +131,8 @@ impl EscortDefinition {
             {
                 return Err(format!("安全区 {name} 没有有效面积"));
             }
-            Ok(SafeZone {
+            safe_zones.push(SafeZone {
+                team,
                 min_x: min[0],
                 min_y: min[1],
                 min_z: min[2],
@@ -137,12 +142,23 @@ impl EscortDefinition {
                 center_x: (min[0] + max[0]) * 0.5,
                 center_y: (min[1] + max[1]) * 0.5,
                 center_z: (min[2] + max[2]) * 0.5,
-            })
-        };
+            });
+        }
+        for team in [1, 2] {
+            if !safe_zones
+                .iter()
+                .any(|zone| zone.team == 0 || zone.team == team)
+            {
+                return Err(format!(
+                    "劫镖地图缺少阵营 {team} 可用的 safe/safeA/safeB 安全区"
+                ));
+            }
+        }
+        safe_zones.sort_by_key(|zone| zone.team);
         Ok(Self {
             stage: EscortStage {
                 flag_home: home,
-                safe_zones: [zone("safeA")?, zone("safeB")?],
+                safe_zones: safe_zones.into(),
                 return_seconds: 5.0,
             },
             scene_name: object.name.clone(),
@@ -252,6 +268,71 @@ pub(crate) mod tests {
         .unwrap()
     }
 
+    pub(crate) fn original_definition(stage: &str) -> EscortDefinition {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        let desc = meteor_asset::des::parse_stage_description(
+            &encoding_rs::GB18030
+                .decode(&std::fs::read(root.join(format!("{stage}/{stage}.des"))).unwrap())
+                .0,
+        );
+        let mesh = meteor_asset::gmdl::decode_gmdl(
+            &std::fs::read(root.join(format!("{stage}/{stage}.gmb"))).unwrap(),
+        )
+        .unwrap();
+        let registry =
+            meteor_asset::res::parse_meteor_res(&std::fs::read(root.join("Meteor.res")).unwrap())
+                .unwrap();
+        let wp = std::fs::read_to_string(root.join(format!("Level/{stage}.wp"))).unwrap();
+        EscortDefinition::from_assets(
+            &desc,
+            &mesh,
+            &registry,
+            meteor_scene::stage_loader::get_stage_center(stage, Some(&wp)),
+            |model| {
+                meteor_asset::gmdl::decode_gmdl(
+                    &std::fs::read(root.join(format!("cmodel/{model}.gmb"))).ok()?,
+                )
+                .ok()
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn qin_huang_ling_uses_jade_seal_and_one_common_exit_for_both_teams() {
+        let definition = original_definition("sn02");
+        assert_eq!(
+            (definition.item_id, definition.scene_name.as_str()),
+            (1, "D_IPItem01")
+        );
+        assert_eq!(definition.stage.safe_zones.len(), 1);
+        let safe = definition.stage.safe_zones[0];
+        assert_eq!(safe.team, 0);
+        let exit = RoleVec3 {
+            x: safe.center_x,
+            y: safe.center_y,
+            z: safe.center_z,
+        };
+        for team in [1, 2] {
+            assert!(crate::escort::position_inside_safe_zone(
+                exit,
+                team,
+                &definition.stage
+            ));
+            assert!(!crate::escort::position_inside_safe_zone(
+                definition.stage.flag_home,
+                team,
+                &definition.stage
+            ));
+        }
+        assert!(!crate::escort::position_inside_safe_zone(
+            exit,
+            0,
+            &definition.stage
+        ));
+        assert!(definition.intersects(definition.stage.flag_home, definition.stage.flag_home));
+    }
+
     #[test]
     fn original_data_matches_the_previously_verified_fixture() {
         let definition = authored_definition(false);
@@ -259,11 +340,65 @@ pub(crate) mod tests {
         assert_eq!(definition.item_id, 2);
         assert_eq!(definition.scene_object_id, 215);
         assert!((definition.stage.flag_home.x - expected.flag_home.x).abs() < 0.001);
-        for (actual, expected) in definition.stage.safe_zones.iter().zip(expected.safe_zones) {
+        for (actual, expected) in definition
+            .stage
+            .safe_zones
+            .iter()
+            .zip(expected.safe_zones.iter())
+        {
             assert!((actual.center_x - expected.center_x).abs() < 0.001);
             assert!((actual.center_z - expected.center_z).abs() < 0.001);
         }
         assert!(definition.intersects(definition.stage.flag_home, definition.stage.flag_home));
+    }
+
+    #[test]
+    fn sn02_uses_original_shared_safe_volume_and_ipitem01() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        let desc = meteor_asset::des::parse_stage_description(
+            &std::fs::read_to_string(root.join("sn02/sn02.des")).unwrap(),
+        );
+        let mesh =
+            meteor_asset::gmdl::decode_gmdl(&std::fs::read(root.join("sn02/sn02.gmb")).unwrap())
+                .unwrap();
+        let registry =
+            meteor_asset::res::parse_meteor_res(&std::fs::read(root.join("Meteor.res")).unwrap())
+                .unwrap();
+        let wp = std::fs::read_to_string(root.join("Level/sn02.wp")).unwrap();
+        let center = meteor_scene::stage_loader::get_stage_center("sn02", Some(&wp));
+        let definition = EscortDefinition::from_assets(&desc, &mesh, &registry, center, |model| {
+            meteor_asset::gmdl::decode_gmdl(
+                &std::fs::read(root.join(format!("cmodel/{model}.gmb"))).ok()?,
+            )
+            .ok()
+        })
+        .unwrap();
+        assert_eq!(definition.item_id, 1);
+        assert_eq!(definition.model, "IPItem01");
+        assert_eq!(definition.stage.safe_zones.len(), 1);
+        assert_eq!(definition.stage.safe_zones[0].team, 0);
+        assert!(definition.intersects(definition.stage.flag_home, definition.stage.flag_home));
+        let safe = definition.stage.safe_zones[0];
+        for team in [1, 2] {
+            let position = RoleVec3 {
+                x: safe.center_x,
+                y: safe.center_y,
+                z: safe.center_z,
+            };
+            assert!(crate::escort::position_inside_safe_zone(
+                position,
+                team,
+                &definition.stage
+            ));
+            assert!(!crate::escort::position_inside_safe_zone(
+                RoleVec3 {
+                    y: safe.max_y + 0.01,
+                    ..position
+                },
+                team,
+                &definition.stage
+            ));
+        }
     }
 
     #[test]

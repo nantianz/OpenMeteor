@@ -20,7 +20,6 @@ fn recorded_sn13_free_descent_speed_and_displacement() {
     let data: Value = serde_json::from_str(include_str!("fixtures/sn13-descent.json")).unwrap();
     let mut failures = Vec::new();
     for case in data["cases"].as_array().unwrap() {
-
         if case["result"] != 0 {
             continue;
         }
@@ -146,10 +145,10 @@ fn diagnose_sn13_descent_frame_rates() {
 
 #[test]
 fn recorded_sn13_ramp_jumps_do_not_enter_wall_run() {
+    use meteor_physics::collision::MeshCollider;
     let data: Value = serde_json::from_str(include_str!("fixtures/sn13-ramp.json")).unwrap();
     let mut failures = Vec::new();
     for case in data["jumps"].as_array().unwrap() {
-
         for fps in [1.0 / scalar(&case["dt"])] {
             let mut h = harness();
             let p = position(&case["position"], &data["center"]);
@@ -174,6 +173,7 @@ fn recorded_sn13_ramp_jumps_do_not_enter_wall_run() {
                 .state = FighterState::Jump;
             {
                 let mut air = h.app.world_mut().get_mut::<FighterAir>(h.fighter).unwrap();
+                air.recovery_ground_mode = None;
                 air.air.start_fall(v.x, v.z);
                 air.air.vertical_speed = v.y;
                 air.air.air_time = scalar(&case["dt"]);
@@ -248,6 +248,18 @@ fn recorded_sn13_ramp_jumps_do_not_enter_wall_run() {
                 let mut jumps = 0;
                 let mut peak_speed = 0.0_f32;
                 for _ in 0..(fps * 1.5) as usize {
+                    let p = h.position();
+                    let floor = h
+                        .app
+                        .world()
+                        .resource::<StageCollider>()
+                        .mesh
+                        .as_ref()
+                        .unwrap()
+                        .sample_ground_hit(p.x, p.z, 0.0, p.y);
+                    if floor.is_some_and(|hit| hit.ny > 0.999) {
+                        break;
+                    }
                     let was_airborne = h.airborne();
                     if held {
                         h.release_key(KeyCode::Space);
@@ -262,7 +274,13 @@ fn recorded_sn13_ramp_jumps_do_not_enter_wall_run() {
                     }
                     let air = h.app.world().get::<FighterAir>(h.fighter).unwrap();
                     peak_speed = peak_speed.max(air.air.planar_x.hypot(air.air.planar_z));
-                    assert!(!matches!(h.pose_id(), 161 | 162 | 163));
+                    assert!(
+                        !matches!(h.pose_id(), 161 | 162 | 163),
+                        "repeated ramp jump: pos={:?} pose={} speed=({}, {}, {}) support={} vertical_contact={} mode={:?}",
+                        h.position(), h.pose_id(), air.air.planar_x, air.air.vertical_speed,
+                        air.air.planar_z, air.ground_contact, air.mover_vertical_contact,
+                        air.recovery_ground_mode,
+                    );
                 }
                 assert!(jumps >= 2, "repeated ramp takeoffs: {jumps}");
                 assert!(

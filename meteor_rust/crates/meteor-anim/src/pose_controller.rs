@@ -99,7 +99,7 @@ pub fn resolve_completed_pose(
 fn link_blend_seconds(next_pose: Option<&NextPoseBlock>) -> Option<f32> {
     let np = next_pose?;
     let t = np.time;
-    if t.is_finite() && t > 0.0 {
+    if t.is_finite() && t >= 0.0 {
         Some(t)
     } else {
         None
@@ -315,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_link_with_zero_next_pose_time_is_none() {
+    fn resolve_link_preserves_explicit_zero_next_pose_time() {
         let np = NextPoseBlock {
             start: Some(40),
             end: Some(55),
@@ -326,7 +326,7 @@ mod tests {
             resolve_completed_pose(5, Some(&p), |_| true),
             PoseLinkDecision::Link {
                 link_pose_id: 6,
-                entry_blend_seconds: None,
+                entry_blend_seconds: Some(0.0),
             }
         );
     }

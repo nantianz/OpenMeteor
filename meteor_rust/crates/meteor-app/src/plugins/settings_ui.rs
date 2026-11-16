@@ -108,6 +108,7 @@ pub fn spawn_web_settings_form(
     font: &Handle<Font>,
     settings: &Settings,
     keymap: &Keymap,
+    in_game: bool,
 ) {
     let mut form = parent.spawn((
         Node {
@@ -208,7 +209,7 @@ pub fn spawn_web_settings_form(
                                 spawn_renderer_fieldset(grid, font, settings)
                             }
                             SettingsCategory::Graphics => {
-                                spawn_graphics_fieldset(grid, font, settings)
+                                spawn_graphics_fieldset(grid, font, settings, in_game)
                             }
                             SettingsCategory::Display => {
                                 spawn_display_fieldset(grid, font, settings)
@@ -439,6 +440,7 @@ fn spawn_graphics_fieldset(
     parent: &mut ChildSpawnerCommands,
     font: &Handle<Font>,
     settings: &Settings,
+    in_game: bool,
 ) {
     parent
         .spawn(fieldset_bundle(Val::Px(FIELDSET_W), false))
@@ -458,12 +460,32 @@ fn spawn_graphics_fieldset(
                 SettingsSelectField::TextureQuality,
                 texture_quality_label(settings.texture_quality),
             );
+            spawn_check_row(
+                fs,
+                font,
+                "高清场景",
+                SettingsBoolField::HdScene,
+                settings.hd_scene,
+            );
             spawn_select_row(
                 fs,
                 font,
                 "帧率上限",
                 SettingsSelectField::TargetFps,
                 target_fps_label(settings.target_fps),
+            );
+            #[cfg(all(
+                feature = "dlss5",
+                target_os = "windows",
+                target_arch = "x86_64",
+                target_env = "msvc"
+            ))]
+            spawn_check_row(
+                fs,
+                font,
+                "DLSS 5 神经渲染（实验）",
+                SettingsBoolField::Dlss5NeuralRendering,
+                settings.dlss5_neural_rendering,
             );
         });
     parent
@@ -489,6 +511,7 @@ fn spawn_graphics_fieldset(
                     } else {
                         Display::None
                     },
+                    flex_direction: FlexDirection::Column,
                     padding: UiRect::left(Val::Px(18.0)),
                     ..default()
                 },
@@ -502,13 +525,78 @@ fn spawn_graphics_fieldset(
                     SettingsBoolField::HitStop,
                     settings.hit_stop,
                 );
+                spawn_check_row(
+                    options,
+                    font,
+                    "打击震屏",
+                    SettingsBoolField::HitShake,
+                    settings.hit_shake,
+                );
             });
+            spawn_check_row(
+                fs,
+                font,
+                "受击轻微摆动",
+                SettingsBoolField::HitSway,
+                settings.hit_sway,
+            );
+            spawn_check_row(
+                fs,
+                font,
+                "使用新人物模型",
+                SettingsBoolField::NewCharacterModels,
+                settings.new_character_models,
+            );
+            spawn_check_row(
+                fs,
+                font,
+                "角色衣物摆动",
+                SettingsBoolField::CharacterMotion,
+                settings.character_motion,
+            );
             spawn_check_row(
                 fs,
                 font,
                 "体积雾",
                 SettingsBoolField::VolumetricFog,
                 settings.volumetric_fog,
+            );
+            spawn_check_row(
+                fs,
+                font,
+                "墙面与地面凹凸",
+                SettingsBoolField::SceneNormalMaps,
+                settings.scene_normal_maps,
+            );
+            spawn_check_row(
+                fs,
+                font,
+                "水面增强",
+                SettingsBoolField::WaterEnhance,
+                settings.water_enhance,
+            );
+            if !in_game && !cfg!(any(target_arch = "wasm32", target_os = "android")) {
+                spawn_check_row(
+                    fs,
+                    font,
+                    "水面实时倒影（重启生效）",
+                    SettingsBoolField::WaterLiveReflections,
+                    settings.water_live_reflections,
+                );
+            }
+            spawn_check_row(
+                fs,
+                font,
+                "环境光与人物明暗",
+                SettingsBoolField::EnvironmentLighting,
+                settings.environment_lighting,
+            );
+            spawn_check_row(
+                fs,
+                font,
+                "动态阴影",
+                SettingsBoolField::DynamicShadows,
+                settings.dynamic_shadows,
             );
         });
 }
@@ -535,6 +623,13 @@ fn spawn_display_fieldset(
                 "画面对比",
                 SettingsRangeField::Contrast,
                 settings.contrast,
+            );
+            spawn_range_row(
+                fs,
+                font,
+                "画面锐化",
+                SettingsRangeField::Sharpness,
+                settings.sharpness * 100.0,
             );
         });
     parent
@@ -600,12 +695,32 @@ fn spawn_camera_fieldset(
         .spawn(fieldset_bundle(Val::Px(FIELDSET_W), false))
         .with_children(|fs| {
             fs.spawn(launcher_text("镜头", 18.0, LAUNCHER_RED_BRIGHT, font));
+            spawn_range_row(
+                fs,
+                font,
+                "视野 FOV",
+                SettingsRangeField::CameraFov,
+                settings.camera_fov_degrees(),
+            );
+            fs.spawn(launcher_text(
+                "默认 60°；数值越大视野越宽。以 4:3 水平视角为基准。",
+                11.0,
+                theme::MUTED,
+                font,
+            ));
             spawn_check_row(
                 fs,
                 font,
                 "自动镜头",
                 SettingsBoolField::AutoCamera,
                 settings.auto_camera,
+            );
+            spawn_check_row(
+                fs,
+                font,
+                "第一人称（娱乐）",
+                SettingsBoolField::FirstPerson,
+                settings.first_person,
             );
             spawn_check_row(
                 fs,
@@ -1079,6 +1194,7 @@ fn format_range_value(field: SettingsRangeField, value: f32) -> String {
             format!("{:.0}", value.round())
         }
         SettingsRangeField::MouseSpeed => format!("{}", value.round() as i32),
+        SettingsRangeField::CameraFov => format!("{:.0}°", value.round()),
         _ => format!("{}", value.round() as i32),
     }
 }
@@ -1087,11 +1203,13 @@ fn range_bounds(field: SettingsRangeField) -> (f32, f32, f32) {
     match field {
         SettingsRangeField::Brightness => (45.0, 145.0, 1.0),
         SettingsRangeField::Contrast => (55.0, 145.0, 1.0),
+        SettingsRangeField::Sharpness => (0.0, 100.0, 1.0),
         SettingsRangeField::Gamma => (0.0, 100.0, 1.0),
         SettingsRangeField::MusicVolume | SettingsRangeField::AudioVolume => (0.0, 100.0, 1.0),
         SettingsRangeField::MouseSpeed => {
             (Settings::MOUSE_SPEED_MIN, Settings::MOUSE_SPEED_MAX, 1.0)
         }
+        SettingsRangeField::CameraFov => (Settings::CAMERA_FOV_MIN, Settings::CAMERA_FOV_MAX, 1.0),
     }
 }
 
@@ -1099,10 +1217,12 @@ fn read_range(settings: &Settings, field: SettingsRangeField) -> f32 {
     match field {
         SettingsRangeField::Brightness => settings.brightness,
         SettingsRangeField::Contrast => settings.contrast,
+        SettingsRangeField::Sharpness => settings.sharpness * 100.0,
         SettingsRangeField::Gamma => settings.gamma,
         SettingsRangeField::MusicVolume => settings.music_volume,
         SettingsRangeField::AudioVolume => settings.audio_volume,
         SettingsRangeField::MouseSpeed => settings.mouse_speed,
+        SettingsRangeField::CameraFov => settings.camera_fov_degrees(),
     }
 }
 
@@ -1112,10 +1232,12 @@ fn write_range(settings: &mut Settings, field: SettingsRangeField, value: f32) {
     match field {
         SettingsRangeField::Brightness => settings.brightness = v,
         SettingsRangeField::Contrast => settings.contrast = v,
+        SettingsRangeField::Sharpness => settings.sharpness = v / 100.0,
         SettingsRangeField::Gamma => settings.gamma = v,
         SettingsRangeField::MusicVolume => settings.music_volume = v,
         SettingsRangeField::AudioVolume => settings.audio_volume = v,
         SettingsRangeField::MouseSpeed => settings.mouse_speed = v,
+        SettingsRangeField::CameraFov => settings.camera_fov = v,
     }
 }
 
@@ -1125,9 +1247,21 @@ fn read_bool(settings: &Settings, field: SettingsBoolField) -> bool {
         SettingsBoolField::BorderlessWindow => settings.borderless_window,
         SettingsBoolField::HitEffects => settings.hit_effects,
         SettingsBoolField::HitStop => settings.hit_stop,
+        SettingsBoolField::HitShake => settings.hit_shake,
+        SettingsBoolField::HitSway => settings.hit_sway,
+        SettingsBoolField::CharacterMotion => settings.character_motion,
+        SettingsBoolField::NewCharacterModels => settings.new_character_models,
         SettingsBoolField::VolumetricFog => settings.volumetric_fog,
+        SettingsBoolField::DynamicShadows => settings.dynamic_shadows,
+        SettingsBoolField::SceneNormalMaps => settings.scene_normal_maps,
+        SettingsBoolField::HdScene => settings.hd_scene,
+        SettingsBoolField::WaterEnhance => settings.water_enhance,
+        SettingsBoolField::WaterLiveReflections => settings.water_live_reflections,
+        SettingsBoolField::EnvironmentLighting => settings.environment_lighting,
+        SettingsBoolField::Dlss5NeuralRendering => settings.dlss5_neural_rendering,
         SettingsBoolField::MusicEnabled => settings.music_enabled,
         SettingsBoolField::AutoCamera => settings.auto_camera,
+        SettingsBoolField::FirstPerson => settings.first_person,
         SettingsBoolField::LockFlag => settings.lock_flag,
         SettingsBoolField::ShowNames => settings.show_names,
         SettingsBoolField::ReverseMouse => settings.reverse_mouse,
@@ -1141,9 +1275,21 @@ fn write_bool(settings: &mut Settings, field: SettingsBoolField, value: bool) {
         SettingsBoolField::BorderlessWindow => settings.borderless_window = value,
         SettingsBoolField::HitEffects => settings.hit_effects = value,
         SettingsBoolField::HitStop => settings.hit_stop = value,
+        SettingsBoolField::HitShake => settings.hit_shake = value,
+        SettingsBoolField::HitSway => settings.hit_sway = value,
+        SettingsBoolField::CharacterMotion => settings.character_motion = value,
+        SettingsBoolField::NewCharacterModels => settings.new_character_models = value,
         SettingsBoolField::VolumetricFog => settings.volumetric_fog = value,
+        SettingsBoolField::DynamicShadows => settings.dynamic_shadows = value,
+        SettingsBoolField::SceneNormalMaps => settings.scene_normal_maps = value,
+        SettingsBoolField::HdScene => settings.hd_scene = value,
+        SettingsBoolField::WaterEnhance => settings.water_enhance = value,
+        SettingsBoolField::WaterLiveReflections => settings.water_live_reflections = value,
+        SettingsBoolField::EnvironmentLighting => settings.environment_lighting = value,
+        SettingsBoolField::Dlss5NeuralRendering => settings.dlss5_neural_rendering = value,
         SettingsBoolField::MusicEnabled => settings.music_enabled = value,
         SettingsBoolField::AutoCamera => settings.auto_camera = value,
+        SettingsBoolField::FirstPerson => settings.first_person = value,
         SettingsBoolField::LockFlag => settings.lock_flag = value,
         SettingsBoolField::ShowNames => settings.show_names = value,
         SettingsBoolField::ReverseMouse => settings.reverse_mouse = value,
@@ -1383,7 +1529,11 @@ pub fn settings_bool_buttons(
         if *interaction != Interaction::Pressed {
             continue;
         }
-        if matches!(field, SettingsBoolField::HitStop) && !settings.hit_effects {
+        if matches!(
+            field,
+            SettingsBoolField::HitStop | SettingsBoolField::HitShake
+        ) && !settings.hit_effects
+        {
             continue;
         }
         let next = !read_bool(&settings, *field);
@@ -1578,7 +1728,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_form_has_six_real_sliders_visible_signs_and_cancelable_selection() {
+    fn settings_form_has_eight_real_sliders_visible_signs_and_cancelable_selection() {
         use crate::plugins::ui_components::slider::UiSlider;
         use crate::plugins::ui_components::{UiComponentsPlugin, UiSelectMenu, UiSelectToggle};
         use bevy::ecs::system::RunSystemOnce;
@@ -1611,6 +1761,7 @@ mod tests {
                             &Handle::default(),
                             &Settings::default(),
                             &Keymap::default(),
+                            false,
                         );
                         spawn_settings_select_dialogs(
                             root,
@@ -1625,8 +1776,34 @@ mod tests {
                 .query::<&UiSlider>()
                 .iter(app.world())
                 .count(),
-            6
+            8
         );
+        let fov_slider = app
+            .world_mut()
+            .query::<(&SettingsRangeField, &UiSlider)>()
+            .iter(app.world())
+            .find(|(field, _)| **field == SettingsRangeField::CameraFov)
+            .unwrap()
+            .1;
+        assert_eq!(
+            (
+                fov_slider.min,
+                fov_slider.max,
+                fov_slider.step,
+                fov_slider.value
+            ),
+            (40.0, 100.0, 1.0, 60.0)
+        );
+        app.world_mut().resource_mut::<Settings>().camera_fov = 85.0;
+        app.update();
+        let fov_text = app
+            .world_mut()
+            .query::<(&SettingsRangeValue, &Text)>()
+            .iter(app.world())
+            .find(|(field, _)| field.0 == SettingsRangeField::CameraFov)
+            .unwrap()
+            .1;
+        assert_eq!(fov_text.0, "85°");
         for (up, down, children, node) in app
             .world_mut()
             .query::<(
@@ -1665,6 +1842,88 @@ mod tests {
                 } else {
                     Display::None
                 }
+            );
+        }
+        for enabled in [false, true] {
+            write_bool(
+                &mut app.world_mut().resource_mut::<Settings>(),
+                SettingsBoolField::HitShake,
+                enabled,
+            );
+            app.update();
+            let (parent, selected) = app
+                .world_mut()
+                .query::<(
+                    &SettingsBoolField,
+                    &ChildOf,
+                    &crate::plugins::ui_components::UiSelectionState,
+                )>()
+                .iter(app.world())
+                .find_map(|(field, parent, selection)| {
+                    (*field == SettingsBoolField::HitShake)
+                        .then_some((parent.parent(), selection.selected))
+                })
+                .expect("hit shake child checkbox");
+            assert_eq!(selected, enabled);
+            assert_eq!(
+                read_bool(
+                    app.world().resource::<Settings>(),
+                    SettingsBoolField::HitShake
+                ),
+                enabled
+            );
+            assert!(app.world().get::<HitEffectsOptions>(parent).is_some());
+            assert_eq!(
+                app.world().get::<Node>(parent).unwrap().flex_direction,
+                FlexDirection::Column
+            );
+            assert!(!app.world().resource::<Settings>().hit_effects);
+        }
+        for enabled in [true, false] {
+            app.world_mut().resource_mut::<Settings>().hit_sway = enabled;
+            app.update();
+            let (parent, selection) = app
+                .world_mut()
+                .query::<(
+                    &SettingsBoolField,
+                    &ChildOf,
+                    &crate::plugins::ui_components::UiSelectionState,
+                )>()
+                .iter(app.world())
+                .find_map(|(field, parent, selection)| {
+                    matches!(field, SettingsBoolField::HitSway)
+                        .then_some((parent.parent(), selection.selected))
+                })
+                .expect("independent hit sway checkbox");
+            assert_eq!(selection, enabled);
+            assert!(app.world().get::<HitEffectsOptions>(parent).is_none());
+            assert!(!app.world().resource::<Settings>().hit_effects);
+        }
+        for enabled in [false, true] {
+            write_bool(
+                &mut app.world_mut().resource_mut::<Settings>(),
+                SettingsBoolField::NewCharacterModels,
+                enabled,
+            );
+            app.update();
+            let selected = app
+                .world_mut()
+                .query::<(
+                    &SettingsBoolField,
+                    &crate::plugins::ui_components::UiSelectionState,
+                )>()
+                .iter(app.world())
+                .find_map(|(field, selection)| {
+                    (*field == SettingsBoolField::NewCharacterModels).then_some(selection.selected)
+                })
+                .expect("new character models checkbox");
+            assert_eq!(selected, enabled);
+            assert_eq!(
+                read_bool(
+                    app.world().resource::<Settings>(),
+                    SettingsBoolField::NewCharacterModels
+                ),
+                enabled
             );
         }
         for (category, _) in SettingsCategory::ALL {
@@ -1736,6 +1995,34 @@ mod tests {
             .world()
             .resource::<ButtonInput<KeyCode>>()
             .just_pressed(KeyCode::Escape));
+    }
+
+    #[test]
+    fn restart_only_reflection_control_is_absent_from_in_game_settings() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = App::new();
+        for in_game in [true, false] {
+            app.world_mut()
+                .run_system_once(move |mut commands: Commands| {
+                    commands.spawn(Node::default()).with_children(|root| {
+                        spawn_web_settings_form(
+                            root,
+                            &Handle::default(),
+                            &Settings::default(),
+                            &Keymap::default(),
+                            in_game,
+                        );
+                    });
+                })
+                .unwrap();
+            let count = app
+                .world_mut()
+                .query::<&SettingsBoolField>()
+                .iter(app.world())
+                .filter(|field| **field == SettingsBoolField::WaterLiveReflections)
+                .count();
+            assert_eq!(count, if in_game { 0 } else { 1 });
+        }
     }
 
     #[test]

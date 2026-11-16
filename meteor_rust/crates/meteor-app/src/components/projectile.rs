@@ -48,11 +48,11 @@ pub struct Projectile {
 #[derive(Debug, Clone)]
 pub struct RangedSegmentHit {
     pub projectile: Entity,
+    pub kind: ProjectileKind,
     pub source: RangedHitSource,
     pub start: Vec3,
     pub end: Vec3,
     pub hit_scale: f32,
-    pub stop_after_first: bool,
     pub despawn_after: bool,
 }
 

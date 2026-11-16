@@ -1,5 +1,3 @@
-
-
 #import bevy_pbr::{
     forward_io::Vertex,
     mesh_functions::{get_tag, get_world_from_local, mesh_position_local_to_world},
@@ -9,6 +7,7 @@
 struct ParticleParams {
     color: vec4<f32>,
     has_texture: u32,
+    uv_offset: vec2<f32>,
 };
 struct ParticlePage {
     values: array<ParticleParams, 128>,

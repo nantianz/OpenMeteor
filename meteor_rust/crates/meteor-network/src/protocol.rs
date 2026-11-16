@@ -266,6 +266,8 @@ pub fn parse_anger_spend_action(value: &str) -> Option<AngerSpendAction> {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RoomSummary {
+    #[serde(default)]
+    pub battle_rules: Option<meteor_combat::battle_rules::BattleRules>,
     pub room_id: String,
     pub name: String,
     pub mode: Option<String>,
@@ -283,6 +285,8 @@ pub struct RoomSummary {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RoomRulesWire {
+    #[serde(default)]
+    pub battle_rules: Option<meteor_combat::battle_rules::BattleRules>,
     #[serde(default)]
     pub max_players: Option<usize>,
     #[serde(default)]
@@ -329,6 +333,7 @@ pub struct P2pMatchConfig {
 impl RoomRulesWire {
     pub fn web_defaults() -> Self {
         Self {
+            battle_rules: Some(Default::default()),
             max_players: Some(16),
             round_time: Some(999),
             game_num: Some(999),
@@ -350,6 +355,7 @@ impl RoomRulesWire {
                 }
             };
         }
+        merge!(battle_rules);
         merge!(max_players);
         merge!(round_time);
         merge!(game_num);
@@ -430,9 +436,15 @@ pub fn escort_flag_from_v4(value: Option<&DynamicObject>) -> Option<EscortFlagSn
     })
 }
 
+fn is_zero_effect(value: &u8) -> bool {
+    *value == 0
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CombatReactionWire {
+    #[serde(default, skip_serializing_if = "is_zero_effect")]
+    pub rebalance_effect: u8,
     pub defense_move: f32,
     pub target_move: f32,
     pub defense_value: f32,
@@ -454,6 +466,8 @@ pub struct CombatReactionWire {
 pub enum Message {
     #[serde(rename = "hello")]
     Hello {
+        #[serde(default)]
+        balance_revision: u32,
         name: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resume_token: Option<String>,
@@ -466,6 +480,8 @@ pub enum Message {
 
     #[serde(rename = "welcome")]
     Welcome {
+        #[serde(default)]
+        balance_revision: u32,
         #[serde(default)]
         player_id: String,
         #[serde(default)]
@@ -793,6 +809,17 @@ pub enum Message {
         ops: Vec<SceneOp>,
     },
 
+    #[serde(rename = "projectile.subscribe")]
+    ProjectileSubscribe { room_id: String },
+
+    #[serde(rename = "projectile.state")]
+    ProjectileState {
+        room_id: String,
+        match_epoch: u32,
+        round_epoch: u32,
+        state: crate::runtime_sync::ProjectileState,
+    },
+
     #[serde(rename = "scene.transfer")]
     SceneTransfer {
         room_id: String,
@@ -1069,6 +1096,8 @@ impl Message {
             Message::MatchEnd { .. } => "match.end",
             Message::ObjectiveEnd { .. } => "objective.end",
             Message::SceneOps { .. } => "scene.ops",
+            Message::ProjectileState { .. } => "projectile.state",
+            Message::ProjectileSubscribe { .. } => "projectile.subscribe",
             Message::ScenePropHit { .. } => "scene.propHit",
             Message::SceneTransfer { .. } => "scene.transfer",
             Message::SceneTransferAck { .. } => "scene.transfer.ack",
@@ -1303,6 +1332,8 @@ fn kind_for_type(type_name: &str) -> Option<MessageKind> {
         "match.end" => MessageKind::MatchEnd,
         "objective.end" => MessageKind::ObjectiveEnd,
         "scene.ops" => MessageKind::SceneOps,
+        "projectile.state" => MessageKind::ProjectileState,
+        "projectile.subscribe" => MessageKind::ProjectileSubscribe,
         "scene.propHit" => MessageKind::ScenePropHit,
         "scene.transfer" => MessageKind::SceneTransfer,
         "scene.transfer.ack" => MessageKind::SceneTransferAck,
@@ -1366,6 +1397,8 @@ fn type_for_kind(kind: i32) -> Option<&'static str> {
         MessageKind::MatchEnd => "match.end",
         MessageKind::ObjectiveEnd => "objective.end",
         MessageKind::SceneOps => "scene.ops",
+        MessageKind::ProjectileState => "projectile.state",
+        MessageKind::ProjectileSubscribe => "projectile.subscribe",
         MessageKind::ScenePropHit => "scene.propHit",
         MessageKind::SceneTransfer => "scene.transfer",
         MessageKind::SceneTransferAck => "scene.transfer.ack",
@@ -1491,12 +1524,14 @@ mod tests {
     fn message_json_tags_match_type_names() {
         let samples: Vec<Message> = vec![
             Message::Hello {
+                balance_revision: meteor_combat::battle_rules::RULES_CAPABILITY,
                 name: "n".into(),
                 resume_token: Some("resume".into()),
                 character_id: 1,
                 weapon: 2,
             },
             Message::Welcome {
+                balance_revision: meteor_combat::battle_rules::RULES_CAPABILITY,
                 player_id: "p1".into(),
                 room_id: "room1".into(),
                 members: vec![],
@@ -1722,6 +1757,7 @@ mod tests {
     fn message_types_match_web_names() {
         assert_eq!(
             Message::Hello {
+                balance_revision: meteor_combat::battle_rules::RULES_CAPABILITY,
                 name: "a".into(),
                 resume_token: None,
                 character_id: 0,
@@ -1816,6 +1852,7 @@ mod tests {
         assert_eq!(
             Message::from_v4_binary(&bytes).expect("Web hello decodes"),
             Message::Hello {
+                balance_revision: 0,
                 name: "Rust".into(),
                 resume_token: None,
                 character_id: 0,
@@ -1832,6 +1869,7 @@ mod tests {
         assert_eq!(
             Message::from_v4_binary(&bytes).expect("Web hello with loadout decodes"),
             Message::Hello {
+                balance_revision: 0,
                 name: "raw".into(),
                 resume_token: None,
                 character_id: 0,
@@ -1849,6 +1887,7 @@ mod tests {
         assert_eq!(
             hello,
             Message::Hello {
+                balance_revision: 0,
                 name: "Rust".into(),
                 resume_token: Some("resume-123".into()),
                 character_id: 0,
@@ -2469,6 +2508,7 @@ mod tests {
                 anger: Some(13.3),
                 motion_scale: Some(0.25),
                 reaction: Some(CombatReactionWire {
+                    rebalance_effect: 0,
                     defense_move: 2.0,
                     target_move: 0.25,
                     defense_value: 0.3,
@@ -2608,6 +2648,7 @@ mod tests {
 
         let response = Message::RoomList {
             rooms: Some(vec![RoomSummary {
+                battle_rules: None,
                 room_id: "room1".into(),
                 name: "Rust room".into(),
                 mode: Some("leader".into()),

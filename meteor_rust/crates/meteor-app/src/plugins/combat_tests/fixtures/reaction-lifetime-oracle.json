@@ -1,0 +1,231 @@
+{
+  "boundary": "Original 55d260/55d910/573140 isolated Pose100 entry and replay timing.\n\nSupplies Common AMB/POS records, millisecond clock, dt and model callback.\nUses flat-floor vertical integration for diagnostic height, not native contacts.\nDoes not reproduce the original player's input/HitJudge/server queue.\n",
+  "loopFlag": 1,
+  "exeSha256": "baebb6d59e6da61e03660c57c31f842f8a3ec157f07d1e2f9bf8d78373a58619",
+  "samples": [
+    {
+      "entryPose": 93,
+      "minimum": 0.0,
+      "fps": 30,
+      "ready": 0.36666666666666664,
+      "finalPose": 93
+    },
+    {
+      "entryPose": 93,
+      "minimum": 0.0,
+      "fps": 60,
+      "ready": 0.36666666666666664,
+      "finalPose": 93
+    },
+    {
+      "entryPose": 93,
+      "minimum": 0.0,
+      "fps": 120,
+      "ready": 0.35833333333333334,
+      "finalPose": 93
+    },
+    {
+      "entryPose": 93,
+      "minimum": 0.0,
+      "fps": 165,
+      "ready": 0.3575757575757576,
+      "finalPose": 93
+    },
+    {
+      "entryPose": 93,
+      "minimum": 0.05,
+      "fps": 30,
+      "ready": 0.36666666666666664,
+      "finalPose": 93
+    },
+    {
+      "entryPose": 93,
+      "minimum": 0.05,
+      "fps": 60,
+      "ready": 0.36666666666666664,
+      "finalPose": 93
+    },
+    {
+      "entryPose": 93,
+      "minimum": 0.05,
+      "fps": 120,
+      "ready": 0.35833333333333334,
+      "finalPose": 93
+    },
+    {
+      "entryPose": 93,
+      "minimum": 0.05,
+      "fps": 165,
+      "ready": 0.3575757575757576,
+      "finalPose": 93
+    },
+    {
+      "entryPose": 93,
+      "minimum": 0.5,
+      "fps": 30,
+      "ready": 0.6333333333333333,
+      "finalPose": 93
+    },
+    {
+      "entryPose": 93,
+      "minimum": 0.5,
+      "fps": 60,
+      "ready": 0.6333333333333333,
+      "finalPose": 93
+    },
+    {
+      "entryPose": 93,
+      "minimum": 0.5,
+      "fps": 120,
+      "ready": 0.6333333333333333,
+      "finalPose": 93
+    },
+    {
+      "entryPose": 93,
+      "minimum": 0.5,
+      "fps": 165,
+      "ready": 0.6242424242424243,
+      "finalPose": 93
+    },
+    {
+      "entryPose": 93,
+      "minimum": 1.5,
+      "fps": 30,
+      "ready": 1.6666666666666667,
+      "finalPose": 93
+    },
+    {
+      "entryPose": 93,
+      "minimum": 1.5,
+      "fps": 60,
+      "ready": 1.65,
+      "finalPose": 93
+    },
+    {
+      "entryPose": 93,
+      "minimum": 1.5,
+      "fps": 120,
+      "ready": 1.6333333333333333,
+      "finalPose": 93
+    },
+    {
+      "entryPose": 93,
+      "minimum": 1.5,
+      "fps": 165,
+      "ready": 1.6242424242424243,
+      "finalPose": 93
+    },
+    {
+      "entryPose": 97,
+      "minimum": 0.0,
+      "fps": 30,
+      "ready": 1.0333333333333334,
+      "finalPose": 112
+    },
+    {
+      "entryPose": 97,
+      "minimum": 0.0,
+      "fps": 60,
+      "ready": 0.9833333333333333,
+      "finalPose": 112
+    },
+    {
+      "entryPose": 97,
+      "minimum": 0.0,
+      "fps": 120,
+      "ready": 0.9416666666666667,
+      "finalPose": 112
+    },
+    {
+      "entryPose": 97,
+      "minimum": 0.0,
+      "fps": 165,
+      "ready": 0.9272727272727272,
+      "finalPose": 112
+    },
+    {
+      "entryPose": 97,
+      "minimum": 0.05,
+      "fps": 30,
+      "ready": 1.0666666666666667,
+      "finalPose": 112
+    },
+    {
+      "entryPose": 97,
+      "minimum": 0.05,
+      "fps": 60,
+      "ready": 1.0166666666666666,
+      "finalPose": 112
+    },
+    {
+      "entryPose": 97,
+      "minimum": 0.05,
+      "fps": 120,
+      "ready": 0.9833333333333333,
+      "finalPose": 112
+    },
+    {
+      "entryPose": 97,
+      "minimum": 0.05,
+      "fps": 165,
+      "ready": 0.9757575757575757,
+      "finalPose": 112
+    },
+    {
+      "entryPose": 97,
+      "minimum": 0.5,
+      "fps": 30,
+      "ready": 1.5,
+      "finalPose": 112
+    },
+    {
+      "entryPose": 97,
+      "minimum": 0.5,
+      "fps": 60,
+      "ready": 1.4666666666666666,
+      "finalPose": 112
+    },
+    {
+      "entryPose": 97,
+      "minimum": 0.5,
+      "fps": 120,
+      "ready": 1.4416666666666667,
+      "finalPose": 112
+    },
+    {
+      "entryPose": 97,
+      "minimum": 0.5,
+      "fps": 165,
+      "ready": 1.4242424242424243,
+      "finalPose": 112
+    },
+    {
+      "entryPose": 97,
+      "minimum": 1.5,
+      "fps": 30,
+      "ready": 2.533333333333333,
+      "finalPose": 112
+    },
+    {
+      "entryPose": 97,
+      "minimum": 1.5,
+      "fps": 60,
+      "ready": 2.4833333333333334,
+      "finalPose": 112
+    },
+    {
+      "entryPose": 97,
+      "minimum": 1.5,
+      "fps": 120,
+      "ready": 2.441666666666667,
+      "finalPose": 112
+    },
+    {
+      "entryPose": 97,
+      "minimum": 1.5,
+      "fps": 165,
+      "ready": 2.4242424242424243,
+      "finalPose": 112
+    }
+  ]
+}

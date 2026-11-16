@@ -10,10 +10,13 @@ use crate::plugins::stage_material::GmdlMaterial;
 use bevy::prelude::*;
 use meteor_combat::ranged_weapons::{
     wheel_guide_score, DART_GRAVITY, DART_SPIN_SPEED, GUN_RANGE, PROJECTILE_MAX_AGE,
-    WHEEL_PATH_EPSILON, WHEEL_RETURN_ACCEL, WHEEL_RETURN_SPEED_SCALE, WHEEL_SPAWN_HEIGHT,
-    WHEEL_TARGET_LEAD_TIME,
+    WHEEL_GUIDE_DELAY, WHEEL_PATH_EPSILON, WHEEL_RETURN_ACCEL, WHEEL_RETURN_SPEED_SCALE,
+    WHEEL_SPAWN_HEIGHT, WHEEL_TARGET_LEAD_TIME,
 };
 use meteor_physics::collision::{MeshCollider, Point3};
+
+#[path = "ranged_plugin/network_sync.rs"]
+mod network_sync;
 
 pub struct RangedPlugin;
 
@@ -43,6 +46,7 @@ type ProjectileQuery<'w, 's> = Query<
 
 impl Plugin for RangedPlugin {
     fn build(&self, app: &mut App) {
+        network_sync::install(app);
         app.init_resource::<PendingRangedHits>()
             .add_systems(
                 Update,
@@ -160,20 +164,21 @@ pub(super) fn update_projectiles(
         let start = transform.translation;
         if projectile.kind == ProjectileKind::GunRay {
             let direction = projectile.velocity.normalize_or_zero();
-            let end = start + direction * GUN_RANGE;
+            let mut end = start + direction * GUN_RANGE;
             if let Some(distance) = stage_hit_distance(&collider, start, end) {
+                end = start + direction * distance;
                 scene_effects.write(crate::plugins::effect_plugin::SceneEffectEvent {
                     effect: "GunHit".to_string(),
-                    position: start + direction * distance,
+                    position: end,
                 });
             }
             pending.0.push(RangedSegmentHit {
                 projectile: entity,
+                kind: projectile.kind,
                 source: projectile.source.clone(),
                 start,
                 end,
                 hit_scale: projectile.hit_scale,
-                stop_after_first: false,
                 despawn_after: true,
             });
             continue;
@@ -214,14 +219,18 @@ pub(super) fn update_projectiles(
             }
         }
 
-        if !ignore_collision {
+        let stock_wheel_hits_wall = projectile.kind == ProjectileKind::FlyingWheel
+            && wall_distance.is_some()
+            && (net.status != crate::plugins::network_plugin::NetStatus::InRoom
+                || net.is_stock_udp());
+        if !ignore_collision && !stock_wheel_hits_wall {
             pending.0.push(RangedSegmentHit {
                 projectile: entity,
+                kind: projectile.kind,
                 source: projectile.source.clone(),
                 start,
                 end,
                 hit_scale: projectile.hit_scale,
-                stop_after_first: projectile.kind == ProjectileKind::Dart,
                 despawn_after: projectile.kind == ProjectileKind::Dart && wall_distance.is_some(),
             });
         }
@@ -252,27 +261,30 @@ pub(super) fn update_projectiles(
             projectile.launch_point
         };
         let route = target - transform.translation;
-        if route.length_squared() <= WHEEL_PATH_EPSILON * WHEEL_PATH_EPSILON {
-            if projectile.route_to_target {
-                projectile.route_to_target = false;
-                projectile.guide_target = None;
-            } else {
-                if let Ok(mut gate) = gates.get_mut(projectile.source.owner) {
-                    gate.wheel_out = false;
-                }
-                commands.entity(entity).despawn();
-                continue;
-            }
-        } else {
-            projectile.velocity += route.normalize_or_zero() * WHEEL_RETURN_ACCEL * dt;
-            let cap = projectile.speed
-                * if projectile.collision_return {
-                    WHEEL_RETURN_SPEED_SCALE
+
+        if projectile.age > WHEEL_GUIDE_DELAY {
+            if route.length_squared() <= WHEEL_PATH_EPSILON * WHEEL_PATH_EPSILON {
+                if projectile.route_to_target {
+                    projectile.route_to_target = false;
+                    projectile.guide_target = None;
                 } else {
-                    1.0
-                };
-            if projectile.velocity.length_squared() > cap * cap {
-                projectile.velocity = projectile.velocity.normalize_or_zero() * cap;
+                    if let Ok(mut gate) = gates.get_mut(projectile.source.owner) {
+                        gate.wheel_out = false;
+                    }
+                    commands.entity(entity).despawn();
+                    continue;
+                }
+            } else {
+                projectile.velocity += route.normalize_or_zero() * WHEEL_RETURN_ACCEL * dt;
+                let cap = projectile.speed
+                    * if projectile.collision_return {
+                        WHEEL_RETURN_SPEED_SCALE
+                    } else {
+                        1.0
+                    };
+                if projectile.velocity.length_squared() > cap * cap {
+                    projectile.velocity = projectile.velocity.normalize_or_zero() * cap;
+                }
             }
         }
         if wall_distance.is_some() {
@@ -291,7 +303,14 @@ fn attach_projectile_visuals(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    query: Query<(Entity, &Projectile), Added<Projectile>>,
+    query: Query<
+        (
+            Entity,
+            Option<&Projectile>,
+            Option<&network_sync::ObserverProjectile>,
+        ),
+        Or<(Added<Projectile>, Added<network_sync::ObserverProjectile>)>,
+    >,
     fighters: Query<(&Fighter, &WeaponForm)>,
     weapon_meshes: Query<(
         &WeaponModel,
@@ -300,20 +319,47 @@ fn attach_projectile_visuals(
         &Transform,
     )>,
 ) {
-    for (entity, projectile) in &query {
-        if projectile.kind == ProjectileKind::GunRay {
+    for (entity, projectile, observer) in &query {
+        let (owner, source_weapon, kind) = if let Some(projectile) = projectile {
+            (
+                projectile.source.owner,
+                projectile.source.weapon,
+                projectile.kind,
+            )
+        } else if let Some(observer) = observer {
+            (observer.owner, observer.weapon, observer.kind)
+        } else {
+            continue;
+        };
+        if kind == ProjectileKind::GunRay {
             continue;
         }
-        let source_state = fighters.get(projectile.source.owner).ok();
+        let source_state = fighters.get(owner).ok();
+        let source_variant = observer.map_or_else(
+            || source_state.map_or(0, |(f, _)| f.weapon_variant),
+            |o| o.variant,
+        );
+        let source_slot = if observer.is_some() {
+            weapon_meshes
+                .iter()
+                .find(|(model, _, _, _)| {
+                    model.fighter == owner
+                        && model.weapon == source_weapon
+                        && model.variant == source_variant
+                })
+                .map(|(model, _, _, _)| model.slot)
+        } else {
+            source_state.map(|(fighter, _)| fighter.weapon_slot)
+        };
         let mut original_parts = 0usize;
         for (weapon, mesh, material, source_local) in &weapon_meshes {
-            let Some((fighter, form)) = source_state else {
+            let Some((_, form)) = source_state else {
                 continue;
             };
-            if weapon.fighter != projectile.source.owner
-                || weapon.weapon != projectile.source.weapon
-                || weapon.slot != fighter.weapon_slot
-                || weapon.variant != fighter.weapon_variant
+            if weapon.fighter != owner
+                || weapon.weapon != source_weapon
+                || Some(weapon.slot) != source_slot
+                || weapon.variant != source_variant
                 || weapon
                     .forms
                     .as_ref()
@@ -339,9 +385,9 @@ fn attach_projectile_visuals(
         }
         warn!(
             "original projectile model unavailable for fighter {:?} weapon {}; using fallback mesh",
-            projectile.source.owner, projectile.source.weapon
+            owner, source_weapon
         );
-        let (size, color) = match projectile.kind {
+        let (size, color) = match kind {
             ProjectileKind::Dart => (Vec3::new(0.05, 0.05, 0.45), Color::srgb(0.7, 0.72, 0.75)),
             ProjectileKind::FlyingWheel => {
                 (Vec3::new(0.65, 0.08, 0.65), Color::srgb(0.75, 0.7, 0.45))
@@ -423,14 +469,21 @@ mod tests {
         }
     }
 
-    #[test]
-    fn production_gun_ray_emits_full_range_segment() {
+    fn gun_ray_test_app(walls: &[f32]) -> App {
         let mut app = App::new();
         app.init_resource::<Time>();
         app.init_resource::<PendingRangedHits>();
         app.init_resource::<StageCollider>();
         app.add_message::<crate::plugins::effect_plugin::SceneEffectEvent>();
         app.add_systems(Update, update_projectiles);
+        let mut mesh = crate::plugins::stage_collider::StageMeshCollider::default();
+        for &z in walls {
+            mesh.append_world_triangles(
+                &[[-10.0, -10.0, z], [10.0, -10.0, z], [0.0, 10.0, z]],
+                &[0, 1, 2],
+            );
+        }
+        app.world_mut().resource_mut::<StageCollider>().mesh = Some(mesh);
         let owner = app
             .world_mut()
             .spawn((
@@ -486,7 +539,12 @@ mod tests {
         ));
 
         app.update();
+        app
+    }
 
+    #[test]
+    fn production_gun_ray_emits_full_range_segment() {
+        let app = gun_ray_test_app(&[]);
         let pending = app.world().resource::<PendingRangedHits>();
         assert_eq!(pending.0.len(), 1);
         assert!((pending.0[0].end.z - GUN_RANGE).abs() < 1e-5);
@@ -494,112 +552,189 @@ mod tests {
     }
 
     #[test]
-    fn flying_wheel_guidance_skips_friendly_and_hidden_fighters() {
-        let mut app = App::new();
-        app.init_resource::<Time>();
-        app.init_resource::<PendingRangedHits>();
-        app.init_resource::<StageCollider>();
-        app.add_message::<crate::plugins::effect_plugin::SceneEffectEvent>();
-        app.add_systems(Update, update_projectiles);
-        let owner = app
-            .world_mut()
-            .spawn((
-                fighter(2, 0),
-                Health::default(),
-                RangedFireGate {
-                    wheel_out: true,
-                    ..default()
-                },
-                MotionState {
-                    movement_mode: meteor_core::MovementMode::Idle,
-                    velocity: Vec3::ZERO,
-                    facing: 0.0,
-                },
-                Transform::from_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
-                crate::plugins::stage_plugin::LocalFighter,
-            ))
-            .id();
-        app.world_mut().spawn((
-            fighter(6, 1),
-            Health::default(),
-            Transform::from_xyz(0.0, 0.0, 2.0),
-            mission_npc(1, 1),
-            Visibility::Visible,
-        ));
-        app.world_mut().spawn((
-            fighter(6, 2),
-            Health::default(),
-            Transform::from_xyz(0.0, 0.0, 3.0),
-            mission_npc(2, 2),
-            Visibility::Hidden,
-        ));
-        let enemy = app
-            .world_mut()
-            .spawn((
-                fighter(6, 3),
-                Health::default(),
-                Transform::from_xyz(0.0, 0.0, 4.0),
-                mission_npc(3, 2),
-                Visibility::Visible,
-            ))
-            .id();
-        let wheel = app
-            .world_mut()
-            .spawn((
-                Projectile {
-                    kind: ProjectileKind::FlyingWheel,
-                    source: RangedHitSource {
-                        owner,
-                        weapon: 2,
-                        weapon_stats: None,
-                        pose_id: 220,
-                        pose_frame: 1.0,
-                        pose_start: 0,
-                        pose_instance_id: 1,
-                        attack_index: 0,
-                        attack: attack(),
-                        player_slot: 0,
-                        combat_team: 1,
-                        script_character_id: 0,
-                        script_team: None,
-                        attack_origin: Vec3::ZERO,
-                        attack_forward: Vec3::Z,
-                    },
-                    velocity: Vec3::Z * 48.0,
-                    age: 0.0,
-                    hit_scale: 2.6,
-                    speed: 48.0,
-                    launch_point: Vec3::Y * WHEEL_SPAWN_HEIGHT,
-                    guide_target: None,
-                    guide_initialized: false,
-                    route_to_target: false,
-                    collision_return: false,
-                },
-                Transform::from_translation(Vec3::Y * WHEEL_SPAWN_HEIGHT),
-            ))
-            .id();
+    fn production_gun_ray_hits_characters_before_nearest_wall_only() {
+        use meteor_combat::ranged_weapons::{
+            ranged_target_box, segment_hits_box_distance, Point3 as RangedPoint,
+        };
 
-        app.update();
-
-        assert_eq!(
-            app.world().get::<Projectile>(wheel).unwrap().guide_target,
-            Some(enemy)
-        );
-
-        for _ in 0..120 {
-            app.world_mut()
-                .resource_mut::<Time>()
-                .advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
-            app.update();
-            if app.world().get::<Projectile>(wheel).is_none() {
-                break;
-            }
-        }
+        let mut app = gun_ray_test_app(&[20.0, 10.0]);
+        let pending = app.world().resource::<PendingRangedHits>();
+        let hit = &pending.0[0];
+        assert!((hit.end.z - 10.0).abs() < 1e-5);
         assert!(
+            hit.kind == ProjectileKind::GunRay,
+            "characters before the wall still pierce"
+        );
+        let convert = |v: Vec3| RangedPoint {
+            x: v.x,
+            y: v.y,
+            z: v.z,
+        };
+
+        for (z, expected) in [(3.0, true), (6.0, true), (15.0, false), (25.0, false)] {
+            let target = ranged_target_box(RangedPoint { x: 0.0, y: -1.0, z }, 1.0);
+            assert_eq!(
+                segment_hits_box_distance(convert(hit.start), convert(hit.end), target).is_some(),
+                expected,
+                "target at z={z}",
+            );
+        }
+        let effects: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<crate::plugins::effect_plugin::SceneEffectEvent>>()
+            .drain()
+            .collect();
+        assert_eq!(effects.len(), 1);
+        assert_eq!(effects[0].effect, "GunHit");
+        assert!((effects[0].position.z - 10.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn flying_wheel_guidance_skips_friendly_and_hidden_fighters() {
+        for fps in [30, 60, 120] {
+            for distance in [1.0, 2.0, 3.0, 4.0, 5.0, 8.0, 20.0] {
+                for speed in [42.0, 48.0, 54.0] {
+                    let mut app = App::new();
+                    app.init_resource::<Time>();
+                    app.init_resource::<PendingRangedHits>();
+                    app.init_resource::<StageCollider>();
+                    app.add_message::<crate::plugins::effect_plugin::SceneEffectEvent>();
+                    app.add_systems(Update, update_projectiles);
+                    let owner = app
+                        .world_mut()
+                        .spawn((
+                            fighter(2, 0),
+                            Health::default(),
+                            RangedFireGate {
+                                wheel_out: true,
+                                ..default()
+                            },
+                            MotionState {
+                                movement_mode: meteor_core::MovementMode::Idle,
+                                velocity: Vec3::ZERO,
+                                facing: 0.0,
+                            },
+                            Transform::from_rotation(Quat::from_rotation_y(
+                                std::f32::consts::FRAC_PI_2,
+                            )),
+                            crate::plugins::stage_plugin::LocalFighter,
+                        ))
+                        .id();
+                    app.world_mut().spawn((
+                        fighter(6, 1),
+                        Health::default(),
+                        Transform::from_xyz(0.0, 0.0, 2.0),
+                        mission_npc(1, 1),
+                        Visibility::Visible,
+                    ));
+                    app.world_mut().spawn((
+                        fighter(6, 2),
+                        Health::default(),
+                        Transform::from_xyz(0.0, 0.0, 3.0),
+                        mission_npc(2, 2),
+                        Visibility::Hidden,
+                    ));
+                    let enemy = app
+                        .world_mut()
+                        .spawn((
+                            fighter(6, 3),
+                            Health::default(),
+                            Transform::from_xyz(0.0, 0.0, distance),
+                            mission_npc(3, 2),
+                            Visibility::Visible,
+                        ))
+                        .id();
+                    let wheel = app
+                        .world_mut()
+                        .spawn((
+                            Projectile {
+                                kind: ProjectileKind::FlyingWheel,
+                                source: RangedHitSource {
+                                    owner,
+                                    weapon: 2,
+                                    weapon_stats: None,
+                                    pose_id: 220,
+                                    pose_frame: 1.0,
+                                    pose_start: 0,
+                                    pose_instance_id: 1,
+                                    attack_index: 0,
+                                    attack: attack(),
+                                    player_slot: 0,
+                                    combat_team: 1,
+                                    script_character_id: 0,
+                                    script_team: None,
+                                    attack_origin: Vec3::ZERO,
+                                    attack_forward: Vec3::Z,
+                                },
+                                velocity: Vec3::Z * speed,
+                                age: 0.0,
+                                hit_scale: 2.6,
+                                speed,
+                                launch_point: Vec3::Y * WHEEL_SPAWN_HEIGHT,
+                                guide_target: None,
+                                guide_initialized: false,
+                                route_to_target: false,
+                                collision_return: false,
+                            },
+                            Transform::from_translation(Vec3::Y * WHEEL_SPAWN_HEIGHT),
+                        ))
+                        .id();
+
+                    app.update();
+
+                    assert_eq!(
+                        app.world().get::<Projectile>(wheel).unwrap().guide_target,
+                        Some(enemy)
+                    );
+
+                    let mut intersects_enemy = false;
+                    for _ in 0..fps * 4 {
+                        app.world_mut()
+                            .resource_mut::<Time>()
+                            .advance_by(std::time::Duration::from_secs_f32(1.0 / fps as f32));
+                        app.update();
+                        use meteor_combat::ranged_weapons::{
+                            ranged_target_box, segment_hits_box_distance, Point3,
+                        };
+                        let target = ranged_target_box(
+                            Point3 {
+                                x: 0.0,
+                                y: 0.0,
+                                z: distance,
+                            },
+                            2.6,
+                        );
+                        for hit in app
+                            .world_mut()
+                            .resource_mut::<PendingRangedHits>()
+                            .0
+                            .drain(..)
+                        {
+                            let point = |v: Vec3| Point3 {
+                                x: v.x,
+                                y: v.y,
+                                z: v.z,
+                            };
+                            intersects_enemy |=
+                                segment_hits_box_distance(point(hit.start), point(hit.end), target)
+                                    .is_some();
+                        }
+                        if app.world().get::<Projectile>(wheel).is_none() {
+                            break;
+                        }
+                    }
+                    assert!(
             app.world().get::<Projectile>(wheel).is_none(),
             "wheel must return before lifetime expiry, even while the enemy remains alive"
         );
-        assert!(!app.world().get::<RangedFireGate>(owner).unwrap().wheel_out);
+                    assert!(!app.world().get::<RangedFireGate>(owner).unwrap().wheel_out);
+                    assert!(
+                        intersects_enemy,
+                        "wheel missed: distance={distance}, fps={fps}, speed={speed}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

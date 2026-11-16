@@ -247,7 +247,6 @@ impl AirState {
     pub fn start_ground_launch(&mut self, pose_id: u16) {
         self.airborne = true;
         self.air_time = 0.0;
-        self.vertical_speed = 0.0;
         self.planar_x = 0.0;
         self.planar_z = 0.0;
         self.motion_mode = AirMotionMode::Curve;
@@ -419,7 +418,7 @@ mod tests {
         assert_eq!(air.motion_mode, AirMotionMode::Curve);
         assert_eq!(air.launch_pose_id, 253);
         assert!(!air.launch_lifted);
-        assert_eq!(air.vertical_speed, 0.0);
+        assert_eq!(air.vertical_speed, -4.0);
         assert_eq!(air.planar_x, 0.0);
         assert!(!air.cling_armed);
     }

@@ -56,7 +56,7 @@ pub fn hit_contact_point(ax: f32, ay: f32, az: f32, dx: f32, dy: f32, dz: f32) -
 
 #[derive(Debug, Clone)]
 pub struct TargetHitClock {
-    pub elapsed: f32,
+    pub last_hit_at: f64,
 
     pub spawn_clock: f32,
 
@@ -72,26 +72,25 @@ impl Default for TargetHitClock {
 impl TargetHitClock {
     pub fn new() -> Self {
         Self {
-            elapsed: f32::INFINITY,
+            last_hit_at: f64::NEG_INFINITY,
             spawn_clock: 0.0,
             alive: true,
         }
     }
 
-    pub fn accepts_target_hit(&self) -> bool {
-        self.elapsed > TARGET_HIT_INTERVAL
+    pub fn accepts_target_hit(&self, now_seconds: f64) -> bool {
+        now_seconds - self.last_hit_at > f64::from(TARGET_HIT_INTERVAL)
     }
 
     pub fn spawn_protected(&self) -> bool {
         self.spawn_clock < SPAWN_PROTECT_SECONDS
     }
 
-    pub fn reset_target_hit_clock(&mut self) {
-        self.elapsed = 0.0;
+    pub fn reset_target_hit_clock(&mut self, now_seconds: f64) {
+        self.last_hit_at = now_seconds;
     }
 
-    pub fn advance(&mut self, dt: f32) {
-        self.elapsed += dt.max(0.0);
+    pub fn advance_spawn(&mut self, dt: f32) {
         self.spawn_clock += dt.max(0.0);
     }
 }
@@ -115,6 +114,8 @@ pub struct AttackHitContext<'a> {
     pub pose_attack_percent: &'a dyn Fn(u16) -> Option<f32>,
 
     pub bucket: FacingBucket,
+
+    pub now_seconds: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -141,10 +142,10 @@ pub fn apply_attack_hit<S: CombatStats, F: ReactionFighter>(
         return None;
     }
 
-    if !defender_clock.accepts_target_hit() {
+    if !defender_clock.accepts_target_hit(ctx.now_seconds) {
         return None;
     }
-    defender_clock.reset_target_hit_clock();
+    defender_clock.reset_target_hit_clock(ctx.now_seconds);
 
     if defender_clock.spawn_protected() {
         return None;
@@ -366,6 +367,7 @@ mod tests {
             attack,
             pose_attack_percent: &sword_percent,
             bucket: FacingBucket::Front,
+            now_seconds: 0.0,
         }
     }
 
@@ -388,21 +390,36 @@ mod tests {
     fn target_hit_clock_interval() {
         let mut clock = TargetHitClock::new();
 
-        assert!(clock.accepts_target_hit());
-        clock.reset_target_hit_clock();
+        assert!(clock.accepts_target_hit(0.0));
+        clock.reset_target_hit_clock(0.0);
 
-        assert!(!clock.accepts_target_hit());
-        clock.advance(0.1);
-        assert!(!clock.accepts_target_hit());
-        clock.advance(0.15);
-        assert!(clock.accepts_target_hit());
+        assert!(!clock.accepts_target_hit(0.2));
+        assert!(!clock.accepts_target_hit(0.199_999));
+
+        assert!(clock.accepts_target_hit(0.200_001));
+        assert!(clock.accepts_target_hit(1.0));
+    }
+
+    #[test]
+    fn absolute_qpc_clock_does_not_drift_at_point_two_seconds() {
+        let mut clock = TargetHitClock::new();
+        clock.reset_target_hit_clock(0.0);
+        assert!(!clock.accepts_target_hit(0.2));
+
+        assert!(clock.accepts_target_hit(0.208_334));
+
+        assert!(!clock.accepts_target_hit(f64::NAN));
+
+        let fresh = TargetHitClock::new();
+        assert!(fresh.accepts_target_hit(0.0));
+        assert!(fresh.accepts_target_hit(-1.0));
     }
 
     #[test]
     fn spawn_protection_blocks() {
         let mut clock = TargetHitClock::new();
         assert!(clock.spawn_protected());
-        clock.advance(2.1);
+        clock.advance_spawn(2.1);
         assert!(!clock.spawn_protected());
     }
 
@@ -436,7 +453,7 @@ mod tests {
             def: 0.0,
         };
         let mut clock = TargetHitClock::new();
-        clock.reset_target_hit_clock();
+        clock.reset_target_hit_clock(0.0);
         let mut fighter = StubFighter::new();
         let poses = fighter.poses.clone();
         let atk = attack_block();
@@ -469,7 +486,7 @@ mod tests {
             def: 0.0,
         };
         let mut clock = TargetHitClock::new();
-        clock.advance(2.1);
+        clock.advance_spawn(2.1);
         let mut fighter = StubFighter::new();
         let poses = fighter.poses.clone();
         let atk = attack_block();
@@ -480,7 +497,7 @@ mod tests {
         assert!(!hit.killed);
         assert_eq!(stats.hp, 961.0);
 
-        assert!(!clock.accepts_target_hit());
+        assert!(!clock.accepts_target_hit(0.0));
     }
 
     #[test]
@@ -492,7 +509,7 @@ mod tests {
             def: 0.0,
         };
         let mut clock = TargetHitClock::new();
-        clock.advance(2.1);
+        clock.advance_spawn(2.1);
         let mut fighter = StubFighter::new();
         let poses = fighter.poses.clone();
         let atk = attack_block();

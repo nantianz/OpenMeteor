@@ -49,7 +49,7 @@ pub fn can_qi_burst(
         return false;
     }
 
-    if airborne {
+    if state == FighterState::Name && airborne {
         return false;
     }
     if !has_pose_367 {
@@ -137,6 +137,33 @@ mod tests {
             false,
             true,
             100.0,
+            true
+        ));
+    }
+
+    #[test]
+    fn airborne_attack_and_hit_reaction_keep_their_burst_modes() {
+        for (state, guard_reaction) in [
+            (FighterState::BeHit, false),
+            (FighterState::Guard, true),
+            (FighterState::Attack1, false),
+        ] {
+            assert!(can_qi_burst(state, guard_reaction, true, true, 60.0, true));
+        }
+        assert!(!can_qi_burst(
+            FighterState::Jump,
+            false,
+            true,
+            true,
+            60.0,
+            true
+        ));
+        assert!(!can_qi_burst(
+            FighterState::Guard,
+            false,
+            true,
+            true,
+            60.0,
             true
         ));
     }

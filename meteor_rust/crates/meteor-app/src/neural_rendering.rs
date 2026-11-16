@@ -1,4 +1,4 @@
-use crate::app_state::AppState;
+use crate::app_state::{AppState, Settings};
 use crate::plugins::camera_plugin::GameplayCamera;
 use bevy::anti_alias::taa::TemporalAntiAliasing;
 use bevy::prelude::*;
@@ -18,13 +18,21 @@ struct NeuralControl {
 #[derive(Component)]
 struct NeuralLabel;
 
-pub(crate) fn install(app: &mut App, original: WgpuSettings) -> WgpuSettings {
+pub(crate) fn install(app: &mut App, original: WgpuSettings, enabled: bool) -> WgpuSettings {
     let requested = std::env::var("METEOR_DLSS5").as_deref() != Ok("0");
     let prepared = requested.then(|| prepare(&original));
     let (settings, ready, label) = match prepared {
         Some(Ok((settings, dll))) => {
             app.add_plugins(DlssNeuralRenderingPlugin::with_dll(dll));
-            (settings, true, "DLSS 5 NR：等待场景（F8 开关）".to_owned())
+            (
+                settings,
+                true,
+                if enabled {
+                    "DLSS 5 NR：等待场景（设置中开关）".to_owned()
+                } else {
+                    "DLSS 5 NR：已关闭（设置 → DLSS 5 神经渲染）".to_owned()
+                },
+            )
         }
         Some(Err(reason)) => (original, false, format!("DLSS 5 NR：不可用 — {reason}")),
         None => (
@@ -34,7 +42,7 @@ pub(crate) fn install(app: &mut App, original: WgpuSettings) -> WgpuSettings {
         ),
     };
     app.insert_resource(NeuralControl {
-        enabled: ready,
+        enabled: ready && enabled,
         ready,
         label,
     })
@@ -130,10 +138,9 @@ fn scene_active(state: AppState) -> bool {
 fn sync_cameras(
     mut commands: Commands,
     mut control: ResMut<NeuralControl>,
+    settings: Res<Settings>,
     status: Option<Res<DlssNeuralRenderingStatus>>,
     state: Res<State<AppState>>,
-    keys: Res<ButtonInput<KeyCode>>,
-    console: Option<Res<crate::plugins::debug_plugin::DebugConsoleState>>,
     mut cameras: Query<
         (
             Entity,
@@ -156,9 +163,9 @@ fn sync_cameras(
         control.ready = false;
         control.label = "DLSS 5 NR：运行库执行失败，已回退（详情见日志）".into();
         warn!("{}", control.label);
-    } else if keys.just_pressed(KeyCode::F8) && !console.is_some_and(|c| c.captures_input()) {
-        control.enabled = !control.enabled;
+        return;
     }
+    control.enabled = settings.dlss5_neural_rendering;
     let active = control.enabled && scene_active(*state.get());
     for (entity, transform, neural, taa) in &mut cameras {
         let cut = previous.as_ref().is_none_or(|(old_state, old)| {
@@ -191,18 +198,16 @@ fn sync_cameras(
         }
         *previous = Some((*state.get(), *transform));
     }
-    if control.ready {
-        control.label = if !control.enabled {
-            "DLSS 5 NR：已关闭（F8 开启）"
-        } else if !active {
-            "DLSS 5 NR：等待场景（F8 开关）"
-        } else if status.is_some_and(|status| status.is_active()) {
-            "DLSS 5 NR：已启用 · Vulkan（F8 关闭）"
-        } else {
-            "DLSS 5 NR：初始化中（F8 关闭）"
-        }
-        .into();
+    control.label = if !control.enabled {
+        "DLSS 5 NR：已关闭（设置 → DLSS 5 神经渲染）"
+    } else if !active {
+        "DLSS 5 NR：等待场景（设置中开关）"
+    } else if status.is_some_and(|status| status.is_active()) {
+        "DLSS 5 NR：已启用 · Vulkan（设置中可关）"
+    } else {
+        "DLSS 5 NR：初始化中（设置中可关）"
     }
+    .into();
 }
 
 fn update_label(control: Res<NeuralControl>, mut labels: Query<&mut Text, With<NeuralLabel>>) {
@@ -222,7 +227,10 @@ mod tests {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
             .insert_state(AppState::Playing)
-            .init_resource::<ButtonInput<KeyCode>>()
+            .insert_resource(Settings {
+                dlss5_neural_rendering: true,
+                ..default()
+            })
             .insert_resource(NeuralControl {
                 enabled: true,
                 ready: true,
@@ -238,10 +246,14 @@ mod tests {
         assert!(app.world().get::<DlssNeuralRendering>(game).is_some());
         assert_eq!(*app.world().get::<Msaa>(game).unwrap(), Msaa::Off);
         assert!(app.world().get::<DlssNeuralRendering>(ui).is_none());
-        app.world_mut().resource_mut::<NeuralControl>().enabled = false;
+        app.world_mut()
+            .resource_mut::<Settings>()
+            .dlss5_neural_rendering = false;
         app.update();
         assert!(app.world().get::<DlssNeuralRendering>(game).is_none());
-        app.world_mut().resource_mut::<NeuralControl>().enabled = true;
+        app.world_mut()
+            .resource_mut::<Settings>()
+            .dlss5_neural_rendering = true;
         app.update();
         assert!(app.world().get::<DlssNeuralRendering>(game).unwrap().reset);
         app.world_mut()

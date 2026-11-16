@@ -155,7 +155,13 @@ pub(crate) fn load_match_assets(
     mut loader: ResMut<AndroidAssetLoader>,
 ) {
     let key = match_key(&request);
-    if loader.active_key.as_deref() == Some(key.as_str()) && loader.error.is_none() {
+    if loader.active_key.as_deref() == Some(key.as_str())
+        && loader.error.is_none()
+        && crate::pack_manifest::match_packs_resident(
+            &request.stage_id,
+            meteor_asset::runtime_assets::contains_pack,
+        )
+    {
         return;
     }
     let result = load_root_packs(&match_pack_roots(&request.stage_id), &mut loader);

@@ -8,7 +8,27 @@ pub const MODE_RULES: &[(&str, i32)] = &[
 
 pub const TEAM_MODE_IDS: &[&str] = &["escort", "siege", "assassin", "deathmatch"];
 
-pub const ESCORT_STAGE_IDS: &[&str] = &["sn03"];
+pub const ESCORT_STAGE_IDS: &[&str] = &["sn02", "sn03"];
+
+const ORIGINAL_STAGE_RULE_MASKS: [u32; 22] = [
+    57, 27, 59, 61, 57, 25, 25, 25, 56, 57, 4, 29, 57, 57, 57, 25, 25, 25, 25, 25, 25, 17,
+];
+
+pub fn original_stage_supports_rule(stage_id: &str, rule: i32) -> bool {
+    if !(1..=6).contains(&rule) {
+        return false;
+    }
+    stage_id
+        .strip_prefix("sn")
+        .and_then(|number| number.parse::<usize>().ok())
+        .and_then(|number| number.checked_sub(1))
+        .and_then(|index| ORIGINAL_STAGE_RULE_MASKS.get(index))
+        .is_some_and(|mask| mask & (1 << (rule - 1)) != 0)
+}
+
+pub fn original_stage_supports_mode(stage_id: &str, mode: &str) -> bool {
+    mode_rule_id(mode).is_some_and(|rule| original_stage_supports_rule(stage_id, rule))
+}
 
 pub const SIEGE_STAGE_IDS: &[&str] = &["sn04", "sn11", "sn12"];
 
@@ -27,7 +47,7 @@ pub fn mode_label(mode: &str) -> &'static str {
 pub fn mode_objective(mode: &str) -> &'static str {
     match mode {
         "leader" => "不分阵营；限时内取得尽可能多的个人击杀，死亡 3 秒后复活",
-        "escort" => "夺取镖物，并送达本阵营的原版安全区",
+        "escort" => "夺取镖物，送达公共安全区或本阵营安全区",
         "siege" => "摧毁对方机关目标并保护己方目标；时间到为平局",
         "assassin" => "保护己方随机选出的 VIP 玩家；击败对方 VIP 即获胜",
         "deathmatch" => "回合内消灭对方全部成员；时间到为平局",
@@ -134,12 +154,42 @@ mod tests {
         assert!(!is_team_mode("leader"));
         assert!(is_team_mode("escort"));
         assert!(is_team_mode("deathmatch"));
+        assert!(is_escort_stage("sn02"));
         assert!(is_escort_stage("sn03"));
+        assert!(is_escort_stage("sn02"));
         assert!(!is_escort_stage("sn01"));
         assert!(is_siege_stage("sn04"));
         assert!(is_siege_stage("sn11"));
         assert!(is_siege_stage("sn12"));
         assert!(!is_siege_stage("sn01"));
+    }
+
+    #[cfg(feature = "original-assets")]
+    #[test]
+    fn stage_rule_masks_match_original_resource_records() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        let registry =
+            meteor_asset::res::parse_meteor_res(&std::fs::read(root.join("Meteor.res")).unwrap())
+                .unwrap();
+        for record in registry
+            .records
+            .iter()
+            .filter(|record| record.category == 5)
+        {
+            let stage = format!("sn{:02}", record.id);
+            let mask = record.prop_seed_value(11).unwrap() as u32;
+            for rule in 1..=6 {
+                assert_eq!(
+                    original_stage_supports_rule(&stage, rule),
+                    mask & (1 << (rule - 1)) != 0,
+                    "{stage}, rule {rule}"
+                );
+            }
+        }
+        assert!(!original_stage_supports_mode("sn09", "leader"));
+        assert!(!original_stage_supports_mode("sn11", "deathmatch"));
+        assert!(!original_stage_supports_mode("sn22", "assassin"));
+        assert!(original_stage_supports_mode("sn02", "escort"));
     }
 
     #[test]

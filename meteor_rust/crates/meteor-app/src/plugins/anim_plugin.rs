@@ -12,7 +12,8 @@ impl Plugin for AnimPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<AnimationClock>().add_systems(
             Update,
-            advance_animation_clock.run_if(not(in_state(crate::app_state::AppState::Paused))),
+            advance_animation_clock
+                .run_if(super::ui_plugin::gameplay_hud_visibility::scene_session_active),
         );
     }
 }

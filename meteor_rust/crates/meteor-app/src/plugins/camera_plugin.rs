@@ -8,9 +8,16 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use meteor_core::MODEL_SCALE;
 use meteor_physics::collision::MeshCollider;
 
-mod spectator;
+mod first_person;
+pub(super) mod spectator;
+
+#[cfg(test)]
+mod follow_tests;
 
 pub struct CameraPlugin;
+
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct CameraInputSet;
 
 #[derive(Resource, Default)]
 pub struct CameraMode {
@@ -27,6 +34,9 @@ impl CameraMode {
 #[derive(Resource, Default)]
 pub struct CameraRecentreRequest(pub bool);
 
+#[derive(Component)]
+pub(crate) struct CameraFollowReset;
+
 #[derive(Resource, Default)]
 pub struct CameraBasis {
     pub yaw: f32,
@@ -36,19 +46,15 @@ const DEFAULT_DISTANCE: f32 = 10.0;
 
 const ACTION_VIEW_DISTANCE: f32 = 10.0;
 
-const LOOK_HEIGHT: f32 = 3.4;
+pub(super) const LOOK_HEIGHT: f32 = 35.0 * MODEL_SCALE;
 
 const DEFAULT_PITCH: f32 = 0.2;
 
-const PITCH_MIN: f32 = -0.5;
-const PITCH_MAX: f32 = 1.2;
+const PITCH_HORIZONTAL_MIN_SQUARED: f32 = 0.1;
 
 const DEG: f32 = std::f32::consts::PI / 180.0;
 
 const YAW_SMOOTH: f32 = 10.0;
-
-const FOLLOW_GROUND: f32 = 12.0;
-const FOLLOW_AIR: f32 = 9.0;
 
 const COLLISION_SKIN: f32 = 0.3;
 
@@ -74,31 +80,48 @@ const LOCK_POSITION_DT_LIMIT: f32 = 0.3;
 
 const LOCK_POSITION_STALL_ALPHA: f32 = 2.0 / 3.0;
 
-const ORIGINAL_H_FOV_DEG: f32 = 60.0;
 const ORIGINAL_ASPECT: f32 = 4.0 / 3.0;
 
 const CAMERA_NEAR: f32 = 2.0 * MODEL_SCALE;
 
 const CAMERA_FAR: f32 = 1200.0;
 
-const AIR_CHASE_UP: f32 = 6.0;
-const AIR_CHASE_DOWN: f32 = 9.0;
-const LAND_RECOVER: f32 = 12.0;
+#[derive(Resource, Default)]
+pub(crate) struct LocalTurnState(pub meteor_physics::locomotion::TurnInPlace);
 
 impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<CameraMode>()
+        first_person::install(app);
+        app.init_resource::<LocalTurnState>()
+            .init_resource::<CameraMode>()
             .init_resource::<spectator::SpectatorState>()
             .init_resource::<CameraRecentreRequest>()
             .init_resource::<CameraBasis>()
+            .init_resource::<CameraInputGate>()
             .add_systems(Startup, setup_camera)
             .add_systems(
                 OnEnter(AppState::Playing),
                 reset_follow_camera.run_if(crate::plugins::starts_fresh_playing_session),
             )
             .add_systems(Update, update_camera_visibility)
+            .add_systems(Update, update_camera_fov.before(follow_fighter_camera))
             .add_systems(Update, toggle_camera_mode)
             .add_systems(Update, sync_pointer_lock)
+            .add_systems(
+                Update,
+                update_camera_input_gate
+                    .after(sync_pointer_lock)
+                    .after(toggle_camera_mode)
+                    .before(crate::plugins::FighterFrameSet::Movement)
+                    .before(fly_camera_control),
+            )
+            .add_systems(
+                Update,
+                begin_manual_turn_frame
+                    .in_set(crate::plugins::FighterFrameSet::Movement)
+                    .before(apply_follow_camera_input)
+                    .run_if(in_state(AppState::Playing)),
+            )
             .add_systems(
                 Update,
                 spectator::update_hint.after(spectator::update_spectator),
@@ -113,7 +136,9 @@ impl Plugin for CameraPlugin {
                     prepare_move_basis,
                 )
                     .chain()
+                    .in_set(CameraInputSet)
                     .in_set(crate::plugins::FighterFrameSet::Movement)
+                    .after(super::network_plugin::NetworkFrameApply)
                     .after(update_camera_visibility)
                     .run_if(in_state(AppState::Playing))
                     .run_if(|mode: Res<CameraMode>| !mode.fly),
@@ -126,7 +151,8 @@ impl Plugin for CameraPlugin {
             )
             .add_systems(
                 Update,
-                follow_fighter_camera
+                (first_person::sample_head, follow_fighter_camera)
+                    .chain()
                     .in_set(crate::plugins::FighterFrameSet::CameraFinalize)
                     .run_if(in_state(AppState::Playing))
                     .run_if(|mode: Res<CameraMode>| !mode.fly),
@@ -148,7 +174,7 @@ fn sync_pointer_lock(
 
     let playing = matches!(state.get(), AppState::Playing);
     let debug_capture = dbg.is_some_and(|dbg| dbg.captures_input());
-    let focused = !cfg!(target_os = "windows") || window.focused;
+    let focused = window.focused;
     let lock = playing && !debug_capture && focused && !cfg!(target_os = "android");
     let want_mode = if lock {
         if cfg!(target_os = "windows") {
@@ -165,6 +191,35 @@ fn sync_pointer_lock(
     let visible = (!playing || debug_capture || !focused) && !cfg!(target_os = "android");
     if cursor.visible != visible {
         cursor.visible = visible;
+    }
+}
+
+#[derive(Resource, Default)]
+struct CameraInputGate {
+    discard: bool,
+}
+
+fn update_camera_input_gate(
+    state: Res<State<AppState>>,
+    mode: Res<CameraMode>,
+    debug: Option<Res<crate::plugins::debug_plugin::DebugConsoleState>>,
+    windows: Query<(&Window, &CursorOptions), With<PrimaryWindow>>,
+    mut gate: ResMut<CameraInputGate>,
+    mut previous: Local<Option<(bool, bool, CursorGrabMode)>>,
+    mut mobile: Option<ResMut<crate::plugins::mobile_controls_plugin::MobileLookDelta>>,
+) {
+    let window = windows.single().ok();
+    let enabled = *state.get() == AppState::Playing
+        && !debug.is_some_and(|debug| debug.captures_input())
+        && window.is_none_or(|(window, _)| window.focused);
+    let capture = window.map_or(CursorGrabMode::None, |(_, cursor)| cursor.grab_mode);
+    let current = (enabled, mode.fly, capture);
+    gate.discard = !enabled || *previous != Some(current);
+    *previous = Some(current);
+    if gate.discard {
+        if let Some(mobile) = mobile.as_deref_mut() {
+            mobile.0 = Vec2::ZERO;
+        }
     }
 }
 
@@ -209,8 +264,6 @@ pub(crate) struct ThirdPersonState {
     free_look_from_yaw: f32,
     free_look_from_pitch: f32,
 
-    prev_target_y: Option<f32>,
-
     follow_ready: bool,
     last_fighter_pos: Vec3,
 
@@ -223,9 +276,14 @@ pub(crate) struct ThirdPersonState {
 
     pub(crate) scene_fade_required: bool,
     followed_entity: Option<Entity>,
+    first_person_active: bool,
 }
 
 impl ThirdPersonState {
+    pub(crate) fn is_first_person(&self) -> bool {
+        self.first_person_active
+    }
+
     #[cfg(test)]
     pub(crate) fn follow_focus_for_test(&self) -> Vec3 {
         self.target
@@ -250,7 +308,6 @@ impl Default for ThirdPersonState {
             free_look_from_ideal: Vec3::ZERO,
             free_look_from_yaw: 0.0,
             free_look_from_pitch: DEFAULT_PITCH,
-            prev_target_y: None,
             follow_ready: false,
             last_fighter_pos: Vec3::ZERO,
             lock_was_active: false,
@@ -259,30 +316,16 @@ impl Default for ThirdPersonState {
             fly_speed: 60.0,
             scene_fade_required: false,
             followed_entity: None,
+            first_person_active: false,
         }
     }
 }
 
-struct VerticalAnchor;
-
-impl VerticalAnchor {
-    fn update(current_y: f32, look_y: f32, dt: f32, in_air: bool) -> f32 {
-        let rate = if in_air {
-            if look_y > current_y {
-                AIR_CHASE_UP
-            } else {
-                AIR_CHASE_DOWN
-            }
-        } else {
-            LAND_RECOVER
-        };
-        let next = damp(current_y, look_y, rate, dt);
-        if !in_air && (next - look_y).abs() < 0.01 {
-            look_y
-        } else {
-            next
-        }
-    }
+fn stock_free_focus_y(current: f32, desired: f32, dt: f32) -> f32 {
+    let delta = desired - current;
+    let rate = if dt <= 0.1 { dt.max(0.0) * 20.0 } else { 2.0 };
+    let factor = if delta > MODEL_SCALE { 0.5 } else { 0.4 };
+    current + delta * rate * factor
 }
 
 fn damp(current: f32, target: f32, rate: f32, dt: f32) -> f32 {
@@ -297,47 +340,40 @@ fn lock_release_yaw(fighter_facing: f32, visible_yaw: f32) -> f32 {
     nearest_equivalent_angle(fighter_facing, visible_yaw)
 }
 
-fn inject_ground_anchor_y(position_y: f32, target_y: f32, previous_y: f32, in_air: bool) -> f32 {
-    if in_air {
-        position_y
-    } else {
-        position_y + target_y - previous_y
-    }
-}
-
-fn camera_position_alpha(
-    lock_ready: bool,
-    lock_snap: bool,
-    airborne: bool,
-    wall_clinging: bool,
-    wall_dt: f32,
-) -> f32 {
+fn camera_position_alpha(lock_ready: bool, wall_dt: f32) -> f32 {
     if lock_ready {
         if wall_dt > LOCK_POSITION_DT_LIMIT {
             LOCK_POSITION_STALL_ALPHA
         } else {
             wall_dt * LOCK_POSITION_RESPONSE
         }
-    } else if lock_snap {
-        1.0
     } else {
-        1.0 - (-(if airborne || wall_clinging {
-            FOLLOW_AIR
-        } else {
-            FOLLOW_GROUND
-        }) * wall_dt)
-            .exp()
+        1.0
     }
 }
 
-fn vertical_fov_for_aspect(aspect: f32) -> f32 {
-    let half_h = (ORIGINAL_H_FOV_DEG * std::f32::consts::PI / 360.0).tan() / ORIGINAL_ASPECT;
-    let tan_half_v = if aspect >= ORIGINAL_ASPECT {
-        half_h
-    } else {
-        (30.0f32 * std::f32::consts::PI / 180.0).tan() / aspect.max(1e-3)
-    };
+fn vertical_fov_for_aspect(aspect: f32, horizontal_degrees: f32) -> f32 {
+    let tan_half_v =
+        (horizontal_degrees.to_radians() * 0.5).tan() / aspect.max(1e-3).min(ORIGINAL_ASPECT);
     2.0 * tan_half_v.atan()
+}
+
+fn update_camera_fov(
+    settings: Res<Settings>,
+    window: Query<&Window, With<PrimaryWindow>>,
+    mut cameras: Query<&mut Projection, With<GameplayCamera>>,
+) {
+    for mut projection in &mut cameras {
+        if let Projection::Perspective(lens) = projection.as_mut() {
+            let aspect = window.single().map_or(lens.aspect_ratio, |window| {
+                window.width() / window.height().max(1.0)
+            });
+            let fov = vertical_fov_for_aspect(aspect, settings.camera_fov_degrees());
+            if (lens.fov - fov).abs() > 1e-4 {
+                lens.fov = fov;
+            }
+        }
+    }
 }
 
 fn resolve_collision(
@@ -362,22 +398,46 @@ fn resolve_collision(
     from + direction * safe
 }
 
+fn keep_camera_above_ground(
+    anchor: Vec3,
+    mut eye: Vec3,
+    raycast: impl Fn(Vec3, Vec3, f32) -> Option<f32>,
+) -> Vec3 {
+    let top = anchor.y.max(eye.y) + COLLISION_SKIN;
+    let depth = top - eye.y + COLLISION_SKIN;
+    for offset in [
+        Vec3::ZERO,
+        Vec3::X + Vec3::Z,
+        Vec3::X - Vec3::Z,
+        -Vec3::X + Vec3::Z,
+        -Vec3::X - Vec3::Z,
+    ] {
+        let origin = Vec3::new(eye.x, top, eye.z) + offset * COLLISION_SKIN;
+        if let Some(hit) = raycast(origin, -Vec3::Y, depth) {
+            eye.y = eye.y.max(top - hit + COLLISION_SKIN);
+        }
+    }
+    eye
+}
+
 fn resolve_free_collision(
     anchor: Vec3,
     ideal: Vec3,
     requested_distance: f32,
     raycast: impl Fn(Vec3, Vec3, f32) -> Option<f32>,
 ) -> (Vec3, bool) {
-    let safe = resolve_collision(anchor, ideal, raycast);
+    let ideal = keep_camera_above_ground(anchor, ideal, &raycast);
+    let safe = resolve_collision(anchor, ideal, &raycast);
     let delta = ideal - anchor;
     let minimum = ACTION_VIEW_DISTANCE
         .min(requested_distance)
         .min(delta.length());
-    if safe.distance(anchor) + 0.001 < minimum {
+    let (eye, fade) = if safe.distance(anchor) + 0.001 < minimum {
         (anchor + delta.normalize_or_zero() * minimum, true)
     } else {
         (safe, false)
-    }
+    };
+    (keep_camera_above_ground(anchor, eye, raycast), fade)
 }
 
 fn frame_locked_pair(
@@ -466,9 +526,10 @@ fn locked_eye(
 fn toggle_camera_mode(
     keys: Res<ButtonInput<KeyCode>>,
     dbg: Option<Res<crate::plugins::debug_plugin::DebugConsoleState>>,
+    replay: Option<Res<crate::plugins::replay_plugin::MrcPlayback>>,
     mut mode: ResMut<CameraMode>,
 ) {
-    if dbg.is_some_and(|dbg| dbg.captures_input()) {
+    if dbg.is_some_and(|dbg| dbg.captures_input()) || replay.is_some_and(|replay| replay.active) {
         return;
     }
     if keys.just_pressed(KeyCode::F5) {
@@ -490,7 +551,7 @@ pub(super) fn setup_camera(mut commands: Commands) {
             ..default()
         },
         Projection::Perspective(PerspectiveProjection {
-            fov: vertical_fov_for_aspect(ORIGINAL_ASPECT),
+            fov: vertical_fov_for_aspect(ORIGINAL_ASPECT, Settings::CAMERA_FOV_DEFAULT),
             near: CAMERA_NEAR,
             far: CAMERA_FAR,
             ..default()
@@ -546,12 +607,33 @@ fn camera_axis_step_degrees(axis: f32, hold: f32, mouse_speed: f32, dt: f32) -> 
     axis * seconds * (1.0 + seconds) * rate * dt
 }
 
-fn apply_camera_look(cam: &mut ThirdPersonState, lock_active: bool, dx_deg: f32, dy_deg: f32) {
-    let free_look = !lock_active && !cam.lock_was_active;
+fn apply_camera_look(
+    cam: &mut ThirdPersonState,
+    lock_active: bool,
+    dx_deg: f32,
+    dy_deg: f32,
+    view: Option<&Transform>,
+) {
+    if lock_active {
+        return;
+    }
+    let free_look = !cam.lock_was_active;
     let from_yaw = if free_look { cam.smooth_yaw } else { cam.yaw };
     let from_pitch = cam.pitch;
     let next_yaw = from_yaw - dx_deg * DEG;
-    let next_pitch = (from_pitch + dy_deg * DEG).clamp(PITCH_MIN, PITCH_MAX);
+    let (forward, up) = view
+        .map(|view| (Vec3::from(view.forward()), Vec3::from(view.up())))
+        .unwrap_or_else(|| {
+            let direction = first_person::view_direction(from_yaw, from_pitch);
+            let (sy, cy) = from_yaw.sin_cos();
+            let (sp, cp) = from_pitch.sin_cos();
+            (direction, Vec3::new(sy * sp, cp, cy * sp))
+        });
+    let next_pitch = if stock_pitch_input_allowed(forward, up, dy_deg) {
+        from_pitch + dy_deg * DEG
+    } else {
+        from_pitch
+    };
     if next_yaw == from_yaw && next_pitch == from_pitch {
         return;
     }
@@ -567,6 +649,12 @@ fn apply_camera_look(cam: &mut ThirdPersonState, lock_active: bool, dx_deg: f32,
     cam.pitch = next_pitch;
 }
 
+fn stock_pitch_input_allowed(forward: Vec3, up: Vec3, delta_deg: f32) -> bool {
+    (forward.x * forward.x + forward.z * forward.z >= PITCH_HORIZONTAL_MIN_SQUARED && up.y >= 0.0)
+        || (forward.y > 0.0 && delta_deg >= 0.0)
+        || (forward.y <= 0.0 && delta_deg <= 0.0)
+}
+
 pub(crate) const TOUCH_LOOK_FULL_SWEEP_DEG: f32 = 240.0;
 
 pub(crate) fn touch_look_degrees(delta: Vec2, width: f32, height: f32, mouse_speed: f32) -> Vec2 {
@@ -575,6 +663,20 @@ pub(crate) fn touch_look_degrees(delta: Vec2, width: f32, height: f32, mouse_spe
         delta.x / width.max(1.0) * TOUCH_LOOK_FULL_SWEEP_DEG * speed,
         delta.y / height.max(1.0) * TOUCH_LOOK_FULL_SWEEP_DEG * speed,
     )
+}
+
+fn begin_manual_turn_frame(
+    time: Res<Time>,
+    clock: Option<Res<crate::plugins::FrameClock>>,
+    mut turn: Option<ResMut<LocalTurnState>>,
+) {
+    if let Some(turn) = turn.as_deref_mut() {
+        turn.0.begin_frame(
+            clock
+                .as_deref()
+                .map_or(time.delta_secs(), |clock| clock.wall_dt),
+        );
+    }
 }
 
 fn apply_keyboard_yaw_to_fighter(
@@ -593,11 +695,13 @@ fn apply_keyboard_yaw_to_fighter(
 #[allow(clippy::too_many_arguments)]
 fn apply_follow_camera_input(
     dbg: Option<Res<crate::plugins::debug_plugin::DebugConsoleState>>,
-    (replay, spectator): (
+    (replay, spectator, input_gate, mode): (
         Option<Res<crate::plugins::replay_plugin::MrcPlayback>>,
         Option<Res<spectator::SpectatorState>>,
+        Option<Res<CameraInputGate>>,
+        Option<Res<CameraMode>>,
     ),
-    time: Res<Time>,
+    (time, mut turn): (Res<Time>, Option<ResMut<LocalTurnState>>),
     frame_clock: Option<Res<crate::plugins::FrameClock>>,
     window: Query<&CursorOptions, With<PrimaryWindow>>,
     windows: Query<&Window, With<PrimaryWindow>>,
@@ -609,7 +713,7 @@ fn apply_follow_camera_input(
     mut scroll: MessageReader<MouseWheel>,
     mut mobile_look: Option<ResMut<crate::plugins::mobile_controls_plugin::MobileLookDelta>>,
     lock: Res<crate::components::fighter::LockOnController>,
-    mut camera: Query<&mut ThirdPersonState, With<GameplayCamera>>,
+    mut camera: Query<(&mut ThirdPersonState, Option<&Transform>), With<GameplayCamera>>,
     mut fighter: Query<
         (
             &mut crate::components::fighter::MotionState,
@@ -620,21 +724,36 @@ fn apply_follow_camera_input(
         With<LocalFighter>,
     >,
 ) {
-    if dbg.is_some_and(|dbg| dbg.captures_input()) {
-        mouse_motion.clear();
-        scroll.clear();
-        if let Some(delta) = mobile_look.as_deref_mut() {
-            delta.0.x = 0.0;
-            delta.0.y = 0.0;
-        }
-        return;
-    }
-    let (Ok(mut cam), Ok((mut fighter_motion, fighter_state, switching, air))) =
+    let (Ok((mut cam, view)), Ok((mut fighter_motion, fighter_state, switching, air))) =
         (camera.single_mut(), fighter.single_mut())
     else {
         return;
     };
     let sim_dt = crate::plugins::simulation_dt(frame_clock.as_deref(), time.delta_secs());
+    let spectating = spectator.as_deref().is_some_and(|state| state.active);
+    let lock_active = !spectating && lock.lock_entity.is_some();
+    if !spectating && !lock_active && !mode.as_ref().is_some_and(|mode| mode.freecam_hold) {
+        cam.yaw = fighter_motion.facing;
+        if !lock_active {
+            cam.smooth_yaw = fighter_motion.facing;
+        }
+        cam.free_look_pending = false;
+    }
+
+    if input_gate.is_some_and(|gate| gate.discard)
+        || dbg.is_some_and(|dbg| dbg.captures_input())
+        || replay.as_ref().is_some_and(|replay| replay.active)
+    {
+        mouse_motion.clear();
+        scroll.clear();
+        if let Some(delta) = mobile_look.as_deref_mut() {
+            delta.0 = Vec2::ZERO;
+        }
+        cam.pitch_axis_hold = 0.0;
+        cam.yaw_axis_hold = 0.0;
+        cam.free_look_pending = false;
+        return;
+    }
     let wall_dt = frame_clock
         .as_deref()
         .map(|clock| clock.wall_dt)
@@ -659,11 +778,11 @@ fn apply_follow_camera_input(
     );
     let pitch_axis = f32::from(pitch_up) - f32::from(pitch_down);
 
-    let spectating = spectator.as_deref().is_some_and(|state| state.active);
     let wall_running =
         air.is_some_and(|air| air.air.motion_mode == meteor_physics::jump::AirMotionMode::Wall);
     let horizontal_look = spectating
-        || (switching.is_none()
+        || (!lock_active
+            && switching.is_none()
             && !wall_running
             && !matches!(
                 fighter_state.current,
@@ -679,6 +798,12 @@ fn apply_follow_camera_input(
                     | meteor_core::FighterState::Dead
                     | meteor_core::FighterState::Cure
             ));
+    if !horizontal_look {
+        cam.yaw_axis_hold = 0.0;
+    }
+    if lock_active {
+        cam.pitch_axis_hold = 0.0;
+    }
     let yaw_axis = if horizontal_look {
         f32::from(yaw_right) - f32::from(yaw_left)
     } else {
@@ -692,19 +817,23 @@ fn apply_follow_camera_input(
     );
     let yaw_step =
         camera_axis_step_degrees(yaw_axis, cam.yaw_axis_hold, settings.mouse_speed, sim_dt);
-    let lock_active = !spectating && lock.lock_entity.is_some();
     if pitch_step != 0.0 {
-        apply_camera_look(&mut cam, lock_active, 0.0, pitch_step);
+        apply_camera_look(&mut cam, lock_active, 0.0, pitch_step, view);
     }
     if yaw_step != 0.0 {
-        apply_camera_look(&mut cam, lock_active, yaw_step, 0.0);
+        apply_camera_look(&mut cam, lock_active, yaw_step, 0.0, view);
         if !spectating {
-            let _ = apply_keyboard_yaw_to_fighter(
+            let applied = apply_keyboard_yaw_to_fighter(
                 &mut fighter_motion,
                 fighter_state.current,
                 switching.is_some(),
                 yaw_step,
             );
+            if applied && !replay.as_deref().is_some_and(|replay| replay.active) {
+                if let Some(turn) = turn.as_deref_mut() {
+                    turn.0.degrees += yaw_step;
+                }
+            }
         }
     }
 
@@ -732,6 +861,7 @@ fn apply_follow_camera_input(
                 lock_active,
                 dx_deg,
                 event.delta.y * deg_per_count * reverse_y,
+                view,
             );
         }
         if mobile_delta != Vec2::ZERO {
@@ -745,7 +875,13 @@ fn apply_follow_camera_input(
                 touch_deg.x = 0.0;
             }
             pointer_yaw_deg += touch_deg.x;
-            apply_camera_look(&mut cam, lock_active, touch_deg.x, touch_deg.y * reverse_y);
+            apply_camera_look(
+                &mut cam,
+                lock_active,
+                touch_deg.x,
+                touch_deg.y * reverse_y,
+                view,
+            );
         }
     } else {
         mouse_motion.clear();
@@ -766,6 +902,13 @@ fn apply_follow_camera_input(
     let facing_before = fighter_motion.facing;
     if can_turn_from_pointer {
         fighter_motion.facing -= pointer_yaw_deg * DEG;
+        if fighter_state.current == meteor_core::FighterState::Name
+            && air.is_none_or(|air| !air.air.airborne || air.recovery_ground_mode == Some(true))
+        {
+            if let Some(turn) = turn.as_deref_mut() {
+                turn.0.degrees += pointer_yaw_deg;
+            }
+        }
     }
     if pointer_yaw_deg != 0.0 && air.is_some_and(|air| air.air.airborne) {
         debug!(
@@ -793,14 +936,25 @@ fn apply_follow_camera_input(
 pub(crate) fn prepare_move_basis(
     mut basis: ResMut<CameraBasis>,
     query: Query<&ThirdPersonState, With<GameplayCamera>>,
+    lock: Option<Res<crate::components::fighter::LockOnController>>,
+    spectator: Option<Res<spectator::SpectatorState>>,
+    fighter: Query<&crate::components::fighter::MotionState, With<LocalFighter>>,
 ) {
     if let Ok(state) = query.single() {
-        basis.yaw = state.yaw;
+        basis.yaw = if lock.as_ref().is_some_and(|lock| lock.lock_entity.is_some())
+            && !spectator.as_ref().is_some_and(|spectator| spectator.active)
+        {
+            fighter.single().map_or(state.yaw, |motion| motion.facing)
+        } else {
+            state.yaw
+        };
     }
 }
 
 fn fly_camera_control(
     dbg: Option<Res<crate::plugins::debug_plugin::DebugConsoleState>>,
+    input_gate: Res<CameraInputGate>,
+    replay: Option<Res<crate::plugins::replay_plugin::MrcPlayback>>,
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
@@ -811,7 +965,10 @@ fn fly_camera_control(
     let Ok((mut transform, mut cam)) = query.single_mut() else {
         return;
     };
-    if dbg.is_some_and(|dbg| dbg.captures_input()) {
+    if input_gate.discard
+        || dbg.is_some_and(|dbg| dbg.captures_input())
+        || replay.is_some_and(|replay| replay.active)
+    {
         motion.clear();
         scroll.clear();
         return;
@@ -877,24 +1034,25 @@ type LocalFighterCamQuery<'w, 's> = Query<
         Entity,
         Option<&'static LocalFighter>,
         &'static Transform,
-        Option<&'static crate::plugins::movement_plugin::FighterAir>,
         &'static crate::components::fighter::MotionState,
+        Option<&'static CameraFollowReset>,
     ),
     Without<GameplayCamera>,
 >;
 
 #[allow(clippy::too_many_arguments)]
 fn follow_fighter_camera(
+    mut commands: Commands,
     spectator: Option<Res<spectator::SpectatorState>>,
     mode: Res<CameraMode>,
     mut recentre: ResMut<CameraRecentreRequest>,
     console: Option<Res<crate::plugins::debug_plugin::DebugConsoleState>>,
     time: Res<Time>,
     frame_clock: Option<Res<crate::plugins::FrameClock>>,
-    window: Query<&Window, With<PrimaryWindow>>,
     mrc_frame: Option<Res<crate::plugins::replay_plugin::MrcFrameOverride>>,
     lock: Res<crate::components::fighter::LockOnController>,
     collider: Res<StageCollider>,
+    first_person: Option<Res<first_person::HeadAnchor>>,
     fighters: LocalFighterCamQuery<'_, '_>,
     mut query: Query<
         (&mut Transform, &mut Projection, &mut ThirdPersonState),
@@ -916,20 +1074,13 @@ fn follow_fighter_camera(
     } else {
         fighters.iter().find(|(_, local, ..)| local.is_some())
     };
-    let Some((entity, _, fighter, fighter_air, motion_state)) = followed else {
+    let Some((entity, _, fighter, motion_state, reset)) = followed else {
+        cam.first_person_active = false;
+        if let Projection::Perspective(lens) = projection.as_mut() {
+            lens.near = CAMERA_NEAR;
+        }
         return;
     };
-    if cam.followed_entity != Some(entity) {
-        if spectating || cam.followed_entity.is_some() {
-            cam.follow_ready = false;
-            cam.prev_target_y = None;
-            cam.lock_was_active = false;
-            cam.free_look_pending = false;
-            cam.target = fighter.translation + Vec3::Y * LOOK_HEIGHT;
-            cam.position = free_ideal(&cam, cam.smooth_yaw, cam.pitch);
-        }
-        cam.followed_entity = Some(entity);
-    }
 
     if mode.freecam_hold {
         return;
@@ -944,6 +1095,23 @@ fn follow_fighter_camera(
     if console.is_some_and(|console| console.captures_input()) {
         return;
     }
+    let reset_follow = reset.is_some() || cam.followed_entity != Some(entity);
+    if reset_follow {
+        cam.followed_entity = Some(entity);
+        cam.follow_ready = true;
+        cam.lock_was_active = false;
+        cam.free_look_pending = false;
+        cam.target = fighter.translation + Vec3::Y * LOOK_HEIGHT;
+        cam.last_fighter_pos = fighter.translation;
+        if !spectating && lock.lock_entity.is_none() {
+            cam.yaw = motion_state.facing;
+            cam.smooth_yaw = cam.yaw;
+        }
+        cam.position = free_ideal(&cam, cam.smooth_yaw, cam.pitch);
+        if reset.is_some() {
+            commands.entity(entity).remove::<CameraFollowReset>();
+        }
+    }
 
     let wall_dt = frame_clock
         .as_deref()
@@ -952,25 +1120,40 @@ fn follow_fighter_camera(
     if mrc_frame.as_ref().is_some_and(|frame| frame.facing_applied) {
         cam.yaw = nearest_equivalent_angle(motion_state.facing, cam.smooth_yaw);
     }
-
-    let air_airborne = fighter_air.map(|air| air.air.airborne).unwrap_or(false);
-    let wall_clinging = fighter_air
-        .map(|air| air.air.motion_mode == meteor_physics::jump::AirMotionMode::Wall)
-        .unwrap_or(false);
-    let airborne = air_airborne
-        || wall_clinging
-        || motion_state.movement_mode == meteor_core::MovementMode::Airborne
-        || motion_state.movement_mode == meteor_core::MovementMode::WallRun;
-
-    if let Ok(window) = window.single() {
-        let aspect = window.width() / window.height().max(1.0);
-        let vfov = vertical_fov_for_aspect(aspect);
-        if let Projection::Perspective(projection) = projection.as_mut() {
-            if (projection.fov - vfov).abs() > 1e-4 {
-                projection.fov = vfov;
-            }
-        }
+    let head = first_person
+        .as_deref()
+        .and_then(|anchor| anchor.0)
+        .filter(|(fighter, _)| !spectating && *fighter == entity)
+        .map(|(_, position)| position);
+    if let Projection::Perspective(lens) = projection.as_mut() {
+        lens.near = if head.is_some() {
+            first_person::NEAR
+        } else {
+            CAMERA_NEAR
+        };
     }
+    if let Some(eye) = head {
+        cam.first_person_active = true;
+        cam.yaw = nearest_equivalent_angle(motion_state.facing, cam.smooth_yaw);
+        cam.smooth_yaw = cam.yaw;
+        cam.free_look_pending = false;
+        cam.lock_was_active = false;
+        cam.scene_fade_required = false;
+        cam.follow_ready = false;
+        cam.position = eye;
+        cam.target = eye + first_person::view_direction(cam.yaw, cam.pitch);
+        cam.last_fighter_pos = fighter.translation;
+        transform.translation = eye;
+        transform.look_at(cam.target, Vec3::Y);
+        return;
+    }
+    if cam.first_person_active {
+        cam.yaw = motion_state.facing;
+        cam.smooth_yaw = cam.yaw;
+        cam.target = fighter.translation + Vec3::Y * LOOK_HEIGHT;
+        cam.position = free_ideal(&cam, cam.yaw, cam.pitch);
+    }
+    cam.first_person_active = false;
     let lock_entity = (!spectating)
         .then_some(lock.lock_entity)
         .flatten()
@@ -981,8 +1164,8 @@ fn follow_fighter_camera(
     let lock_target_pos = lock_entity.map(|t| t.translation);
     let lock_ready = lock_target_pos.is_some();
 
-    let wall_follow = wall_clinging && !spectating && !lock_ready;
-    if wall_follow {
+    let root_follow = !spectating && !lock_ready;
+    if root_follow {
         cam.yaw = nearest_equivalent_angle(motion_state.facing, cam.smooth_yaw);
         cam.smooth_yaw = cam.yaw;
         cam.free_look_pending = false;
@@ -992,13 +1175,13 @@ fn follow_fighter_camera(
     if lock_snap {
         cam.yaw = lock_release_yaw(motion_state.facing, cam.smooth_yaw);
     }
-    if !lock_ready && !lock_snap {
+    if !lock_ready && !lock_snap && !root_follow {
         cam.smooth_yaw = damp(cam.smooth_yaw, cam.yaw, YAW_SMOOTH, wall_dt);
     }
     cam.lock_was_active = lock_ready;
 
     if cam.follow_ready {
-        if !lock_ready && !lock_snap {
+        if !lock_ready && !lock_snap && !root_follow {
             let dx = fighter_pos.x - cam.last_fighter_pos.x;
             let dz = fighter_pos.z - cam.last_fighter_pos.z;
             cam.target.x += dx;
@@ -1019,29 +1202,21 @@ fn follow_fighter_camera(
             player.y + (watched.y - player.y) * LOCK_FOCUS_FRACTION + LOCK_FOCUS_HEIGHT,
             player.z + (watched.z - player.z) * LOCK_FOCUS_FRACTION,
         );
-        cam.target = cam
-            .target
-            .lerp(focus, (wall_dt * LOCK_FOCUS_RESPONSE).min(1.0));
-        cam.prev_target_y = Some(cam.target.y);
+        cam.target = if reset_follow {
+            focus
+        } else {
+            cam.target
+                .lerp(focus, (wall_dt * LOCK_FOCUS_RESPONSE).min(1.0))
+        };
         Some(focus)
     } else if lock_snap {
         cam.smooth_yaw = cam.yaw;
         cam.target = Vec3::new(fighter_pos.x, look_y, fighter_pos.z);
-        cam.prev_target_y = Some(cam.target.y);
         None
     } else {
-        let in_air = airborne || wall_clinging;
-        cam.target.y = VerticalAnchor::update(cam.target.y, look_y, wall_dt, in_air);
+        cam.target.y = stock_free_focus_y(cam.target.y, look_y, wall_dt);
         cam.target.x = fighter_pos.x;
         cam.target.z = fighter_pos.z;
-
-        cam.position.y = inject_ground_anchor_y(
-            cam.position.y,
-            cam.target.y,
-            cam.prev_target_y.unwrap_or(cam.target.y),
-            in_air,
-        );
-        cam.prev_target_y = Some(cam.target.y);
         None
     };
     cam.last_fighter_pos = fighter_pos;
@@ -1111,10 +1286,10 @@ fn follow_fighter_camera(
         cam.free_look_pending = false;
     }
 
-    let alpha = if wall_follow {
+    let alpha = if reset_follow {
         1.0
     } else {
-        camera_position_alpha(lock_ready, lock_snap, airborne, wall_clinging, wall_dt)
+        camera_position_alpha(lock_ready, wall_dt)
     };
 
     let smoothed = cam.position.lerp(ideal, alpha);
@@ -1138,13 +1313,19 @@ fn follow_fighter_camera(
 
 #[cfg(test)]
 pub(crate) fn install_camera_input_for_test(app: &mut App) {
-    app.init_resource::<Messages<MouseMotion>>()
+    app.init_resource::<LocalTurnState>()
+        .init_resource::<Messages<MouseMotion>>()
         .init_resource::<Messages<MouseWheel>>()
         .add_systems(
             Update,
-            (apply_follow_camera_input, prepare_move_basis)
+            (
+                begin_manual_turn_frame,
+                apply_follow_camera_input,
+                prepare_move_basis,
+            )
                 .chain()
-                .in_set(crate::plugins::FighterFrameSet::Movement),
+                .in_set(crate::plugins::FighterFrameSet::Movement)
+                .after(super::network_plugin::NetworkFrameApply),
         );
 }
 
@@ -1188,6 +1369,8 @@ fn point(v: Vec3) -> meteor_physics::collision::Point3 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    include!("camera_plugin/hit_follow_tests.rs");
 
     #[cfg(target_os = "windows")]
     #[test]
@@ -1303,7 +1486,7 @@ mod tests {
     }
 
     #[test]
-    fn production_free_camera_keeps_action_distance_and_recovers_after_wall() {
+    fn production_free_camera_keeps_action_distance_and_restores_rig_after_wall() {
         use crate::components::fighter::{LockOnController, MotionState};
         let mut mesh = crate::plugins::stage_collider::StageMeshCollider::default();
         mesh.append_world_triangles(
@@ -1362,33 +1545,103 @@ mod tests {
         app.update();
         let recovering = app.world().get::<Transform>(camera).unwrap().translation;
         assert!(recovering.distance(Vec3::Y * LOOK_HEIGHT) > eye.distance(Vec3::Y * LOOK_HEIGHT));
-        assert!(recovering.distance(Vec3::Y * LOOK_HEIGHT) < MAX_DISTANCE);
+        let cam = app.world().get::<ThirdPersonState>(camera).unwrap();
+        assert!(recovering.distance(free_ideal(cam, cam.yaw, cam.pitch)) < 1e-5);
         assert!(
             !app.world()
                 .get::<ThirdPersonState>(camera)
                 .unwrap()
                 .scene_fade_required
         );
-        for _ in 0..40 {
-            app.update();
+    }
+
+    #[test]
+    fn production_lowest_pitch_stays_above_floor_after_orbit_and_damping() {
+        use crate::components::fighter::{LockOnController, MotionState};
+        for slope in [0.0_f32, 0.2, -0.2] {
+            for distance in [MIN_DISTANCE, DEFAULT_DISTANCE, MAX_DISTANCE] {
+                for wall in [false, true] {
+                    let mut mesh = crate::plugins::stage_collider::StageMeshCollider::default();
+                    let floor = |z: f32| 7.0 + slope * z;
+                    mesh.append_world_triangles(
+                        &[
+                            [-50.0, floor(-50.0), -50.0],
+                            [-50.0, floor(50.0), 50.0],
+                            [50.0, floor(50.0), 50.0],
+                            [50.0, floor(-50.0), -50.0],
+                        ],
+                        &[0, 1, 2, 0, 2, 3],
+                    );
+                    if wall {
+                        mesh.append_world_triangles(
+                            &[
+                                [-50.0, -20.0, -2.0],
+                                [50.0, -20.0, -2.0],
+                                [50.0, 50.0, -2.0],
+                                [-50.0, 50.0, -2.0],
+                            ],
+                            &[0, 1, 2, 0, 2, 3],
+                        );
+                    }
+                    let mut time: Time = Time::default();
+                    time.advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
+                    let mut app = App::new();
+                    app.insert_resource(time)
+                        .insert_resource(StageCollider { mesh: Some(mesh) })
+                        .init_resource::<LockOnController>();
+                    app.world_mut().spawn((
+                        LocalFighter,
+                        Transform::from_xyz(0.0, 7.0, 0.0),
+                        MotionState {
+                            movement_mode: meteor_core::MovementMode::Idle,
+                            velocity: Vec3::ZERO,
+                            facing: 0.0,
+                        },
+                    ));
+                    let camera = install_follow_camera_for_test(&mut app);
+                    {
+                        let mut cam = app.world_mut().get_mut::<ThirdPersonState>(camera).unwrap();
+                        cam.target = Vec3::Y * (7.0 + LOOK_HEIGHT);
+                        cam.position = Vec3::new(0.0, 7.0 + LOOK_HEIGHT, -distance);
+                        cam.distance = distance;
+                        cam.pitch = -PITCH_HORIZONTAL_MIN_SQUARED.sqrt().acos();
+                        cam.free_look_pending = true;
+                        cam.free_look_from_pitch = DEFAULT_PITCH;
+                    }
+                    for frame in 0..90 {
+                        app.update();
+                        let eye = app.world().get::<Transform>(camera).unwrap().translation;
+                        assert!(
+                            eye.y >= floor(eye.z) + COLLISION_SKIN - 1e-4,
+                            "frame={frame} slope={slope} distance={distance} wall={wall}: {eye:?}"
+                        );
+                    }
+                    let cam = app.world().get::<ThirdPersonState>(camera).unwrap();
+                    assert_eq!(cam.scene_fade_required, wall);
+                }
+            }
         }
-        assert!(
-            app.world()
-                .get::<Transform>(camera)
-                .unwrap()
-                .translation
-                .distance(Vec3::Y * LOOK_HEIGHT)
-                > MAX_DISTANCE - 0.1
+    }
+
+    #[test]
+    fn ground_clearance_does_not_invent_a_floor_over_empty_space() {
+        let anchor = Vec3::Y * LOOK_HEIGHT;
+        let eye = Vec3::new(0.0, -2.0, -10.0);
+        assert_eq!(
+            resolve_free_collision(anchor, eye, MAX_DISTANCE, |_, _, _| None),
+            (eye, false)
         );
     }
 
     #[test]
     fn free_collision_respects_manual_zoom_and_smooth_pullback() {
         for requested in [2.0_f32, 6.0, 16.0] {
-            let (eye, fade) =
-                resolve_free_collision(Vec3::ZERO, -Vec3::Z * requested, requested, |_, _, _| {
-                    Some(1.0)
-                });
+            let (eye, fade) = resolve_free_collision(
+                Vec3::ZERO,
+                -Vec3::Z * requested,
+                requested,
+                |_, direction, _| (direction.z.abs() > 0.5).then_some(1.0),
+            );
             assert!(fade);
             assert!((eye.length() - requested.min(ACTION_VIEW_DISTANCE)).abs() < 1e-5);
         }
@@ -1397,7 +1650,9 @@ mod tests {
         assert_eq!(eye, ideal);
         assert!(!fade);
         let (eye, fade) =
-            resolve_free_collision(Vec3::ZERO, -Vec3::Z * 3.0, 16.0, |_, _, _| Some(1.0));
+            resolve_free_collision(Vec3::ZERO, -Vec3::Z * 3.0, 16.0, |_, direction, _| {
+                (direction.z.abs() > 0.5).then_some(1.0)
+            });
         assert!(fade);
         assert!(
             (eye.length() - 3.0).abs() < 1e-5,
@@ -1486,9 +1741,13 @@ mod tests {
                     .unwrap()
                     .air
                     .motion_mode = AirMotionMode::Ballistic;
+                app.world_mut()
+                    .get_mut::<MotionState>(fighter)
+                    .unwrap()
+                    .facing = facing - 10.0 * DEG;
                 {
                     let mut cam = app.world_mut().get_mut::<ThirdPersonState>(camera).unwrap();
-                    apply_camera_look(&mut cam, false, 10.0, 0.0);
+                    apply_camera_look(&mut cam, false, 10.0, 0.0, None);
                 }
                 app.update();
                 let cam = app.world().get::<ThirdPersonState>(camera).unwrap();
@@ -1512,7 +1771,7 @@ mod tests {
                     &mut side,
                     0.0,
                 );
-                let fov = vertical_fov_for_aspect(aspect);
+                let fov = vertical_fov_for_aspect(aspect, Settings::CAMERA_FOV_DEFAULT);
                 let eye = frame_locked_pair(focus, eye, player, target, fov, aspect);
                 let camera = Transform::from_translation(eye).looking_at(focus, Vec3::Y);
                 for root in [player, target] {
@@ -1607,17 +1866,147 @@ mod tests {
         assert_eq!(update_camera_axis_hold(1.48, true, false, 0.1), 1.5);
     }
 
+    #[cfg(feature = "original-assets")]
     #[test]
-    fn free_mouse_look_is_immediate_but_locked_look_stays_hidden() {
+    fn pitch_gate_matches_original_binary_oracle() {
+        let oracle: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../analysis/camera-pitch-20261005/pitch-oracle.json"
+        )))
+        .unwrap();
+        let cases = oracle["cases"].as_array().unwrap();
+        assert_eq!(cases.len(), 234);
+        for case in cases {
+            let pitch = (case["pitch"].as_f64().unwrap() as f32).to_radians();
+            let yaw = (case["yaw"].as_f64().unwrap() as f32).to_radians();
+            let delta = case["delta"].as_f64().unwrap() as f32;
+            let delta = if case["reverse"].as_bool().unwrap() {
+                delta
+            } else {
+                -delta
+            };
+            let (sy, cy) = yaw.sin_cos();
+            let (sp, cp) = pitch.sin_cos();
+            assert_eq!(
+                stock_pitch_input_allowed(
+                    first_person::view_direction(yaw, pitch),
+                    Vec3::new(sy * sp, cp, cy * sp),
+                    delta,
+                ),
+                case["accepted"].as_bool().unwrap(),
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn pitch_gate_accepts_whole_step_then_allows_return() {
+        for sign in [-1.0_f32, 1.0] {
+            let mut cam = ThirdPersonState {
+                pitch: sign * 70.0 * DEG,
+                ..default()
+            };
+            apply_camera_look(&mut cam, false, 0.0, sign * 3.0, None);
+            assert!((cam.pitch - sign * 73.0 * DEG).abs() < 1e-6);
+            let beyond = cam.pitch;
+            apply_camera_look(&mut cam, false, 0.0, sign * 3.0, None);
+            assert_eq!(cam.pitch, beyond);
+            apply_camera_look(&mut cam, false, 0.0, -sign * 3.0, None);
+            assert!((cam.pitch - sign * 70.0 * DEG).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn production_pitch_gate_uses_visible_camera_for_all_inputs() {
+        use crate::plugins::mobile_controls_plugin::MobileLookDelta;
+        for input in ["keyboard", "mouse", "touch"] {
+            for sign in [-1.0_f32, 1.0] {
+                for reverse in [false, true] {
+                    let (mut app, _) = airborne_pointer_app();
+                    let camera = app
+                        .world_mut()
+                        .query_filtered::<Entity, With<GameplayCamera>>()
+                        .single(app.world())
+                        .unwrap();
+                    let pitch = sign * 72.0 * DEG;
+                    app.world_mut().entity_mut(camera).insert(
+                        Transform::default()
+                            .looking_to(first_person::view_direction(0.0, pitch), Vec3::Y),
+                    );
+
+                    app.world_mut()
+                        .get_mut::<ThirdPersonState>(camera)
+                        .unwrap()
+                        .pitch = 0.0;
+                    app.world_mut().resource_mut::<Settings>().reverse_mouse = reverse;
+                    app.world_mut()
+                        .resource_mut::<Time>()
+                        .advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
+                    for direction in [sign, -sign] {
+                        let pointer_direction = direction * if reverse { -1.0 } else { 1.0 };
+                        match input {
+                            "keyboard" => {
+                                let key = if direction > 0.0 {
+                                    KeyCode::ArrowUp
+                                } else {
+                                    KeyCode::ArrowDown
+                                };
+                                let mut keys =
+                                    app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+                                keys.reset_all();
+                                keys.press(key);
+                                keys.clear_just_pressed(key);
+                                app.world_mut()
+                                    .get_mut::<ThirdPersonState>(camera)
+                                    .unwrap()
+                                    .pitch_axis_hold = 1.5;
+                            }
+                            "mouse" => {
+                                app.world_mut()
+                                    .resource_mut::<Messages<MouseMotion>>()
+                                    .write(MouseMotion {
+                                        delta: Vec2::new(0.0, pointer_direction * 8.0),
+                                    });
+                            }
+                            _ => {
+                                app.world_mut().resource_mut::<MobileLookDelta>().0 =
+                                    Vec2::new(0.0, pointer_direction * 8.0)
+                            }
+                        }
+                        app.update();
+                        let cam = app.world().get::<ThirdPersonState>(camera).unwrap();
+                        if direction == sign {
+                            assert_eq!(cam.pitch, 0.0, "{input} must reject outward step");
+                        } else {
+                            assert!(cam.pitch * sign < 0.0, "{input} must allow return");
+                        }
+                    }
+                    app.world_mut()
+                        .resource_mut::<ButtonInput<KeyCode>>()
+                        .reset_all();
+                    let before = app.world().get::<ThirdPersonState>(camera).unwrap().pitch;
+                    app.update();
+                    assert_eq!(
+                        app.world().get::<ThirdPersonState>(camera).unwrap().pitch,
+                        before
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn free_mouse_look_is_immediate_and_lock_discards_view_input() {
         let mut free = ThirdPersonState::default();
-        apply_camera_look(&mut free, false, 10.0, 0.0);
+        apply_camera_look(&mut free, false, 10.0, 0.0, None);
         assert!((free.yaw + 10.0 * DEG).abs() < 1e-6);
         assert_eq!(free.smooth_yaw, free.yaw);
         assert!(free.free_look_pending);
 
         let mut locked = ThirdPersonState::default();
-        apply_camera_look(&mut locked, true, 10.0, 0.0);
-        assert!((locked.yaw + 10.0 * DEG).abs() < 1e-6);
+        apply_camera_look(&mut locked, true, 10.0, 5.0, None);
+        assert_eq!(locked.yaw, 0.0);
+        assert_eq!(locked.pitch, DEFAULT_PITCH);
         assert_eq!(locked.smooth_yaw, 0.0);
         assert!(!locked.free_look_pending);
     }
@@ -2010,7 +2399,7 @@ mod tests {
             let expected = if gate == "ledge" { -20.0 * DEG } else { 0.0 };
             assert!((facing - expected).abs() < 1e-6, "gate={gate}: {facing}");
             let yaw = app.world().resource::<CameraBasis>().yaw;
-            if gate == "attack" || gate == "wall" || gate == "switch" {
+            if ["attack", "wall", "switch", "lock", "replay"].contains(&gate) {
                 assert_eq!(yaw, 0.0, "action blocks horizontal camera input");
             } else {
                 assert!(yaw < 0.0, "camera remains usable: {gate}");
@@ -2019,42 +2408,107 @@ mod tests {
     }
 
     #[test]
-    fn vertical_anchor_delta_is_injected_only_on_ground() {
-        assert!((inject_ground_anchor_y(10.0, 5.0, 3.0, false) - 12.0).abs() < 1e-6);
-        assert!((inject_ground_anchor_y(10.0, 5.0, 3.0, true) - 10.0).abs() < 1e-6);
+    fn stock_free_focus_uses_camera_tick_and_source_unit_height_gate() {
+        let dt = 1.0 / 60.0;
+        assert!((stock_free_focus_y(0.0, 6.0, dt) - 1.0).abs() < 1e-6);
+        assert!((stock_free_focus_y(6.0, 0.0, dt) - 5.2).abs() < 1e-6);
+        assert!((stock_free_focus_y(0.0, MODEL_SCALE, dt) - MODEL_SCALE * 2.0 / 15.0).abs() < 1e-6);
+        assert!((stock_free_focus_y(0.0, 6.0, 0.2) - 6.0).abs() < 1e-6);
     }
 
     #[test]
-    fn first_free_camera_frame_keeps_web_follow_lag_instead_of_hard_cutting() {
-        let alpha = camera_position_alpha(false, false, false, false, 1.0 / 60.0);
-        let expected = 1.0 - (-FOLLOW_GROUND / 60.0).exp();
-        assert!((alpha - expected).abs() < 1e-6);
-        assert!(alpha > 0.0 && alpha < 1.0);
+    fn free_camera_eye_commits_the_rig_anchor_without_a_second_chase() {
+        assert_eq!(camera_position_alpha(false, 1.0 / 60.0), 1.0);
     }
 
     #[test]
-    fn only_unlock_snap_hard_cuts_while_lock_uses_its_own_response() {
-        assert_eq!(camera_position_alpha(false, true, false, false, 0.0), 1.0);
+    fn lock_camera_keeps_its_own_response() {
         assert!(
-            (camera_position_alpha(true, false, false, false, 1.0 / 60.0)
-                - LOCK_POSITION_RESPONSE / 60.0)
-                .abs()
-                < 1e-6
+            (camera_position_alpha(true, 1.0 / 60.0) - LOCK_POSITION_RESPONSE / 60.0).abs() < 1e-6
         );
-        assert_eq!(
-            camera_position_alpha(true, false, false, false, 0.31),
-            LOCK_POSITION_STALL_ALPHA
-        );
+        assert_eq!(camera_position_alpha(true, 0.31), LOCK_POSITION_STALL_ALPHA);
     }
 
     #[test]
     fn vertical_fov_wide_keeps_vertical() {
-        let v43 = vertical_fov_for_aspect(4.0 / 3.0);
-        let v169 = vertical_fov_for_aspect(16.0 / 9.0);
+        let v43 = vertical_fov_for_aspect(4.0 / 3.0, Settings::CAMERA_FOV_DEFAULT);
+        let v169 = vertical_fov_for_aspect(16.0 / 9.0, Settings::CAMERA_FOV_DEFAULT);
         assert!((v43 - v169).abs() < 1e-3);
 
         let expect = 2.0 * ((30.0f32 * std::f32::consts::PI / 180.0).tan() / (4.0 / 3.0)).atan();
         assert!((v43 - expect).abs() < 1e-4);
+    }
+
+    #[test]
+    fn configurable_fov_preserves_wide_and_portrait_framing() {
+        for degrees in [40.0_f32, 60.0, 80.0, 100.0] {
+            let reference = vertical_fov_for_aspect(ORIGINAL_ASPECT, degrees);
+            for aspect in [ORIGINAL_ASPECT, 16.0 / 9.0, 21.0 / 9.0] {
+                let vertical = vertical_fov_for_aspect(aspect, degrees);
+                assert!((vertical - reference).abs() < 1e-6);
+                let horizontal = 2.0 * ((vertical * 0.5).tan() * aspect).atan();
+                assert!(horizontal.to_degrees() >= degrees - 1e-4);
+            }
+            for aspect in [1.0, 9.0 / 16.0] {
+                let vertical = vertical_fov_for_aspect(aspect, degrees);
+                let horizontal = 2.0 * ((vertical * 0.5).tan() * aspect).atan();
+                assert!((horizontal.to_degrees() - degrees).abs() < 1e-4);
+            }
+        }
+    }
+
+    #[test]
+    fn fov_updates_without_a_followed_fighter_and_leaves_portrait_camera_alone() {
+        let mut app = App::new();
+        app.init_resource::<Settings>()
+            .add_systems(Update, update_camera_fov);
+        let window = app
+            .world_mut()
+            .spawn((
+                PrimaryWindow,
+                Window {
+                    resolution: (1600, 900).into(),
+                    ..default()
+                },
+            ))
+            .id();
+        let game = app
+            .world_mut()
+            .spawn((
+                GameplayCamera,
+                Projection::Perspective(PerspectiveProjection::default()),
+            ))
+            .id();
+        let portrait = app
+            .world_mut()
+            .spawn(Projection::Perspective(PerspectiveProjection {
+                fov: 0.4,
+                ..default()
+            }))
+            .id();
+        for degrees in [60.0, 90.0, 40.0] {
+            app.world_mut().resource_mut::<Settings>().camera_fov = degrees;
+            for (width, height) in [(1600, 900), (900, 1600)] {
+                app.world_mut()
+                    .get_mut::<Window>(window)
+                    .unwrap()
+                    .resolution
+                    .set(width as f32, height as f32);
+                app.update();
+                let Projection::Perspective(lens) = app.world().get::<Projection>(game).unwrap()
+                else {
+                    panic!("expected perspective camera");
+                };
+                let expected = vertical_fov_for_aspect(width as f32 / height as f32, degrees);
+                assert!((lens.fov - expected).abs() < 1e-6);
+                let Projection::Perspective(lens) =
+                    app.world().get::<Projection>(portrait).unwrap()
+                else {
+                    panic!("expected perspective portrait");
+                };
+                assert_eq!(lens.fov, 0.4);
+            }
+        }
     }
 
     #[test]
@@ -2104,28 +2558,62 @@ mod tests {
     }
 
     #[test]
-    fn vertical_anchor_air_rates() {
-        let grounded_target_y = 3.4_f32;
-        let mut target_y =
-            VerticalAnchor::update(grounded_target_y, grounded_target_y, 1.0 / 60.0, false);
-        let airborne_look_y = 8.852 + 3.4;
-        let y0 = target_y;
-        target_y = VerticalAnchor::update(target_y, airborne_look_y, 1.0 / 60.0, true);
-        assert!(target_y > y0 && target_y < airborne_look_y - 0.5);
-        let mut rising = 0;
-        let mut prev = target_y;
-        for _ in 0..45 {
-            target_y = VerticalAnchor::update(target_y, airborne_look_y, 1.0 / 60.0, true);
-            if target_y > prev + 1e-4 {
-                rising += 1;
-            }
-            prev = target_y;
+    fn production_free_jump_follows_one_stock_vertical_stage_at_multiple_frame_rates() {
+        use crate::components::fighter::{LockOnController, MotionState};
+        for fps in [30.0_f32, 60.0, 120.0] {
+            let mut time: Time = Time::default();
+            time.advance_by(std::time::Duration::from_secs_f32(1.0 / fps));
+            let mut app = App::new();
+            app.insert_resource(time)
+                .init_resource::<StageCollider>()
+                .init_resource::<LockOnController>();
+            let fighter = app
+                .world_mut()
+                .spawn((
+                    LocalFighter,
+                    Transform::default(),
+                    MotionState {
+                        movement_mode: meteor_core::MovementMode::Idle,
+                        velocity: Vec3::ZERO,
+                        facing: 0.0,
+                    },
+                ))
+                .id();
+            let camera = install_follow_camera_for_test(&mut app);
+            app.update();
+            let jump_height = 73.7740555 * MODEL_SCALE;
+            app.world_mut()
+                .get_mut::<Transform>(fighter)
+                .unwrap()
+                .translation = Vec3::new(2.0, jump_height, 3.0);
+            app.update();
+            let expected_up = LOOK_HEIGHT + jump_height * (10.0 / fps);
+            let state = app.world().get::<ThirdPersonState>(camera).unwrap();
+            assert!((state.target.y - expected_up).abs() < 1e-4, "fps={fps}");
+            assert_eq!(state.target.x, 2.0);
+            assert_eq!(state.target.z, 3.0);
+            let expected_eye = Vec3::new(
+                2.0,
+                expected_up + DEFAULT_DISTANCE * DEFAULT_PITCH.sin() + 0.35,
+                3.0 - DEFAULT_DISTANCE * DEFAULT_PITCH.cos(),
+            );
+            assert!(state.position.distance(expected_eye) < 1e-4, "fps={fps}");
+            app.world_mut()
+                .get_mut::<Transform>(fighter)
+                .unwrap()
+                .translation
+                .y = 0.0;
+            app.update();
+            let expected_down = expected_up + (LOOK_HEIGHT - expected_up) * (8.0 / fps);
+            let state = app.world().get::<ThirdPersonState>(camera).unwrap();
+            assert!((state.target.y - expected_down).abs() < 1e-4, "fps={fps}");
+            assert!(
+                (state.position.y
+                    - (expected_down + DEFAULT_DISTANCE * DEFAULT_PITCH.sin() + 0.35))
+                    .abs()
+                    < 1e-4,
+                "fps={fps}"
+            );
         }
-        assert!(rising > 20);
-        assert!((target_y - airborne_look_y).abs() < 0.15);
-        for _ in 0..120 {
-            target_y = VerticalAnchor::update(target_y, grounded_target_y, 1.0 / 60.0, false);
-        }
-        assert!((target_y - grounded_target_y).abs() < 0.05);
     }
 }

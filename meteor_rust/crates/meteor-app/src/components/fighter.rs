@@ -68,6 +68,8 @@ impl FighterStatusEffects {
 pub struct FighterHitReaction {
     pub current: Option<meteor_combat::hit_reaction::HitReact>,
     pub authored_minimum: f32,
+
+    pub entry_blend_held: bool,
     pub root_expected_pose_id: Option<u16>,
     pub root_pose_id: Option<u16>,
     pub root_prev: Option<[f32; 3]>,
@@ -82,6 +84,7 @@ pub struct FighterHitReaction {
 
 impl FighterHitReaction {
     pub fn begin(&mut self, reaction: meteor_combat::hit_reaction::HitReact, airborne: bool) {
+        self.entry_blend_held = false;
         self.root_expected_pose_id = reaction.pose_id;
         self.root_pose_id = None;
         self.root_prev = None;
@@ -96,6 +99,11 @@ impl FighterHitReaction {
     }
 
     pub fn bank_be_hit_carry(&mut self, composed: Vec3, locally_driven: bool) {
+        self.vertical_velocity = if composed.y.is_finite() {
+            composed.y
+        } else {
+            0.0
+        };
         if locally_driven {
             self.carry_x = if composed.x.is_finite() {
                 composed.x
@@ -268,52 +276,45 @@ impl Default for Health {
 
 #[derive(Component, Debug, Clone)]
 pub struct TargetHitClock {
-    pub elapsed: f32,
+    pub last_hit_at: f64,
 
     pub spawn_elapsed: f32,
 }
 
-pub const TARGET_HIT_INTERVAL_SECONDS: f32 = 0.2;
+pub const TARGET_HIT_INTERVAL_SECONDS: f32 = meteor_combat::attack_window::TARGET_HIT_INTERVAL;
 
 pub const SPAWN_INVULNERABLE_SECONDS: f32 = 2.0;
 
 impl TargetHitClock {
-    pub fn tick(&mut self, dt: f32) {
-        self.tick_target(dt);
-        self.tick_spawn(dt);
-    }
-
-    pub fn tick_target(&mut self, dt: f32) {
-        if self.elapsed.is_finite() {
-            self.elapsed += dt;
-        }
-    }
-
     pub fn tick_spawn(&mut self, dt: f32) {
         self.spawn_elapsed += dt;
     }
 
-    pub fn accepts_target_hit(&self) -> bool {
-        self.elapsed > TARGET_HIT_INTERVAL_SECONDS
+    pub fn accepts_target_hit(&self, now_seconds: f64) -> bool {
+        now_seconds - self.last_hit_at > f64::from(TARGET_HIT_INTERVAL_SECONDS)
     }
 
     pub fn spawn_protected(&self) -> bool {
         self.spawn_elapsed < SPAWN_INVULNERABLE_SECONDS
     }
 
-    pub fn reset(&mut self) {
-        self.elapsed = 0.0;
+    pub fn reset(&mut self, now_seconds: f64) {
+        self.last_hit_at = now_seconds;
     }
 
     pub fn reset_spawn(&mut self) {
         self.spawn_elapsed = 0.0;
+    }
+
+    pub fn clear_hit(&mut self) {
+        self.last_hit_at = f64::NEG_INFINITY;
     }
 }
 
 impl Default for TargetHitClock {
     fn default() -> Self {
         Self {
-            elapsed: f32::INFINITY,
+            last_hit_at: f64::NEG_INFINITY,
             spawn_elapsed: 0.0,
         }
     }
@@ -403,6 +404,8 @@ pub struct MotionState {
 pub struct PoseRuntime {
     pub pose_id: PoseId,
 
+    pub action_id: Option<u16>,
+
     pub frame: f32,
     pub start: u32,
     pub end: u32,
@@ -413,12 +416,15 @@ pub struct PoseRuntime {
     pub loops: bool,
 
     pub pose_instance_id: u32,
+
+    pub link_past_end: bool,
 }
 
 impl PoseRuntime {
     pub fn idle() -> Self {
         Self {
             pose_id: 0,
+            action_id: None,
             frame: 0.0,
             start: 0,
             end: 1,
@@ -426,6 +432,7 @@ impl PoseRuntime {
             loop_end: 1,
             loops: true,
             pose_instance_id: 0,
+            link_past_end: false,
         }
     }
 
@@ -451,6 +458,18 @@ impl PoseRuntime {
 
 #[derive(Component, Debug, Clone, Default)]
 pub struct EntryBlend {
+    pub preserve_sample_once: bool,
+
+    pub zero_duration_pending: bool,
+
+    pub retain_root_delta_once: bool,
+
+    pub last_root_sample: Option<([f32; 3], f32)>,
+
+    pub motion_source: Option<(u16, u32)>,
+
+    pub frame_record_source: Option<(u16, u32)>,
+
     pub pending_local_chain: Option<(u32, u16, f32)>,
 
     pub from_root: [f32; 3],
@@ -472,6 +491,42 @@ pub struct EntryBlend {
     pub pose_id: u16,
 
     pub kind: EntryBlendKind,
+}
+
+impl EntryBlend {
+    pub fn is_active_for(&self, pose_id: u16) -> bool {
+        self.pose_id == pose_id && (self.duration > 0.0 || self.zero_duration_pending)
+    }
+
+    pub fn frame_record_for(&self, pose: &PoseRuntime) -> (u16, u32) {
+        let current = (pose.pose_id, pose.frame.floor() as u32);
+        if self.is_active_for(pose.pose_id) {
+            self.frame_record_source
+                .or(self.motion_source)
+                .unwrap_or(current)
+        } else {
+            current
+        }
+    }
+
+    pub fn advance_zero_duration_sample(&mut self, pose_id: u16, now_seconds: f64) -> bool {
+        if !self.zero_duration_pending || self.pose_id != pose_id {
+            return false;
+        }
+        if self.started_at_seconds.is_none() {
+            self.started_at_seconds = Some(now_seconds);
+            self.frame_record_source = Some((pose_id, self.to_frame as u32));
+            self.preserve_sample_once = true;
+            return true;
+        }
+        self.zero_duration_pending = false;
+        self.retain_root_delta_once = true;
+        false
+    }
+
+    pub fn retains_root_delta(&self) -> bool {
+        self.preserve_sample_once || self.retain_root_delta_once
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -571,6 +626,8 @@ pub struct AiIntent {
     pub navigation_jump_target: Option<Vec3>,
 
     pub want_attack: bool,
+
+    pub want_weapon_switch: bool,
 
     pub attack_directions: Vec<meteor_combat::combo_engine::Dir>,
 

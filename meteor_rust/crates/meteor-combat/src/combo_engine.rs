@@ -179,6 +179,10 @@ pub fn weapon_visual_form(weapon_id: u8, command_form: u8, pose_id: u16) -> u8 {
     if weapon_id != 10 {
         return command_form;
     }
+
+    if pose_id == 180 {
+        return command_form;
+    }
     let common = matches!(pose_id,
         0 | 10 | 24 | 32 | 35 | 36 | 90..=120 | 140..=148 | 150..=163
         | 176..=179 | 367 | 401..=403 | 481 | 494..=500 | 505..=508);
@@ -623,6 +627,31 @@ mod tests {
 
         let res = resolve_affordable_weapon_command(6, &[L, R, U], false, 0, |_| true);
         assert_eq!(res.unwrap().pose_id, 368);
+    }
+
+    #[test]
+    fn staff_blade_jump_chains_keep_all_three_forms_until_landing() {
+        for form in 0..=2 {
+            for (rise, fall) in [
+                (151, 152),
+                (153, 154),
+                (155, 156),
+                (157, 158),
+                (159, 156),
+                (160, 154),
+            ] {
+                for pose in [rise, fall, 180, 180, 0] {
+                    assert_eq!(
+                        weapon_visual_form(10, form, pose),
+                        form,
+                        "form {form}, pose {pose}"
+                    );
+                    assert_eq!(weapon_form_for_pose(10, pose), None);
+                }
+            }
+
+            assert_eq!(weapon_visual_form(10, form, 454), 0);
+        }
     }
 
     #[test]

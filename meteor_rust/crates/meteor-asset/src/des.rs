@@ -19,6 +19,8 @@ pub struct StageObject {
     pub object_type: Option<String>,
     pub name_attr: Option<String>,
     pub ticket: Option<String>,
+
+    pub ticket_admitted: bool,
     pub effect: Option<String>,
     pub billboard: i32,
     pub visible: bool,
@@ -35,8 +37,19 @@ pub struct StageObject {
 }
 
 impl StageObject {
+    pub fn admits_ticket(&self, mask: u32) -> bool {
+        self.ticket.as_deref().is_none_or(|tickets| {
+            tickets
+                .split(',')
+                .filter_map(|n| n.trim().parse::<u32>().ok())
+                .any(|n| (1u32.wrapping_shl(n) & mask) != 0)
+        })
+    }
+
     pub fn skip_render(&self) -> bool {
-        !self.visible || regex_contains(&self.custom, r"objecttype\s*=\s*camerabox")
+        !self.ticket_admitted
+            || !self.visible
+            || regex_contains(&self.custom, r"objecttype\s*=\s*camerabox")
     }
 }
 
@@ -64,6 +77,14 @@ pub struct StageDescription {
     pub dummies: Vec<StageObject>,
 
     pub block_map: BTreeMap<String, bool>,
+}
+
+impl StageDescription {
+    pub fn apply_ticket_mask(&mut self, mask: u32) {
+        for object in self.scene_objects.iter_mut().chain(&mut self.dummies) {
+            object.ticket_admitted = object.admits_ticket(mask);
+        }
+    }
 }
 
 pub fn parse_stage_description(text: &str) -> StageDescription {
@@ -228,6 +249,7 @@ fn parse_body(name: &str, body: &str) -> Option<StageObject> {
         object_type: fields.object_type,
         name_attr: fields.name_attr,
         ticket: fields.ticket,
+        ticket_admitted: true,
         effect: fields.effect,
         billboard: fields.billboard,
         visible: fields.visible,
@@ -527,6 +549,7 @@ impl<T> IntoSome for Vec<T> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "original-assets")]
     #[test]
     fn original_sn05_deformation_parameters_are_not_swallowed_by_following_fields() {
         let text = include_str!("../../../../origin_res/sn05/sn05.des");

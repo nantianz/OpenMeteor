@@ -1,6 +1,9 @@
 #![allow(dead_code)]
 
 mod dynamic_uniforms;
+pub(crate) mod scene_normals;
+pub(crate) mod scene_textures;
+pub(crate) mod water;
 pub(crate) use dynamic_uniforms::{split_time, FrameUniforms};
 
 use bevy::material::AlphaMode;
@@ -12,7 +15,14 @@ use bevy::render::render_resource::{
     AsBindGroup, BlendComponent, BlendFactor, BlendOperation, BlendState, Face,
     RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
 };
-use bevy::shader::{Shader, ShaderRef};
+use bevy::shader::{Shader, ShaderDefVal, ShaderRef};
+
+fn is_prepass_pipeline(descriptor: &RenderPipelineDescriptor) -> bool {
+    descriptor
+        .vertex
+        .shader_defs
+        .contains(&ShaderDefVal::Bool("PREPASS_PIPELINE".into(), true))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GmdlMode {
@@ -49,6 +59,7 @@ bitflags::bitflags! {
         const BLEND_GROUP = 1 << 1;
         const SRC_COLOR_ONE = 1 << 2;
         const SRC_ALPHA_ONE = 1 << 3;
+        const SRC_ALPHA_BLEND = 1 << 4;
     }
 }
 
@@ -70,6 +81,8 @@ pub struct CameraOcclusionParams {
     pub eye: Vec4,
     pub player: Vec4,
     pub watched: Vec4,
+
+    pub self_eye: Vec4,
 }
 
 #[derive(Asset, TypePath, Clone)]
@@ -77,7 +90,29 @@ pub struct GmdlMaterial {
     pub params: GmdlMaterialParams,
     pub texture: Option<Handle<Image>>,
 
+    pub normal_texture: Option<Handle<Image>>,
+
+    pub normal_strength: f32,
+    pub normal_contrast: f32,
+
     pub uv_scroll: Vec4,
+
+    pub water: Vec4,
+
+    pub water_bounds: Vec4,
+    pub water_reflection: Option<Handle<Image>>,
+    pub water_depth: Option<Handle<Image>>,
+    pub water_normal: Option<Handle<Image>>,
+    pub water_dynamics: Option<Handle<Image>>,
+    pub water_dynamics_bounds: Vec4,
+
+    pub water_live_reflection: bool,
+
+    pub body_glow: Vec4,
+
+    pub body_style: Vec4,
+
+    pub first_person_clip: Vec4,
 
     pub camera_occlusion_enabled: bool,
 
@@ -98,7 +133,21 @@ impl GmdlMaterial {
         Self {
             params,
             texture,
+            normal_texture: None,
+            normal_strength: 1.0,
+            normal_contrast: 0.8,
             uv_scroll: Vec4::ZERO,
+            water: Vec4::ZERO,
+            water_bounds: Vec4::ZERO,
+            water_reflection: None,
+            water_depth: None,
+            water_normal: None,
+            water_dynamics: None,
+            water_dynamics_bounds: Vec4::ZERO,
+            water_live_reflection: false,
+            body_glow: Vec4::ZERO,
+            body_style: Vec4::ZERO,
+            first_person_clip: Vec4::ZERO,
             camera_occlusion_enabled: false,
             weapon_refraction_source: false,
             two_side,
@@ -127,6 +176,7 @@ impl GmdlMaterial {
             key |= GmdlMaterialKey::BLEND_GROUP;
         }
         match self.mode {
+            GmdlMode::Blend => key |= GmdlMaterialKey::SRC_ALPHA_BLEND,
             GmdlMode::SrcColorOne => key |= GmdlMaterialKey::SRC_COLOR_ONE,
             GmdlMode::Add => key |= GmdlMaterialKey::SRC_ALPHA_ONE,
             _ => {}
@@ -165,13 +215,20 @@ impl GmdlMaterialKey {
 const GMDL_SHADER_HANDLE: Handle<Shader> =
     bevy::asset::uuid_handle!("00000000-0000-0000-0000-9d2a1b3c4d5e");
 
+const GMDL_PREPASS_SHADER_HANDLE: Handle<Shader> =
+    bevy::asset::uuid_handle!("c12c7fa4-5bdf-4c0b-9c44-41f1eac54d27");
+
 impl Material for GmdlMaterial {
+    fn prepass_fragment_shader() -> ShaderRef {
+        ShaderRef::Handle(GMDL_PREPASS_SHADER_HANDLE)
+    }
+
     fn fragment_shader() -> ShaderRef {
         ShaderRef::Handle(GMDL_SHADER_HANDLE)
     }
 
     fn reads_view_transmission_texture(&self) -> bool {
-        self.weapon_refraction_source
+        self.weapon_refraction_source || self.water_live_reflection
     }
 
     fn depth_bias(&self) -> f32 {
@@ -183,13 +240,16 @@ impl Material for GmdlMaterial {
     }
 
     fn alpha_mode(&self) -> AlphaMode {
-        if self.weapon_refraction_source {
+        if self.weapon_refraction_source || self.water_live_reflection {
             return AlphaMode::Opaque;
         }
         match self.mode {
             GmdlMode::Blend => AlphaMode::Blend,
             GmdlMode::Add | GmdlMode::SrcColorOne => AlphaMode::Add,
             GmdlMode::MultiplyShadow => AlphaMode::Multiply,
+            GmdlMode::Opaque if self.params.alpha_cutoff > 0.0 => {
+                AlphaMode::Mask(self.params.alpha_cutoff)
+            }
             GmdlMode::Opaque => AlphaMode::Opaque,
         }
     }
@@ -206,6 +266,10 @@ impl Material for GmdlMaterial {
         } else {
             Some(Face::Back)
         };
+
+        if is_prepass_pipeline(descriptor) {
+            return Ok(());
+        }
         if let Some(depth_stencil) = &mut descriptor.depth_stencil {
             depth_stencil.depth_write_enabled =
                 Some(!key.bind_group_data.contains(GmdlMaterialKey::BLEND_GROUP));
@@ -214,6 +278,15 @@ impl Material for GmdlMaterial {
             if let Some(fragment) = &mut descriptor.fragment {
                 if let Some(Some(target)) = fragment.targets.get_mut(0) {
                     target.blend = Some(blend);
+                }
+            }
+        } else if key
+            .bind_group_data
+            .contains(GmdlMaterialKey::SRC_ALPHA_BLEND)
+        {
+            if let Some(fragment) = &mut descriptor.fragment {
+                if let Some(Some(target)) = fragment.targets.get_mut(0) {
+                    target.blend = Some(BlendState::ALPHA_BLENDING);
                 }
             }
         }
@@ -225,12 +298,22 @@ pub struct GmdlMaterialPlugin;
 
 impl Plugin for GmdlMaterialPlugin {
     fn build(&self, app: &mut App) {
+        water::install(app);
         dynamic_uniforms::install(app);
+        water::interaction::install(app);
+        water::screen_reflection::install(app);
+        app.add_systems(Update, scene_normals::sync_normal_setting);
         app.add_plugins(MaterialPlugin::<GmdlMaterial>::default())
             .add_systems(
                 Update,
                 update_camera_occlusion.after(crate::plugins::FighterFrameSet::CameraFinalize),
             );
+        bevy::asset::load_internal_asset!(
+            app,
+            GMDL_PREPASS_SHADER_HANDLE,
+            "gmdl_prepass.wgsl",
+            Shader::from_wgsl
+        );
         bevy::asset::load_internal_asset!(
             app,
             GMDL_SHADER_HANDLE,
@@ -296,6 +379,57 @@ fn update_camera_occlusion(
     if fade.eye.w == 0.0 {
         *fade = CameraOcclusionParams::default();
     }
+
+    fade.self_eye = cameras
+        .single()
+        .ok()
+        .filter(|_| in_scene)
+        .and_then(|(eye, camera)| {
+            camera
+                .filter(|c| c.is_first_person())
+                .map(|_| eye.translation.extend(1.0))
+        })
+        .unwrap_or(Vec4::ZERO);
+}
+
+#[cfg(test)]
+pub(crate) fn install_camera_uniforms_for_test(app: &mut App) {
+    app.init_resource::<FrameUniforms>().add_systems(
+        Update,
+        update_camera_occlusion.after(crate::plugins::FighterFrameSet::CameraFinalize),
+    );
+}
+
+#[cfg(test)]
+pub(super) fn standalone_shader_source(colors: bool) -> String {
+    standalone_shader_variant(colors, true)
+}
+
+#[cfg(test)]
+fn standalone_shader_variant(colors: bool, tangents: bool) -> String {
+    let mut active = vec![true];
+    let mut source = String::from("struct VertexOutput { @builtin(position) position: vec4<f32>, @location(0) world_position: vec4<f32>, @location(1) world_normal: vec3<f32>, @location(2) uv: vec2<f32>, @location(4) world_tangent: vec4<f32>, @location(5) color: vec4<f32>, };\nstruct TestView { world_position: vec3<f32>, }; @group(0) @binding(0) var<uniform> view: TestView;\n");
+    for line in include_str!("gmdl_material.wgsl").lines() {
+        if line.starts_with("#import") {
+            continue;
+        }
+        if let Some(flag) = line.strip_prefix("#ifdef ") {
+            active.push(
+                *active.last().unwrap()
+                    && ((flag == "VERTEX_COLORS" && colors)
+                        || (flag == "VERTEX_TANGENTS" && tangents)),
+            );
+        } else if line.starts_with("#else") {
+            let last = active.pop().unwrap();
+            active.push(*active.last().unwrap() && !last);
+        } else if line.starts_with("#endif") {
+            active.pop();
+        } else if *active.last().unwrap() {
+            source.push_str(line);
+            source.push('\n');
+        }
+    }
+    source.replace("#{MATERIAL_BIND_GROUP}", "3")
 }
 
 #[cfg(feature = "original-assets")]
@@ -316,6 +450,16 @@ mod tests {
             true,
             mode,
         )
+    }
+
+    #[test]
+    fn live_water_enters_transmissive_phase_with_alpha_blending() {
+        let mut water = test_material(GmdlMode::Blend);
+        assert_eq!(water.alpha_mode(), AlphaMode::Blend);
+        water.water_live_reflection = true;
+        assert_eq!(water.alpha_mode(), AlphaMode::Opaque);
+        assert!(water.reads_view_transmission_texture());
+        assert!(water.key().contains(GmdlMaterialKey::SRC_ALPHA_BLEND));
     }
 
     #[test]
@@ -369,16 +513,8 @@ mod tests {
 
     #[test]
     fn camera_fade_shader_validates_with_and_without_vertex_colors() {
-        for colors in [false, true] {
-            let mut source = include_str!("gmdl_material.wgsl")
-                .replace("#import bevy_pbr::forward_io::VertexOutput;", "struct VertexOutput { @builtin(position) position: vec4<f32>, @location(0) world_position: vec4<f32>, @location(2) uv: vec2<f32>, @location(5) color: vec4<f32>, };")
-                .replace("#import bevy_pbr::mesh_view_bindings::view;", "struct TestView { world_position: vec3<f32>, }; @group(0) @binding(0) var<uniform> view: TestView;")
-                .replace("#{MATERIAL_BIND_GROUP}", "3")
-                .replace("#ifdef VERTEX_COLORS", "")
-                .replace("#endif", "");
-            if !colors {
-                source = source.replace("diffuse = in.color;", "");
-            }
+        for (colors, tangents) in [(false, false), (true, false), (false, true), (true, true)] {
+            let source = standalone_shader_variant(colors, tangents);
             let module = naga::front::wgsl::parse_str(&source).expect("GMDL WGSL parses");
             naga::valid::Validator::new(
                 naga::valid::ValidationFlags::all(),

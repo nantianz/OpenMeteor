@@ -1,7 +1,13 @@
+mod collision_sample;
+mod concealment;
+#[cfg(test)]
+pub(crate) use collision_sample::refresh_collision_fixture;
+pub(crate) use collision_sample::{capture_collision_transforms, SampledCollisionTransform};
+mod hit_sway;
+mod remake;
+
 use crate::components::fighter::{EntryBlend, PoseRuntime};
-use crate::plugins::pak_textures::{
-    image_from_decoded, image_handle, pak_read_ci, resolve_pak_texture, resolve_runtime_texture,
-};
+use crate::plugins::pak_textures::{pak_read_ci, resolve_pak_texture, resolve_runtime_texture};
 use crate::plugins::stage_material::{GmdlMaterial, GmdlMaterialParams, GmdlMode};
 use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
@@ -72,6 +78,7 @@ pub struct CharacterPlugin;
 mod crowd_tests;
 
 #[derive(Component)]
+#[require(collision_sample::CollisionSampleState)]
 pub(crate) struct FighterModel {
     pub(crate) fighter: Entity,
 
@@ -79,8 +86,8 @@ pub(crate) struct FighterModel {
 }
 
 #[derive(Component)]
-struct FighterSkin {
-    fighter: Entity,
+pub(crate) struct FighterSkin {
+    pub(crate) fighter: Entity,
     base_alpha_cutoff: f32,
     concealed: bool,
 }
@@ -136,6 +143,22 @@ pub(crate) struct WeaponEndpoint {
     pub(crate) part: String,
     pub(crate) left: bool,
     pub(crate) forms: Option<Vec<u8>>,
+}
+
+impl WeaponEndpoint {
+    pub(crate) fn is_active_for(
+        &self,
+        fighter: &crate::components::fighter::Fighter,
+        visual_form: u8,
+    ) -> bool {
+        self.slot == fighter.weapon_slot
+            && self.weapon == fighter.weapon
+            && self.variant == fighter.weapon_variant
+            && self
+                .forms
+                .as_ref()
+                .is_none_or(|forms| forms.contains(&visual_form))
+    }
 }
 
 #[derive(Component)]
@@ -216,6 +239,7 @@ pub(crate) const MOTION_ROOT_DUMMY: &str = "d_base";
 pub(crate) struct CharacterAssets {
     pub(crate) amb: AmbAnimation,
     pub(crate) skin: meteor_asset::skc::SkinMesh,
+    pub(crate) visual: Option<remake::VisualAssets>,
     pub(crate) skeleton: Skeleton,
 
     pub(crate) dummy_order: std::collections::HashMap<String, usize>,
@@ -267,9 +291,106 @@ impl CharacterAssets {
         if dt <= 0.0 || !dt.is_finite() || !frame.is_finite() || frame >= pose.end as f32 {
             return [0.0; 3];
         }
-        let a = self.motion_root_at(common, pose.pose_id, frame);
-        let b = self.motion_root_at(common, pose.pose_id, frame + 1.0);
-        std::array::from_fn(|i| (b[i] - a[i]) * (30.0 * dt))
+        let delta = self
+            .amb_for_pose(common, pose.pose_id)
+            .sample_local_motion_delta(
+                frame as usize,
+                self.dummy_order.get(MOTION_ROOT_DUMMY).copied(),
+            );
+        delta.map(|value| value * (30.0 * dt))
+    }
+
+    pub(crate) fn authored_root_rotation(
+        &self,
+        common: &AmbAnimation,
+        pose: &crate::components::fighter::PoseRuntime,
+        dt: f32,
+    ) -> Quat {
+        let frame = pose.frame.floor();
+        if dt <= 0.0 || !dt.is_finite() || !frame.is_finite() || frame >= pose.end as f32 {
+            return Quat::IDENTITY;
+        }
+        self.root_rotation_between(
+            common,
+            (pose.pose_id, frame as u32),
+            (pose.pose_id, frame as u32 + 1),
+            dt,
+        )
+    }
+
+    pub(crate) fn reaction_root_rotation(
+        &self,
+        common: &AmbAnimation,
+        pose: &crate::components::fighter::PoseRuntime,
+        blend: Option<&crate::components::fighter::EntryBlend>,
+        held: bool,
+        dt: f32,
+    ) -> Quat {
+        if let Some(blend) = blend.filter(|b| b.is_active_for(pose.pose_id)) {
+            return blend.motion_source.map_or(Quat::IDENTITY, |source| {
+                self.root_rotation_between(
+                    common,
+                    source,
+                    (pose.pose_id, blend.to_frame as u32),
+                    dt,
+                )
+            });
+        }
+        if held {
+            Quat::IDENTITY
+        } else {
+            self.authored_root_rotation(common, pose, dt)
+        }
+    }
+
+    fn root_rotation_between(
+        &self,
+        common: &AmbAnimation,
+        source: (u16, u32),
+        target: (u16, u32),
+        dt: f32,
+    ) -> Quat {
+        if dt <= 0.0 || !dt.is_finite() {
+            return Quat::IDENTITY;
+        }
+        let Some(index) = self.dummy_order.get(MOTION_ROOT_DUMMY).copied() else {
+            return Quat::IDENTITY;
+        };
+        let a = self
+            .amb_for_pose(common, source.0)
+            .sample_dummy_rotation(source.1 as usize, index);
+        let b = self
+            .amb_for_pose(common, target.0)
+            .sample_dummy_rotation(target.1 as usize, index);
+        if a[..3] == [0.0; 3] && b[..3] == [0.0; 3] {
+            return Quat::IDENTITY;
+        }
+        let matrix = |q: [f32; 4]| {
+            meteor_core::Mat4::from_quaternion(meteor_core::Quat {
+                x: q[0],
+                y: q[1],
+                z: q[2],
+                w: q[3],
+            })
+        };
+        let relative = matrix(a).invert().mul(&matrix(b));
+        let basis = |m: &[f32; 16]| {
+            Mat3::from_cols(
+                Vec3::new(m[0], m[1], m[2]),
+                Vec3::new(m[4], m[5], m[6]),
+                Vec3::new(m[8], m[9], m[10]),
+            )
+        };
+        let mut q = Quat::from_mat3(&basis(&relative.m));
+        q.w *= 30.0 * dt;
+        let step = matrix(q.to_array());
+        let m = basis(&step.m);
+        Quat::from_mat3(&Mat3::from_cols(
+            m.x_axis.normalize(),
+            m.y_axis.normalize(),
+            m.z_axis.normalize(),
+        ))
+        .normalize()
     }
 
     pub(crate) fn apply_pose(
@@ -317,6 +438,9 @@ impl CharacterAssets {
             force_blend,
             strategy_id,
         );
+        if pose.pose_id == pose_id {
+            pose.action_id = self.act.groups.get(&pose_id).copied();
+        }
     }
 }
 
@@ -344,9 +468,16 @@ fn apply_pose_transition(
         _ => (start, end, false),
     };
 
+    blend.preserve_sample_once = false;
+    blend.retain_root_delta_once = false;
     let previous_id = pose.pose_id;
+    let previous_motion_source = blend.frame_record_for(pose);
+    blend.frame_record_source = None;
+    blend.zero_duration_pending = false;
     let pose_changed = previous_id != pose_id;
     pose.pose_id = pose_id;
+
+    pose.link_past_end = matches!(pose_id, 152 | 154 | 156 | 158);
     pose.start = start;
     pose.end = end;
     pose.loop_start = loop_start;
@@ -377,7 +508,10 @@ fn apply_pose_transition(
         blend.started_at_seconds = None;
         return;
     }
+    blend.motion_source = Some(previous_motion_source);
+    blend.frame_record_source = Some(previous_motion_source);
     blend.duration = entry_blend_duration(pending_blend_seconds, strategy_id, pose_id);
+    blend.zero_duration_pending = blend.duration == 0.0;
     blend.elapsed = 0.0;
     blend.started_at_seconds = None;
     blend.pose_id = pose_id;
@@ -400,7 +534,7 @@ pub(crate) fn entry_blend_duration(
     pose_id: u16,
 ) -> f32 {
     let authored = pending_blend_seconds
-        .filter(|t| t.is_finite() && *t > 0.0)
+        .filter(|t| t.is_finite() && *t >= 0.0)
         .map(|t| t.min(0.6));
     let fast =
         strategy_id.and_then(|sid| meteor_physics::locomotion::fast_blend_seconds(sid, pose_id));
@@ -430,13 +564,16 @@ const ACTIVE_CHARACTERS: [&str; 2] = ["p0", "p1"];
 
 impl Plugin for CharacterPlugin {
     fn build(&self, app: &mut App) {
+        hit_sway::install(app);
+        remake::install(app);
         let actor_schedule = super::fighter_frame::schedule(app);
         let serial = super::fighter_frame::installed(app);
         app.add_systems(
             Update,
-            drive_fighter_animation
+            (drive_fighter_animation, capture_collision_transforms)
+                .chain()
                 .after(crate::plugins::FighterFrameSet::PoseResolve)
-                .run_if(in_state(crate::app_state::AppState::Playing))
+                .run_if(super::ui_plugin::gameplay_hud_visibility::scene_session_active)
                 .run_if(
                     |loading: Option<Res<super::loading_ui::LoadingPresentation>>| {
                         loading.is_some_and(|loading| loading.active)
@@ -445,6 +582,7 @@ impl Plugin for CharacterPlugin {
         );
         app.init_resource::<CharacterLoadFailures>()
             .init_resource::<LocalVisualDiagnostics>()
+            .init_resource::<crate::plugins::pak_textures::QualityTextureHandles>()
             .add_systems(
                 OnEnter(crate::app_state::AppState::Playing),
                 (
@@ -452,11 +590,21 @@ impl Plugin for CharacterPlugin {
                     reset_local_visual_diagnostics,
                     load_character_assets,
                 )
-                    .chain(),
+                    .chain()
+                    .run_if(crate::plugins::starts_fresh_playing_session),
             )
             .add_systems(
                 OnExit(crate::app_state::AppState::Playing),
-                despawn_fighter_models,
+                (
+                    despawn_fighter_models,
+                    crate::plugins::pak_textures::clear_quality_texture_handles,
+                )
+                    .run_if(crate::plugins::ends_playing_session),
+            )
+            .add_systems(
+                Update,
+                crate::plugins::pak_textures::sync_quality_texture_samplers
+                    .run_if(super::ui_plugin::gameplay_hud_visibility::scene_session_active),
             )
             .add_systems(
                 Update,
@@ -472,7 +620,7 @@ impl Plugin for CharacterPlugin {
                     } else {
                         crate::plugins::FighterFrameSet::SkeletonSample
                     })
-                    .run_if(in_state(crate::app_state::AppState::Playing)),
+                    .run_if(super::ui_plugin::gameplay_hud_visibility::scene_session_active),
             )
             .add_systems(
                 actor_schedule,
@@ -482,24 +630,28 @@ impl Plugin for CharacterPlugin {
                         .after(crate::plugins::movement_plugin::hold_airborne_fall_pose),
                     head_track,
                     sync_weapon_form_visibility,
+                    capture_collision_transforms,
                     sync_skin_concealment,
                 )
                     .chain()
                     .in_set(crate::plugins::FighterFrameSet::SkeletonSample)
-                    .run_if(in_state(crate::app_state::AppState::Playing)),
+                    .run_if(super::ui_plugin::gameplay_hud_visibility::scene_session_active),
             )
             .add_systems(
                 actor_schedule,
                 resample_late_air_pose_visual
                     .in_set(crate::plugins::FighterFrameSet::PoseResolve)
                     .after(crate::plugins::combat_plugin::CombatPoseResolveSet)
-                    .run_if(in_state(crate::app_state::AppState::Playing)),
+                    .run_if(super::ui_plugin::gameplay_hud_visibility::scene_session_active),
             )
             .add_systems(
                 PostUpdate,
-                log_local_visual_alignment
+                (
+                    concealment::sync_equipment_concealment,
+                    log_local_visual_alignment,
+                )
                     .after(bevy::transform::TransformSystems::Propagate)
-                    .run_if(in_state(crate::app_state::AppState::Playing)),
+                    .run_if(super::ui_plugin::gameplay_hud_visibility::scene_session_active),
             );
     }
 }
@@ -611,7 +763,10 @@ fn weapon_marker_matches_inventory(
 
 fn sync_skin_concealment(
     active_fighter: Option<Res<super::fighter_frame::ActiveFighter>>,
-    fighters: Query<&crate::components::fighter::Concealment>,
+    fighters: Query<(
+        &crate::components::fighter::Concealment,
+        &crate::components::fighter::Health,
+    )>,
     mut skins: Query<(&mut FighterSkin, &MeshMaterial3d<GmdlMaterial>)>,
     mut materials: ResMut<Assets<GmdlMaterial>>,
 ) {
@@ -621,7 +776,7 @@ fn sync_skin_concealment(
         }
         let concealed = fighters
             .get(skin.fighter)
-            .is_ok_and(|state| state.remaining > 0.0);
+            .is_ok_and(|(state, health)| state.remaining > 0.0 && health.current > 0.0);
         if concealed == skin.concealed {
             continue;
         }
@@ -993,12 +1148,15 @@ pub(crate) fn load_character_asset(
         read_first(roots, "TexturePatch.pak").and_then(|bytes| PakArchive::from_bytes(&bytes).ok());
     match &ptexture {
         Some(pak) => info!("ptexture.pak loaded: {} entries", pak.len()),
-        None if meteor_asset::runtime_assets::registered_pack_count() > 0 => {
+        None if meteor_asset::runtime_assets::runtime_texture_source_active() => {
             info!("legacy ptexture.pak not mounted; using runtime MPK texture scopes")
         }
         None => warn!("ptexture.pak missing (character untextured)"),
     }
     let skin = parse_skin(&skin_text);
+
+    let collision_skin = read_first(roots, &format!("pmodel/{character_id}_300.skc"))
+        .map(|bytes| parse_skin(&crate::text_codec::decode_text(&bytes)))?;
     let bone_data = parse_bones(&bnc_text);
     let skeleton = Skeleton::from_bone_data(&bone_data);
 
@@ -1032,12 +1190,12 @@ pub(crate) fn load_character_asset(
     );
 
     let bone_local_bounds = {
-        let positions: Vec<meteor_core::Vec3> = skin
+        let positions: Vec<meteor_core::Vec3> = collision_skin
             .positions
             .chunks_exact(3)
             .map(|c| meteor_core::Vec3::new(c[0], c[1], c[2]))
             .collect();
-        let influences: Vec<Vec<meteor_combat::hitbox::BoneInfluence>> = skin
+        let influences: Vec<Vec<meteor_combat::hitbox::BoneInfluence>> = collision_skin
             .skin_influences
             .iter()
             .map(|refs| {
@@ -1051,7 +1209,9 @@ pub(crate) fn load_character_asset(
             .collect();
         meteor_combat::hitbox::build_bone_local_bounds(&positions, &influences)
     };
+    let visual = remake::load(roots, character_id, &skeleton);
     Some(CharacterAssets {
+        visual,
         amb,
         skin,
         skeleton,
@@ -1097,6 +1257,8 @@ fn spawn_fighter_model(
     mut materials: ResMut<Assets<GmdlMaterial>>,
     mut images: ResMut<Assets<bevy::image::Image>>,
     mut inverse_binds: ResMut<Assets<SkinnedMeshInverseBindposes>>,
+    mut quality_handles: ResMut<crate::plugins::pak_textures::QualityTextureHandles>,
+    settings: Res<crate::app_state::Settings>,
     net: Res<crate::plugins::network_plugin::NetState>,
     fighters: SpawnFighterModelQuery<'_, '_>,
     models: Query<&FighterModel>,
@@ -1132,6 +1294,9 @@ fn spawn_fighter_model(
             &mut materials,
             &mut images,
             &mut inverse_binds,
+            settings.new_character_models,
+            settings.texture_quality,
+            &mut quality_handles,
         );
     }
 }
@@ -1149,9 +1314,13 @@ fn spawn_fighter_model_for(
     materials: &mut Assets<GmdlMaterial>,
     images: &mut Assets<bevy::image::Image>,
     inverse_binds: &mut Assets<SkinnedMeshInverseBindposes>,
+    new_character_models: bool,
+    texture_quality: u8,
+    quality_handles: &mut crate::plugins::pak_textures::QualityTextureHandles,
 ) {
     let skeleton = &assets.skeleton;
-    let skin = &assets.skin;
+    let visual = assets.visual.as_ref().filter(|_| new_character_models);
+    let skin = visual.map_or(&assets.skin, remake::VisualAssets::skin);
 
     let model = commands
         .spawn((
@@ -1254,47 +1423,49 @@ fn spawn_fighter_model_for(
         }
     }
 
-    let inverse: Vec<bevy::math::Mat4> = skeleton
+    let mut inverse: Vec<bevy::math::Mat4> = skeleton
         .skin_world_bind_inverse
         .iter()
         .map(|m| bevy::math::Mat4::from_cols_array(&m.m))
         .collect();
-    let inverse_handle = inverse_binds.add(SkinnedMeshInverseBindposes::from(inverse));
+    let source_joints = joint_entities.clone();
+    if let Some(visual) = visual {
+        visual.append_joints(commands, model, skeleton, &mut joint_entities, &mut inverse);
+    }
+    hit_sway::spawn_render_joints(commands, model, skeleton, &node_entities, &joint_entities);
+    let inverse_handle = if let Some(visual) = visual {
+        visual.inverse(inverse, inverse_binds)
+    } else {
+        inverse_binds.add(SkinnedMeshInverseBindposes::from(inverse))
+    };
 
-    let mut material_cache: std::collections::HashMap<usize, Handle<GmdlMaterial>> =
-        std::collections::HashMap::new();
-    for group in &skin.groups {
-        let indices = skin.indices[group.start..group.start + group.count].to_vec();
-        let mesh = build_group_mesh(skin, &indices);
-        let def = skin.materials.get(group.material_index);
-        let base_alpha_cutoff = if def.is_some_and(|def| def.alpha) {
-            0.5
-        } else {
-            0.0
-        };
-        let material = material_cache
-            .entry(group.material_index)
-            .or_insert_with(|| build_skin_material(def, assets, color_index, images, materials))
-            .clone();
-        commands
-            .spawn((
-                Mesh3d(meshes.add(mesh)),
-                MeshMaterial3d(material),
-                SkinnedMesh {
-                    inverse_bindposes: inverse_handle.clone(),
-                    joints: joint_entities.clone(),
-                },
-                FighterSkin {
-                    fighter,
-                    base_alpha_cutoff,
-                    concealed: false,
-                },
-                PendingFighterSkinReveal,
-                Visibility::Hidden,
-                InheritedVisibility::default(),
-                Transform::IDENTITY,
-            ))
-            .insert(ChildOf(model));
+    let draws = spawn_body_skins(
+        commands,
+        model,
+        fighter,
+        assets,
+        visual,
+        color_index,
+        &joint_entities,
+        inverse_handle.clone(),
+        meshes,
+        materials,
+        images,
+        texture_quality,
+        quality_handles,
+        false,
+        None,
+    );
+    if assets.visual.is_some() {
+        commands.entity(model).insert(remake::Appearance {
+            enabled: visual.is_some(),
+            source_joints,
+            color_index,
+            stock: visual.is_none().then_some(remake::StockAppearance {
+                draws,
+                inverse: inverse_handle,
+            }),
+        });
     }
 
     for root in roots {
@@ -1326,6 +1497,8 @@ fn spawn_fighter_model_for(
                 meshes,
                 materials,
                 images,
+                texture_quality,
+                quality_handles,
             );
         }
     }
@@ -1334,6 +1507,111 @@ fn spawn_fighter_model_for(
         fighter,
         skin.groups.len()
     );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_body_skins(
+    commands: &mut Commands,
+    model: Entity,
+    fighter: Entity,
+    assets: &CharacterAssets,
+    visual: Option<&remake::VisualAssets>,
+    color_index: u8,
+    joint_entities: &[Entity],
+    inverse_handle: Handle<SkinnedMeshInverseBindposes>,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<GmdlMaterial>,
+    images: &mut Assets<bevy::image::Image>,
+    texture_quality: u8,
+    quality_handles: &mut crate::plugins::pak_textures::QualityTextureHandles,
+    concealed: bool,
+    cached: Option<&[remake::StockDraw]>,
+) -> Vec<remake::StockDraw> {
+    let skin = visual.map_or(&assets.skin, remake::VisualAssets::skin);
+
+    let mut material_cache: std::collections::HashMap<usize, Handle<GmdlMaterial>> =
+        std::collections::HashMap::new();
+    let mut draws = Vec::with_capacity(skin.groups.len());
+    for (index, group) in skin.groups.iter().enumerate() {
+        let indices = skin.indices[group.start..group.start + group.count].to_vec();
+        let mesh = if let Some(cached) = cached {
+            cached[index].mesh.clone()
+        } else if let Some(visual) = visual {
+            visual.mesh(meshes)
+        } else {
+            meshes.add(build_group_mesh(skin, &indices))
+        };
+        let def = skin.materials.get(group.material_index);
+        let base_alpha_cutoff = if let Some(cached) = cached {
+            cached[index].alpha_cutoff
+        } else if def.is_some_and(|def| def.alpha) {
+            0.5
+        } else {
+            0.0
+        };
+        let material = if let Some(cached) = cached {
+            cached[index].material.clone()
+        } else {
+            material_cache
+                .entry(group.material_index)
+                .or_insert_with(|| {
+                    if let Some(visual) = visual {
+                        visual.material(
+                            color_index,
+                            images,
+                            materials,
+                            texture_quality,
+                            quality_handles,
+                        )
+                    } else {
+                        build_skin_material(
+                            def,
+                            assets,
+                            color_index,
+                            images,
+                            materials,
+                            texture_quality,
+                            quality_handles,
+                        )
+                    }
+                })
+                .clone()
+        };
+        if concealed || cached.is_some() {
+            if let Some(mut value) = materials.get_mut(&material) {
+                apply_skin_concealment_material(&mut value, base_alpha_cutoff, concealed);
+            }
+        }
+        draws.push(remake::StockDraw {
+            mesh: mesh.clone(),
+            material: material.clone(),
+            alpha_cutoff: base_alpha_cutoff,
+        });
+        let skin_entity = commands
+            .spawn((
+                Mesh3d(mesh),
+                MeshMaterial3d(material),
+                SkinnedMesh {
+                    inverse_bindposes: inverse_handle.clone(),
+                    joints: joint_entities.to_vec(),
+                },
+                FighterSkin {
+                    fighter,
+                    base_alpha_cutoff,
+                    concealed,
+                },
+                PendingFighterSkinReveal,
+                Visibility::Hidden,
+                InheritedVisibility::default(),
+                Transform::IDENTITY,
+            ))
+            .insert(ChildOf(model))
+            .id();
+        if visual.is_some() {
+            remake::link_skin(commands, model, skin_entity);
+        }
+    }
+    draws
 }
 
 pub(crate) fn weapon_model_stem(weapon_id: u8, variant: u8) -> Option<String> {
@@ -1548,6 +1826,8 @@ fn load_weapon_texture(
     assets: &CharacterAssets,
     name: &str,
     alpha: WeaponTextureAlpha,
+    texture_quality: u8,
+    quality_handles: &mut crate::plugins::pak_textures::QualityTextureHandles,
 ) -> Option<Handle<bevy::image::Image>> {
     let bytes = resolve_weapon_texture(assets, name)?;
     let mut decoded = meteor_asset::texture::decode_image(&bytes).ok()?;
@@ -1576,7 +1856,13 @@ fn load_weapon_texture(
             }
         }
     }
-    Some(image_from_decoded(images, &decoded))
+    let handle = crate::plugins::pak_textures::image_from_decoded_with_quality(
+        images,
+        &decoded,
+        texture_quality,
+    );
+    crate::plugins::pak_textures::register_quality_texture(quality_handles, handle.clone());
+    Some(handle)
 }
 
 fn classify_gmc_shader(shader: &meteor_asset::gmc::GmcShader) -> (GmdlMode, f32, f32) {
@@ -1627,6 +1913,8 @@ pub(crate) fn spawn_weapon(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<GmdlMaterial>,
     images: &mut Assets<bevy::image::Image>,
+    texture_quality: u8,
+    quality_handles: &mut crate::plugins::pak_textures::QualityTextureHandles,
 ) {
     let specs = weapon_part_specs(weapon, variant);
     if specs.is_empty() {
@@ -1663,6 +1951,8 @@ pub(crate) fn spawn_weapon(
             meshes,
             materials,
             images,
+            texture_quality,
+            quality_handles,
         );
     }
 }
@@ -1684,6 +1974,8 @@ fn spawn_weapon_part(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<GmdlMaterial>,
     images: &mut Assets<bevy::image::Image>,
+    texture_quality: u8,
+    quality_handles: &mut crate::plugins::pak_textures::QualityTextureHandles,
 ) {
     let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let roots = resource_roots(&root);
@@ -1723,6 +2015,8 @@ fn spawn_weapon_part(
             images,
             active_slot,
             active_form,
+            texture_quality,
+            quality_handles,
         );
     } else if let Some(bytes) = gmb_bytes {
         if let Ok(gmdl) = meteor_asset::gmdl::decode_gmdl(&bytes) {
@@ -1742,6 +2036,8 @@ fn spawn_weapon_part(
                 images,
                 active_slot,
                 active_form,
+                texture_quality,
+                quality_handles,
             );
         } else {
             collision_boxes = Vec::new();
@@ -1816,6 +2112,8 @@ fn spawn_gmc_weapon(
     images: &mut Assets<bevy::image::Image>,
     active_slot: u8,
     active_form: u8,
+    texture_quality: u8,
+    quality_handles: &mut crate::plugins::pak_textures::QualityTextureHandles,
 ) -> usize {
     let mut spawned = 0usize;
     let mut material_cache: std::collections::HashMap<usize, Handle<GmdlMaterial>> =
@@ -1866,8 +2164,16 @@ fn spawn_gmc_weapon(
                         texture_name,
                         shader.map_or("NORMAL", |shader| shader.texture_mode.as_str()),
                     );
-                    let texture = texture_name
-                        .and_then(|name| load_weapon_texture(images, assets, name, alpha));
+                    let texture = texture_name.and_then(|name| {
+                        load_weapon_texture(
+                            images,
+                            assets,
+                            name,
+                            alpha,
+                            texture_quality,
+                            quality_handles,
+                        )
+                    });
                     let two_side = shader.map(|s| s.two_side).unwrap_or(false);
                     let (mode, opacity, alpha_cutoff) = shader
                         .map(classify_gmc_shader)
@@ -1960,6 +2266,8 @@ fn spawn_gmdl_weapon(
     images: &mut Assets<bevy::image::Image>,
     active_slot: u8,
     active_form: u8,
+    texture_quality: u8,
+    quality_handles: &mut crate::plugins::pak_textures::QualityTextureHandles,
 ) -> usize {
     let mut spawned = 0usize;
     for object in &gmdl.objects {
@@ -1990,8 +2298,16 @@ fn spawn_gmdl_weapon(
                 crate::plugins::render_plugin::classify_gmdl_material(mat);
             let texture_name = gmdl.resolve_texture_name(mat);
             let alpha = gmdl_weapon_texture_alpha(mat);
-            let texture =
-                texture_name.and_then(|name| load_weapon_texture(images, assets, name, alpha));
+            let texture = texture_name.and_then(|name| {
+                load_weapon_texture(
+                    images,
+                    assets,
+                    name,
+                    alpha,
+                    texture_quality,
+                    quality_handles,
+                )
+            });
             let material = materials.add(GmdlMaterial::new(
                 GmdlMaterialParams {
                     opacity,
@@ -2085,6 +2401,7 @@ fn build_group_mesh(skin: &meteor_asset::skc::SkinMesh, indices: &[u32]) -> Mesh
     )
     .with_inserted_attribute(Mesh::ATTRIBUTE_JOINT_WEIGHT, joint_weights)
     .with_inserted_indices(Indices::U32(indices.to_vec()))
+    .with_computed_smooth_normals()
 }
 
 fn build_skin_material(
@@ -2093,6 +2410,8 @@ fn build_skin_material(
     color_index: u8,
     images: &mut Assets<bevy::image::Image>,
     materials: &mut Assets<GmdlMaterial>,
+    texture_quality: u8,
+    quality_handles: &mut crate::plugins::pak_textures::QualityTextureHandles,
 ) -> Handle<GmdlMaterial> {
     let Some(def) = def else {
         return materials.add(GmdlMaterial::new(
@@ -2121,10 +2440,18 @@ fn build_skin_material(
             info!("character texture missing: {variant} (untextured fallback)");
             return None;
         };
-        image_handle(images, &bytes).or_else(|| {
-            warn!("character texture decode failed: {variant}");
-            None
-        })
+        crate::plugins::pak_textures::image_handle_with_quality(images, &bytes, texture_quality)
+            .map(|handle| {
+                crate::plugins::pak_textures::register_quality_texture(
+                    quality_handles,
+                    handle.clone(),
+                );
+                handle
+            })
+            .or_else(|| {
+                warn!("character texture decode failed: {variant}");
+                None
+            })
     });
     materials.add(GmdlMaterial::new(
         GmdlMaterialParams {
@@ -2145,7 +2472,12 @@ fn build_skin_material(
 type ModelTransformQuery<'w, 's> = Query<
     'w,
     's,
-    (Entity, &'static FighterModel, &'static mut Transform),
+    (
+        Entity,
+        &'static FighterModel,
+        &'static mut Transform,
+        &'static mut collision_sample::CollisionSampleState,
+    ),
     (Without<FighterBone>, Without<FighterDummy>),
 >;
 
@@ -2167,16 +2499,21 @@ fn visual_root_owned(
                 | meteor_core::FighterState::Attack3
                 | meteor_core::FighterState::Dodge
                 | meteor_core::FighterState::Burst
+                | meteor_core::FighterState::Fake
         )
 }
 
 #[allow(clippy::type_complexity)]
 #[allow(clippy::too_many_arguments)]
 fn drive_fighter_animation(
+    net: Option<Res<crate::plugins::network_plugin::NetState>>,
+    mrc: Option<Res<crate::plugins::replay_plugin::MrcPlayback>>,
     mut commands: Commands,
     sampled_models: Query<(), With<FighterPoseSampled>>,
     active_fighter: Option<Res<super::fighter_frame::ActiveFighter>>,
     time: Res<Time<bevy::time::Real>>,
+    simulation_time: Option<Res<Time>>,
+    frame_clock: Option<Res<super::FrameClock>>,
     assets: Option<Res<CharacterAssetsSet>>,
     common_amb: Option<Res<CommonAmb>>,
     mut fighters: Query<
@@ -2207,9 +2544,19 @@ fn drive_fighter_animation(
     let Some(common_amb) = common_amb else {
         return;
     };
-    let now_seconds = time.elapsed_secs_f64();
 
-    for (model_entity, model, mut model_transform) in models.iter_mut() {
+    let now_seconds = mrc
+        .as_ref()
+        .filter(|mrc| mrc.active)
+        .map_or_else(|| time.elapsed_secs_f64(), |mrc| f64::from(mrc.elapsed));
+    let root_dt = super::simulation_dt(
+        frame_clock.as_deref(),
+        simulation_time
+            .as_ref()
+            .map_or(time.delta_secs(), |time| time.delta_secs()),
+    );
+
+    for (model_entity, model, mut model_transform, mut collision_sample) in models.iter_mut() {
         if !super::fighter_frame::accepts(active_fighter.as_deref(), model.fighter) {
             continue;
         }
@@ -2232,6 +2579,14 @@ fn drive_fighter_animation(
         else {
             continue;
         };
+        if blend.preserve_sample_once {
+            continue;
+        }
+
+        let zero_retiring = blend.zero_duration_pending && blend.pose_id == pose.pose_id;
+        if blend.advance_zero_duration_sample(pose.pose_id, now_seconds) {
+            continue;
+        }
         let motion_root_pin = air.and_then(|air| air.motion_root_pin);
         let frame = pose.frame;
         let sampled = character_assets
@@ -2241,7 +2596,7 @@ fn drive_fighter_animation(
         model_transform.rotation = Quat::from_rotation_y(motion.facing)
             * Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
 
-        let blend_active = blend.duration > 0.0 && blend.pose_id == pose.pose_id;
+        let blend_active = blend.is_active_for(pose.pose_id) || zero_retiring;
         if blend_active && blend.started_at_seconds.is_none() {
             let mut root_snap = [0.0f32; 3];
             blend.from_quats.clear();
@@ -2293,7 +2648,11 @@ fn drive_fighter_animation(
         }
 
         if blend_active {
-            blend.elapsed = entry_blend_wall_elapsed(blend.started_at_seconds, now_seconds);
+            let speed = net
+                .as_deref()
+                .filter(|net| net.status == crate::plugins::network_plugin::NetStatus::InRoom)
+                .map_or(1.0, |net| net.battle_rules.speed_scale(pose.pose_id));
+            blend.elapsed = entry_blend_wall_elapsed(blend.started_at_seconds, now_seconds) * speed;
         }
         let t = if blend_active && blend.duration > 0.0 {
             (blend.elapsed / blend.duration).clamp(0.0, 1.0)
@@ -2301,10 +2660,39 @@ fn drive_fighter_animation(
             1.0
         };
         let base_dummy_index = character_assets.dummy_order.get("d_base").copied();
+        if !blend.retain_root_delta_once {
+            let delta = if blend_active || hit_reaction.entry_blend_held {
+                [0.0; 3]
+            } else {
+                character_assets.authored_root_step(&common_amb.0, pose, root_dt)
+            };
+            let (x, z) = meteor_anim::root_motion::root_delta_to_world_xz(
+                delta[0],
+                delta[1],
+                motion.facing,
+                1.0,
+            );
+            let rotation = if blend_active && t >= 1.0 {
+                Quat::IDENTITY
+            } else {
+                character_assets.reaction_root_rotation(
+                    &common_amb.0,
+                    pose,
+                    Some(&blend),
+                    hit_reaction.entry_blend_held,
+                    root_dt,
+                )
+            } * Vec3::X;
+            blend.last_root_sample = Some((
+                [x, delta[2] * meteor_core::MODEL_SCALE, z],
+                motion.facing + rotation.y.atan2(rotation.x),
+            ));
+        }
 
         let airborne = air.is_some_and(|air| air.air.airborne);
 
-        let root_owned = gun_aim.aiming
+        let root_owned = base_dummy_index.is_some()
+            || gun_aim.aiming
             || visual_root_owned(
                 sm.current,
                 airborne,
@@ -2412,8 +2800,25 @@ fn drive_fighter_animation(
                 transform.translation = Vec3::new(blended[0], blended[1], blended[2]);
             }
             if let Some(q) = sampled.dummy_quats.get(dummy.dummy_index) {
-                let target = Quat::from_xyzw(q[0], q[1], q[2], q[3]);
-                if t < 1.0 && dummy.dummy_index < blend.from_dummy_quats.len() {
+                let reaction_root =
+                    base_dummy_index == Some(dummy.dummy_index) && hit_reaction.current.is_some();
+                let target = if reaction_root {
+                    if blend_active && t >= 1.0 {
+                        Quat::IDENTITY
+                    } else {
+                        character_assets.reaction_root_rotation(
+                            &common_amb.0,
+                            pose,
+                            Some(&blend),
+                            hit_reaction.entry_blend_held,
+                            root_dt,
+                        )
+                    }
+                } else {
+                    Quat::from_xyzw(q[0], q[1], q[2], q[3])
+                };
+
+                if !reaction_root && t < 1.0 && dummy.dummy_index < blend.from_dummy_quats.len() {
                     transform.rotation =
                         blend_quat(blend.from_dummy_quats[dummy.dummy_index], target, t);
                 } else {
@@ -2432,6 +2837,7 @@ fn drive_fighter_animation(
             }
         }
 
+        collision_sample.pending = true;
         if !sampled_models.contains(model_entity) {
             commands.entity(model_entity).insert(FighterPoseSampled);
         }
@@ -2446,16 +2852,31 @@ fn drive_fighter_animation(
 
 pub(crate) fn sync_fighter_model_facing(
     active_fighter: Option<Res<super::fighter_frame::ActiveFighter>>,
-    fighters: Query<&crate::components::fighter::MotionState>,
+    fighters: Query<(
+        &crate::components::fighter::MotionState,
+        Option<&crate::components::fighter::FighterHitReaction>,
+    )>,
+    skeletons: FighterSkeletonQuery,
+    mut dummies: Query<(&FighterDummy, &mut Transform)>,
     mut models: ModelTransformQuery<'_, '_>,
 ) {
-    for (_, model, mut transform) in &mut models {
+    for (model_entity, model, mut transform, _) in &mut models {
         if !super::fighter_frame::accepts(active_fighter.as_deref(), model.fighter) {
             continue;
         }
-        if let Ok(motion) = fighters.get(model.fighter) {
-            transform.rotation = Quat::from_rotation_y(motion.facing)
+        if let Ok((motion, reaction)) = fighters.get(model.fighter) {
+            let next = Quat::from_rotation_y(motion.facing)
                 * Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
+            if reaction.is_some_and(|reaction| reaction.current.is_some()) {
+                let compensation = next.inverse() * transform.rotation;
+                let mut nodes = dummies.iter_many_mut(model_dummies(model_entity, &skeletons));
+                while let Some((dummy, mut node)) = nodes.fetch_next() {
+                    if dummy.name == MOTION_ROOT_DUMMY {
+                        node.rotation = (compensation * node.rotation).normalize();
+                    }
+                }
+            }
+            transform.rotation = next;
         }
     }
 }
@@ -2466,6 +2887,9 @@ pub(crate) fn drive_fighter_animation_for_test(world: &mut World) {
     world
         .run_system_once(drive_fighter_animation)
         .expect("production fighter animation");
+    world
+        .run_system_once(capture_collision_transforms)
+        .expect("sampled collision transforms");
 }
 
 #[cfg(test)]
@@ -2473,10 +2897,17 @@ pub(crate) fn install_crowd_animation_for_test(app: &mut App) {
     app.add_systems(
         super::fighter_frame::schedule(app),
         (
-            drive_fighter_animation.in_set(super::FighterFrameSet::SkeletonSample),
+            (drive_fighter_animation, capture_collision_transforms)
+                .chain()
+                .in_set(super::FighterFrameSet::SkeletonSample),
             resample_late_air_pose_visual.in_set(super::FighterFrameSet::PoseResolve),
         ),
     );
+}
+
+#[cfg(test)]
+pub(crate) fn install_hit_sway_for_test(app: &mut App) {
+    hit_sway::install(app);
 }
 
 #[cfg(test)]
@@ -2485,6 +2916,22 @@ pub(crate) fn spawn_fighter_model_for_test(world: &mut World, fighter: Entity) {
         .get::<crate::components::fighter::Fighter>(fighter)
         .unwrap()
         .clone();
+    let new_models = world
+        .get_resource::<crate::app_state::Settings>()
+        .is_none_or(|s| s.new_character_models);
+    let mut meshes = world.remove_resource::<Assets<Mesh>>().unwrap_or_default();
+    let mut materials = world
+        .remove_resource::<Assets<GmdlMaterial>>()
+        .unwrap_or_default();
+    let mut images = world
+        .remove_resource::<Assets<bevy::image::Image>>()
+        .unwrap_or_default();
+    let mut inverse = world
+        .remove_resource::<Assets<SkinnedMeshInverseBindposes>>()
+        .unwrap_or_default();
+    let mut quality = world
+        .remove_resource::<crate::plugins::pak_textures::QualityTextureHandles>()
+        .unwrap_or_default();
     world.resource_scope(|world, assets: Mut<CharacterAssetsSet>| {
         let character = format!("p{}", meta.character_id);
         let mut state = bevy::ecs::system::SystemState::<Commands>::new(world);
@@ -2497,13 +2944,21 @@ pub(crate) fn spawn_fighter_model_for_test(world: &mut World, fighter: Entity) {
             &character,
             &assets.0[&character],
             0,
-            &mut Assets::default(),
-            &mut Assets::default(),
-            &mut Assets::default(),
-            &mut Assets::default(),
+            &mut meshes,
+            &mut materials,
+            &mut images,
+            &mut inverse,
+            new_models,
+            0,
+            &mut quality,
         );
         state.apply(world);
     });
+    world.insert_resource(meshes);
+    world.insert_resource(materials);
+    world.insert_resource(images);
+    world.insert_resource(inverse);
+    world.insert_resource(quality);
 }
 
 fn resample_late_air_pose_visual(
@@ -2599,6 +3054,8 @@ fn rebuild_weapon_inventory(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<GmdlMaterial>>,
     mut images: ResMut<Assets<bevy::image::Image>>,
+    mut quality_handles: ResMut<crate::plugins::pak_textures::QualityTextureHandles>,
+    settings: Res<crate::app_state::Settings>,
     fighters: Query<
         (
             Entity,
@@ -2666,6 +3123,8 @@ fn rebuild_weapon_inventory(
                 &mut meshes,
                 &mut materials,
                 &mut images,
+                settings.texture_quality,
+                &mut quality_handles,
             );
         }
         commands
@@ -2724,6 +3183,58 @@ fn head_track(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pause_preserves_models_and_suspended_exit_cleans_them() {
+        use crate::app_state::AppState;
+        let mut app = App::new();
+        app.add_plugins(bevy::state::app::StatesPlugin)
+            .init_state::<AppState>()
+            .add_systems(
+                OnExit(AppState::Playing),
+                despawn_fighter_models.run_if(crate::plugins::ends_playing_session),
+            )
+            .add_systems(
+                OnTransition {
+                    exited: AppState::Paused,
+                    entered: AppState::Menu,
+                },
+                crate::plugins::cleanup_suspended_playing_session,
+            );
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::Playing);
+        app.update();
+        let fighter = app.world_mut().spawn_empty().id();
+        let model = app
+            .world_mut()
+            .spawn(FighterModel {
+                fighter,
+                character: "p0".into(),
+            })
+            .id();
+        for state in [
+            AppState::Paused,
+            AppState::Settings,
+            AppState::Paused,
+            AppState::Playing,
+            AppState::Paused,
+        ] {
+            app.world_mut()
+                .resource_mut::<NextState<AppState>>()
+                .set(state);
+            app.update();
+            assert!(
+                app.world().get::<FighterModel>(model).is_some(),
+                "model survives {state:?}"
+            );
+        }
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::Menu);
+        app.update();
+        assert!(app.world().get::<FighterModel>(model).is_none());
+    }
 
     #[test]
     fn network_asset_barrier_preloads_all_twelve_weapon_models() {
@@ -2923,6 +3434,82 @@ mod tests {
             false,
             false,
         ));
+    }
+
+    #[test]
+    fn side_reaction_continuous_basis_matches_original_executable() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        let common = meteor_asset::amb::parse_amb(
+            &std::fs::read(root.join("Common/character.amb")).unwrap(),
+        )
+        .unwrap();
+        let character = load_character_asset_for_test(&[root], "p0").unwrap();
+        let golden: serde_json::Value = serde_json::from_str(include_str!(
+            "combat_plugin/stock_side_reaction_feedback.json"
+        ))
+        .unwrap();
+        for case in golden["cases"].as_array().unwrap() {
+            let id = case["pose"].as_u64().unwrap() as u16;
+            let dt = 1.0 / case["fps"].as_f64().unwrap() as f32;
+            let mut pose = crate::components::fighter::PoseRuntime::idle();
+            character.apply_pose(&mut pose, id, true);
+            let mut rotation = Quat::IDENTITY;
+            let mut position = Vec3::new(7.0, -11.0, 3.0);
+            for sample in case["steps"].as_array().unwrap() {
+                pose.frame = sample["frame"].as_f64().unwrap() as f32;
+                position +=
+                    rotation * Vec3::from_array(character.authored_root_step(&common, &pose, dt));
+                rotation =
+                    (rotation * character.authored_root_rotation(&common, &pose, dt)).normalize();
+                let expected = Vec3::from_array(std::array::from_fn(|i| {
+                    sample["position"][i].as_f64().unwrap() as f32
+                }));
+                let direction = rotation * Vec3::X;
+                let yaw = sample["yaw"].as_f64().unwrap() as f32;
+                assert!(
+                    position.abs_diff_eq(expected, 0.0002),
+                    "pose{id} frame{} dt{dt}: {position:?} != {expected:?}",
+                    pose.frame
+                );
+                assert!(direction.abs_diff_eq(Vec3::new(yaw.cos(), yaw.sin(), 0.0), 1e-5));
+            }
+        }
+    }
+
+    #[test]
+    fn side_reaction_root_steps_match_original_executable() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        let common = meteor_asset::amb::parse_amb(
+            &std::fs::read(root.join("Common/character.amb")).unwrap(),
+        )
+        .unwrap();
+        let characters: Vec<_> = ["p0", "p1"]
+            .into_iter()
+            .map(|name| load_character_asset_for_test(std::slice::from_ref(&root), name).unwrap())
+            .collect();
+        let golden: serde_json::Value = serde_json::from_str(include_str!(
+            "combat_plugin/stock_side_reaction_root_steps.json"
+        ))
+        .unwrap();
+        for sample in golden["samples"].as_array().unwrap() {
+            let hero = sample["hero"].as_u64().unwrap() as usize;
+            let id = sample["pose"].as_u64().unwrap() as u16;
+            let frame = sample["frame"].as_f64().unwrap() as f32;
+            let dt = sample["dt"].as_f64().unwrap() as f32;
+            let mut pose = crate::components::fighter::PoseRuntime::idle();
+            characters[hero].apply_pose(&mut pose, id, true);
+            pose.frame = frame;
+            let actual = characters[hero].authored_root_step(&common, &pose, dt);
+            let expected: [f32; 3] =
+                std::array::from_fn(|axis| sample["delta"][axis].as_f64().unwrap() as f32);
+            assert!(
+                actual
+                    .iter()
+                    .zip(expected)
+                    .all(|(a, b)| (a - b).abs() < 0.0005),
+                "p{hero} pose{id} frame{frame}: Rust {actual:?}, stock {expected:?}"
+            );
+        }
     }
 
     #[test]
@@ -3185,6 +3772,8 @@ mod tests {
             &assets,
             "AItem0902.jpg",
             WeaponTextureAlpha::Luminance,
+            0,
+            &mut crate::plugins::pak_textures::QualityTextureHandles::default(),
         )
         .unwrap();
         let bytes = resolve_weapon_texture_exact(&assets, "AItem0902.bmp").unwrap();
@@ -3196,6 +3785,7 @@ mod tests {
             .as_ref()
             .unwrap()
             .chunks_exact(4)
+            .take((alpha.width * alpha.height) as usize)
             .map(|p| p[3])
             .collect();
         let expected: Vec<_> = alpha.rgba.chunks_exact(4).map(|p| p[0]).collect();
@@ -3341,13 +3931,16 @@ mod tests {
                 (id, slot, spec.stem)
             })
             .collect();
-        for pose in [431, 485, 486, 403, 520, 522, 524, 451, 452, 456, 487] {
+        for pose in [
+            431, 485, 486, 403, 151, 152, 180, 180, 403, 153, 154, 180, 155, 156, 180, 157, 158,
+            180, 520, 522, 524, 451, 452, 456, 487,
+        ] {
             app.world_mut()
                 .get_mut::<PoseRuntime>(fighter)
                 .unwrap()
                 .pose_id = pose;
             app.update();
-            let combined = matches!(pose, 486 | 403 | 520 | 524 | 451 | 487);
+            let combined = matches!(pose, 151..=158 | 180 | 486 | 403 | 520 | 524 | 451 | 487);
             for (id, slot, stem) in &parts {
                 let expected = *slot == 0
                     && if combined {
@@ -3446,8 +4039,8 @@ mod tests {
     }
 
     #[test]
-    fn entry_blend_duration_non_positive_authored_falls_through() {
-        assert!((entry_blend_duration(Some(0.0), None, 0) - 0.12).abs() < 1e-6);
+    fn entry_blend_duration_preserves_zero_and_rejects_invalid() {
+        assert_eq!(entry_blend_duration(Some(0.0), None, 0), 0.0);
         assert!((entry_blend_duration(Some(-1.0), None, 0) - 0.12).abs() < 1e-6);
         assert!((entry_blend_duration(Some(f32::NAN), None, 0) - 0.12).abs() < 1e-6);
         assert!((entry_blend_duration(Some(f32::INFINITY), None, 0) - 0.12).abs() < 1e-6);
@@ -3589,6 +4182,38 @@ mod tests {
         assert!((blend.duration - 0.12).abs() < 1e-6);
         assert_eq!(pose.frame, 0.0);
         assert_eq!(pose.pose_instance_id, 1);
+        assert_eq!(blend.motion_source, Some((3, 7)));
+
+        apply_with(
+            &mut pose,
+            &mut blend,
+            &frames,
+            &poses,
+            3,
+            true,
+            None,
+            crate::components::fighter::EntryBlendKind::Generic,
+            false,
+            false,
+            None,
+        );
+        assert_eq!(blend.motion_source, Some((3, 7)));
+        blend.duration = 0.0;
+        pose.frame = 8.5;
+        apply_with(
+            &mut pose,
+            &mut blend,
+            &frames,
+            &poses,
+            3,
+            true,
+            None,
+            crate::components::fighter::EntryBlendKind::Generic,
+            false,
+            false,
+            None,
+        );
+        assert_eq!(blend.motion_source, Some((3, 8)));
     }
 
     #[test]
@@ -3598,6 +4223,7 @@ mod tests {
         frames.extend(target_frames);
         poses.extend(target_poses);
         let mut pose = crate::components::fighter::PoseRuntime {
+            action_id: None,
             pose_id: 8,
             frame: 112.5,
             start: 100,
@@ -3605,6 +4231,7 @@ mod tests {
             loop_start: 100,
             loop_end: 140,
             loops: false,
+            link_past_end: false,
             pose_instance_id: 4,
         };
         let mut blend = crate::components::fighter::EntryBlend::default();
@@ -3742,6 +4369,8 @@ pub(crate) fn spawn_live_portrait_fixture(
     mut materials: ResMut<Assets<GmdlMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut inverse_binds: ResMut<Assets<SkinnedMeshInverseBindposes>>,
+    mut quality_handles: ResMut<crate::plugins::pak_textures::QualityTextureHandles>,
+    settings: Res<crate::app_state::Settings>,
 ) {
     let roots = [std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res")];
     let assets = load_character_asset_for_test(&roots, "p1").expect("original p1 assets");
@@ -3758,6 +4387,9 @@ pub(crate) fn spawn_live_portrait_fixture(
             &mut materials,
             &mut images,
             &mut inverse_binds,
+            settings.new_character_models,
+            settings.texture_quality,
+            &mut quality_handles,
         );
     }
 }
@@ -3778,3 +4410,7 @@ pub(crate) fn animate_live_portrait_fixture(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "character_plugin/rebalance_tests.rs"]
+mod rebalance_tests;

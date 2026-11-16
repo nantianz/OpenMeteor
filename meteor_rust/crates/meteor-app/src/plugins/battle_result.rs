@@ -23,21 +23,102 @@ pub struct ScoreRow {
     pub deaths: u32,
 }
 
+#[derive(Resource, Default)]
+pub struct OfflineScores {
+    pub roster: std::collections::BTreeMap<String, ScoreRow>,
+    totals: std::collections::BTreeMap<String, (u32, u32)>,
+}
+
+pub fn offline_actor_id(local: bool, mission_id: Option<i64>, slot: u8) -> String {
+    if local {
+        "local".into()
+    } else if let Some(id) = mission_id {
+        format!("npc:{id}")
+    } else {
+        format!("slot:{slot}")
+    }
+}
+
+pub(crate) fn offline_player_team(request: &LaunchRequest) -> i32 {
+    if request.mode == "single" && !request.spawn_room_npcs {
+        1
+    } else {
+        request.stock_camp as i32
+    }
+}
+
+impl OfflineScores {
+    pub fn record_death(&mut self, target: String, attacker: Option<String>) {
+        let total = self.totals.entry(target.clone()).or_default();
+        total.1 = total.1.saturating_add(1);
+        if let Some(attacker) = attacker.filter(|id| id != &target) {
+            let total = self.totals.entry(attacker).or_default();
+            total.0 = total.0.saturating_add(1);
+        }
+    }
+
+    pub fn rows(&self, request: &LaunchRequest, score: &KillScore) -> Vec<ScoreRow> {
+        let mut roster = self.roster.clone();
+        roster.entry("local".into()).or_insert_with(|| ScoreRow {
+            id: "local".into(),
+            name: if request.player_name.is_empty() {
+                "玩家".into()
+            } else {
+                request.player_name.clone()
+            },
+            team: offline_player_team(request),
+            kills: 0,
+            deaths: 0,
+        });
+        let mut rows: Vec<_> = roster
+            .into_values()
+            .map(|mut row| {
+                let (kills, deaths) = self.totals.get(&row.id).copied().unwrap_or((
+                    if row.id == "local" {
+                        score.player_kills
+                    } else {
+                        0
+                    },
+                    0,
+                ));
+                row.kills = kills;
+                row.deaths = deaths;
+                row
+            })
+            .collect();
+        rows.sort_by(|a, b| {
+            b.kills
+                .cmp(&a.kills)
+                .then(a.deaths.cmp(&b.deaths))
+                .then(a.id.cmp(&b.id))
+        });
+        rows
+    }
+}
+
+pub fn local_player_id(net: &NetState) -> String {
+    if net.player_id.is_empty() {
+        "local".into()
+    } else {
+        net.player_id.clone()
+    }
+}
+
 pub fn score_rows(net: &NetState, request: &LaunchRequest, score: &KillScore) -> Vec<ScoreRow> {
+    let local_id = local_player_id(net);
     let mut ids = std::collections::BTreeSet::new();
     ids.extend(net.members.iter().map(|m| m.player_id.clone()));
     ids.extend(net.remote_actor_names.keys().cloned());
     ids.extend(net.remote_kills.keys().cloned());
     ids.extend(net.stock_deaths.keys().cloned());
     ids.extend(net.network_npc_ids.iter().cloned());
-    if !net.player_id.is_empty() {
-        ids.insert(net.player_id.clone());
-    }
+
+    ids.insert(local_id.clone());
     let mut rows = ids
         .into_iter()
         .map(|id| {
             let member = net.members.iter().find(|m| m.player_id == id);
-            let local = id == net.player_id;
+            let local = id == local_id || (!net.player_id.is_empty() && id == net.player_id);
             let name = net
                 .remote_actor_names
                 .get(&id)
@@ -50,19 +131,27 @@ pub fn score_rows(net: &NetState, request: &LaunchRequest, score: &KillScore) ->
                 })
                 .unwrap_or_else(|| {
                     if local {
-                        request.player_name.clone()
+                        if request.player_name.is_empty() {
+                            "玩家".into()
+                        } else {
+                            request.player_name.clone()
+                        }
                     } else {
                         id.clone()
                     }
                 });
-            let team = member
-                .and_then(|m| m.team)
-                .map(|v| v as i32)
-                .or_else(|| net.remote_actor_teams.get(&id).copied())
-                .unwrap_or(if local { request.stock_camp as i32 } else { 0 });
+            let team = if local && net.status != super::network_plugin::NetStatus::InRoom {
+                offline_player_team(request)
+            } else {
+                member
+                    .and_then(|m| m.team)
+                    .map(|v| v as i32)
+                    .or_else(|| net.remote_actor_teams.get(&id).copied())
+                    .unwrap_or(if local { request.stock_camp as i32 } else { 0 })
+            };
             let kills = net.remote_kills.get(&id).copied().unwrap_or_else(|| {
                 if local {
-                    score.player_kills.saturating_add(score.npc_kills)
+                    score.player_kills
                 } else {
                     0
                 }
@@ -145,18 +234,18 @@ pub fn result_heading(net: &NetState, result: &NetworkBattleResult) -> String {
 }
 
 pub fn score_text(net: &NetState, request: &LaunchRequest, score: &KillScore) -> String {
+    format_score_rows(&score_rows(net, request, score), &local_player_id(net))
+}
+
+pub fn format_score_rows(rows: &[ScoreRow], local_id: &str) -> String {
     let mut lines = vec!["排名    姓名 / 阵营                 击杀    被打败".to_owned()];
-    for (rank, row) in score_rows(net, request, score).iter().enumerate() {
+    for (rank, row) in rows.iter().enumerate() {
         let camp = match row.team {
             1 => "流星",
             2 => "蝴蝶",
             _ => "个人",
         };
-        let me = if row.id == net.player_id {
-            "（你）"
-        } else {
-            ""
-        };
+        let me = if row.id == local_id { "（你）" } else { "" };
         lines.push(format!(
             "{}    {}{} / {}        {}        {}",
             rank + 1,
@@ -174,47 +263,68 @@ pub(crate) fn gameplay_active(net: Option<Res<NetState>>) -> bool {
     net.is_none_or(|net| net.battle_result.is_none())
 }
 
+pub(crate) mod timing;
+mod view;
+pub(crate) use view::SettlementLayout;
+
 pub struct BattleResultPlugin;
 
 #[derive(Component)]
 struct RoundOverlay;
 #[derive(Component)]
-struct RoundHeading;
-#[derive(Component)]
-struct RoundScores;
-#[derive(Component)]
 struct RoundFooter;
 #[derive(Component)]
-struct ResultEmblem;
-#[derive(Resource, Default)]
-struct ResultArt([Option<Handle<Image>>; 3]);
+struct RoundProgress;
 
 impl Plugin for BattleResultPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<ResultArt>()
-            .add_systems(Startup, load_result_art)
+        app.init_resource::<timing::BestTimes>()
+            .init_resource::<timing::SettlementTime>()
+            .add_systems(OnEnter(AppState::Loading), timing::reset)
             .add_systems(
                 Update,
-                update_round_overlay.after(super::fighter_frame::SerialFighterSet),
+                timing::capture
+                    .in_set(timing::CaptureSettlementTime)
+                    .after(super::fighter_frame::SerialFighterSet),
+            )
+            .add_systems(
+                Update,
+                update_round_overlay.after(timing::CaptureSettlementTime),
             );
     }
 }
 
-fn load_result_art(mut art: ResMut<ResultArt>, mut images: ResMut<Assets<Image>>) {
-    for (i, name) in ["sheng.bmp", "fu.bmp", "he.bmp"].iter().enumerate() {
-        let bytes = crate::resource_io::required(&format!("image/{name}"));
-        let Ok(mut decoded) = meteor_asset::texture::decode_image(&bytes) else {
-            continue;
-        };
-
-        for pixel in decoded.rgba.chunks_exact_mut(4) {
-            pixel[3] = pixel[0].max(pixel[1]).max(pixel[2]);
-        }
-        art.0[i] = Some(super::pak_textures::image_from_decoded(
-            &mut images,
-            &decoded,
-        ));
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_final_surface(
+    commands: &mut Commands,
+    root: Entity,
+    font: &super::launcher_ui::UiFont,
+    net: &NetState,
+    request: &LaunchRequest,
+    score: &KillScore,
+    offline: &OfflineScores,
+    bits: i32,
+    elapsed: f32,
+    timing: &timing::SettlementTime,
+    records: &timing::BestTimes,
+    layout: SettlementLayout,
+) -> Entity {
+    let mut data = if net.battle_result.is_some() {
+        view::Presentation::network(net, request, score)
+    } else {
+        view::Presentation::offline(request, score, offline, bits)
+    };
+    data.elapsed_ms = timing.elapsed_ms.or_else(|| timing::milliseconds(elapsed));
+    if net.battle_result.is_none() && request.mode == "single" && !request.spawn_room_npcs {
+        data.best_time = Some(records.best(&request.stage_id));
+        data.new_best = timing.new_best;
+        data.save_failed = records.save_failed;
     }
+    view::spawn_surface(commands, root, font, &data, layout)
+}
+
+pub(crate) fn settlement_overlay_node() -> Node {
+    view::overlay_node()
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -225,16 +335,14 @@ fn update_round_overlay(
     mut net: ResMut<NetState>,
     request: Res<LaunchRequest>,
     score: Res<KillScore>,
+    timing: Res<timing::SettlementTime>,
     font: Res<super::launcher_ui::UiFont>,
-    art: Res<ResultArt>,
+    windows: Query<&Window>,
+    scale: Option<Res<UiScale>>,
     roots: Query<Entity, With<RoundOverlay>>,
-    mut labels: Query<(
-        &mut Text,
-        Option<&RoundHeading>,
-        Option<&RoundScores>,
-        Option<&RoundFooter>,
-    )>,
-    mut emblems: Query<(&mut Node, &mut ImageNode), With<ResultEmblem>>,
+    mut footers: Query<&mut Text, With<RoundFooter>>,
+    mut progress_bars: Query<&mut Node, With<RoundProgress>>,
+    mut previous: Local<Option<(view::Presentation, SettlementLayout, bool)>>,
 ) {
     let visible =
         matches!(*state.get(), AppState::Playing | AppState::Paused) && net.battle_result.is_some();
@@ -242,138 +350,95 @@ fn update_round_overlay(
         for root in &roots {
             commands.entity(root).despawn();
         }
+        *previous = None;
         return;
     }
     let result = net.battle_result.as_mut().unwrap();
     result.elapsed += time.delta_secs();
-    let result = result.clone();
-    let bits = local_result_bits(&net, &request, &result);
-    let title = format!(
-        "{} · 第 {} 回合\n{}",
-        if result.terminal {
-            "战局结算"
-        } else {
-            "回合结算"
-        },
-        result.round.max(1),
-        result_heading(&net, &result)
-    );
-    let scores = score_text(&net, &request, &score);
-    let remaining = (10.0 - result.elapsed).max(0.0).ceil() as u32;
-    let footer = format!(
-        "流星 {} : {} 蝴蝶\n{}",
-        net.stock_team_wins[0],
-        net.stock_team_wins[1],
-        if result.terminal {
-            "战局已结束".to_owned()
-        } else if remaining > 0 {
-            format!("{remaining} 秒后开始下一回合")
-        } else {
-            "等待房主开始下一回合".to_owned()
+    let elapsed = result.elapsed;
+    let terminal = result.terminal;
+    let mut data = view::Presentation::network(&net, &request, &score);
+    data.elapsed_ms = timing.elapsed_ms;
+    let unit = scale.as_ref().map_or(1.0, |s| s.0).max(0.05);
+    let layout = windows.single().map_or(SettlementLayout::Desktop, |w| {
+        SettlementLayout::for_viewport(w.width() / unit, w.height() / unit)
+    });
+    let remaining = (10.0 - elapsed).max(0.0).ceil() as u32;
+    let footer = if terminal {
+        "本场对战结束 · 即将进入最终战绩".to_owned()
+    } else if remaining > 0 {
+        format!("下一回合即将开始    {remaining:02} 秒")
+    } else {
+        "等待房主开始下一回合".to_owned()
+    };
+
+    let signature = (data.clone(), layout, terminal);
+    if previous.as_ref() != Some(&signature) || roots.is_empty() {
+        for root in &roots {
+            commands.entity(root).despawn();
         }
-    );
-    if roots.is_empty() {
         let root = commands
             .spawn((
-                super::launcher_ui::scrollable_y(Node {
-                    position_type: PositionType::Absolute,
-                    left: Val::Percent(8.0),
-                    top: Val::Percent(4.0),
-                    width: Val::Percent(84.0),
-                    max_height: Val::Percent(88.0),
-                    padding: UiRect::all(Val::Px(20.0)),
-                    flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(10.0),
-                    ..default()
-                }),
-                BackgroundColor(Color::srgba(0.025, 0.03, 0.045, 0.88)),
+                view::overlay_node(),
+                BackgroundColor(super::ui_theme::BACKGROUND),
+                super::ui_theme::CinematicBackdrop,
                 GlobalZIndex(290),
+                bevy::ui::FocusPolicy::Block,
                 super::ui_components::UiInputBlocker,
                 RoundOverlay,
             ))
             .id();
-        let image_index = if bits == 4 {
-            0
-        } else if bits == 2 {
-            1
-        } else {
-            2
-        };
-        if let Some(handle) = &art.0[image_index] {
-            let emblem = commands
+        let panel = view::spawn_surface(&mut commands, root, &font, &data, layout);
+        let foot = view::label(
+            &mut commands,
+            panel,
+            &font,
+            &footer,
+            12.0,
+            super::ui_theme::MUTED,
+        );
+        commands.entity(foot).insert((
+            RoundFooter,
+            Node {
+                flex_shrink: 0.0,
+                ..default()
+            },
+        ));
+        if !terminal {
+            let track = commands
                 .spawn((
                     Node {
-                        width: Val::Px(150.0),
-                        height: Val::Px(100.0),
-                        align_self: AlignSelf::Center,
+                        width: Val::Percent(100.0),
+                        height: Val::Px(2.0),
+                        flex_shrink: 0.0,
                         ..default()
                     },
-                    ImageNode::new(handle.clone()),
-                    ResultEmblem,
+                    BackgroundColor(super::ui_theme::LINE),
                 ))
                 .id();
-            commands.entity(root).add_child(emblem);
+            let bar = commands
+                .spawn((
+                    Node {
+                        width: Val::Percent(((10.0 - elapsed) / 10.0).clamp(0.0, 1.0) * 100.0),
+                        height: Val::Percent(100.0),
+                        ..default()
+                    },
+                    BackgroundColor(super::ui_theme::METAL),
+                    RoundProgress,
+                ))
+                .id();
+            commands.entity(track).add_child(bar);
+            commands.entity(panel).add_child(track);
         }
-        for (index, content) in [title, scores, footer].into_iter().enumerate() {
-            let mut label = commands.spawn((
-                Text::new(content),
-                TextFont {
-                    font: font.0.clone().into(),
-                    font_size: (if index == 0 { 26.0 } else { 18.0 }).into(),
-                    ..default()
-                },
-                TextColor(if index == 0 {
-                    Color::srgb(1.0, 0.83, 0.45)
-                } else {
-                    Color::WHITE
-                }),
-            ));
-            match index {
-                0 => {
-                    label.insert(RoundHeading);
-                }
-                1 => {
-                    label.insert(RoundScores);
-                }
-                _ => {
-                    label.insert(RoundFooter);
-                }
-            }
-            let child = label.id();
-            commands.entity(root).add_child(child);
-        }
+        *previous = Some(signature);
     } else {
-        for (mut text, heading, rows, foot) in &mut labels {
-            let value = if heading.is_some() {
-                &title
-            } else if rows.is_some() {
-                &scores
-            } else if foot.is_some() {
-                &footer
-            } else {
-                continue;
-            };
-            if text.0 != *value {
-                text.0.clone_from(value);
+        for mut text in &mut footers {
+            if text.0 != footer {
+                text.0.clone_from(&footer);
             }
         }
-    }
-
-    let progress = (result.elapsed / 0.55).clamp(0.0, 1.0);
-    let scale = 1.0 + 0.3 * (1.0 - progress).powi(3);
-    let image_index = if bits == 4 {
-        0
-    } else if bits == 2 {
-        1
-    } else {
-        2
-    };
-    for (mut node, mut image) in &mut emblems {
-        node.width = Val::Px(150.0 * scale);
-        node.height = Val::Px(100.0 * scale);
-        image.color = Color::srgba(1.0, 1.0, 1.0, progress);
-        if let Some(handle) = &art.0[image_index] {
-            image.image = handle.clone();
+        for mut bar in &mut progress_bars {
+            bar.width = Val::Percent(((10.0 - elapsed) / 10.0).clamp(0.0, 1.0) * 100.0);
         }
     }
 }
@@ -383,25 +448,9 @@ mod tests {
     use super::*;
     use meteor_network::protocol::RoomMemberWire;
 
-    #[cfg(feature = "original-assets")]
-    #[test]
-    fn original_result_images_are_available_without_external_resource_directories() {
-        let mut app = App::new();
-        app.init_resource::<ResultArt>()
-            .init_resource::<Assets<Image>>()
-            .add_systems(Update, load_result_art);
-        app.update();
-        let images = app.world().resource::<Assets<Image>>();
-        for handle in &app.world().resource::<ResultArt>().0 {
-            let image = images
-                .get(handle.as_ref().expect("original result bitmap"))
-                .unwrap();
-            assert_eq!(image.size(), UVec2::new(300, 200));
-        }
-    }
-
     fn room() -> NetState {
         let mut net = NetState::default();
+        net.status = super::super::network_plugin::NetStatus::InRoom;
         net.player_id = "b".into();
         net.members = [("a", "甲", 1), ("b", "乙", 2), ("c", "丙", 2)]
             .into_iter()
@@ -460,6 +509,87 @@ mod tests {
     }
 
     #[test]
+    fn offline_scoreboard_keeps_local_player_row() {
+        let rows = score_rows(
+            &NetState::default(),
+            &LaunchRequest {
+                player_name: "剑客".into(),
+                stock_camp: 1,
+                ..default()
+            },
+            &KillScore {
+                player_kills: 2,
+                npc_kills: 1,
+            },
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "local");
+        assert_eq!(rows[0].name, "剑客");
+        assert_eq!(rows[0].team, 1);
+        assert_eq!(rows[0].kills, 2);
+        let text = score_text(
+            &NetState::default(),
+            &LaunchRequest {
+                player_name: "剑客".into(),
+                ..default()
+            },
+            &KillScore {
+                player_kills: 2,
+                npc_kills: 0,
+            },
+        );
+        assert!(text.contains("剑客（你）"));
+    }
+
+    #[test]
+    fn solo_score_row_ignores_disconnected_room_camp() {
+        let mut net = room();
+        net.status = super::super::network_plugin::NetStatus::Disconnected;
+        let rows = score_rows(
+            &net,
+            &LaunchRequest {
+                stock_camp: 2,
+                ..default()
+            },
+            &KillScore::default(),
+        );
+        assert_eq!(rows.iter().find(|row| row.id == "b").unwrap().team, 1);
+    }
+
+    #[test]
+    fn offline_totals_are_per_actor_and_survive_roster_refresh() {
+        let mut scores = OfflineScores::default();
+        let npc = offline_actor_id(false, Some(7), 1);
+        scores.roster.insert(
+            npc.clone(),
+            ScoreRow {
+                id: npc.clone(),
+                name: "对手".into(),
+                team: 2,
+                kills: 0,
+                deaths: 0,
+            },
+        );
+        scores.record_death("local".into(), Some(npc.clone()));
+        scores.record_death("local".into(), None);
+        scores.record_death(npc.clone(), Some("local".into()));
+
+        scores.roster.get_mut(&npc).unwrap().name = "对手复活".into();
+        let rows = scores.rows(
+            &LaunchRequest::default(),
+            &KillScore {
+                player_kills: 1,
+                npc_kills: 1,
+            },
+        );
+        let local = rows.iter().find(|row| row.id == "local").unwrap();
+        let opponent = rows.iter().find(|row| row.id == npc).unwrap();
+        assert_eq!((local.kills, local.deaths), (1, 2));
+        assert_eq!((opponent.kills, opponent.deaths), (1, 1));
+        assert!(format_score_rows(&rows, "local").contains("对手复活"));
+    }
+
+    #[test]
     fn round_overlay_appears_updates_and_clears_without_leaving_playing() {
         let mut net = room();
         net.battle_result = Some(NetworkBattleResult {
@@ -473,8 +603,8 @@ mod tests {
             .insert_resource(net)
             .init_resource::<LaunchRequest>()
             .init_resource::<KillScore>()
-            .init_resource::<ResultArt>()
             .insert_resource(super::super::launcher_ui::UiFont(Handle::default()))
+            .init_resource::<timing::SettlementTime>()
             .add_systems(Update, update_round_overlay);
         app.update();
         let world = app.world_mut();

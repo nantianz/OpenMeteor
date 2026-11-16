@@ -1,3 +1,4 @@
+use super::battle_result::{offline_actor_id, OfflineScores};
 use crate::app_state::{AppState, Settings};
 use crate::components::fighter::{
     AiIntent, CombatState, DeathRespawn, EntryBlend, EntryBlendKind, Fighter, FighterHitReaction,
@@ -10,7 +11,7 @@ use crate::plugins::character_contact_plugin::{
 };
 use crate::plugins::character_plugin::{
     model_bones, model_dummies, CharacterAssets, CharacterAssetsSet, CommonAmb, FighterBone,
-    FighterDummy, FighterModel, FighterSkeletonQuery,
+    FighterDummy, FighterModel, FighterSkeletonQuery, WeaponEndpoint,
 };
 use crate::plugins::input_plugin::{
     DesktopDodgeInput, DodgeGesture, LocalCombatInput, LocalCombatInputEdge, LocalCrouchInput,
@@ -25,7 +26,9 @@ use crate::plugins::network_plugin::{
     RemoteTransformTarget,
 };
 use crate::plugins::stage_collider::StageCollider;
-use crate::plugins::stage_plugin::{LocalFighter, MissionNpc, NpcCombatProfile, NpcPerformance};
+#[cfg(test)]
+use crate::plugins::stage_plugin::NpcCombatProfile;
+use crate::plugins::stage_plugin::{LocalFighter, MissionNpc, NpcPerformance};
 use crate::{
     components::projectile::{PendingRangedHits, Projectile, ProjectileKind, RangedHitSource},
     plugins::camera_plugin::GameplayCamera,
@@ -39,18 +42,17 @@ use meteor_combat::combo_engine::{
 };
 use meteor_combat::hit_reaction::{
     begin_be_hit, begin_death, begin_guard_hit, facing_bucket, getup_reaction_for_pose,
-    pose_duration_seconds, tick_hit_react, HitReactKind, ReactionFighter,
+    pose_duration_seconds, tick_hit_react, FacingBucket, HitReactKind, ReactionFighter,
 };
 use meteor_combat::hit_resolve::{
-    guard_anger_gain, resolve_hit, sum_attack_power, team_mask, CombatStats, HitOptions,
+    guard_anger_gain, sum_attack_power, team_mask, CombatStats, HitOptions,
 };
 use meteor_combat::hitbox::{
     attack_hit_obbs, body_hurt_obbs, bone_world_obb, normalized_bone_name, obbs_intersect,
     BoneLocalBox, Obb, WeaponCollisionPart,
 };
 use meteor_combat::lock_on::{
-    locked_attack_facing_yaw, tracked_head_yaw, LockCandidate, TRACK_CURVE_EXIT_TURN_LIMIT,
-    TRACK_TURN_LIMIT,
+    tracked_head_yaw, LockCandidate, TRACK_CURVE_EXIT_TURN_LIMIT, TRACK_TURN_LIMIT,
 };
 use meteor_combat::qi_burst::{
     can_qi_burst, QI_BURST_ACTION_ID, QI_BURST_ANGER_COST, QI_BURST_POSE_ID,
@@ -66,6 +68,8 @@ use meteor_combat::state_machine::{
 use meteor_combat::weapon_strategy::{
     weapon_to_strategy, WEAPON_SWITCH_POSE_AIR, WEAPON_SWITCH_POSE_GROUND,
 };
+#[path = "combat_plugin/offline_cure.rs"]
+mod offline_cure;
 use meteor_core::FighterState;
 use meteor_network::modes::{evaluate_round_result, RoundMember};
 use meteor_physics::carry_velocity::{
@@ -211,7 +215,7 @@ impl Plugin for CombatPlugin {
             actor_schedule,
             super::status_plugin::apply_self_attack_effect
                 .in_set(crate::plugins::FighterFrameSet::SkeletonSample)
-                .run_if(in_state(AppState::Playing))
+                .run_if(super::ui_plugin::gameplay_hud_visibility::scene_session_active)
                 .run_if(crate::plugins::simulation_frame),
         );
         configure_periodic_status_updates(app);
@@ -220,16 +224,22 @@ impl Plugin for CombatPlugin {
             npc_lock_on_tick
                 .before(local_attack_lock_facing)
                 .in_set(crate::plugins::FighterFrameSet::AttackFacing)
-                .run_if(in_state(AppState::Playing)),
+                .run_if(super::ui_plugin::gameplay_hud_visibility::scene_session_active),
         );
         app.init_resource::<super::hazard_plugin::StageHazardRuntime>()
+            .add_message::<offline_cure::CureCompleted>()
             .init_resource::<crate::components::fighter::KillScore>()
             .init_resource::<LockOnController>()
             .init_resource::<crate::plugins::camera_plugin::CameraBasis>()
             .init_resource::<MatchEnd>()
             .add_systems(
+                OnEnter(AppState::Loading),
+                offline_cure::clear_cure_completed,
+            )
+            .add_systems(
                 PreUpdate,
-                advance_match_settlement.run_if(in_state(AppState::Playing)),
+                advance_match_settlement
+                    .run_if(super::ui_plugin::gameplay_hud_visibility::scene_session_active),
             )
             .add_systems(
                 OnEnter(AppState::Playing),
@@ -248,13 +258,13 @@ impl Plugin for CombatPlugin {
             .add_systems(
                 Update,
                 (
-                    tick_target_hit_clocks.run_if(crate::plugins::simulation_frame),
+                    tick_target_hit_clocks,
                     apply_weapon_strategy_equip_hooks,
                     init_fighter_poses,
                 )
                     .chain()
                     .in_set(crate::plugins::FighterFrameSet::PoseDecision)
-                    .run_if(in_state(AppState::Playing)),
+                    .run_if(super::ui_plugin::gameplay_hud_visibility::scene_session_active),
             )
             .add_systems(
                 actor_schedule,
@@ -265,7 +275,16 @@ impl Plugin for CombatPlugin {
                 )
                     .chain()
                     .in_set(crate::plugins::FighterFrameSet::PoseDecision)
-                    .run_if(in_state(AppState::Playing)),
+                    .run_if(super::ui_plugin::gameplay_hud_visibility::scene_session_active),
+            )
+            .add_systems(
+                actor_schedule,
+                offline_cure::cure_mission_allies
+                    .after(combat_tick)
+                    .in_set(crate::plugins::FighterFrameSet::PoseDecision)
+                    .run_if(super::fighter_frame::current_is_local)
+                    .run_if(super::ui_plugin::gameplay_hud_visibility::scene_session_active)
+                    .run_if(crate::plugins::simulation_frame),
             )
             .add_systems(
                 actor_schedule,
@@ -273,19 +292,19 @@ impl Plugin for CombatPlugin {
                     .run_if(super::fighter_frame::current_is_local)
                     .after(crate::plugins::movement_plugin::move_local_fighter)
                     .in_set(crate::plugins::FighterFrameSet::Locomotion)
-                    .run_if(in_state(AppState::Playing)),
+                    .run_if(super::ui_plugin::gameplay_hud_visibility::scene_session_active),
             )
             .add_systems(
                 actor_schedule,
                 advance_poses
                     .in_set(crate::plugins::FighterFrameSet::PoseAdvance)
-                    .run_if(in_state(AppState::Playing)),
+                    .run_if(super::ui_plugin::gameplay_hud_visibility::scene_session_active),
             )
             .add_systems(
                 actor_schedule,
                 attack_windows
                     .in_set(crate::plugins::FighterFrameSet::HitJudge)
-                    .run_if(in_state(AppState::Playing)),
+                    .run_if(super::ui_plugin::gameplay_hud_visibility::scene_session_active),
             )
             .add_systems(
                 actor_schedule,
@@ -294,7 +313,7 @@ impl Plugin for CombatPlugin {
                     .after(crate::plugins::movement_plugin::attack_root_motion)
                     .after(crate::plugins::movement_plugin::dodge_root_motion)
                     .after(crate::plugins::ai_plugin::npc_ballistic_air_root_motion)
-                    .run_if(in_state(AppState::Playing)),
+                    .run_if(super::ui_plugin::gameplay_hud_visibility::scene_session_active),
             )
             .add_systems(
                 actor_schedule,
@@ -308,7 +327,7 @@ impl Plugin for CombatPlugin {
                     .chain()
                     .in_set(CombatPoseResolveSet)
                     .in_set(crate::plugins::FighterFrameSet::PoseResolve)
-                    .run_if(in_state(AppState::Playing)),
+                    .run_if(super::ui_plugin::gameplay_hud_visibility::scene_session_active),
             )
             .add_systems(
                 Update,
@@ -323,7 +342,7 @@ impl Plugin for CombatPlugin {
                     .chain()
                     .in_set(CombatPoseResolveSet)
                     .in_set(crate::plugins::FighterFrameSet::PoseResolve)
-                    .run_if(in_state(AppState::Playing)),
+                    .run_if(super::ui_plugin::gameplay_hud_visibility::scene_session_active),
             );
     }
 }
@@ -468,6 +487,10 @@ fn stage_hazard_damage(
     mut hazards: ResMut<super::hazard_plugin::StageHazardRuntime>,
     assets: Option<Res<CharacterAssetsSet>>,
     net: Res<NetState>,
+    request: Option<Res<crate::app_state::LaunchRequest>>,
+    room: Option<Res<crate::app_state::RoomState>>,
+    mut notices: Option<ResMut<crate::plugins::system_notice::SystemNoticeFeed>>,
+    mut offline_scores: Option<ResMut<OfflineScores>>,
     mut script: ResMut<super::stage_plugin::StageScriptRuntime>,
     mut drops: MessageWriter<super::render_plugin::OfflineWeaponDeathDrop>,
     mut fighters: Query<
@@ -615,6 +638,26 @@ fn stage_hazard_damage(
         death.active = true;
         death.timer = meteor_combat::death::RESPAWN_DELAY_SECONDS;
         if net.status != NetStatus::InRoom {
+            if let Some(scores) = offline_scores.as_mut() {
+                scores.record_death(
+                    offline_actor_id(local.is_some(), npc.map(|npc| npc.id), fighter.player_slot),
+                    None,
+                );
+            }
+            if let (Some(request), Some(room), Some(notices)) =
+                (request.as_ref(), room.as_ref(), notices.as_mut())
+            {
+                let name = crate::plugins::system_notice::resolve_local_combatant_name(
+                    request,
+                    &net,
+                    room,
+                    local.is_some(),
+                    None,
+                    npc.map(|npc| npc.name.as_str()),
+                    fighter.player_slot,
+                );
+                notices.push(crate::plugins::system_notice::format_death(&name));
+            }
             if let Some(model) =
                 super::character_plugin::weapon_model_stem(fighter.weapon, fighter.weapon_variant)
             {
@@ -626,7 +669,12 @@ fn stage_hazard_damage(
                 });
             }
         }
-        let character_id = npc.map(|n| n.id).or_else(|| local.is_some().then_some(0));
+        let character_id = npc
+            .map(|n| n.id)
+            .or_else(|| local.is_some().then_some(0))
+            .filter(|_| {
+                !(net.status == NetStatus::InRoom && net.is_stock_host() && net.stage == "sn22")
+            });
         if let (Some(id), Some(runtime)) = (character_id, script.script_mut()) {
             use meteor_scene::scene_script_runtime::PstValue;
             if let Err(error) = runtime.call(
@@ -675,15 +723,14 @@ struct PoseInitialized;
 fn tick_target_hit_clocks(
     time: Res<Time>,
     frame_clock: Option<Res<crate::plugins::FrameClock>>,
-    impact: Option<Res<crate::plugins::impact_fx_plugin::ImpactSimulationScale>>,
     mut query: Query<&mut crate::components::fighter::TargetHitClock>,
 ) {
-    let dt = crate::plugins::simulation_wall_step(frame_clock.as_deref(), time.delta_secs());
+    let dt = frame_clock
+        .as_deref()
+        .map_or(time.delta_secs(), |clock| clock.wall_dt)
+        .max(0.0);
     for mut clock in &mut query {
         clock.tick_spawn(dt);
-        if !impact.as_deref().is_some_and(|impact| impact.frozen) {
-            clock.tick_target(dt);
-        }
     }
 }
 
@@ -694,11 +741,21 @@ enum IntersectingTargetAdmission {
     Accepted,
 }
 
-fn admit_intersecting_target(clock: &mut TargetHitClock) -> IntersectingTargetAdmission {
-    if !clock.accepts_target_hit() {
-        return IntersectingTargetAdmission::IntervalBlocked;
+fn admit_intersecting_target(
+    clock: &mut TargetHitClock,
+    projectile: Option<ProjectileKind>,
+    now_seconds: f64,
+) -> IntersectingTargetAdmission {
+    if projectile != Some(ProjectileKind::GunRay) {
+        let interval_open = match projectile {
+            Some(ProjectileKind::FlyingWheel) => now_seconds - clock.last_hit_at > 0.4,
+            _ => clock.accepts_target_hit(now_seconds),
+        };
+        if !interval_open {
+            return IntersectingTargetAdmission::IntervalBlocked;
+        }
+        clock.reset(now_seconds);
     }
-    clock.reset();
     if clock.spawn_protected() {
         IntersectingTargetAdmission::SpawnProtected
     } else {
@@ -761,6 +818,8 @@ fn spawn_training_npc(
     }
     let mut offset = NPC_SPAWN_OFFSET;
     for (slot, member) in (1u8..).zip(room.members.iter().filter(|m| m.is_npc)) {
+        let mut patrol = crate::plugins::ai_plugin::NpcPatrol::default();
+        patrol.schedule_initial_think(crate::plugins::ai_plugin::STOCK_NPC_THINK, i64::from(slot));
         commands
             .spawn((
                 NpcFighter,
@@ -791,8 +850,11 @@ fn spawn_training_npc(
                 FighterAir::default(),
                 FighterDodge::default(),
                 crate::components::fighter::AiIntent::default(),
-                crate::plugins::ai_plugin::NpcPatrol::default(),
-                NpcCombatProfile::web_debug(),
+                patrol,
+                (
+                    crate::plugins::ai_plugin::StockNpcBrain,
+                    crate::plugins::ai_plugin::stock_npc_profile(),
+                ),
                 Transform::from_xyz(0.0, 0.9, offset),
             ))
             .insert(Visibility::default())
@@ -902,6 +964,7 @@ type LockPlayerQuery<'w, 's> = Query<
     's,
     (
         Entity,
+        &'static Fighter,
         &'static Health,
         &'static SmState,
         &'static PoseRuntime,
@@ -920,13 +983,15 @@ fn attack_transition_facing_yaw(
     transition_active: bool,
     player: Vec3,
     target: Vec3,
+    target_yaw: Option<f32>,
 ) -> Option<f32> {
     if !is_attacking || !transition_active {
         return None;
     }
-    locked_attack_facing_yaw(
+    meteor_combat::lock_on::locked_facing_yaw(
         (player.x, player.y, player.z),
         (target.x, target.y, target.z),
+        target_yaw,
     )
 }
 
@@ -956,10 +1021,18 @@ fn npc_lock_on_tick(
     active_fighter: Option<Res<super::fighter_frame::ActiveFighter>>,
     net: Res<NetState>,
     targets: LockCandidateQuery<'_, '_>,
-    mut npcs: NpcLockQuery<'_, '_>,
+    mut actors: ParamSet<(
+        Query<(Entity, &MotionState), With<Fighter>>,
+        NpcLockQuery<'_, '_>,
+    )>,
 ) {
+    let facings: std::collections::HashMap<_, _> = actors
+        .p0()
+        .iter()
+        .map(|(entity, motion)| (entity, motion.facing))
+        .collect();
     for (entity, fighter, health, sm, pose, blend, transform, mut motion, mut intent, mission) in
-        &mut npcs
+        &mut actors.p1()
     {
         if !super::fighter_frame::accepts(active_fighter.as_deref(), entity) {
             continue;
@@ -988,14 +1061,13 @@ fn npc_lock_on_tick(
             intent.lock_target = None;
             continue;
         };
-        if is_attacking_state(sm.current)
-            && entry_blend_is_active(blend.duration, blend.pose_id, pose.pose_id)
-        {
+        if is_attacking_state(sm.current) && blend.is_active_for(pose.pose_id) {
             if let Some(yaw) = attack_transition_facing_yaw(
                 true,
                 true,
                 transform.translation,
                 target_transform.translation,
+                facings.get(&target).copied(),
             ) {
                 motion.facing = yaw;
             } else {
@@ -1061,6 +1133,7 @@ fn lock_on_tick(
 ) {
     let Ok((
         player_entity,
+        player_fighter,
         player_health,
         player_sm,
         _player_pose,
@@ -1172,6 +1245,7 @@ fn lock_on_tick(
         (p.x, p.y, p.z),
         player_motion.facing,
         &candidates,
+        weapon_to_strategy(player_fighter.weapon),
         false,
         false,
     );
@@ -1225,6 +1299,7 @@ fn local_attack_lock_facing(
     mut controller: ResMut<LockOnController>,
     mut camera_basis: Option<ResMut<crate::plugins::camera_plugin::CameraBasis>>,
     targets: LockCandidateQuery<'_, '_>,
+    target_facings: Query<&MotionState, Without<LocalFighter>>,
     mut player: AttackFacingPlayerQuery<'_, '_>,
 ) {
     let Ok((entity, health, sm, pose, blend, mut motion, transform)) = player.single_mut() else {
@@ -1232,7 +1307,7 @@ fn local_attack_lock_facing(
     };
     if health.current <= 0.0
         || !is_attacking_state(sm.current)
-        || !entry_blend_is_active(blend.duration, blend.pose_id, pose.pose_id)
+        || !blend.is_active_for(pose.pose_id)
     {
         return;
     }
@@ -1249,7 +1324,13 @@ fn local_attack_lock_facing(
             .then_some(pos.translation)
         });
     if let Some(yaw) = target_position.and_then(|position| {
-        attack_transition_facing_yaw(true, true, transform.translation, position)
+        attack_transition_facing_yaw(
+            true,
+            true,
+            transform.translation,
+            position,
+            target_facings.get(target).ok().map(|motion| motion.facing),
+        )
     }) {
         motion.facing = yaw;
     } else if target_position.is_none_or(|position| {
@@ -1403,6 +1484,9 @@ impl CombatView<'_> {
 }
 
 impl FighterView for CombatView<'_> {
+    fn can_guard(&self) -> bool {
+        meteor_combat::weapon_strategy::weapon_can_guard(self.strategy_id)
+    }
     fn guard_held(&self) -> bool {
         self.guard_held_input
     }
@@ -1479,13 +1563,15 @@ impl FighterView for CombatView<'_> {
             return None;
         }
 
-        queued_qi_burst(
+        let queued = queued_qi_burst(
             current,
             frame,
             window.time,
             self.qi.current,
             FighterView::has_pose(self, QI_BURST_POSE_ID),
-        )
+        )?;
+        self.pose.action_id = Some(QI_BURST_ACTION_ID);
+        Some(queued)
     }
     fn start_neutral_attack(&mut self, airborne: bool) -> bool {
         let Some(mut resolved) = resolve_affordable_weapon_command(
@@ -1562,6 +1648,7 @@ impl FighterView for CombatView<'_> {
             return None;
         }
 
+        self.pose.action_id = Some(requested_action);
         Some(QueuedAttack {
             source_pose_id: current,
             next_pose_id,
@@ -1627,16 +1714,26 @@ impl ReactionFighter for CombatView<'_> {
         self.pose.pose_id
     }
     fn is_pose_finished(&self) -> bool {
-        self.pose.finished()
+        let controller_link = self
+            .assets
+            .poses
+            .get(&self.pose.pose_id)
+            .is_some_and(|def| {
+                def.link
+                    .is_some_and(|id| id > 0 && self.assets.poses.contains_key(&id))
+            });
+        !controller_link && self.pose.finished()
     }
     fn has_pose(&self, pose_id: u16) -> bool {
         self.assets.poses.contains_key(&pose_id)
     }
     fn play_pose(&mut self, pose_id: u16, hard: bool) {
         self.play_pose_entry(pose_id, hard, None, EntryBlendKind::Generic, false, false);
+        self.pose.link_past_end = true;
     }
     fn play_pose_hard_cut(&mut self, pose_id: u16) {
         self.play_pose_entry(pose_id, true, None, EntryBlendKind::Generic, true, false);
+        self.pose.link_past_end = true;
     }
     fn set_in_guard(&mut self, v: bool) {
         let _ = v;
@@ -1708,13 +1805,13 @@ fn attack_input_reaches_auto_lock(
 
 fn weapon_switch_context_pose(
     state: FighterState,
-    linked_recovery: bool,
+    _linked_recovery: bool,
     airborne: bool,
     motion_mode: meteor_physics::jump::AirMotionMode,
 ) -> Option<u16> {
-    if state == FighterState::Name && !linked_recovery && !airborne {
+    if state == FighterState::Name && !airborne {
         Some(WEAPON_SWITCH_POSE_GROUND)
-    } else if state == FighterState::Jump
+    } else if matches!(state, FighterState::Name | FighterState::Jump)
         && airborne
         && motion_mode == meteor_physics::jump::AirMotionMode::Ballistic
     {
@@ -2003,6 +2100,22 @@ pub(crate) fn active_attack_window(
         .next_back()
 }
 
+pub(crate) fn sampled_attack_window<'a>(
+    assets: &'a CharacterAssets,
+    pose: &PoseRuntime,
+    blend: &EntryBlend,
+) -> Option<(u32, &'a meteor_asset::pos::AttackBlock)> {
+    let (source_pose, frame) = blend.frame_record_for(pose);
+    let source = assets.poses.get(&source_pose)?;
+    let (index, _) = active_attack_window(frame as f32, &source.attacks)?;
+    let target = assets.poses.get(&pose.pose_id)?;
+
+    target
+        .attacks
+        .get(index as usize)
+        .map(|attack| (index, attack))
+}
+
 fn bevy_mat4_to_core(m: bevy::math::Mat4) -> meteor_core::Mat4 {
     meteor_core::Mat4 {
         m: m.to_cols_array(),
@@ -2016,6 +2129,8 @@ type FighterBoneWorldQuery<'w, 's> =
     Query<'w, 's, (Entity, &'static FighterBone, &'static GlobalTransform)>;
 type FighterDummyWorldQuery<'w, 's> =
     Query<'w, 's, (Entity, &'static FighterDummy, &'static GlobalTransform)>;
+type WeaponEndpointWorldQuery<'w, 's> =
+    Query<'w, 's, (Entity, &'static WeaponEndpoint, &'static GlobalTransform)>;
 type WeaponCollisionWorldQuery<'w, 's> = Query<
     'w,
     's,
@@ -2029,11 +2144,13 @@ type WeaponCollisionWorldQuery<'w, 's> = Query<
 
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct HitGeometryQueries<'w, 's> {
+    sampled: Query<'w, 's, &'static super::character_plugin::SampledCollisionTransform>,
     models: FighterModelQuery<'w, 's>,
     model_worlds: FighterModelWorldQuery<'w, 's>,
     bones: FighterBoneWorldQuery<'w, 's>,
     skeletons: FighterSkeletonQuery<'w, 's>,
     dummies: FighterDummyWorldQuery<'w, 's>,
+    weapon_endpoints: WeaponEndpointWorldQuery<'w, 's>,
     weapons: WeaponCollisionWorldQuery<'w, 's>,
     transforms: TransformHelper<'w, 's>,
     stage: Option<Res<'w, StageCollider>>,
@@ -2048,23 +2165,44 @@ pub(crate) struct HitGeometryQueries<'w, 's> {
 }
 
 impl HitGeometryQueries<'_, '_> {
+    fn sampled_transform(&self, entity: Entity, propagated: &GlobalTransform) -> GlobalTransform {
+        self.sampled.get(entity).map_or_else(
+            |_| current_global_transform(entity, propagated, &self.transforms),
+            |sample| sample.0,
+        )
+    }
+
     pub(crate) fn hurt_obbs(&self, entity: Entity, assets: &CharacterAssets) -> Vec<Obb> {
         fighter_body_hurt_obbs(entity, assets, self)
     }
 
-    pub(crate) fn live_effect_obbs(&self, fighter: Entity, assets: &CharacterAssets) -> Vec<Obb> {
-        let Some(model) = find_fighter_model(fighter, &self.models) else {
-            return Vec::new();
-        };
+    pub(crate) fn live_effect_obbs(
+        &self,
+        entity: Entity,
+        fighter: &Fighter,
+        form: &WeaponForm,
+        pose_id: u16,
+        assets: &CharacterAssets,
+    ) -> Vec<Obb> {
+        let visual_form =
+            meteor_combat::combo_engine::weapon_visual_form(fighter.weapon, form.current, pose_id);
         self.effects
             .iter()
             .filter(|(effect, parent)| {
-                parent.parent() == model
+                parent.parent() == entity
                     && !effect.looping
                     && effect.elapsed <= effect.duration + 1e-4
             })
             .flat_map(|(effect, _)| {
-                effect_attack_obbs(fighter, assets, &effect.ef, effect.elapsed, self)
+                effect_attack_obbs(
+                    entity,
+                    fighter,
+                    visual_form,
+                    assets,
+                    &effect.ef,
+                    effect.elapsed,
+                    self,
+                )
             })
             .collect()
     }
@@ -2087,6 +2225,7 @@ impl HitGeometryQueries<'_, '_> {
             meteor_combat::combo_engine::weapon_visual_form(fighter.weapon, form.current, pose_id),
             &self.weapons,
             &self.transforms,
+            &self.sampled,
         );
         attack_hit_obbs(bone_names, &weapons, |name| bones.get(name).cloned())
     }
@@ -2094,9 +2233,16 @@ impl HitGeometryQueries<'_, '_> {
 
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct HitFeedback<'w> {
+    water: Option<ResMut<'w, super::stage_material::water::combat::WaterCombat>>,
     effects: Option<Res<'w, crate::plugins::effect_plugin::EffectAssets>>,
     impacts: MessageWriter<'w, crate::plugins::impact_fx_plugin::CombatImpactEvent>,
     settings: Res<'w, Settings>,
+    request: Option<Res<'w, crate::app_state::LaunchRequest>>,
+    room: Option<Res<'w, crate::app_state::RoomState>>,
+    notices: Option<ResMut<'w, crate::plugins::system_notice::SystemNoticeFeed>>,
+    offline_scores: Option<ResMut<'w, OfflineScores>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    trace: Option<ResMut<'w, super::combat_trace::CombatTrace>>,
 }
 
 #[derive(bevy::ecs::system::SystemParam)]
@@ -2104,6 +2250,7 @@ struct RangedRuntimeParams<'w, 's> {
     statuses: Query<'w, 's, &'static mut crate::components::fighter::FighterStatusEffects>,
     net_tx: Option<Res<'w, crate::plugins::network_plugin::NetTx>>,
     pending: ResMut<'w, PendingRangedHits>,
+    projectiles: Query<'w, 's, &'static Projectile>,
     camera: Query<'w, 's, &'static GlobalTransform, With<GameplayCamera>>,
 }
 
@@ -2151,7 +2298,7 @@ fn build_attacker_bone_resolver(
         let Some(Some(local)) = character_assets.bone_local_bounds.get(bone.skin_index) else {
             continue;
         };
-        let global = current_global_transform(entity, propagated, &geometry.transforms);
+        let global = geometry.sampled_transform(entity, propagated);
         let Some(world) = bone_world_matrix(character_assets, bone, &global) else {
             continue;
         };
@@ -2188,6 +2335,7 @@ fn build_weapon_collision_parts(
     weapon_form: u8,
     weapons: &WeaponCollisionWorldQuery<'_, '_>,
     transforms: &TransformHelper<'_, '_>,
+    sampled: &Query<&super::character_plugin::SampledCollisionTransform>,
 ) -> Vec<WeaponCollisionPart> {
     weapons
         .iter()
@@ -2204,7 +2352,13 @@ fn build_weapon_collision_parts(
         })
         .map(|(entity, geometry, propagated, _)| WeaponCollisionPart {
             world_matrix: bevy_mat4_to_core(
-                current_global_transform(entity, propagated, transforms).to_matrix(),
+                sampled
+                    .get(entity)
+                    .map_or_else(
+                        |_| current_global_transform(entity, propagated, transforms),
+                        |sample| sample.0,
+                    )
+                    .to_matrix(),
             ),
             boxes: geometry
                 .boxes
@@ -2227,7 +2381,9 @@ fn build_weapon_collision_parts(
 }
 
 fn effect_attack_obbs(
-    fighter: Entity,
+    entity: Entity,
+    fighter: &Fighter,
+    visual_form: u8,
     character_assets: &CharacterAssets,
     ef: &meteor_asset::pon_ef::PonEf,
     time_secs: f32,
@@ -2236,17 +2392,18 @@ fn effect_attack_obbs(
     let Some((model_entity, _)) = geometry
         .models
         .iter()
-        .find(|(_, model)| model.fighter == fighter)
+        .find(|(_, model)| model.fighter == entity)
     else {
         return Vec::new();
     };
     let Some(root) = geometry
         .model_worlds
         .iter()
-        .find_map(|(entity, model, propagated)| {
-            (model.fighter == fighter).then(|| {
+        .find_map(|(model_entity, model, propagated)| {
+            (model.fighter == entity).then(|| {
                 bevy_mat4_to_core(
-                    current_global_transform(entity, propagated, &geometry.transforms).to_matrix(),
+                    current_global_transform(model_entity, propagated, &geometry.transforms)
+                        .to_matrix(),
                 )
             })
         })
@@ -2261,7 +2418,7 @@ fn effect_attack_obbs(
         .bones
         .iter_many(model_bones(model_entity, &geometry.skeletons))
     {
-        let global = current_global_transform(entity, propagated, &geometry.transforms);
+        let global = geometry.sampled_transform(entity, propagated);
         external.insert(
             bone.name.to_ascii_lowercase(),
             bevy_mat4_to_core(global.to_matrix()),
@@ -2273,11 +2430,19 @@ fn effect_attack_obbs(
             .iter_many(model_dummies(model_entity, &geometry.skeletons))
             .find(|(_, dummy, _)| dummy.dummy_index == *index)
         {
-            let global = current_global_transform(entity, propagated, &geometry.transforms);
+            let global = geometry.sampled_transform(entity, propagated);
             external.insert(
                 name.to_ascii_lowercase(),
                 bevy_mat4_to_core(global.to_matrix()),
             );
+        }
+    }
+
+    for (endpoint_entity, endpoint, propagated) in &geometry.weapon_endpoints {
+        if endpoint.fighter == entity && endpoint.is_active_for(fighter, visual_form) {
+            let global =
+                current_global_transform(endpoint_entity, propagated, &geometry.transforms);
+            external.insert(endpoint.name.clone(), bevy_mat4_to_core(global.to_matrix()));
         }
     }
 
@@ -2331,7 +2496,7 @@ fn fighter_body_hurt_obbs(
                 .bone_local_bounds
                 .get(bone.skin_index)?
                 .as_ref()?;
-            let global = current_global_transform(entity, propagated, &geometry.transforms);
+            let global = geometry.sampled_transform(entity, propagated);
             let world = bone_world_matrix(character_assets, bone, &global)?;
             Some((bone.name.as_str(), world, Some(*local)))
         });
@@ -2349,7 +2514,7 @@ fn fighter_whole_body_obb(
         .iter_many(model_bones(model, &geometry.skeletons))
         .filter_map(|(entity, bone, propagated)| {
             let local = assets.bone_local_bounds.get(bone.skin_index)?.as_ref()?;
-            let world = current_global_transform(entity, propagated, &geometry.transforms);
+            let world = geometry.sampled_transform(entity, propagated);
             let matrix = bone_world_matrix(assets, bone, &world)?;
             bone_world_obb(&matrix, local)
         });
@@ -2407,18 +2572,6 @@ fn whole_body_aabb(boxes: impl Iterator<Item = Obb>) -> Option<Obb> {
     })
 }
 
-pub(crate) fn entry_blend_is_active(
-    blend_duration: f32,
-    blend_pose_id: u16,
-    current_pose_id: u16,
-) -> bool {
-    blend_duration > 0.0 && blend_pose_id == current_pose_id
-}
-
-fn jump_transition_is_hard_cut(from_pose_id: u16, to_pose_id: u16) -> bool {
-    is_jump_pose_id(from_pose_id) || is_jump_pose_id(to_pose_id)
-}
-
 fn take_ground_entry_blend(
     air: Option<&mut crate::plugins::movement_plugin::FighterAir>,
     movement_mode: meteor_core::MovementMode,
@@ -2433,18 +2586,65 @@ fn take_ground_entry_blend(
     true
 }
 
+fn release_attack_pose_loop(
+    pose: &mut PoseRuntime,
+    blend: &EntryBlend,
+    sm: &SmState,
+    strategy_id: u8,
+    wheel_out: bool,
+    vertical_contact: bool,
+) {
+    let can_release = if strategy_id == meteor_combat::weapon_strategy::WHEEL_STRATEGY_ID {
+        !wheel_out
+    } else {
+        vertical_contact
+    };
+    let frame = pose.frame.trunc();
+    if is_attacking_state(sm.current)
+        && sm.attack_queued.is_none()
+        && !pose.plays_to_end()
+        && !blend.is_active_for(pose.pose_id)
+        && frame >= pose.loop_start as f32
+        && frame <= pose.loop_end as f32
+        && can_release
+    {
+        pose.frame = pose.loop_end as f32;
+        pose.loops = false;
+    }
+}
+
+#[allow(clippy::type_complexity)]
 pub(super) fn advance_poses(
+    net: Option<Res<NetState>>,
     active_fighter: Option<Res<super::fighter_frame::ActiveFighter>>,
     time: Res<Time>,
     frame_clock: Option<Res<crate::plugins::FrameClock>>,
     assets: Option<Res<CharacterAssetsSet>>,
-    mut query: Query<(Entity, &Fighter, &mut PoseRuntime, &mut EntryBlend)>,
+    mut query: Query<(
+        Entity,
+        &Fighter,
+        &mut PoseRuntime,
+        &mut EntryBlend,
+        Option<&mut FighterHitReaction>,
+        Option<&RemoteFighter>,
+        Option<(
+            &mut SmState,
+            &mut CombatState,
+            &mut Health,
+            &mut Qi,
+            &FighterAir,
+            &WeaponForm,
+        )>,
+        Option<&WeaponSwitchActive>,
+    )>,
 ) {
     let dt = crate::plugins::simulation_dt(frame_clock.as_deref(), time.delta_secs());
     let Some(assets) = assets else {
         return;
     };
-    for (entity, fighter, mut pose, mut blend) in &mut query {
+    for (entity, fighter, mut pose, mut blend, reaction, remote, local_state, switching) in
+        &mut query
+    {
         if !super::fighter_frame::accepts(active_fighter.as_deref(), entity) {
             continue;
         }
@@ -2454,15 +2654,70 @@ pub(super) fn advance_poses(
         let Some(pose_data) = character_assets.poses.get(&pose.pose_id) else {
             continue;
         };
+        blend.preserve_sample_once = false;
+        blend.retain_root_delta_once = false;
 
-        let blend_active = entry_blend_is_active(blend.duration, blend.pose_id, pose.pose_id);
+        let blend_active = blend.is_active_for(pose.pose_id);
+
+        let reaction_loop = pose.loops
+            && reaction.as_deref().is_some_and(|runtime| {
+                runtime.current.as_ref().is_some_and(|hit| {
+                    matches!(hit.kind, HitReactKind::BeHit | HitReactKind::Guard)
+                })
+            });
+        let reaction_owned = reaction
+            .as_deref()
+            .is_some_and(|runtime| runtime.current.is_some());
+        if let Some(mut reaction) = reaction {
+            reaction.entry_blend_held = blend_active;
+        }
         if blend_active {
             pose.frame = blend.to_frame.clamp(pose.start as f32, pose.end as f32);
             continue;
         }
-        pose.frame = advance_pose_cursor(pose_data, &pose, dt);
+        let speed = net
+            .as_deref()
+            .filter(|net| net.status == NetStatus::InRoom)
+            .map_or(1.0, |net| net.battle_rules.speed_scale(pose.pose_id));
+        let jump_link = (151..=160).contains(&pose.pose_id) && pose_data.link.is_some();
+        let local_attack_link = remote.is_none()
+            && switching.is_none()
+            && local_state.as_ref().is_some_and(|(sm, ..)| {
+                is_attacking_state(sm.current) && sm.attack_queued.is_none()
+            });
+        let controller_link = (remote.is_some() || reaction_owned || local_attack_link)
+            && pose_data
+                .link
+                .is_some_and(|id| id > 0 && character_assets.poses.contains_key(&id));
+        let link_source_frame = pose.frame;
+        let mut jump_link_due = false;
+        pose.frame = if jump_link || controller_link {
+            let advanced = pose.frame
+                + dt * speed
+                    * meteor_core::ANIM_FPS
+                    * pose_playback_speed_at_frame(pose_data, pose.frame);
+            jump_link_due = if pose.link_past_end {
+                advanced > pose.end as f32
+            } else {
+                advanced >= pose.end as f32
+            };
+            advanced.min(pose.end as f32)
+        } else if reaction_loop {
+            pose.start as f32
+                + advance_pose_loop_cursor(
+                    pose.frame - pose.start as f32,
+                    dt * speed
+                        * meteor_core::ANIM_FPS
+                        * pose_playback_speed_at_frame(pose_data, pose.frame),
+                    pose.start,
+                    pose.loop_start,
+                    pose.loop_end,
+                )
+        } else {
+            advance_pose_cursor(pose_data, &pose, dt * speed)
+        };
 
-        if matches!(pose.pose_id, 152 | 154 | 156 | 158) && pose.finished() {
+        if jump_link_due {
             if let meteor_anim::pose_controller::PoseLinkDecision::Link {
                 link_pose_id,
                 entry_blend_seconds,
@@ -2471,7 +2726,28 @@ pub(super) fn advance_poses(
                 Some(pose_data),
                 |id| character_assets.poses.contains_key(&id),
             ) {
+                let linked_action_id = pose.action_id;
+                if local_attack_link {
+                    let (mut sm, mut combat, mut health, mut qi, air, form) = local_state.unwrap();
+                    project_authored_pose_link(
+                        fighter,
+                        &mut pose,
+                        &mut blend,
+                        &mut sm,
+                        &mut combat,
+                        &mut health,
+                        &mut qi,
+                        air,
+                        character_assets,
+                        form.current,
+                        pose_data.id,
+                        link_pose_id,
+                    );
+                }
                 let instance = pose.pose_instance_id;
+                if controller_link {
+                    pose.frame = link_source_frame;
+                }
                 character_assets.apply_pose_with_blend(
                     &mut pose,
                     &mut blend,
@@ -2484,6 +2760,12 @@ pub(super) fn advance_poses(
                     None,
                 );
                 pose.pose_instance_id = instance;
+                pose.action_id = linked_action_id;
+
+                pose.link_past_end = false;
+                if controller_link {
+                    blend.preserve_sample_once = true;
+                }
             }
         }
     }
@@ -2507,6 +2789,7 @@ fn resolve_completed_pose_links(
             Option<&WeaponSwitchActive>,
             &WeaponForm,
             Option<&RemoteFighter>,
+            Option<&FighterHitReaction>,
         ),
         With<Fighter>,
     >,
@@ -2527,13 +2810,20 @@ fn resolve_completed_pose_links(
         switching,
         weapon_form,
         remote,
+        reaction,
     ) in &mut query
     {
         if !super::fighter_frame::accepts(active_fighter.as_deref(), entity) {
             continue;
         }
+        if remote.is_some()
+            || is_attacking_state(sm_state.current)
+            || reaction.is_some_and(|runtime| runtime.current.is_some())
+        {
+            continue;
+        }
 
-        if switching.is_some() || !pose.finished() {
+        if switching.is_some() || (151..=160).contains(&pose.pose_id) || !pose.finished() {
             continue;
         }
         let Some(character_assets) = assets.0.get(&format!("p{}", fighter.character_id)) else {
@@ -2555,43 +2845,23 @@ fn resolve_completed_pose_links(
             continue;
         };
 
-        if remote.is_none() && state_machine_tracks_pose_link(sm_state.current) {
-            combat.state = sm_state.current;
-            let mut anger_spend = None;
-            let view = CombatView {
-                pose: &mut pose,
-                blend: &mut blend,
-                combat: &mut combat,
-                health: &mut health,
-                qi: &mut qi,
+        let linked_action_id = pose.action_id;
+        if state_machine_tracks_pose_link(sm_state.current) {
+            project_authored_pose_link(
+                fighter,
+                &mut pose,
+                &mut blend,
+                &mut sm_state,
+                &mut combat,
+                &mut health,
+                &mut qi,
                 air,
-                assets: character_assets,
-                weapon: fighter.weapon,
-                guard_held_input: false,
-                in_guard_hit_reaction: false,
-                attack_directions: Vec::new(),
-                weapon_form: weapon_form.current,
-                anger_spend: &mut anger_spend,
-                strategy_id: weapon_to_strategy(fighter.weapon),
-                weapon_action_vetoed: false,
-            };
-            let mut sm = StateMachine::new(view);
-            sm.current = sm_state.current;
-            sm.previous = sm_state.previous;
-            sm.time_in_state = sm_state.time_in_state;
-            sm.locked = sm_state.locked;
-            sm.attack_stage = sm_state.attack_stage;
-            sm.attack_queued = sm_state.attack_queued.clone();
-            sm.linked_recovery_pose_id = sm_state.linked_recovery_pose_id;
-            sm.exe_ground_mode_ticks = sm_state.exe_ground_mode_ticks;
-            sm.on_pose_linked(completed.id, link_pose_id);
-            let projected = project_state_machine(&sm);
-            drop(sm);
-            *sm_state = projected;
-            combat.state = sm_state.current;
+                character_assets,
+                weapon_form.current,
+                completed.id,
+                link_pose_id,
+            );
         }
-
-        let skip_blend = jump_transition_is_hard_cut(completed.id, link_pose_id);
 
         let pose_instance_id = pose.pose_instance_id;
         character_assets.apply_pose_with_blend(
@@ -2601,12 +2871,63 @@ fn resolve_completed_pose_links(
             true,
             entry_blend_seconds,
             EntryBlendKind::Generic,
-            skip_blend,
+            false,
             false,
             None,
         );
         pose.pose_instance_id = pose_instance_id;
+        pose.action_id = linked_action_id;
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn project_authored_pose_link(
+    fighter: &Fighter,
+    pose: &mut PoseRuntime,
+    blend: &mut EntryBlend,
+    sm_state: &mut SmState,
+    combat: &mut CombatState,
+    health: &mut Health,
+    qi: &mut Qi,
+    air: &FighterAir,
+    character_assets: &CharacterAssets,
+    weapon_form: u8,
+    from_pose_id: u16,
+    link_pose_id: u16,
+) {
+    combat.state = sm_state.current;
+    let mut anger_spend = None;
+    let view = CombatView {
+        pose,
+        blend,
+        combat,
+        health,
+        qi,
+        air,
+        assets: character_assets,
+        weapon: fighter.weapon,
+        guard_held_input: false,
+        in_guard_hit_reaction: false,
+        attack_directions: Vec::new(),
+        weapon_form,
+        anger_spend: &mut anger_spend,
+        strategy_id: weapon_to_strategy(fighter.weapon),
+        weapon_action_vetoed: false,
+    };
+    let mut sm = StateMachine::new(view);
+    sm.current = sm_state.current;
+    sm.previous = sm_state.previous;
+    sm.time_in_state = sm_state.time_in_state;
+    sm.locked = sm_state.locked;
+    sm.attack_stage = sm_state.attack_stage;
+    sm.attack_queued = sm_state.attack_queued.clone();
+    sm.linked_recovery_pose_id = sm_state.linked_recovery_pose_id;
+    sm.exe_ground_mode_ticks = sm_state.exe_ground_mode_ticks;
+    sm.on_pose_linked(from_pose_id, link_pose_id);
+    let projected = project_state_machine(&sm);
+    drop(sm);
+    *sm_state = projected;
+    combat.state = sm_state.current;
 }
 
 fn state_machine_tracks_pose_link(state: FighterState) -> bool {
@@ -2757,6 +3078,7 @@ type DefenderPositionQuery<'w, 's> = Query<
 
 struct AttackSnapshot {
     entity: Entity,
+    all_candidates: bool,
     weapon: u8,
     weapon_stats: Option<WeaponCombatStats>,
     pose_id: u16,
@@ -2768,6 +3090,8 @@ struct AttackSnapshot {
     script_character_id: i64,
 
     script_team: Option<i64>,
+
+    notice_name: String,
     atk_pos: Vec3,
 
     forward: Vec3,
@@ -2789,7 +3113,7 @@ enum AttackGeometry {
         end: Vec3,
         hit_scale: f32,
         projectile: Entity,
-        stop_after_first: bool,
+        kind: ProjectileKind,
         despawn_after: bool,
     },
 }
@@ -2815,7 +3139,8 @@ fn attack_window_owner_active_for_scope(
     reaction_active: bool,
     props_only: bool,
 ) -> bool {
-    health > 0.0 && !death_active && !reaction_active && (props_only || is_attacking_state(state))
+    let living = health > 0.0 && (props_only || !death_active);
+    living && !reaction_active && (props_only || is_attacking_state(state))
 }
 
 fn attack_forward_from_facing(facing: f32) -> Vec3 {
@@ -2844,6 +3169,19 @@ fn combat_weapon_stats(
         .or_else(|| table.weapon_stats(fighter.weapon))
 }
 
+pub(crate) fn fighter_speed_factor(
+    resources: Option<&CombatResourceData>,
+    fighter: &Fighter,
+    item_factor: f32,
+    status: Option<&crate::components::fighter::FighterStatusEffects>,
+) -> f32 {
+    let weapon_percent = resources
+        .and_then(|resources| combat_weapon_stats(&resources.0, fighter))
+        .map_or(100, |stats| stats.speed_percent);
+    let base = item_factor + (weapon_percent - 100) as f32 / 100.0;
+    status.map_or_else(|| base.max(0.0), |status| status.effects.speed_factor(base))
+}
+
 fn scene_on_attack_args(
     character_id: i64,
     damage: i32,
@@ -2866,12 +3204,15 @@ pub(crate) fn script_allows_prop_hit(
         return true;
     };
 
-    ["active", "interactive"].iter().all(|key| {
-        instance
-            .props
-            .get(*key)
-            .is_none_or(|value| value.as_f64() != 0.0)
-    })
+    let active_ok = instance
+        .props
+        .get("_active_override")
+        .is_none_or(|value| value.as_f64() != 0.0);
+    let interactive_ok = instance
+        .props
+        .get("interactive")
+        .is_none_or(|value| value.as_f64() != 0.0);
+    active_ok && interactive_ok
 }
 
 fn stage_prop_hit_obb(prop: &crate::plugins::item_plugin::StageProp, transform: &Transform) -> Obb {
@@ -3016,6 +3357,7 @@ struct CombatNetwork<'w> {
     net_tx: Option<Res<'w, crate::plugins::network_plugin::NetTx>>,
     net: Res<'w, NetState>,
     pending_actions: ResMut<'w, PendingNetActions>,
+    cure_completed: Option<ResMut<'w, Messages<offline_cure::CureCompleted>>>,
     camera_basis: ResMut<'w, crate::plugins::camera_plugin::CameraBasis>,
     guard_input: Option<Res<'w, LocalGuardInput>>,
     crouch_input: Option<Res<'w, LocalCrouchInput>>,
@@ -3023,6 +3365,26 @@ struct CombatNetwork<'w> {
     desktop_dodge: Option<ResMut<'w, DesktopDodgeInput>>,
     jump_input: Option<ResMut<'w, LocalJumpInput>>,
     common_amb: Option<Res<'w, CommonAmb>>,
+    mission: Option<Res<'w, super::stage_plugin::StageMissionRuntime>>,
+}
+
+fn local_cure_eligible(
+    net: &NetState,
+    mission: Option<&super::stage_plugin::StageMissionRuntime>,
+) -> bool {
+    if net.status == NetStatus::InRoom {
+        return net.round_active
+            && net.mode == "assassin"
+            && net.vip_team(&net.player_id).is_some();
+    }
+
+    mission
+        .and_then(|mission| mission.script())
+        .is_some_and(|script| {
+            [1, 2]
+                .into_iter()
+                .any(|team| script.host().vip(team) == Some(0))
+        })
 }
 
 fn report_committed_anger(
@@ -3067,7 +3429,10 @@ fn report_committed_anger(
 fn combat_tick(
     mut commands: Commands,
     (active_fighter, time): (Option<Res<super::fighter_frame::ActiveFighter>>, Res<Time>),
-    frame_clock: Option<Res<crate::plugins::FrameClock>>,
+    (frame_clock, app_state): (
+        Option<Res<crate::plugins::FrameClock>>,
+        Option<Res<State<AppState>>>,
+    ),
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     keymap: Res<crate::app_state::Keymap>,
@@ -3198,9 +3563,12 @@ fn combat_tick(
 
         combat.state = sm_state.current;
         let is_local = local.is_some();
-        let input_blocked = player_performance
-            .as_deref()
-            .is_some_and(|performance| performance.input_blocked);
+        let input_blocked = app_state
+            .as_ref()
+            .is_some_and(|state| *state.get() != AppState::Playing)
+            || player_performance
+                .as_deref()
+                .is_some_and(|performance| performance.input_blocked);
         let accept_local_input = is_local && !input_blocked;
         let raw_bindings = if is_local {
             network
@@ -3234,6 +3602,15 @@ fn combat_tick(
             && !saw_raw_binding(keymap.weapon_switch)
             && keymap.weapon_switch.just_pressed(&keys, &mouse);
         let weapon_action_vetoed = ranged_gates.get(entity).is_ok_and(|gate| gate.wheel_out);
+        let cure_eligible = local_cure_eligible(&network.net, network.mission.as_deref());
+        release_attack_pose_loop(
+            &mut pose,
+            &blend,
+            &sm_state,
+            strategy_id,
+            weapon_action_vetoed,
+            air.mover_vertical_contact,
+        );
         let npc_attack_requested = !is_local && intent.want_attack;
         let actor_team = fighter_combat_team(&network.net, is_local, None, mission);
         let candidates: Vec<LockCandidate> = all_candidates
@@ -3254,6 +3631,12 @@ fn combat_tick(
             && network.jump_input.as_deref().map_or_else(
                 || keymap.jump.just_released(&keys, &mouse),
                 |jump| jump.released,
+            );
+
+        let jump_has_charge = air.jump_charge_active
+            || network.jump_input.as_deref().map_or_else(
+                || keymap.jump.just_pressed(&keys, &mouse),
+                |jump| jump.pressed,
             );
         let weapon_form = weapon_form_state.current;
         let guard_held = actor_guard_held(
@@ -3510,7 +3893,9 @@ fn combat_tick(
                         }
                         LocalCombatInputEdge::Jump => {
                             if accept_local_input && !switch_active && !switch_started {
-                                let accepted = sm.handle_input(Action::Jump);
+                                let accepted = jump_has_charge
+                                    && !sm.fighter_mut().in_guard_hit_reaction
+                                    && sm.handle_input(Action::Jump);
                                 if accepted {
                                     if let Some(jump) = network.jump_input.as_deref_mut() {
                                         jump.action_accepted = true;
@@ -3524,7 +3909,11 @@ fn combat_tick(
                             }
                         }
                         LocalCombatInputEdge::Cure => {
-                            if accept_local_input && !switch_active && !switch_started {
+                            if accept_local_input
+                                && !switch_active
+                                && !switch_started
+                                && cure_eligible
+                            {
                                 sm.handle_input(Action::Cure);
                             }
                         }
@@ -3628,7 +4017,9 @@ fn combat_tick(
                     sm.handle_input(Action::Fake);
                 }
                 if jump_released {
-                    let accepted = sm.handle_input(Action::Jump);
+                    let accepted = jump_has_charge
+                        && !sm.fighter_mut().in_guard_hit_reaction
+                        && sm.handle_input(Action::Jump);
                     if accepted {
                         if let Some(jump) = network.jump_input.as_deref_mut() {
                             jump.action_accepted = true;
@@ -3641,7 +4032,10 @@ fn combat_tick(
                         sm.current,
                     );
                 }
-                if !saw_raw_binding(keymap.cure) && keymap.cure.just_pressed(&keys, &mouse) {
+                if cure_eligible
+                    && !saw_raw_binding(keymap.cure)
+                    && keymap.cure.just_pressed(&keys, &mouse)
+                {
                     sm.handle_input(Action::Cure);
                 }
             }
@@ -3656,7 +4050,30 @@ fn combat_tick(
             if let Some(now_ms) = command_update_ms {
                 command_input.0.update(now_ms);
             }
-        } else if !is_local {
+        } else if !is_local && !switch_active {
+            if std::mem::take(&mut intent.want_weapon_switch) {
+                gun_aim.aiming = false;
+                intent.lock_target = None;
+                intent.ranged_aim = None;
+                sm.handle_input(Action::GuardRelease);
+                if let Some(active) = begin_local_weapon_switch(
+                    &mut sm,
+                    false,
+                    gun_aim.aiming,
+                    fighter,
+                    motion,
+                    &attack_motion,
+                    network.common_amb.as_deref(),
+                ) {
+                    commands.entity(entity).insert(active);
+                    switch_started = true;
+                }
+                intent.want_attack = false;
+                intent.want_guard = false;
+                intent.want_qi_burst = false;
+                intent.want_taunt = false;
+                intent.dodge_burst = None;
+            }
             if std::mem::take(&mut intent.want_qi_burst) {
                 attack_commit_accepted |= sm.handle_input(Action::QiBurst);
             }
@@ -3696,9 +4113,23 @@ fn combat_tick(
             );
         }
 
+        let completing_cure =
+            is_local && sm.current == FighterState::Cure && hit_reaction.current.is_none();
         sm.update(dt);
+        let cure_completed = completing_cure && sm.current == FighterState::Name;
         let mut projected = project_state_machine(&sm);
         drop(sm);
+        if cure_completed && health.current > 0.0 {
+            if let Some(events) = network.cure_completed.as_deref_mut() {
+                events.write(offline_cure::CureCompleted {
+                    healer: entity,
+                    position: transform.translation,
+                });
+            }
+            if network.net.status == NetStatus::InRoom && network.net.round_active {
+                network.pending_actions.push("cure");
+            }
+        }
         let _ = install_requested_getup_reaction(
             &mut hit_reaction,
             &mut projected,
@@ -3881,19 +4312,21 @@ fn hit_reaction_root_motion(
         Option<&RemoteFighter>,
         Option<&mut RemoteTransformTarget>,
         Option<&mut RemoteHitMotionWindow>,
+        Option<&super::network_plugin::RemoteContactSegment>,
     )>,
 ) {
     let dt = crate::plugins::simulation_dt(frame_clock.as_deref(), time.delta_secs());
     if !dt.is_finite() || dt <= 0.0 {
         return;
     }
-    let (Some(assets), Some(common_amb), Some(mesh)) = (assets, common_amb, collider.mesh.as_ref())
-    else {
+    let (Some(assets), Some(common_amb)) = (assets, common_amb) else {
         return;
     };
     let mut collision =
         meteor_physics::collision::CollisionSystem::new(COLLIDER_RADIUS, COLLIDER_HEIGHT);
-    collision.set_mesh_collider(mesh);
+    if let Some(mesh) = collider.mesh.as_ref() {
+        collision.set_mesh_collider(mesh);
+    }
 
     for (
         entity,
@@ -3907,6 +4340,7 @@ fn hit_reaction_root_motion(
         remote,
         mut remote_target,
         mut remote_window,
+        remote_segment,
     ) in &mut query
     {
         if !super::fighter_frame::accepts(active_fighter.as_deref(), entity) {
@@ -3915,6 +4349,9 @@ fn hit_reaction_root_motion(
         let Some(reaction) = runtime.current.as_ref() else {
             continue;
         };
+
+        let root_blend_held = runtime.entry_blend_held
+            || blend.is_some_and(|blend| blend.is_active_for(pose.pose_id));
         if remote.is_some() {
             let Some(window) = remote_window.as_deref_mut() else {
                 runtime.clear();
@@ -3926,8 +4363,76 @@ fn hit_reaction_root_motion(
                 continue;
             }
         }
+        if remote.is_some() {
+            if remote_segment
+                .is_some_and(|segment| segment.skip_stock_motion || segment.state_age > 0.5)
+            {
+                continue;
+            }
+            let Some(character) = assets.0.get(&format!("p{}", fighter.character_id)) else {
+                continue;
+            };
+            let scale = if reaction.motion_scale.is_finite() {
+                reaction.motion_scale
+            } else {
+                1.0
+            };
+            let delta = if root_blend_held {
+                [0.0; 3]
+            } else {
+                character.authored_root_step(&common_amb.0, pose, dt)
+            };
+            let (x, z) = meteor_anim::root_motion::root_delta_to_world_xz(
+                delta[0] * scale,
+                delta[1] * scale,
+                motion.facing,
+                1.0,
+            );
+            let mut delta = Vec3::new(x, delta[2] * scale * meteor_core::MODEL_SCALE, z);
+            if blend.is_some_and(|blend| blend.retains_root_delta()) {
+                delta = Vec3::ZERO;
+                if let Some((cached_delta, cached_yaw)) =
+                    blend.and_then(|blend| blend.last_root_sample)
+                {
+                    delta = Vec3::from_array(cached_delta) * scale;
+                    if blend.is_some_and(|blend| blend.preserve_sample_once) {
+                        motion.facing = cached_yaw;
+                    }
+                }
+            } else {
+                let root = character.reaction_root_rotation(
+                    &common_amb.0,
+                    pose,
+                    blend,
+                    runtime.entry_blend_held,
+                    dt,
+                ) * Vec3::X;
+                motion.facing += root.y.atan2(root.x);
+            }
+            transform.translation += delta;
+            if let Some(target) = remote_target.as_deref_mut() {
+                target.translation += delta;
+            }
+
+            motion.velocity = Vec3::ZERO;
+            commit_fighter_position(contacts.as_deref_mut(), entity, transform.translation);
+            continue;
+        }
+        if collider.mesh.is_none() {
+            continue;
+        }
 
         if reaction.kind == HitReactKind::Down {
+            if let Some(character) = assets.0.get(&format!("p{}", fighter.character_id)) {
+                let root = character.reaction_root_rotation(
+                    &common_amb.0,
+                    pose,
+                    blend,
+                    runtime.entry_blend_held,
+                    dt,
+                ) * Vec3::X;
+                motion.facing += root.y.atan2(root.x);
+            }
             let (tx, tz) = advance_down_carry(&mut runtime, &air, dt);
             let mut accepted_x = 0.0;
             let mut accepted_y = 0.0;
@@ -4009,15 +4514,36 @@ fn hit_reaction_root_motion(
             runtime.root_prev = Some(root);
         }
         runtime.root_prev = Some(root);
-        let delta =
-            if blend.is_some_and(|blend| blend.duration > 0.0 && blend.pose_id == pose.pose_id) {
-                [0.0; 3]
-            } else {
-                character_assets.authored_root_step(&common_amb.0, pose, dt)
-            };
-        let [dx, dy, dz] = delta.map(|value| value * motion_scale);
-        let (world_x, world_z) =
+        let delta = if root_blend_held {
+            [0.0; 3]
+        } else {
+            character_assets.authored_root_step(&common_amb.0, pose, dt)
+        };
+        let [dx, dy, mut dz] = delta.map(|value| value * motion_scale);
+        let (mut world_x, mut world_z) =
             meteor_anim::root_motion::root_delta_to_world_xz(dx, dy, motion.facing, 1.0);
+        if blend.is_some_and(|blend| blend.retains_root_delta()) {
+            world_x = 0.0;
+            world_z = 0.0;
+            dz = 0.0;
+            if let Some((cached, yaw)) = blend.and_then(|blend| blend.last_root_sample) {
+                world_x = cached[0] * motion_scale;
+                world_z = cached[2] * motion_scale;
+                dz = cached[1] * motion_scale / meteor_core::MODEL_SCALE;
+                if blend.is_some_and(|blend| blend.preserve_sample_once) {
+                    motion.facing = yaw;
+                }
+            }
+        } else {
+            let root = character_assets.reaction_root_rotation(
+                &common_amb.0,
+                pose,
+                blend,
+                runtime.entry_blend_held,
+                dt,
+            ) * Vec3::X;
+            motion.facing += root.y.atan2(root.x);
+        }
         let (carry_x, carry_z) = advance_reaction_carry(&mut runtime, &air, dt);
         let world_x = world_x + carry_x + air.ground_external_velocity.x * dt;
         let world_z = world_z + carry_z + air.ground_external_velocity.z * dt;
@@ -4043,12 +4569,9 @@ fn hit_reaction_root_motion(
         let requested_y = if anim_driven {
             runtime.vertical_velocity = anim_speed_source * meteor_core::MODEL_SCALE;
             dz * meteor_core::MODEL_SCALE
-        } else if was_airborne && dt > 0.0 {
+        } else {
             runtime.vertical_velocity += meteor_combat::hit_reaction::HIT_REACTION_GRAVITY * dt;
             runtime.vertical_velocity * dt
-        } else {
-            runtime.vertical_velocity = 0.0;
-            0.0
         };
         let (world_x, mut requested_y, world_z, scale) =
             clamp_composed_delta_3d(world_x, requested_y, world_z, dt, CARRY_MAX_SPEED);
@@ -4199,7 +4722,8 @@ fn tick_hit_reactions(
             &mut Health,
             &mut Qi,
             &mut SmState,
-            &FighterAir,
+            &mut FighterAir,
+            Option<&mut MotionState>,
             &WeaponForm,
             &mut FighterHitReaction,
             Option<&LocalFighter>,
@@ -4222,7 +4746,8 @@ fn tick_hit_reactions(
         mut health,
         mut qi,
         mut sm,
-        air,
+        mut air,
+        mut motion,
         weapon_form,
         mut runtime,
         local,
@@ -4266,6 +4791,15 @@ fn tick_hit_reactions(
             runtime.root_started = false;
         }
 
+        if matches!(
+            reaction.kind,
+            HitReactKind::BeHit | HitReactKind::Guard | HitReactKind::GetUp
+        ) && (runtime.entry_blend_held || blend.is_active_for(pose.pose_id))
+        {
+            runtime.current = Some(reaction);
+            continue;
+        }
+
         combat.state = sm.current;
         let guard_held = actor_guard_held(
             local.is_some(),
@@ -4279,7 +4813,7 @@ fn tick_hit_reactions(
             combat: &mut combat,
             health: &mut health,
             qi: &mut qi,
-            air,
+            air: &air,
             assets: character_assets,
             weapon: fighter.weapon,
             guard_held_input: guard_held,
@@ -4292,7 +4826,30 @@ fn tick_hit_reactions(
         };
         let previous_kind = reaction.kind;
         let next = tick_hit_react(&mut view, reaction, dt);
+
+        let resume_guard = guard_held && FighterView::can_guard(&view);
         drop(view);
+
+        let exits_reaction_motion = next.is_none()
+            || (previous_kind != HitReactKind::Down
+                && next
+                    .as_ref()
+                    .is_some_and(|next| next.kind == HitReactKind::Down));
+        if exits_reaction_motion {
+            air.air.motion_mode = AirMotionMode::Ballistic;
+            air.air.prev_root_z = None;
+            air.air.vertical_pose_id = 0;
+            air.air.launch_pose_id = 0;
+            air.air.launch_lifted = false;
+            air.air_attack_recovery_pose = None;
+            if let Some(motion) = motion.as_deref_mut() {
+                motion.movement_mode = if air.air.airborne {
+                    meteor_core::MovementMode::Airborne
+                } else {
+                    meteor_core::MovementMode::Idle
+                };
+            }
+        }
 
         if let Some(next) = next {
             let (state, locked) = match next.kind {
@@ -4312,7 +4869,7 @@ fn tick_hit_reactions(
             runtime.current = Some(next);
         } else {
             runtime.clear();
-            let state = if guard_held {
+            let state = if resume_guard {
                 FighterState::Guard
             } else {
                 FighterState::Name
@@ -4337,12 +4894,23 @@ fn tick_hit_reactions(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(not(target_arch = "wasm32"))]
+fn trace_obb(obb: &Obb) -> serde_json::Value {
+    serde_json::json!({
+        "center": [obb.center.x, obb.center.y, obb.center.z],
+        "axes": obb.axes.map(|axis| [axis.x, axis.y, axis.z]),
+        "half": [obb.half_size.x, obb.half_size.y, obb.half_size.z],
+    })
+}
+
 fn attack_windows(
     mut commands: Commands,
-    (active_fighter, time, mut self_effect_commits): (
+    (active_fighter, time, mut self_effect_commits, mut contact_frame, mrc_playback): (
         Option<Res<super::fighter_frame::ActiveFighter>>,
         Res<Time>,
         Local<std::collections::HashMap<Entity, u32>>,
+        Option<ResMut<CharacterContactFrame>>,
+        Option<Res<crate::plugins::replay_plugin::MrcPlayback>>,
     ),
     net: Res<NetState>,
     assets: Option<Res<CharacterAssetsSet>>,
@@ -4380,6 +4948,15 @@ fn attack_windows(
         return;
     };
 
+    if mrc_playback
+        .as_ref()
+        .is_some_and(|playback| playback.active)
+    {
+        return;
+    }
+
+    let now_seconds = time.elapsed_secs_f64();
+
     let mut snapshots: Vec<AttackSnapshot> = Vec::new();
     let mut self_effects = Vec::new();
     {
@@ -4408,7 +4985,9 @@ fn attack_windows(
             }
             let local_authority = local_attack_window_authority(net.status, local.is_some())
                 || (net.is_stock_host() && net.stock_npc_ready.contains(&attacker_entity));
-            let props_only = remote_prop_authority(&net, remote.is_some());
+            let props_only = remote_prop_authority(&net, remote.is_some())
+                && remote
+                    .is_none_or(|remote| !net.stock_scene_hit_peers.contains(&remote.player_id));
             if !local_authority && !props_only {
                 continue;
             }
@@ -4418,19 +4997,20 @@ fn attack_windows(
                 sm_state.current,
                 hit_reaction.current.is_some(),
                 props_only,
-            ) || entry_blend_is_active(blend.duration, blend.pose_id, pose.pose_id)
-            {
+            ) {
                 continue;
             }
             let Some(character_assets) = assets.0.get(&format!("p{}", fighter.character_id)) else {
                 continue;
             };
-            let Some(pose_data) = character_assets.poses.get(&pose.pose_id) else {
-                continue;
+            let sampled_frame = if blend.is_active_for(pose.pose_id) {
+                blend.frame_record_for(pose).1 as f32
+            } else {
+                pose.frame
             };
 
             if !props_only
-                && pose.frame.floor() >= pose.end.saturating_sub(1) as f32
+                && sampled_frame.floor() >= pose.end.saturating_sub(1) as f32
                 && self_effect_commits.get(&attacker_entity) != Some(&pose.pose_instance_id)
             {
                 if let Some(effect) = combat_resources
@@ -4448,7 +5028,7 @@ fn attack_windows(
             }
             let forward = attack_forward_from_facing(motion.facing);
 
-            let Some((index, window)) = active_attack_window(pose.frame, &pose_data.attacks) else {
+            let Some((index, window)) = sampled_attack_window(character_assets, pose, blend) else {
                 continue;
             };
             let (script_character_id, script_team) = if let Some(npc) = mission_npc {
@@ -4459,6 +5039,20 @@ fn attack_windows(
                 remote_scene_character(&net, remote)
             } else {
                 (-1, None)
+            };
+            let notice_name = match (feedback.request.as_ref(), feedback.room.as_ref()) {
+                (Some(request), Some(room)) => {
+                    crate::plugins::system_notice::resolve_local_combatant_name(
+                        request,
+                        &net,
+                        room,
+                        local.is_some(),
+                        remote.map(|remote| remote.player_id.as_str()),
+                        mission_npc.map(|npc| npc.name.as_str()),
+                        fighter.player_slot,
+                    )
+                }
+                _ => String::new(),
             };
             let combat_team = fighter_combat_team(&net, local.is_some(), remote, mission_npc);
             let profile = ranged_attack_profile(
@@ -4504,7 +5098,7 @@ fn attack_windows(
                     weapon: fighter.weapon,
                     weapon_stats: combat_weapon_stats(&combat_resources.0, fighter),
                     pose_id: pose.pose_id,
-                    pose_frame: pose.frame,
+                    pose_frame: sampled_frame,
                     pose_start: pose.start,
                     pose_instance_id: pose.pose_instance_id,
                     attack_index: index,
@@ -4581,19 +5175,45 @@ fn attack_windows(
                     ));
                 }
                 if profile.mode == RangedMode::Effect {
-                    let effect_obbs = geometry.live_effect_obbs(attacker_entity, character_assets);
+                    let effect_obbs = geometry.live_effect_obbs(
+                        attacker_entity,
+                        fighter,
+                        weapon_form_state,
+                        pose.pose_id,
+                        character_assets,
+                    );
                     if !effect_obbs.is_empty() {
+                        if feedback.settings.water_enhance {
+                            if let Some(water) = feedback.water.as_deref_mut() {
+                                water.record_boxes(
+                                    attacker_entity,
+                                    pose.pose_instance_id,
+                                    index,
+                                    now_seconds,
+                                    forward,
+                                    &effect_obbs,
+                                );
+                            }
+                        }
                         snapshots.push(AttackSnapshot {
                             entity: attacker_entity,
+                            all_candidates:
+                                meteor_combat::weapon_strategy::attack_uses_all_candidates(
+                                    weapon_to_strategy(fighter.weapon),
+                                    pose.action_id.or_else(|| {
+                                        character_assets.act.groups.get(&pose.pose_id).copied()
+                                    }),
+                                ),
                             weapon: fighter.weapon,
                             weapon_stats: combat_weapon_stats(&combat_resources.0, fighter),
                             pose_id: pose.pose_id,
-                            pose_frame: pose.frame,
+                            pose_frame: sampled_frame,
                             pose_start: pose.start,
                             player_slot: fighter.player_slot,
                             combat_team,
                             script_character_id,
                             script_team,
+                            notice_name: notice_name.clone(),
                             atk_pos: atk_pos.translation,
                             forward,
                             active_window: Some((index, window.clone())),
@@ -4625,10 +5245,37 @@ fn attack_windows(
                 .iter()
                 .any(|name| name.eq_ignore_ascii_case("effect"))
             {
-                geometry.live_effect_obbs(attacker_entity, character_assets)
+                geometry.live_effect_obbs(
+                    attacker_entity,
+                    fighter,
+                    weapon_form_state,
+                    pose.pose_id,
+                    character_assets,
+                )
             } else {
                 Vec::new()
             };
+            if feedback.settings.water_enhance {
+                if let Some(water) = feedback.water.as_deref_mut() {
+                    water.record_boxes(
+                        attacker_entity,
+                        pose.pose_instance_id,
+                        index,
+                        now_seconds,
+                        forward,
+                        &attack_obbs,
+                    );
+
+                    water.record_boxes(
+                        attacker_entity,
+                        pose.pose_instance_id,
+                        index | (1 << 31),
+                        now_seconds,
+                        forward,
+                        &effect_obbs,
+                    );
+                }
+            }
             let effect_origin = if effect_obbs.is_empty() {
                 None
             } else {
@@ -4636,15 +5283,21 @@ fn attack_windows(
             };
             snapshots.push(AttackSnapshot {
                 entity: attacker_entity,
+                all_candidates: meteor_combat::weapon_strategy::attack_uses_all_candidates(
+                    weapon_to_strategy(fighter.weapon),
+                    pose.action_id
+                        .or_else(|| character_assets.act.groups.get(&pose.pose_id).copied()),
+                ),
                 weapon: fighter.weapon,
                 weapon_stats: combat_weapon_stats(&combat_resources.0, fighter),
                 pose_id: pose.pose_id,
-                pose_frame: pose.frame,
+                pose_frame: sampled_frame,
                 pose_start: pose.start,
                 player_slot: fighter.player_slot,
                 combat_team,
                 script_character_id,
                 script_team,
+                notice_name,
                 atk_pos: atk_pos.translation,
                 forward,
                 active_window: Some((index, window.clone())),
@@ -4657,7 +5310,29 @@ fn attack_windows(
         }
     }
     for hit in ranged.pending.0.drain(..) {
+        if feedback.settings.water_enhance {
+            if let Some(water) = feedback.water.as_deref_mut() {
+                let (velocity, radius) = match hit.kind {
+                    ProjectileKind::GunRay => {
+                        ((hit.end - hit.start).normalize_or_zero() * 80.0, 0.045)
+                    }
+                    kind => (
+                        ranged.projectiles.get(hit.projectile).map_or_else(
+                            |_| (hit.end - hit.start) / time.delta_secs().max(0.0001),
+                            |p| p.velocity,
+                        ),
+                        if kind == ProjectileKind::FlyingWheel {
+                            0.22
+                        } else {
+                            0.075
+                        },
+                    ),
+                };
+                water.record_segment(hit.start, hit.end, velocity, radius);
+            }
+        }
         snapshots.push(AttackSnapshot {
+            all_candidates: true,
             entity: hit.source.owner,
             weapon: hit.source.weapon,
             weapon_stats: hit.source.weapon_stats,
@@ -4668,6 +5343,20 @@ fn attack_windows(
             combat_team: hit.source.combat_team,
             script_character_id: hit.source.script_character_id,
             script_team: hit.source.script_team,
+            notice_name: match (feedback.request.as_ref(), feedback.room.as_ref()) {
+                (Some(request), Some(room)) => {
+                    crate::plugins::system_notice::resolve_local_combatant_name(
+                        request,
+                        &net,
+                        room,
+                        hit.source.player_slot == 0 && hit.source.script_character_id == 0,
+                        None,
+                        None,
+                        hit.source.player_slot,
+                    )
+                }
+                _ => String::new(),
+            },
             atk_pos: hit.source.attack_origin,
             forward: hit.source.attack_forward,
             active_window: Some((hit.source.attack_index, hit.source.attack)),
@@ -4680,10 +5369,30 @@ fn attack_windows(
                 end: hit.end,
                 hit_scale: hit.hit_scale,
                 projectile: hit.projectile,
-                stop_after_first: hit.stop_after_first,
+                kind: hit.kind,
                 despawn_after: hit.despawn_after,
             },
         });
+    }
+
+    if let Some(frame) = contact_frame.as_deref_mut() {
+        let positions = queries.p2();
+        for snapshot in &snapshots {
+            if snapshot.requires_live_attack_owner
+                && !snapshot.props_only
+                && !snapshot.all_candidates
+            {
+                if let Ok((_, transform, ..)) = positions.get(snapshot.entity) {
+                    frame.cache_candidates(
+                        snapshot.entity,
+                        transform.translation,
+                        positions
+                            .iter()
+                            .map(|(entity, transform, ..)| (entity, transform.translation)),
+                    );
+                }
+            }
+        }
     }
     sort_attack_snapshots(&mut snapshots);
 
@@ -4730,6 +5439,20 @@ fn attack_windows(
                     if entity == snapshot.entity {
                         return None;
                     }
+                    if !snapshot.all_candidates && snapshot.requires_live_attack_owner {
+                        let included = contact_frame
+                            .as_deref()
+                            .and_then(|frame| {
+                                frame.cached_candidate_contains(snapshot.entity, entity)
+                            })
+                            .unwrap_or_else(|| {
+                                snapshot.atk_pos.distance(transform.translation)
+                                    <= 100.0 * meteor_core::MODEL_SCALE
+                            });
+                        if !included {
+                            return None;
+                        }
+                    }
                     let along = match &snapshot.geometry {
                         AttackGeometry::Segment {
                             start,
@@ -4765,6 +5488,46 @@ fn attack_windows(
         if matches!(&snapshot.geometry, AttackGeometry::Segment { .. }) {
             sort_ranged_defender_candidates(&mut defender_order);
         }
+        let projectile_kind = match &snapshot.geometry {
+            AttackGeometry::Segment { kind, .. } => Some(*kind),
+            AttackGeometry::Obbs(_) => None,
+        };
+        let original_hit_rules = net.status != NetStatus::InRoom || net.is_stock_udp();
+        let stock_wheel =
+            original_hit_rules && projectile_kind == Some(ProjectileKind::FlyingWheel);
+        let stock_ray = original_hit_rules && projectile_kind == Some(ProjectileKind::GunRay);
+        let stop_after_first = projectile_kind == Some(ProjectileKind::Dart) || stock_wheel;
+        let wheel_attack;
+        let window = if stock_wheel {
+            wheel_attack = meteor_asset::pos::AttackBlock {
+                defense_move: 0.0,
+                defense_value: 0.0,
+                ..window.clone()
+            };
+            &wheel_attack
+        } else {
+            window
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        if net.is_stock_udp() && matches!(&snapshot.geometry, AttackGeometry::Obbs(_)) {
+            let defenders = queries.p1();
+            defender_order.sort_by_key(|(entity, _)| {
+                let actor_id = net.stock_npc_actors.get(entity).copied().or_else(|| {
+                    let defender = defenders.get(*entity).ok()?;
+                    let player_id = if defender.14 .0.is_some() {
+                        net.player_id.as_str()
+                    } else {
+                        defender.12?.player_id.as_str()
+                    };
+                    player_id.strip_prefix("stock-")?.parse().ok()
+                });
+                (
+                    actor_id.is_none(),
+                    actor_id.unwrap_or_default(),
+                    entity.to_bits(),
+                )
+            });
+        }
         let mut ranged_hit_landed = false;
         if !snapshot.props_only {
             let mut defenders = queries.p1();
@@ -4798,7 +5561,7 @@ fn attack_windows(
                     continue;
                 };
                 if defender_entity == snapshot.entity
-                    || def_death.active
+                    || (def_death.active && health.current <= 0.0)
                     || defender_visibility
                         .is_some_and(|visibility| *visibility == Visibility::Hidden)
                 {
@@ -4882,14 +5645,115 @@ fn attack_windows(
                     .is_some(),
                 };
                 if !hit_geometry && !effect_hit {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if feedback
+                        .trace
+                        .as_ref()
+                        .is_some_and(|trace| trace.tracks_pose(snapshot.pose_id))
+                    {
+                        let (closest, attack_boxes, hurt_boxes) = match &snapshot.geometry {
+                            AttackGeometry::Obbs(attacks) => {
+                                let hurts =
+                                    fighter_body_hurt_obbs(defender_entity, def_assets, &geometry);
+                                let closest = attacks
+                                    .iter()
+                                    .flat_map(|a| {
+                                        hurts.iter().map(move |b| {
+                                            let delta = a.center - b.center;
+                                            (delta.x * delta.x
+                                                + delta.y * delta.y
+                                                + delta.z * delta.z)
+                                                .sqrt()
+                                        })
+                                    })
+                                    .fold(f32::INFINITY, f32::min);
+                                (
+                                    closest,
+                                    attacks.iter().map(trace_obb).collect::<Vec<_>>(),
+                                    hurts.iter().map(trace_obb).collect::<Vec<_>>(),
+                                )
+                            }
+                            _ => (f32::INFINITY, Vec::new(), Vec::new()),
+                        };
+                        let delta = def_pos.translation - snapshot.atk_pos;
+                        let planar_distance = delta.xz().length();
+                        let target_forward_dot =
+                            snapshot.forward.xz().dot(delta.xz()) / planar_distance.max(1e-5);
+                        if let Some(trace) = feedback.trace.as_deref_mut() {
+                            trace.event(serde_json::json!({
+                                "kind":"hit-geometry-miss", "attacker":snapshot.entity.to_bits(),
+                                "defender":defender_entity.to_bits(), "pose":snapshot.pose_id,
+                                "frame":snapshot.pose_frame, "attackIndex":attack_index,
+                                "attackerPosition":snapshot.atk_pos.to_array(),
+                                "defenderPosition":def_pos.translation.to_array(),
+                                "defenderPose":def_pose.pose_id,"defenderFrame":def_pose.frame,
+                                "attackerYaw":snapshot.forward.x.atan2(snapshot.forward.z),
+                                "defenderYaw":def_motion.facing,
+                                "planarDistance":planar_distance,
+                                "targetForwardDot":target_forward_dot,
+                                "closestCenters":closest.is_finite().then_some(closest),
+                                "attackObbs":attack_boxes,"hurtObbs":hurt_boxes,
+                            }));
+                        }
+                    }
                     continue;
                 }
 
-                if admit_intersecting_target(&mut target_hit_clock)
-                    != IntersectingTargetAdmission::Accepted
-                {
-                    continue;
+                #[cfg(not(target_arch = "wasm32"))]
+                let previous_hit_at = target_hit_clock.last_hit_at;
+                let admission = admit_intersecting_target(
+                    &mut target_hit_clock,
+                    projectile_kind.filter(|_| original_hit_rules),
+                    now_seconds,
+                );
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(trace) = feedback.trace.as_deref_mut() {
+                    let (attack_boxes, hurt_boxes) = if trace.tracks_pose(snapshot.pose_id) {
+                        match &snapshot.geometry {
+                            AttackGeometry::Obbs(attacks) => (
+                                attacks.iter().map(trace_obb).collect::<Vec<_>>(),
+                                fighter_body_hurt_obbs(defender_entity, def_assets, &geometry)
+                                    .iter()
+                                    .map(trace_obb)
+                                    .collect::<Vec<_>>(),
+                            ),
+                            _ => (Vec::new(), Vec::new()),
+                        }
+                    } else {
+                        (Vec::new(), Vec::new())
+                    };
+                    trace.event(serde_json::json!({
+                        "kind":"hit-admission", "attacker":snapshot.entity.to_bits(),
+                        "defender":defender_entity.to_bits(), "pose":snapshot.pose_id,
+                        "frame":snapshot.pose_frame, "attackIndex":attack_index,
+                        "window":[window.start,window.end], "now":now_seconds,
+                        "previousHitAt":previous_hit_at.is_finite().then_some(previous_hit_at),
+                        "admission":format!("{admission:?}"), "hpBefore":health.current,
+                        "stockHost":net.is_stock_host(), "remote":defender_remote.is_some(),
+                        "attackerPosition":snapshot.atk_pos.to_array(),
+                        "defenderPosition":def_pos.translation.to_array(),
+                        "defenderPose":def_pose.pose_id,"defenderFrame":def_pose.frame,
+                        "attackerYaw":snapshot.forward.x.atan2(snapshot.forward.z),
+                        "defenderYaw":def_motion.facing,
+                        "attackObbs":attack_boxes,"hurtObbs":hurt_boxes,
+                    }));
                 }
+                match admission {
+                    IntersectingTargetAdmission::Accepted => {}
+                    IntersectingTargetAdmission::SpawnProtected if stock_wheel => break,
+                    _ => continue,
+                }
+                let bucket = if stock_ray || stock_wheel {
+                    FacingBucket::Default
+                } else {
+                    facing_bucket(
+                        snapshot.atk_pos.x,
+                        snapshot.atk_pos.z,
+                        def_pos.translation.x,
+                        def_pos.translation.z,
+                        def_motion.facing,
+                    )
+                };
 
                 #[cfg(not(target_arch = "wasm32"))]
                 if net.is_stock_host()
@@ -4910,13 +5774,6 @@ fn attack_windows(
                             });
                     if let (Some(target_id), Some(tx)) = (target_id, ranged.net_tx.as_deref()) {
                         let poses: Vec<u16> = def_assets.poses.keys().copied().collect();
-                        let bucket = facing_bucket(
-                            snapshot.atk_pos.x,
-                            snapshot.atk_pos.z,
-                            def_pos.translation.x,
-                            def_pos.translation.z,
-                            def_motion.facing,
-                        );
                         let request = meteor_network::stock_protocol::StockHitRequest::from_attack(
                             target_id,
                             snapshot.pose_id,
@@ -4931,6 +5788,14 @@ fn attack_windows(
                                 .then_some(snapshot.entity),
                             request,
                         );
+                        if let Some(trace) = feedback.trace.as_deref_mut() {
+                            trace.event(
+                                serde_json::json!({"kind":"hit-uplink", "targetActor":target_id,
+                                "pose":snapshot.pose_id,"frame":snapshot.pose_frame,
+                                "attackIndex":attack_index,"reaction":request.target_pose(),
+                                "hostNpc":true}),
+                            );
+                        }
 
                         if !net.stock_npc_ready.contains(&snapshot.entity)
                             && teams_are_hostile(snapshot.combat_team, defender_team)
@@ -4953,13 +5818,7 @@ fn attack_windows(
                         }
                         ranged_hit_landed |=
                             matches!(&snapshot.geometry, AttackGeometry::Segment { .. });
-                        if matches!(
-                            &snapshot.geometry,
-                            AttackGeometry::Segment {
-                                stop_after_first: true,
-                                ..
-                            }
-                        ) {
+                        if stop_after_first {
                             break;
                         }
                     }
@@ -5006,7 +5865,7 @@ fn attack_windows(
                     .unwrap_or(15)
                     + defender_bonus;
                 let pose_attack_percent = |pose_id| combat_resources.0.pose_attack_percent(pose_id);
-                let result = resolve_hit(
+                let result = meteor_combat::hit_resolve::resolve_hit_with_rules(
                     &mut stats,
                     &HitOptions {
                         attacker_team: snapshot.combat_team,
@@ -5024,7 +5883,16 @@ fn attack_windows(
                         attack: Some(window),
                         pose_attack_percent: &pose_attack_percent,
                     },
+                    if net.status == NetStatus::InRoom {
+                        net.battle_rules.clone()
+                    } else {
+                        Default::default()
+                    },
                 );
+                let mut reaction_window = window.clone();
+                reaction_window.defense_value = result.defense_value;
+                reaction_window.target_value = result.target_value;
+                let window = &reaction_window;
                 if !result.guarded
                     && !result.killed
                     && defender_remote.is_none()
@@ -5037,13 +5905,6 @@ fn attack_windows(
                     }
                 }
                 ranged_hit_landed |= matches!(&snapshot.geometry, AttackGeometry::Segment { .. });
-                let stop_after_first = matches!(
-                    &snapshot.geometry,
-                    AttackGeometry::Segment {
-                        stop_after_first: true,
-                        ..
-                    }
-                );
                 let killed = result.killed;
                 let chest = def_pos.translation + Vec3::Y * 2.2;
                 let weapon_point = match &snapshot.geometry {
@@ -5067,13 +5928,6 @@ fn attack_windows(
                         DEATH_POSES,
                     };
                     let poses: Vec<u16> = def_assets.poses.keys().copied().collect();
-                    let bucket = facing_bucket(
-                        snapshot.atk_pos.x,
-                        snapshot.atk_pos.z,
-                        def_pos.translation.x,
-                        def_pos.translation.z,
-                        def_motion.facing,
-                    );
                     if result.guarded {
                         let strategy = weapon_to_strategy(defender.weapon);
                         guard_reaction_pose_id(
@@ -5126,8 +5980,66 @@ fn attack_windows(
                     }
                 }
 
-                if let Some(_remote) = defender_remote.as_ref() {
+                if let Some(remote) = defender_remote.as_ref() {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if net.is_stock_udp() && (stock_ray || stock_wheel) {
+                        if let (Some(target_id), Some(tx)) = (
+                            remote
+                                .player_id
+                                .strip_prefix("stock-")
+                                .and_then(|id| id.parse().ok()),
+                            ranged.net_tx.as_deref(),
+                        ) {
+                            let poses: Vec<u16> = def_assets.poses.keys().copied().collect();
+                            tx.send_stock_actor_hit(
+                                None,
+                                meteor_network::stock_protocol::StockHitRequest::from_attack(
+                                    target_id,
+                                    snapshot.pose_id,
+                                    snapshot.weapon,
+                                    window,
+                                    bucket,
+                                    &poses,
+                                ),
+                            );
+                        }
+                        if stop_after_first {
+                            break;
+                        }
+                        continue;
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    let _ = remote;
+
                     commands.entity(defender_entity).insert(PendingRemoteHit {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        stock_request: if net.is_stock_udp() {
+                            remote
+                                .player_id
+                                .strip_prefix("stock-")
+                                .and_then(|id| id.parse().ok())
+                                .map(|id| {
+                                    let bucket = facing_bucket(
+                                        snapshot.atk_pos.x,
+                                        snapshot.atk_pos.z,
+                                        def_pos.translation.x,
+                                        def_pos.translation.z,
+                                        def_motion.facing,
+                                    );
+                                    let poses =
+                                        def_assets.poses.keys().copied().collect::<Vec<_>>();
+                                    meteor_network::stock_protocol::StockHitRequest::from_attack(
+                                        id,
+                                        snapshot.pose_id,
+                                        snapshot.weapon,
+                                        window,
+                                        bucket,
+                                        &poses,
+                                    )
+                                })
+                        } else {
+                            None
+                        },
                         damage: result.damage as f32,
                         pose_id: snapshot.pose_id,
                         attack_index: *attack_index,
@@ -5142,13 +6054,6 @@ fn attack_windows(
                     continue;
                 }
                 let poses: Vec<u16> = def_assets.poses.keys().copied().collect();
-                let bucket = facing_bucket(
-                    snapshot.atk_pos.x,
-                    snapshot.atk_pos.z,
-                    def_pos.translation.x,
-                    def_pos.translation.z,
-                    def_motion.facing,
-                );
 
                 if let Some(mut attack_motion) = defender_attack_motion {
                     *attack_motion = FighterAttackMotion::default();
@@ -5174,7 +6079,7 @@ fn attack_windows(
                     strategy_id: weapon_to_strategy(defender.weapon),
                     weapon_action_vetoed: false,
                 };
-                if result.guarded {
+                if result.guarded && !killed {
                     let strategy = weapon_to_strategy(defender.weapon);
                     if let Some(reaction) = begin_guard_hit(
                         &mut view,
@@ -5237,6 +6142,45 @@ fn attack_windows(
                     } else {
                         score.npc_kills += 1;
                     }
+                    if net.status != NetStatus::InRoom {
+                        if let Some(scores) = feedback.offline_scores.as_mut() {
+                            scores.record_death(
+                                offline_actor_id(
+                                    defender_local.is_some(),
+                                    defender_mission_npc.map(|npc| npc.id),
+                                    defender.player_slot,
+                                ),
+                                Some(offline_actor_id(
+                                    snapshot.script_character_id == 0 && snapshot.player_slot == 0,
+                                    (snapshot.script_character_id > 0)
+                                        .then_some(snapshot.script_character_id),
+                                    snapshot.player_slot,
+                                )),
+                            );
+                        }
+                        if let (Some(request), Some(room), Some(notices)) = (
+                            feedback.request.as_ref(),
+                            feedback.room.as_ref(),
+                            feedback.notices.as_mut(),
+                        ) {
+                            let target_name =
+                                crate::plugins::system_notice::resolve_local_combatant_name(
+                                    request,
+                                    &net,
+                                    room,
+                                    defender_local.is_some(),
+                                    None,
+                                    defender_mission_npc.map(|npc| npc.name.as_str()),
+                                    defender.player_slot,
+                                );
+                            if !snapshot.notice_name.is_empty() {
+                                notices.push(crate::plugins::system_notice::format_kill_or_death(
+                                    Some(&snapshot.notice_name),
+                                    &target_name,
+                                ));
+                            }
+                        }
+                    }
                     info!(
                         "kill! attacker slot {} → defender slot {}",
                         snapshot.player_slot, defender.player_slot
@@ -5244,7 +6188,12 @@ fn attack_windows(
 
                     let character_id = defender_mission_npc
                         .map(|npc| npc.id)
-                        .or_else(|| defender_local.is_some().then_some(0));
+                        .or_else(|| defender_local.is_some().then_some(0))
+                        .filter(|_| {
+                            !(net.status == NetStatus::InRoom
+                                && net.is_stock_host()
+                                && net.stage == "sn22")
+                        });
                     if let (Some(character_id), Some(runtime)) = (character_id, script.script_mut())
                     {
                         if let Err(error) = runtime.call(
@@ -5261,6 +6210,21 @@ fn attack_windows(
                     }
                 } else {
                     if let Some(reaction) = begin_be_hit(&mut view, Some(window), bucket, &poses) {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if matches!(snapshot.pose_id, 285 | 289 | 291) {
+                            if let Some(trace) = feedback.trace.as_deref_mut() {
+                                trace.event(serde_json::json!({
+                                    "kind":"spear-reaction", "attacker":snapshot.entity.to_bits(),
+                                    "defender":defender_entity.to_bits(), "attackPose":snapshot.pose_id,
+                                    "attackFrame":snapshot.pose_frame, "attackIndex":attack_index,
+                                    "reactionPose":reaction.pose_id, "move":reaction.motion_scale,
+                                    "minimum":reaction.minimum_remaining,
+                                    "attackerPosition":snapshot.atk_pos.to_array(),
+                                    "defenderPosition":def_pos.translation.to_array(),
+                                    "defenderYaw":def_motion.facing,
+                                }));
+                            }
+                        }
                         defender_reaction.begin(reaction, defender_air.air.airborne);
                         defender_reaction
                             .bank_be_hit_carry(def_motion.velocity, defender_local.is_some());
@@ -5311,8 +6275,8 @@ fn attack_windows(
                 let mut prop_hit = false;
 
                 let mut reported_props = std::collections::HashSet::new();
-                for (_, mut prop, prop_transform, visibility) in &mut props {
-                    if prop.broken || *visibility == Visibility::Hidden {
+                for (_, mut prop, prop_transform, _visibility) in &mut props {
+                    if prop.broken {
                         continue;
                     }
                     if script
@@ -5381,12 +6345,12 @@ fn attack_windows(
             }
             if let AttackGeometry::Segment {
                 projectile,
-                stop_after_first,
+                kind,
                 despawn_after,
                 ..
             } = &snapshot.geometry
             {
-                if *despawn_after || (*stop_after_first && ranged_hit_landed) {
+                if *despawn_after || (*kind == ProjectileKind::Dart && ranged_hit_landed) {
                     commands.entity(*projectile).despawn();
                 }
             }
@@ -5477,6 +6441,30 @@ fn attack_windows(
         sm.exe_ground_mode_ticks = 0;
         death.active = true;
         death.timer = meteor_combat::death::RESPAWN_DELAY_SECONDS;
+        if net.status != NetStatus::InRoom {
+            if let Some(scores) = feedback.offline_scores.as_mut() {
+                scores.record_death(
+                    offline_actor_id(local.is_some(), npc.map(|npc| npc.id), fighter.player_slot),
+                    None,
+                );
+            }
+            if let (Some(request), Some(room), Some(notices)) = (
+                feedback.request.as_ref(),
+                feedback.room.as_ref(),
+                feedback.notices.as_mut(),
+            ) {
+                let name = crate::plugins::system_notice::resolve_local_combatant_name(
+                    request,
+                    &net,
+                    room,
+                    local.is_some(),
+                    None,
+                    npc.map(|npc| npc.name.as_str()),
+                    fighter.player_slot,
+                );
+                notices.push(crate::plugins::system_notice::format_death(&name));
+            }
+        }
 
         if let Some(model) =
             super::character_plugin::weapon_model_stem(fighter.weapon, fighter.weapon_variant)
@@ -5488,7 +6476,12 @@ fn attack_windows(
                 velocity: [yaw.sin() * 12.0, 0.0, yaw.cos() * 12.0],
             });
         }
-        let character_id = npc.map(|n| n.id).or_else(|| local.is_some().then_some(0));
+        let character_id = npc
+            .map(|n| n.id)
+            .or_else(|| local.is_some().then_some(0))
+            .filter(|_| {
+                !(net.status == NetStatus::InRoom && net.is_stock_host() && net.stage == "sn22")
+            });
         if let (Some(id), Some(runtime)) = (character_id, script.script_mut()) {
             use meteor_scene::scene_script_runtime::PstValue;
             if let Err(error) = runtime.call(
@@ -5818,14 +6811,19 @@ pub(crate) fn forward_network_prop_hit(
     pose_id: u16,
     frame: f32,
 ) -> bool {
-    if net.status != NetStatus::InRoom || net.is_stock_udp() || net.is_scene_authority() {
+    if net.status != NetStatus::InRoom
+        || net.is_scene_authority()
+        || net.is_stock_udp() && net.stock_runtime_generation.is_none()
+    {
         return false;
     }
 
     if net.round_active {
-        if let (Some(tx), Some(match_epoch), Some(round_epoch)) =
-            (tx, net.match_epoch, net.round_epoch)
-        {
+        if let (Some(tx), Some(match_epoch), Some(round_epoch)) = (
+            tx,
+            net.match_epoch.or_else(|| net.is_stock_udp().then_some(0)),
+            net.round_epoch.or_else(|| net.is_stock_udp().then_some(0)),
+        ) {
             tx.send_control(meteor_network::protocol::Message::ScenePropHit {
                 room_id: net.room_id.clone(),
                 match_epoch,
@@ -5984,7 +6982,7 @@ pub(super) fn death_respawn(
         }
 
         target_hit_clock.reset_spawn();
-        target_hit_clock.reset();
+        target_hit_clock.clear_hit();
     }
 }
 
@@ -6027,7 +7025,11 @@ fn guard_reaction_owns_pose(hit_reaction: &FighterHitReaction) -> bool {
 }
 
 fn preadvance_local_ground_locomotion_pose(
+    mut turn: Option<ResMut<crate::plugins::camera_plugin::LocalTurnState>>,
+    crouch_input: Option<Res<LocalCrouchInput>>,
+    app_state: Option<Res<State<AppState>>>,
     assets: Option<Res<CharacterAssetsSet>>,
+    combat_resources: Option<Res<CombatResourceData>>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     keymap: Res<crate::app_state::Keymap>,
@@ -6059,15 +7061,22 @@ fn preadvance_local_ground_locomotion_pose(
         mut air,
     ) in &mut query
     {
+        let mode1 = air
+            .as_ref()
+            .is_some_and(|air| air.recovery_ground_mode == Some(true));
+        let crouching = motion.movement_mode == meteor_core::MovementMode::Crouch
+            || (mode1 && crouch_input.as_deref().is_some_and(|input| input.held));
         let base_speed = if local.is_some() {
             buffs.as_ref().map_or(1.0, |buffs| buffs.speed_factor)
         } else {
             1.0
         };
-        let slow = statuses
-            .get(entity)
-            .map_or(base_speed, |status| status.effects.speed_factor(base_speed))
-            < 0.7;
+        let slow = fighter_speed_factor(
+            combat_resources.as_deref(),
+            fighter,
+            base_speed,
+            statuses.get(entity).ok(),
+        ) < 0.7;
         if (sm_state.current == FighterState::Name
             && ranged.get(entity).is_ok_and(|gate| gate.wheel_out))
             || local.is_none()
@@ -6077,14 +7086,15 @@ fn preadvance_local_ground_locomotion_pose(
             || wall.as_ref().is_some_and(|wall| {
                 wall.cling_active || (wall.kick_pose != 0 && wall.kick_pose == pose.pose_id)
             })
-            || air.as_ref().is_some_and(|air| air.air.airborne)
-            || !matches!(
-                motion.movement_mode,
-                meteor_core::MovementMode::Idle
-                    | meteor_core::MovementMode::Walk
-                    | meteor_core::MovementMode::Run
-                    | meteor_core::MovementMode::Crouch
-            )
+            || (air.as_ref().is_some_and(|air| air.air.airborne) && !mode1)
+            || (!mode1
+                && !matches!(
+                    motion.movement_mode,
+                    meteor_core::MovementMode::Idle
+                        | meteor_core::MovementMode::Walk
+                        | meteor_core::MovementMode::Run
+                        | meteor_core::MovementMode::Crouch
+                ))
         {
             continue;
         }
@@ -6124,35 +7134,38 @@ fn preadvance_local_ground_locomotion_pose(
         let Some(character_assets) = assets.0.get(&format!("p{}", fighter.character_id)) else {
             continue;
         };
-        let input = if player_performance
-            .as_deref()
-            .is_some_and(|performance| performance.input_blocked)
+        let input = if app_state
+            .as_ref()
+            .is_some_and(|state| *state.get() != AppState::Playing)
+            || player_performance
+                .as_deref()
+                .is_some_and(|performance| performance.input_blocked)
         {
             Vec3::ZERO
         } else {
             crate::plugins::movement_plugin::directional_input(&keys, &mouse, &keymap)
         };
         let strategy_id = weapon_to_strategy(fighter.weapon);
-        let mut wanted = walk_pose_for_input(
-            input.x,
-            input.z,
-            WalkOptions {
-                slow,
-                crouching: motion.movement_mode == meteor_core::MovementMode::Crouch,
-                strategy_id: Some(strategy_id),
-                locked: lock.lock_entity.is_some(),
-                aiming: gun_aim.aiming,
-                weapon_form: weapon_form.current,
-                ..WalkOptions::default()
-            },
-        );
+        let opts = WalkOptions {
+            slow,
+            crouching,
+            strategy_id: Some(strategy_id),
+            locked: lock.lock_entity.is_some(),
+            aiming: gun_aim.aiming,
+            weapon_form: weapon_form.current,
+        };
+        let mut wanted = if let Some(turn) = turn.as_deref_mut() {
+            turn.0.ground_pose(input.x, input.z, pose.pose_id, opts)
+        } else {
+            walk_pose_for_input(input.x, input.z, opts)
+        };
         if !character_assets.poses.contains_key(&wanted) {
             wanted = walk_pose_for_input(
                 input.x,
                 input.z,
                 WalkOptions {
                     slow,
-                    crouching: motion.movement_mode == meteor_core::MovementMode::Crouch,
+                    crouching,
                     ..WalkOptions::default()
                 },
             );
@@ -6199,8 +7212,11 @@ fn airborne_locomotion_pose(
 }
 
 fn default_poses(
+    turn: Option<Res<crate::plugins::camera_plugin::LocalTurnState>>,
+    app_state: Option<Res<State<AppState>>>,
     active_fighter: Option<Res<super::fighter_frame::ActiveFighter>>,
     assets: Option<Res<CharacterAssetsSet>>,
+    combat_resources: Option<Res<CombatResourceData>>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     keymap: Res<crate::app_state::Keymap>,
@@ -6237,10 +7253,12 @@ fn default_poses(
         } else {
             1.0
         };
-        let slow = statuses
-            .get(entity)
-            .map_or(base_speed, |status| status.effects.speed_factor(base_speed))
-            < 0.7;
+        let slow = fighter_speed_factor(
+            combat_resources.as_deref(),
+            fighter,
+            base_speed,
+            statuses.get(entity).ok(),
+        ) < 0.7;
         if !super::fighter_frame::accepts(active_fighter.as_deref(), entity) {
             continue;
         }
@@ -6338,7 +7356,7 @@ fn default_poses(
                         true,
                         None,
                         EntryBlendKind::Generic,
-                        true,
+                        false,
                         false,
                         Some(strategy_id),
                     );
@@ -6359,6 +7377,12 @@ fn default_poses(
         if let Some(air) = air.as_deref_mut() {
             air.attack_ground_pose_pending = false;
         }
+        if air
+            .as_deref()
+            .is_some_and(|air| air.held_jump_mover_deferred)
+        {
+            continue;
+        }
         let ledge_fall = air.as_deref().is_some_and(|air| air.ledge_fall);
         let strategy_sample = air.as_deref().and_then(|air| air.locomotion_pose_sample);
         let vertical_speed = strategy_sample.map_or_else(
@@ -6376,7 +7400,7 @@ fn default_poses(
             meteor_core::MovementMode::Airborne => airborne_locomotion_pose(
                 pose.pose_id,
                 pose.is_fall_hold(),
-                ledge_fall,
+                ledge_fall || strategy_sample.is_some(),
                 vertical_speed,
                 character_assets.poses.contains_key(&L::JUMP_ARC),
             ),
@@ -6386,6 +7410,9 @@ fn default_poses(
             | meteor_core::MovementMode::Run
             | meteor_core::MovementMode::Crouch => {
                 let (ix, iz) = if local.is_some()
+                    && app_state
+                        .as_ref()
+                        .is_none_or(|state| *state.get() == AppState::Playing)
                     && !player_performance
                         .as_deref()
                         .is_some_and(|performance| performance.input_blocked)
@@ -6398,19 +7425,27 @@ fn default_poses(
                 } else {
                     (0.0, 0.0)
                 };
-                let mut want = walk_pose_for_input(
-                    ix,
-                    iz,
-                    WalkOptions {
-                        slow,
-                        crouching: motion.movement_mode == meteor_core::MovementMode::Crouch,
-                        strategy_id: Some(weapon_to_strategy(fighter.weapon)),
-                        locked: actor_uses_local_lock(local.is_some(), lock.lock_entity.is_some()),
-                        aiming: gun_aim.aiming,
-                        weapon_form: weapon_form.current,
-                        ..WalkOptions::default()
-                    },
-                );
+                let opts = WalkOptions {
+                    slow,
+                    crouching: motion.movement_mode == meteor_core::MovementMode::Crouch,
+                    strategy_id: Some(strategy_id),
+                    locked: actor_uses_local_lock(local.is_some(), lock.lock_entity.is_some()),
+                    aiming: gun_aim.aiming,
+                    weapon_form: weapon_form.current,
+                };
+
+                let mut want = if local.is_some() && sm_state.current == FighterState::Name {
+                    turn.as_deref().map_or_else(
+                        || walk_pose_for_input(ix, iz, opts),
+                        |turn| {
+                            let mut sample = turn.0;
+                            sample.degrees = 0.0;
+                            sample.ground_pose(ix, iz, pose.pose_id, opts)
+                        },
+                    )
+                } else {
+                    walk_pose_for_input(ix, iz, opts)
+                };
 
                 if !character_assets.poses.contains_key(&want) {
                     want = walk_pose_for_input(
@@ -6429,7 +7464,6 @@ fn default_poses(
         let force_ground_entry = take_ground_entry_blend(air.as_deref_mut(), motion.movement_mode);
         if pose.pose_id != pose_id {
             let hard = !can_keep_locomotion_phase(pose.pose_id, pose_id);
-            let skip_blend = jump_transition_is_hard_cut(pose.pose_id, pose_id);
             character_assets.apply_pose_with_blend(
                 &mut pose,
                 &mut blend,
@@ -6437,7 +7471,7 @@ fn default_poses(
                 hard,
                 None,
                 EntryBlendKind::Generic,
-                skip_blend,
+                false,
                 force_ground_entry,
                 Some(strategy_id),
             );
@@ -6448,13 +7482,42 @@ fn default_poses(
 #[cfg(feature = "original-assets")]
 #[cfg(test)]
 mod tests {
+    #[cfg(not(target_arch = "wasm32"))]
+    mod spear_combo_tests {
+        include!("combat_plugin/spear_combo_tests.rs");
+    }
+    mod getup_tests {
+        include!("combat_plugin/getup_tests.rs");
+    }
+    mod turn_blend_tests {
+        include!("combat_plugin/turn_blend_tests.rs");
+    }
+    mod landing_roof_tests {
+        include!("combat_plugin/landing_roof_tests.rs");
+    }
+    mod sn03_lightfoot_tests {
+        include!("combat_plugin/sn03_lightfoot_tests.rs");
+    }
+    mod lock_height_tests {
+        include!("combat_plugin/lock_height_tests.rs");
+    }
     use super::*;
+    mod dagger_crouch_tests {
+        include!("combat_plugin/dagger_crouch_tests.rs");
+    }
+    mod ninja_collision_oracle_tests {
+        include!("combat_plugin/ninja_collision_oracle_tests.rs");
+    }
     mod story_rule_tests {
         include!("combat_plugin/story_rule_tests.rs");
     }
 
     mod sn13_slope_tests {
         include!("combat_plugin/sn13_slope_tests.rs");
+    }
+
+    mod wheel_recovery_tests {
+        include!("combat_plugin/wheel_recovery_tests.rs");
     }
 
     mod crowd_schedule_tests {
@@ -6781,6 +7844,98 @@ mod tests {
             );
             assert!(!script_allows_prop_hit(&runtime, name));
         }
+    }
+
+    #[test]
+    fn prop_hit_sn07_hidden_eye_triggers_remain_attackable() {
+        use meteor_scene::scene_script_runtime::{PstValue, SceneItemInstance, SceneScriptRuntime};
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        if !root.join("sn07/sn07.des").exists() {
+            eprintln!("origin_res missing, skipping");
+            return;
+        }
+        let mut source = String::new();
+        for path in [
+            "PScriptLib/Def.h",
+            "PScriptLib/box.pst",
+            "PScriptLib/desk.pst",
+            "PScriptLib/chair.pst",
+            "PScriptLib/jug.pst",
+            "sn07/sn07.pst",
+        ] {
+            source.push_str(&meteor_scene::text::decode_cp936(
+                &std::fs::read(root.join(path)).unwrap(),
+            ));
+            source.push('\n');
+        }
+        let desc = meteor_asset::des::parse_stage_description(
+            &std::fs::read_to_string(root.join("sn07/sn07.des")).unwrap(),
+        );
+        let trigger = desc
+            .dummies
+            .iter()
+            .find(|dummy| dummy.name == "D_sn07gd02")
+            .expect("sn07 invisible eye trigger");
+        assert!(
+            !trigger.visible,
+            "authored DES marks the attack volume invisible"
+        );
+        let instances = desc
+            .dummies
+            .iter()
+            .enumerate()
+            .map(|(index, dummy)| SceneItemInstance {
+                name: dummy.name.clone(),
+                index,
+                props: crate::plugins::stage_plugin::scene_item_props_from_dummy(dummy),
+            })
+            .collect();
+        let mut runtime = SceneScriptRuntime::load(&source, instances, 250_000).unwrap();
+        runtime.start().unwrap();
+
+        let gd = runtime
+            .host()
+            .instances()
+            .iter()
+            .find(|instance| instance.name == "D_sn07gd02")
+            .expect("gd02 instance");
+        assert_eq!(gd.get("active").as_f64(), 1.0);
+        assert_eq!(gd.get("visible").as_f64(), 0.0);
+        assert!(script_allows_prop_hit(&runtime, "D_sn07gd02"));
+        assert!(
+            !crate::plugins::stage_plugin::script_item_is_rendered(true, false),
+            "render stays hidden while PropHit remains open"
+        );
+
+        let eye = runtime.host().resolve_name("D_gd02eye01").unwrap();
+        assert_eq!(
+            runtime.host().instance(eye).unwrap().get("state").as_f64(),
+            3.0
+        );
+        runtime.host_mut().take_effects();
+        runtime
+            .call_item("D_sn07gd02", "OnAttack", &scene_on_attack_args(0, 50))
+            .unwrap();
+        let pin = runtime.host().resolve_name("D_sn07t06").unwrap();
+        assert_eq!(
+            runtime.host().instance(pin).unwrap().get("pose").as_f64(),
+            1.0,
+            "attacking the invisible gd trigger must launch the paired pin"
+        );
+        assert_eq!(
+            runtime.host().instance(eye).unwrap().get("pose").as_f64(),
+            1.0,
+            "paired eye pose advances so the trigger cannot retrigger until idle"
+        );
+        let effects = runtime.host_mut().take_effects();
+        assert!(
+            effects.iter().any(|op| matches!(
+                op,
+                meteor_scene::scene_script_runtime::SceneNetOp::Effect { effect, .. }
+                    if effect.eq_ignore_ascii_case("FStinger")
+            )),
+            "OnAttack must emit the authored FStinger effect"
+        );
     }
 
     #[test]
@@ -7527,6 +8682,7 @@ mod tests {
                     ..default()
                 },
                 PoseRuntime {
+                    action_id: None,
                     pose_id: 200,
                     frame: 10.0,
                     start: 0,
@@ -7534,6 +8690,7 @@ mod tests {
                     loop_start: 0,
                     loop_end: 20,
                     loops: false,
+                    link_past_end: false,
                     pose_instance_id: 1,
                 },
                 EntryBlend {
@@ -7713,9 +8870,10 @@ mod tests {
             &FighterAttackMotion,
             &crate::components::fighter::VisualRootPin,
             &NpcCombatProfile,
+            &crate::plugins::ai_plugin::StockNpcBrain,
         ), With<Fighter>>();
         assert_eq!(query.iter(app.world()).count(), 1);
-        let (_, _, _, profile) = query.single(app.world()).unwrap();
+        let (_, _, _, profile, _) = query.single(app.world()).unwrap();
         assert_eq!(
             (
                 profile.attack1,
@@ -7725,7 +8883,7 @@ mod tests {
                 profile.dodge,
                 profile.burst,
             ),
-            (40.0, 30.0, 20.0, 20.0, 15.0, 10.0)
+            (30.0, 25.0, 25.0, 20.0, 0.0, 30.0)
         );
     }
 
@@ -7930,37 +9088,37 @@ mod tests {
 
     #[test]
     fn entry_blend_active_when_duration_positive_and_pose_matches() {
-        assert!(entry_blend_is_active(0.12, 5, 5));
+        assert!(EntryBlend {
+            duration: 0.12,
+            pose_id: 5,
+            ..Default::default()
+        }
+        .is_active_for(5));
     }
 
     #[test]
-    fn entry_blend_inactive_when_duration_zero() {
-        assert!(!entry_blend_is_active(0.0, 5, 5));
+    fn entry_blend_zero_duration_requires_explicit_phase() {
+        let mut blend = EntryBlend {
+            pose_id: 5,
+            ..Default::default()
+        };
+        assert!(!blend.is_active_for(5));
+        blend.zero_duration_pending = true;
+        assert!(blend.is_active_for(5));
+        assert!(!blend.is_active_for(6));
     }
 
     #[test]
     fn entry_blend_inactive_when_pose_id_mismatches() {
-        assert!(!entry_blend_is_active(0.12, 5, 6));
+        assert!(!EntryBlend {
+            duration: 0.12,
+            pose_id: 5,
+            ..Default::default()
+        }
+        .is_active_for(6));
     }
 
-    #[test]
-    fn jump_transition_matrix_keeps_web_hard_cuts() {
-        for (from, to) in [
-            (0, 151),
-            (151, 152),
-            (152, 180),
-            (153, 154),
-            (155, 156),
-            (157, 158),
-            (0, 161),
-            (161, 159),
-            (180, 0),
-        ] {
-            assert!(jump_transition_is_hard_cut(from, to), "{from}->{to}");
-        }
-        assert!(!jump_transition_is_hard_cut(0, 140));
-        assert!(!jump_transition_is_hard_cut(140, 10));
-    }
+    include!("combat_tests/jump_pose_transitions.rs");
 
     #[test]
     fn ground_entry_blend_is_consumed_once_after_landing() {
@@ -8219,6 +9377,7 @@ mod tests {
             weapon_variant: 1,
         };
         let pose = PoseRuntime {
+            action_id: None,
             pose_id: 412,
             frame: 1.0,
             start: 0,
@@ -8226,6 +9385,7 @@ mod tests {
             loop_start: 0,
             loop_end: 1,
             loops: false,
+            link_past_end: false,
             pose_instance_id: 1,
         };
         let local = app.world_mut().spawn((fighter(), pose.clone())).id();
@@ -8302,6 +9462,7 @@ mod tests {
 
     fn switch_runtime(frame: f32, pose_id: u16, instance: u32) -> PoseRuntime {
         PoseRuntime {
+            action_id: None,
             pose_id,
             frame,
             start: 10,
@@ -8309,6 +9470,7 @@ mod tests {
             loop_start: 20,
             loop_end: 20,
             loops: false,
+            link_past_end: false,
             pose_instance_id: instance,
         }
     }
@@ -8405,6 +9567,7 @@ mod tests {
             Some(WeaponCombatStats {
                 attack: 95,
                 defense: 7,
+                speed_percent: 120,
             })
         );
     }
@@ -9005,8 +10168,8 @@ mod tests {
         );
         assert_eq!(
             weapon_switch_context_pose(FighterState::Name, true, false, AirMotionMode::Ballistic),
-            None,
-            "linked recovery still owns ground mode"
+            Some(WEAPON_SWITCH_POSE_GROUND),
+            "mode 1 may switch during a linked recovery"
         );
         assert_eq!(
             weapon_switch_context_pose(FighterState::Jump, false, true, AirMotionMode::Ballistic),
@@ -9014,8 +10177,8 @@ mod tests {
         );
         assert_eq!(
             weapon_switch_context_pose(FighterState::Name, false, true, AirMotionMode::Ballistic),
-            None,
-            "ledge-fall Name is not the Jump mode-0 switch entry"
+            Some(WEAPON_SWITCH_POSE_AIR),
+            "mode 1 chooses the airborne pose when contact is lost"
         );
         for mode in [
             AirMotionMode::Wall,
@@ -9142,6 +10305,64 @@ mod tests {
     }
 
     #[test]
+    fn pose_rules_speed_applies_to_remote_pose_cursor() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        if !root.exists() {
+            eprintln!("origin_res missing, skipping");
+            return;
+        }
+        let character = crate::plugins::character_plugin::load_character_asset_for_test(
+            std::slice::from_ref(&root),
+            "p0",
+        )
+        .expect("p0 assets");
+        let mut pose = PoseRuntime::idle();
+        character.apply_pose(&mut pose, 0, true);
+        pose.pose_instance_id = 17;
+        let expected = advance_pose_cursor(character.poses.get(&0).unwrap(), &pose, 2.0 / 30.0);
+
+        let mut app = App::new();
+        app.insert_resource(NetState {
+            status: NetStatus::InRoom,
+            battle_rules: meteor_combat::battle_rules::BattleRules::from_json(r#"{"schemaVersion":2,"rebalance":{"guardChipPercent":10,"guardChipPoses":"all","poseOverrides":[{"poseId":0,"speedPercent":200}]}}"#).unwrap(),
+            ..Default::default()
+        });
+        app.init_resource::<Time>()
+            .insert_resource(CharacterAssetsSet(std::collections::HashMap::from([(
+                "p0".to_string(),
+                character,
+            )])))
+            .add_systems(Update, advance_poses);
+        let entity = app
+            .world_mut()
+            .spawn((
+                RemoteFighter {
+                    player_id: "remote".into(),
+                },
+                Fighter {
+                    character_id: 0,
+                    player_slot: 1,
+                    weapon: 6,
+                    weapon_slots: [6, 5],
+                    weapon_slot: 0,
+                    weapon_slot_variants: [0, 0],
+                    weapon_variant: 0,
+                },
+                pose,
+                EntryBlend::default(),
+            ))
+            .id();
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(1.0 / 30.0));
+        app.update();
+
+        let advanced = app.world().get::<PoseRuntime>(entity).unwrap();
+        assert!((advanced.frame - expected).abs() < 0.0001);
+        assert_eq!(advanced.pose_instance_id, 17);
+    }
+
+    #[test]
     fn production_remote_pose_advances_between_role_state_edges() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
         if !root.exists() {
@@ -9206,19 +10427,13 @@ mod tests {
             "p0",
         )
         .expect("p0 assets");
-        let (source_pose_id, link_pose_id) = character
-            .poses
-            .iter()
-            .find_map(|(&pose_id, pose)| {
-                (!pose.loops)
-                    .then_some(pose.link)
-                    .flatten()
-                    .filter(|link| character.poses.contains_key(link))
-                    .map(|link| (pose_id, link))
-            })
-            .expect("p0 has a non-looping authored Link");
+        let source_pose_id = 426;
+        let link_pose_id = character.poses[&source_pose_id].link.unwrap();
+        assert_eq!(link_pose_id, 488);
+        assert!(!character.act.groups.contains_key(&488));
         let mut pose = PoseRuntime::idle();
         character.apply_pose(&mut pose, source_pose_id, true);
+        assert_eq!(pose.action_id, Some(119));
         pose.frame = pose.end as f32;
         pose.pose_instance_id = 41;
 
@@ -9227,7 +10442,11 @@ mod tests {
             "p0".to_string(),
             character,
         )])))
-        .add_systems(Update, resolve_completed_pose_links);
+        .init_resource::<Time>()
+        .add_systems(
+            Update,
+            (resolve_completed_pose_links, advance_poses).chain(),
+        );
         let entity = app
             .world_mut()
             .spawn((
@@ -9237,8 +10456,8 @@ mod tests {
                 Fighter {
                     character_id: 0,
                     player_slot: 1,
-                    weapon: 6,
-                    weapon_slots: [6, 5],
+                    weapon: 11,
+                    weapon_slots: [11, 5],
                     weapon_slot: 0,
                     weapon_slot_variants: [0, 0],
                     weapon_variant: 0,
@@ -9253,12 +10472,26 @@ mod tests {
                 WeaponForm::default(),
             ))
             .id();
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
         app.update();
 
         let linked = app.world().get::<PoseRuntime>(entity).unwrap();
         assert_eq!(linked.pose_id, link_pose_id);
         assert_eq!(linked.frame, linked.start as f32);
         assert_eq!(linked.pose_instance_id, 41);
+        assert_eq!(linked.action_id, Some(119));
+        assert!(meteor_combat::weapon_strategy::attack_uses_all_candidates(
+            10,
+            linked.action_id
+        ));
+        assert!(
+            app.world()
+                .get::<EntryBlend>(entity)
+                .unwrap()
+                .preserve_sample_once
+        );
     }
 
     #[test]
@@ -9596,6 +10829,1330 @@ mod tests {
     }
 
     #[test]
+    fn owned_and_remote_link_boundaries_match_original_dispatcher() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        let character = crate::plugins::character_plugin::load_character_asset_for_test(
+            std::slice::from_ref(&root),
+            "p0",
+        )
+        .unwrap();
+        let common = meteor_asset::amb::parse_amb(
+            &std::fs::read(root.join("Common/character.amb")).unwrap(),
+        )
+        .unwrap();
+        let dummy_index = character.dummy_order["d_base"];
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<Time<bevy::time::Real>>()
+            .insert_resource(CommonAmb(common))
+            .insert_resource(CharacterAssetsSet(std::collections::HashMap::from([(
+                "p0".into(),
+                character,
+            )])))
+            .add_systems(
+                Update,
+                (
+                    resolve_completed_pose_links,
+                    advance_poses,
+                    tick_hit_reactions,
+                )
+                    .chain(),
+            );
+        let golden: serde_json::Value = serde_json::from_str(include_str!(
+            "combat_plugin/stock_natural_link_boundary.json"
+        ))
+        .unwrap();
+        for (sample, remote) in golden["samples"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|sample| [(sample, true), (sample, false)])
+        {
+            let id = sample["pose"].as_u64().unwrap() as u16;
+
+            let local_attack = !remote && id == 372;
+            let mut pose = PoseRuntime::idle();
+            app.world().resource::<CharacterAssetsSet>().0["p0"].apply_pose(&mut pose, id, true);
+            pose.loops = false;
+            pose.link_past_end = sample["mode"] == 0;
+            pose.frame = sample["before"].as_f64().unwrap() as f32;
+            let mut reaction = getup_reaction_for_pose(id, pose.start, pose.end);
+            reaction.kind = HitReactKind::BeHit;
+            let mut runtime = FighterHitReaction::default();
+            if !local_attack {
+                runtime.begin(reaction, false);
+            }
+            let state = if local_attack {
+                FighterState::Attack1
+            } else {
+                FighterState::BeHit
+            };
+            let entity = app
+                .world_mut()
+                .spawn((
+                    Fighter {
+                        character_id: 0,
+                        player_slot: 1,
+                        weapon: 12,
+                        weapon_slots: [12, 0],
+                        weapon_slot: 0,
+                        weapon_slot_variants: [0, 0],
+                        weapon_variant: 0,
+                    },
+                    RemoteFighter {
+                        player_id: "peer".into(),
+                    },
+                    pose,
+                    EntryBlend::default(),
+                    runtime,
+                    SmState {
+                        current: state,
+                        ..Default::default()
+                    },
+                    CombatState { state },
+                    Health::default(),
+                    Qi::default(),
+                    FighterAir::default(),
+                    WeaponForm::default(),
+                ))
+                .id();
+            if !remote {
+                app.world_mut().entity_mut(entity).remove::<RemoteFighter>();
+            }
+            app.world_mut().entity_mut(entity).insert((
+                MotionState {
+                    movement_mode: meteor_core::MovementMode::Idle,
+                    velocity: Vec3::ZERO,
+                    facing: 0.0,
+                },
+                crate::components::fighter::GunAimState::default(),
+                crate::components::fighter::VisualRootPin::default(),
+            ));
+            app.world_mut()
+                .get_mut::<EntryBlend>(entity)
+                .unwrap()
+                .last_root_sample = Some(([7.0, 8.0, 9.0], 0.7));
+            let model = app
+                .world_mut()
+                .spawn((
+                    crate::plugins::character_plugin::FighterModel {
+                        fighter: entity,
+                        character: "p0".into(),
+                    },
+                    Transform::from_rotation(Quat::from_rotation_y(0.2)),
+                ))
+                .id();
+            let dummy = app
+                .world_mut()
+                .spawn((
+                    crate::plugins::character_plugin::FighterDummy {
+                        model,
+                        name: "d_base".into(),
+                        dummy_index,
+                    },
+                    Transform::from_rotation(Quat::from_rotation_z(0.3)),
+                ))
+                .id();
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f64(
+                    1.0 / sample["fps"].as_f64().unwrap(),
+                ));
+            app.update();
+            crate::plugins::character_plugin::drive_fighter_animation_for_test(app.world_mut());
+            let actual = app.world().get::<PoseRuntime>(entity).unwrap();
+            let expected = sample["after_pose"].as_u64().unwrap() as u16;
+            assert_eq!(
+                actual.pose_id, expected,
+                "stock controller boundary {sample}"
+            );
+            if expected != id {
+                assert_eq!(
+                    app.world().get::<EntryBlend>(entity).unwrap().motion_source,
+                    Some((id, sample["source"].as_u64().unwrap() as u32)),
+                    "source must precede advance"
+                );
+                let blend = app.world().get::<EntryBlend>(entity).unwrap();
+                assert!(blend.preserve_sample_once);
+                assert_eq!(
+                    blend.started_at_seconds, None,
+                    "Link installation is not the first blend sample"
+                );
+                assert_eq!(blend.last_root_sample, Some(([7.0, 8.0, 9.0], 0.7)));
+                assert_eq!(
+                    app.world().get::<Transform>(model).unwrap().rotation,
+                    Quat::from_rotation_y(0.2)
+                );
+                assert_eq!(
+                    app.world().get::<Transform>(dummy).unwrap().rotation,
+                    Quat::from_rotation_z(0.3)
+                );
+            }
+            app.world_mut().despawn(dummy);
+            app.world_mut().despawn(model);
+            app.world_mut().despawn(entity);
+        }
+    }
+
+    #[test]
+    fn transition_attack_records_match_original_controller_frames() {
+        use crate::plugins::character_plugin::{drive_fighter_animation_for_test, FighterModel};
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        let character = crate::plugins::character_plugin::load_character_asset_for_test(
+            std::slice::from_ref(&root),
+            "p0",
+        )
+        .unwrap();
+        let common = meteor_asset::amb::parse_amb(
+            &std::fs::read(root.join("Common/character.amb")).unwrap(),
+        )
+        .unwrap();
+        let golden: serde_json::Value =
+            serde_json::from_str(include_str!("combat_plugin/stock_link_attack_records.json"))
+                .unwrap();
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<Time<bevy::time::Real>>()
+            .insert_resource(CommonAmb(common))
+            .insert_resource(CharacterAssetsSet(std::collections::HashMap::from([(
+                "p0".into(),
+                character,
+            )])))
+            .add_systems(Update, advance_poses);
+        for source in [372, 422, 424, 425] {
+            for fps in [30, 60, 120] {
+                let character = &app.world().resource::<CharacterAssetsSet>().0["p0"];
+                let mut pose = PoseRuntime::idle();
+                character.apply_pose(&mut pose, source, true);
+                pose.loops = false;
+                pose.frame = pose.end as f32 - 0.1;
+                let entity = app
+                    .world_mut()
+                    .spawn((
+                        Fighter {
+                            character_id: 0,
+                            player_slot: 1,
+                            weapon: 12,
+                            weapon_slots: [12, 0],
+                            weapon_slot: 0,
+                            weapon_slot_variants: [0, 0],
+                            weapon_variant: 0,
+                        },
+                        RemoteFighter {
+                            player_id: "peer".into(),
+                        },
+                        pose,
+                        EntryBlend::default(),
+                        FighterHitReaction::default(),
+                        SmState {
+                            current: FighterState::Attack1,
+                            ..Default::default()
+                        },
+                        MotionState {
+                            movement_mode: meteor_core::MovementMode::Idle,
+                            velocity: Vec3::ZERO,
+                            facing: 0.0,
+                        },
+                        crate::components::fighter::GunAimState::default(),
+                    ))
+                    .id();
+                let model = app
+                    .world_mut()
+                    .spawn((
+                        FighterModel {
+                            fighter: entity,
+                            character: "p0".into(),
+                        },
+                        Transform::default(),
+                    ))
+                    .id();
+                for tick in 0..4 {
+                    app.world_mut()
+                        .resource_mut::<Time>()
+                        .advance_by(std::time::Duration::from_secs_f32(1.0 / fps as f32));
+                    app.world_mut()
+                        .resource_mut::<Time<bevy::time::Real>>()
+                        .advance_by(std::time::Duration::from_millis(17));
+                    app.update();
+                    drive_fighter_animation_for_test(app.world_mut());
+                    let sample = golden["samples"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|row| {
+                            row["source"] == source
+                                && row["fps"] == fps
+                                && row["tick"] == tick
+                                && row["distance"] == 0.0
+                        })
+                        .unwrap();
+                    let pose = app.world().get::<PoseRuntime>(entity).unwrap();
+                    let blend = app.world().get::<EntryBlend>(entity).unwrap();
+                    let character = &app.world().resource::<CharacterAssetsSet>().0["p0"];
+                    assert_eq!(pose.pose_id as u64, sample["pose"].as_u64().unwrap());
+                    assert_eq!(
+                        blend.frame_record_for(pose).1 as u64,
+                        sample["integer_frame"].as_u64().unwrap(),
+                        "{sample}"
+                    );
+                    assert_eq!(
+                        blend.is_active_for(pose.pose_id),
+                        sample["state"] == 3,
+                        "{sample}"
+                    );
+                    let selected = sampled_attack_window(character, pose, blend);
+                    assert_eq!(
+                        selected.map(|(index, _)| index as u64),
+                        sample["selected_index"].as_u64(),
+                        "{sample}"
+                    );
+                    if let Some((_, attack)) = selected {
+                        assert_eq!(
+                            [attack.start as u64, attack.end as u64],
+                            [
+                                sample["target_window"][0].as_u64().unwrap(),
+                                sample["target_window"][1].as_u64().unwrap()
+                            ]
+                        );
+                    }
+                }
+                app.world_mut().despawn(model);
+                app.world_mut().despawn(entity);
+            }
+        }
+    }
+
+    #[test]
+    fn zero_time_natural_links_retain_sample_then_retire_before_advancing() {
+        use crate::plugins::character_plugin::{
+            drive_fighter_animation_for_test, FighterDummy, FighterModel,
+        };
+        use bevy::ecs::system::RunSystemOnce;
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        let character = crate::plugins::character_plugin::load_character_asset_for_test(
+            std::slice::from_ref(&root),
+            "p0",
+        )
+        .unwrap();
+        let common = meteor_asset::amb::parse_amb(
+            &std::fs::read(root.join("Common/character.amb")).unwrap(),
+        )
+        .unwrap();
+        let dummy_index = character.dummy_order["d_base"];
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<Time<bevy::time::Real>>()
+            .insert_resource(CommonAmb(common))
+            .insert_resource(StageCollider {
+                mesh: Some(harness_ground()),
+            })
+            .insert_resource(CharacterAssetsSet(std::collections::HashMap::from([(
+                "p0".into(),
+                character,
+            )])))
+            .add_systems(
+                Update,
+                (resolve_completed_pose_links, advance_poses).chain(),
+            );
+
+        for (source, fps, remote) in [372, 424, 425].into_iter().flat_map(|id| {
+            [30, 60, 120]
+                .into_iter()
+                .flat_map(move |fps| [true, false].map(|remote| (id, fps, remote)))
+        }) {
+            let dt = 1.0 / fps as f32;
+            let mut pose = PoseRuntime::idle();
+            let character = &app.world().resource::<CharacterAssetsSet>().0["p0"];
+            character.apply_pose(&mut pose, source, true);
+            pose.loops = false;
+            pose.frame = pose.end as f32 - 0.1;
+            let queued_pose = pose.clone();
+            let instance = pose.pose_instance_id;
+            let target = character.poses[&source].link.unwrap();
+            let same_group = character.act.groups.get(&source).is_some()
+                && character.act.groups.get(&source) == character.act.groups.get(&target);
+            let start = character.poses[&target].start as f32;
+            assert_eq!(
+                character.poses[&source].next_pose.as_ref().unwrap().time,
+                0.0
+            );
+            let sentinel = Some(([7.0, 8.0, 9.0], 0.7));
+            let entity = app
+                .world_mut()
+                .spawn((
+                    Fighter {
+                        character_id: 0,
+                        player_slot: 1,
+                        weapon: 12,
+                        weapon_slots: [12, 0],
+                        weapon_slot: 0,
+                        weapon_slot_variants: [0, 0],
+                        weapon_variant: 0,
+                    },
+                    RemoteFighter {
+                        player_id: "peer".into(),
+                    },
+                    pose,
+                    EntryBlend {
+                        last_root_sample: sentinel,
+                        ..Default::default()
+                    },
+                    FighterHitReaction::default(),
+                    Transform::default(),
+                    FighterAir::default(),
+                    crate::plugins::movement_plugin::FighterAttackMotion::default(),
+                    SmState {
+                        current: FighterState::Attack1,
+                        ..Default::default()
+                    },
+                    MotionState {
+                        movement_mode: meteor_core::MovementMode::Idle,
+                        velocity: Vec3::ZERO,
+                        facing: 0.2,
+                    },
+                    crate::components::fighter::GunAimState::default(),
+                    crate::components::fighter::VisualRootPin::default(),
+                ))
+                .id();
+            app.world_mut().entity_mut(entity).insert((
+                CombatState {
+                    state: FighterState::Attack1,
+                },
+                Health::default(),
+                Qi::default(),
+                WeaponForm::default(),
+            ));
+            if !remote {
+                app.world_mut().entity_mut(entity).remove::<RemoteFighter>();
+            }
+            let model = app
+                .world_mut()
+                .spawn((
+                    FighterModel {
+                        fighter: entity,
+                        character: "p0".into(),
+                    },
+                    Transform::default(),
+                ))
+                .id();
+            let old_dummy =
+                Transform::from_xyz(5.0, 6.0, 7.0).with_rotation(Quat::from_rotation_z(0.3));
+            let dummy = app
+                .world_mut()
+                .spawn((
+                    FighterDummy {
+                        model,
+                        name: "d_base".into(),
+                        dummy_index,
+                    },
+                    old_dummy,
+                ))
+                .id();
+            for tick in 0..4 {
+                app.world_mut()
+                    .resource_mut::<Time>()
+                    .advance_by(std::time::Duration::from_secs_f32(dt));
+                app.world_mut()
+                    .resource_mut::<Time<bevy::time::Real>>()
+                    .advance_by(std::time::Duration::from_millis(17));
+                app.update();
+                drive_fighter_animation_for_test(app.world_mut());
+                let pose = app.world().get::<PoseRuntime>(entity).unwrap();
+                let blend = app.world().get::<EntryBlend>(entity).unwrap();
+                assert_eq!(
+                    pose.pose_id, target,
+                    "source={source} fps={fps} remote={remote} tick={tick}"
+                );
+                assert_eq!(pose.pose_instance_id, instance);
+                if !remote {
+                    let sm = app.world().get::<SmState>(entity).unwrap();
+                    assert_eq!(sm.current, FighterState::Attack1);
+                    assert_eq!(
+                        sm.linked_recovery_pose_id,
+                        if same_group { None } else { Some(target) }
+                    );
+                }
+                assert_eq!(blend.duration, 0.0);
+                assert_eq!(blend.is_active_for(target), tick < 2);
+                assert_eq!(blend.preserve_sample_once, tick < 2);
+                assert_eq!(blend.retain_root_delta_once, tick == 2);
+                if tick < 3 {
+                    assert_eq!(pose.frame, start);
+                    assert_eq!(
+                        blend.last_root_sample, sentinel,
+                        "zero timer must not clear model+304"
+                    );
+                } else {
+                    assert!(pose.frame > start, "playback resumes only after retirement");
+                    assert_ne!(blend.last_root_sample, sentinel);
+                    if source == 372 && fps == 60 {
+                        let oracle: serde_json::Value = serde_json::from_str(include_str!(
+                            "combat_plugin/stock_zero_link_time.json"
+                        ))
+                        .unwrap();
+                        let sample = &oracle["samples"][3];
+                        assert!(
+                            (pose.frame - sample["frame"].as_f64().unwrap() as f32).abs() < 0.001
+                        );
+                        let dx = sample["delta"][0].as_f64().unwrap() as f32;
+                        let dy = sample["delta"][1].as_f64().unwrap() as f32;
+                        let (x, z) =
+                            meteor_anim::root_motion::root_delta_to_world_xz(dx, dy, 0.2, 1.0);
+                        let actual = Vec3::from_array(blend.last_root_sample.unwrap().0);
+                        assert!(
+                            (actual - Vec3::new(x, 0.0, z)).length() < 1e-5,
+                            "first post-retirement root sample versus EXE: {actual:?}"
+                        );
+                    }
+                }
+                if tick < 2 {
+                    let actual = app.world().get::<Transform>(dummy).unwrap();
+                    assert_eq!(actual.translation, old_dummy.translation);
+                    assert_eq!(actual.rotation, old_dummy.rotation);
+                }
+            }
+
+            app.world_mut().entity_mut(entity).remove::<RemoteFighter>();
+            for preserve in [true, false] {
+                {
+                    let mut blend = app.world_mut().get_mut::<EntryBlend>(entity).unwrap();
+                    blend.preserve_sample_once = preserve;
+                    blend.retain_root_delta_once = !preserve;
+                    blend.last_root_sample = Some(([0.01, 0.0, 0.02], 0.7));
+                }
+                app.world_mut()
+                    .get_mut::<MotionState>(entity)
+                    .unwrap()
+                    .facing = -0.4;
+                let before = app.world().get::<Transform>(entity).unwrap().translation;
+                app.world_mut()
+                    .run_system_once(crate::plugins::movement_plugin::attack_root_motion)
+                    .unwrap();
+                let after = app.world().get::<Transform>(entity).unwrap().translation;
+                assert!((after.x - before.x - 0.01).abs() < 1e-5);
+                assert!((after.z - before.z - 0.02).abs() < 1e-5);
+                let yaw = app.world().get::<MotionState>(entity).unwrap().facing;
+                assert!((yaw - if preserve { 0.7 } else { -0.4 }).abs() < 1e-6);
+            }
+
+            *app.world_mut().get_mut::<PoseRuntime>(entity).unwrap() = queued_pose.clone();
+            *app.world_mut().get_mut::<EntryBlend>(entity).unwrap() = EntryBlend::default();
+            let queued =
+                queued_qi_burst(source, queued_pose.frame as u32, 0.1, 100.0, true).unwrap();
+            app.world_mut()
+                .get_mut::<SmState>(entity)
+                .unwrap()
+                .attack_queued = Some(queued.clone());
+            app.update();
+            assert_eq!(
+                app.world().get::<PoseRuntime>(entity).unwrap().pose_id,
+                source
+            );
+            assert_eq!(
+                app.world().get::<SmState>(entity).unwrap().attack_queued,
+                Some(queued)
+            );
+            app.world_mut().despawn(dummy);
+            app.world_mut().despawn(model);
+            app.world_mut().despawn(entity);
+        }
+    }
+
+    #[test]
+    fn reaction_entry_retirement_waits_one_frame_before_authored_travel() {
+        use crate::plugins::character_plugin::{
+            drive_fighter_animation_for_test, FighterDummy, FighterModel,
+        };
+        use bevy::ecs::system::RunSystemOnce;
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        for (fps, remote) in [30, 60, 120]
+            .into_iter()
+            .flat_map(|fps| [(fps, false), (fps, true)])
+        {
+            let dt = 1.0 / fps as f32;
+            let character = crate::plugins::character_plugin::load_character_asset_for_test(
+                std::slice::from_ref(&root),
+                "p0",
+            )
+            .unwrap();
+            let common = meteor_asset::amb::parse_amb(
+                &std::fs::read(root.join("Common/character.amb")).unwrap(),
+            )
+            .unwrap();
+            let mut pose = PoseRuntime::idle();
+            character.apply_pose(&mut pose, 97, true);
+            let base_index = character.dummy_order["d_base"];
+            let mut reaction = getup_reaction_for_pose(97, pose.start, pose.end);
+            reaction.kind = HitReactKind::BeHit;
+            reaction.motion_scale = 6.0;
+            let mut runtime = FighterHitReaction::default();
+            runtime.begin(reaction, false);
+            let blend = EntryBlend {
+                pose_id: 97,
+                duration: 0.05,
+                to_frame: pose.frame,
+                started_at_seconds: Some(0.0),
+                ..Default::default()
+            };
+            let mut app = App::new();
+            app.init_resource::<Time>()
+                .init_resource::<Time<bevy::time::Real>>()
+                .insert_resource(CharacterAssetsSet(std::collections::HashMap::from([(
+                    "p0".into(),
+                    character,
+                )])))
+                .insert_resource(CommonAmb(common))
+                .insert_resource(StageCollider {
+                    mesh: Some(StageMeshCollider::default()),
+                })
+                .add_systems(Update, hit_reaction_root_motion);
+            let entity = app
+                .world_mut()
+                .spawn((
+                    Fighter {
+                        character_id: 0,
+                        player_slot: 1,
+                        weapon: 12,
+                        weapon_slots: [12, 0],
+                        weapon_slot: 0,
+                        weapon_slot_variants: [0, 0],
+                        weapon_variant: 0,
+                    },
+                    pose,
+                    blend,
+                    runtime,
+                    FighterAir::default(),
+                    Transform::default(),
+                    MotionState {
+                        movement_mode: meteor_core::MovementMode::Idle,
+                        velocity: Vec3::ZERO,
+                        facing: 0.0,
+                    },
+                    SmState::default(),
+                    crate::components::fighter::GunAimState::default(),
+                    crate::components::fighter::VisualRootPin::default(),
+                    RemoteHitMotionWindow { remaining: 0.4 },
+                ))
+                .id();
+            if remote {
+                app.world_mut().entity_mut(entity).insert(RemoteFighter {
+                    player_id: "peer".into(),
+                });
+            }
+            let model = app
+                .world_mut()
+                .spawn((
+                    FighterModel {
+                        fighter: entity,
+                        character: "p0".into(),
+                    },
+                    Transform::default(),
+                ))
+                .id();
+            app.world_mut().spawn((
+                FighterDummy {
+                    model,
+                    name: "d_base".into(),
+                    dummy_index: base_index,
+                },
+                Transform::default(),
+            ));
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(dt));
+            app.world_mut()
+                .resource_mut::<Time<bevy::time::Real>>()
+                .advance_by(std::time::Duration::from_secs_f64(0.051));
+            app.world_mut().run_system_once(advance_poses).unwrap();
+            drive_fighter_animation_for_test(app.world_mut());
+            assert_eq!(app.world().get::<EntryBlend>(entity).unwrap().duration, 0.0);
+            assert!(
+                app.world()
+                    .get::<FighterHitReaction>(entity)
+                    .unwrap()
+                    .entry_blend_held
+            );
+            app.update();
+            let position = app.world().get::<Transform>(entity).unwrap().translation;
+            assert!(position.x.abs() < 1e-6 && position.z.abs() < 1e-6,
+                "fps{fps} remote{remote}: retirement must not consume adjacent-frame delta: {position:?}");
+            if remote {
+                assert_eq!(position, Vec3::ZERO);
+                assert!(
+                    app.world()
+                        .get::<RemoteHitMotionWindow>(entity)
+                        .unwrap()
+                        .remaining
+                        < 0.4
+                );
+            }
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(dt));
+            app.world_mut()
+                .resource_mut::<Time<bevy::time::Real>>()
+                .advance_by(std::time::Duration::from_secs_f32(dt));
+            app.world_mut().run_system_once(advance_poses).unwrap();
+            drive_fighter_animation_for_test(app.world_mut());
+            app.update();
+            let after = app.world().get::<Transform>(entity).unwrap().translation;
+            assert!(
+                (after.x - position.x).abs() > 1e-4 || (after.z - position.z).abs() > 1e-4,
+                "authored movement must resume after the retirement frame"
+            );
+            app.world_mut()
+                .get_mut::<EntryBlend>(entity)
+                .unwrap()
+                .preserve_sample_once = true;
+            app.world_mut()
+                .get_mut::<EntryBlend>(entity)
+                .unwrap()
+                .last_root_sample = Some(([0.01, 0.01, 0.02], 0.7));
+            app.update();
+            let retained = app.world().get::<Transform>(entity).unwrap().translation;
+            assert!(
+                (retained.x - after.x - 0.06).abs() < 1e-5
+                    && (retained.z - after.z - 0.12).abs() < 1e-5
+                    && (retained.y - after.y - 0.06).abs() < 1e-5,
+                "fps{fps} remote{remote}: cached world delta must still pass through the mover"
+            );
+            assert!((app.world().get::<MotionState>(entity).unwrap().facing - 0.7).abs() < 1e-6);
+
+            {
+                let mut blend = app.world_mut().get_mut::<EntryBlend>(entity).unwrap();
+                blend.preserve_sample_once = false;
+                blend.retain_root_delta_once = true;
+            }
+            app.world_mut()
+                .get_mut::<MotionState>(entity)
+                .unwrap()
+                .facing = -0.4;
+            app.update();
+            let retired = app.world().get::<Transform>(entity).unwrap().translation;
+            assert!((retired - retained - Vec3::new(0.06, 0.06, 0.12)).length() < 1e-5);
+            assert!((app.world().get::<MotionState>(entity).unwrap().facing + 0.4).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn reaction_reentry_blend_matches_original_controller_basis() {
+        use crate::plugins::character_plugin::{
+            drive_fighter_animation_for_test, sync_fighter_model_facing, FighterDummy, FighterModel,
+        };
+        use bevy::ecs::system::RunSystemOnce;
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        let character = crate::plugins::character_plugin::load_character_asset_for_test(
+            std::slice::from_ref(&root),
+            "p0",
+        )
+        .unwrap();
+        let common = meteor_asset::amb::parse_amb(
+            &std::fs::read(root.join("Common/character.amb")).unwrap(),
+        )
+        .unwrap();
+        let base_index = character.dummy_order["d_base"];
+        let golden: serde_json::Value =
+            serde_json::from_str(include_str!("combat_plugin/stock_reentry_root_basis.json"))
+                .unwrap();
+        for (case, remote) in golden["samples"]
+            .as_array()
+            .unwrap()
+            .chunks(3)
+            .flat_map(|case| [(case, true), (case, false)])
+        {
+            let id = case[0]["pose"].as_u64().unwrap() as u16;
+            let fps = case[0]["fps"].as_u64().unwrap() as usize;
+            let dt = 1.0 / fps as f32;
+            let mut pose = PoseRuntime::idle();
+            let source_id = case[0]["source_pose"].as_u64().map_or(id, |id| id as u16);
+            character.apply_pose(&mut pose, source_id, true);
+            pose.frame = case[0]["source"].as_f64().unwrap() as f32;
+            let mut blend = EntryBlend::default();
+            character.apply_pose_with_blend(
+                &mut pose,
+                &mut blend,
+                id,
+                true,
+                Some(0.05),
+                if case[0]["entry_flags"].as_u64() == Some(1) {
+                    crate::components::fighter::EntryBlendKind::Generic
+                } else {
+                    crate::components::fighter::EntryBlendKind::Chained
+                },
+                false,
+                true,
+                None,
+            );
+            assert_eq!(
+                blend.motion_source,
+                Some((source_id, case[0]["source"].as_u64().unwrap() as u32))
+            );
+            let mut reaction = getup_reaction_for_pose(id, pose.start, pose.end);
+            reaction.kind = if matches!(id, 112 | 113) {
+                HitReactKind::Down
+            } else {
+                HitReactKind::BeHit
+            };
+            reaction.motion_scale = 1.0;
+            let mut runtime = FighterHitReaction::default();
+            runtime.begin(reaction, false);
+            let mut app = App::new();
+            app.init_resource::<Time>()
+                .init_resource::<Time<bevy::time::Real>>()
+                .insert_resource(CharacterAssetsSet(std::collections::HashMap::from([(
+                    "p0".into(),
+                    crate::plugins::character_plugin::load_character_asset_for_test(
+                        std::slice::from_ref(&root),
+                        "p0",
+                    )
+                    .unwrap(),
+                )])))
+                .insert_resource(CommonAmb(common.clone()))
+                .insert_resource(StageCollider {
+                    mesh: Some(StageMeshCollider::default()),
+                })
+                .add_systems(
+                    Update,
+                    hit_reaction_root_motion.in_set(crate::plugins::FighterFrameSet::RootMotion),
+                );
+            let fighter = app
+                .world_mut()
+                .spawn((
+                    RemoteFighter {
+                        player_id: "peer".into(),
+                    },
+                    Fighter {
+                        character_id: 0,
+                        player_slot: 1,
+                        weapon: 12,
+                        weapon_slots: [12, 0],
+                        weapon_slot: 0,
+                        weapon_slot_variants: [0, 0],
+                        weapon_variant: 0,
+                    },
+                    pose,
+                    Transform::default(),
+                    MotionState {
+                        movement_mode: meteor_core::MovementMode::Airborne,
+                        velocity: Vec3::ZERO,
+                        facing: 0.0,
+                    },
+                    FighterAir::default(),
+                    runtime,
+                    blend,
+                    SmState::default(),
+                    crate::components::fighter::GunAimState::default(),
+                    crate::components::fighter::VisualRootPin::default(),
+                    RemoteHitMotionWindow { remaining: 0.4 },
+                ))
+                .id();
+            let camera = if !remote {
+                app.world_mut()
+                    .entity_mut(fighter)
+                    .remove::<RemoteFighter>()
+                    .insert(LocalFighter);
+                app.init_resource::<LockOnController>().configure_sets(
+                    Update,
+                    (
+                        crate::plugins::FighterFrameSet::RootMotion,
+                        crate::plugins::FighterFrameSet::CameraFinalize,
+                    )
+                        .chain(),
+                );
+                Some(crate::plugins::camera_plugin::install_follow_camera_for_test(&mut app))
+            } else {
+                None
+            };
+            let model = app
+                .world_mut()
+                .spawn((
+                    FighterModel {
+                        fighter,
+                        character: "p0".into(),
+                    },
+                    Transform::default(),
+                ))
+                .id();
+            let dummy = app
+                .world_mut()
+                .spawn((
+                    FighterDummy {
+                        model,
+                        name: "d_base".into(),
+                        dummy_index: base_index,
+                    },
+                    Transform::default(),
+                ))
+                .id();
+
+            for sample in case {
+                let duration = std::time::Duration::from_secs_f32(dt);
+                app.world_mut().resource_mut::<Time>().advance_by(duration);
+                app.world_mut()
+                    .resource_mut::<Time<bevy::time::Real>>()
+                    .advance_by(std::time::Duration::from_millis(10));
+                app.world_mut().run_system_once(advance_poses).unwrap();
+                drive_fighter_animation_for_test(app.world_mut());
+                let sampled = app.world().get::<Transform>(model).unwrap().rotation
+                    * app.world().get::<Transform>(dummy).unwrap().rotation;
+                app.update();
+                app.world_mut()
+                    .run_system_once(sync_fighter_model_facing)
+                    .unwrap();
+                let after = app.world().get::<Transform>(model).unwrap().rotation
+                    * app.world().get::<Transform>(dummy).unwrap().rotation;
+                assert!(
+                    (sampled * Vec3::X).abs_diff_eq(after * Vec3::X, 1e-5),
+                    "adopting root rotation must not rotate the sampled skeleton twice"
+                );
+                let yaw = (sample["yaw_degrees"].as_f64().unwrap() as f32).to_radians();
+                let expected_direction = Vec3::new(yaw.cos(), 0.0, -yaw.sin());
+                assert!(
+                    (after * Vec3::X).abs_diff_eq(expected_direction, 1e-5),
+                    "{source_id}->{id} fps{fps} remote{remote} tick{} skeleton",
+                    sample["tick"]
+                );
+
+                if let Some(camera) = camera {
+                    let camera_yaw = app
+                        .world()
+                        .get::<crate::plugins::camera_plugin::ThirdPersonState>(camera)
+                        .unwrap()
+                        .debug_snapshot()
+                        .0;
+                    assert!((Quat::from_rotation_y(camera_yaw) * Vec3::X)
+                        .abs_diff_eq(expected_direction, 1e-5),
+                        "{source_id}->{id} fps{fps}: down/reentry camera must follow the adopted model basis");
+                }
+                let facing = app.world().get::<MotionState>(fighter).unwrap().facing;
+                assert!(
+                    (Quat::from_rotation_y(facing) * Vec3::X).abs_diff_eq(expected_direction, 1e-5),
+                    "{source_id}->{id} fps{fps} remote{remote} tick{} model",
+                    sample["tick"]
+                );
+                let expected_position = Vec3::ZERO;
+                let mut actual = app.world().get::<Transform>(fighter).unwrap().translation;
+
+                if !remote {
+                    actual.y = expected_position.y;
+                }
+                assert!(
+                    actual.abs_diff_eq(expected_position, 0.0001),
+                    "pose{id} fps{fps} remote{remote}: {actual:?} != {expected_position:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn side_reaction_preserves_sampled_basis_when_root_moves_to_model() {
+        use crate::plugins::character_plugin::{
+            drive_fighter_animation_for_test, sync_fighter_model_facing, FighterDummy, FighterModel,
+        };
+        use bevy::ecs::system::RunSystemOnce;
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        let character = crate::plugins::character_plugin::load_character_asset_for_test(
+            std::slice::from_ref(&root),
+            "p0",
+        )
+        .unwrap();
+        let common = meteor_asset::amb::parse_amb(
+            &std::fs::read(root.join("Common/character.amb")).unwrap(),
+        )
+        .unwrap();
+        let base_index = character.dummy_order["d_base"];
+        let golden: serde_json::Value = serde_json::from_str(include_str!(
+            "combat_plugin/stock_side_reaction_feedback.json"
+        ))
+        .unwrap();
+        for (case, remote) in golden["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|case| [(case, true), (case, false)])
+        {
+            let id = case["pose"].as_u64().unwrap() as u16;
+            let fps = case["fps"].as_u64().unwrap() as usize;
+            let dt = 1.0 / fps as f32;
+            let mut pose = PoseRuntime::idle();
+            character.apply_pose(&mut pose, id, true);
+            let mut reaction = getup_reaction_for_pose(id, pose.start, pose.end);
+            reaction.kind = HitReactKind::BeHit;
+            reaction.motion_scale = 1.0;
+            let mut runtime = FighterHitReaction::default();
+            runtime.begin(reaction, false);
+            let mut app = App::new();
+            app.init_resource::<Time>()
+                .init_resource::<Time<bevy::time::Real>>()
+                .insert_resource(CharacterAssetsSet(std::collections::HashMap::from([(
+                    "p0".into(),
+                    crate::plugins::character_plugin::load_character_asset_for_test(
+                        std::slice::from_ref(&root),
+                        "p0",
+                    )
+                    .unwrap(),
+                )])))
+                .insert_resource(CommonAmb(common.clone()))
+                .insert_resource(StageCollider {
+                    mesh: Some(StageMeshCollider::default()),
+                })
+                .add_systems(
+                    Update,
+                    hit_reaction_root_motion.in_set(crate::plugins::FighterFrameSet::RootMotion),
+                );
+            let fighter = app
+                .world_mut()
+                .spawn((
+                    RemoteFighter {
+                        player_id: "peer".into(),
+                    },
+                    Fighter {
+                        character_id: 0,
+                        player_slot: 1,
+                        weapon: 12,
+                        weapon_slots: [12, 0],
+                        weapon_slot: 0,
+                        weapon_slot_variants: [0, 0],
+                        weapon_variant: 0,
+                    },
+                    pose,
+                    Transform::default(),
+                    MotionState {
+                        movement_mode: meteor_core::MovementMode::Airborne,
+                        velocity: Vec3::ZERO,
+                        facing: 0.0,
+                    },
+                    FighterAir::default(),
+                    runtime,
+                    EntryBlend::default(),
+                    SmState::default(),
+                    crate::components::fighter::GunAimState::default(),
+                    crate::components::fighter::VisualRootPin::default(),
+                    RemoteHitMotionWindow { remaining: 0.4 },
+                ))
+                .id();
+            let camera = if !remote {
+                app.world_mut()
+                    .entity_mut(fighter)
+                    .remove::<RemoteFighter>()
+                    .insert(LocalFighter);
+                app.init_resource::<LockOnController>().configure_sets(
+                    Update,
+                    (
+                        crate::plugins::FighterFrameSet::RootMotion,
+                        crate::plugins::FighterFrameSet::CameraFinalize,
+                    )
+                        .chain(),
+                );
+                Some(crate::plugins::camera_plugin::install_follow_camera_for_test(&mut app))
+            } else {
+                None
+            };
+            let model = app
+                .world_mut()
+                .spawn((
+                    FighterModel {
+                        fighter,
+                        character: "p0".into(),
+                    },
+                    Transform::default(),
+                ))
+                .id();
+            let dummy = app
+                .world_mut()
+                .spawn((
+                    FighterDummy {
+                        model,
+                        name: "d_base".into(),
+                        dummy_index: base_index,
+                    },
+                    Transform::default(),
+                ))
+                .id();
+
+            for sample in case["steps"].as_array().unwrap().iter().take(fps * 3 / 10) {
+                app.world_mut()
+                    .get_mut::<PoseRuntime>(fighter)
+                    .unwrap()
+                    .frame = sample["frame"].as_f64().unwrap() as f32;
+                let duration = std::time::Duration::from_secs_f32(dt);
+                app.world_mut().resource_mut::<Time>().advance_by(duration);
+                app.world_mut()
+                    .resource_mut::<Time<bevy::time::Real>>()
+                    .advance_by(duration);
+                drive_fighter_animation_for_test(app.world_mut());
+                let sampled = app.world().get::<Transform>(model).unwrap().rotation
+                    * app.world().get::<Transform>(dummy).unwrap().rotation;
+                app.update();
+                app.world_mut()
+                    .run_system_once(sync_fighter_model_facing)
+                    .unwrap();
+                let after = app.world().get::<Transform>(model).unwrap().rotation
+                    * app.world().get::<Transform>(dummy).unwrap().rotation;
+                assert!(
+                    (sampled * Vec3::X).abs_diff_eq(after * Vec3::X, 1e-5),
+                    "adopting root rotation must not rotate the sampled skeleton twice"
+                );
+                let yaw = sample["yaw"].as_f64().unwrap() as f32;
+                let expected_direction = Vec3::new(yaw.cos(), 0.0, -yaw.sin());
+                assert!((after * Vec3::X).abs_diff_eq(expected_direction, 1e-5));
+                if let Some(camera) = camera {
+                    let camera_yaw = app
+                        .world()
+                        .get::<crate::plugins::camera_plugin::ThirdPersonState>(camera)
+                        .unwrap()
+                        .debug_snapshot()
+                        .0;
+                    assert!((Quat::from_rotation_y(camera_yaw) * Vec3::X)
+                        .abs_diff_eq(expected_direction, 1e-5),
+                        "pose{id} fps{fps}: free camera must use this tick's EXE-verified model heading");
+                    let focus = app
+                        .world()
+                        .get::<crate::plugins::camera_plugin::ThirdPersonState>(camera)
+                        .unwrap()
+                        .follow_focus_for_test();
+                    let eye = app.world().get::<Transform>(camera).unwrap().translation;
+                    let planar_back = Vec3::new(eye.x - focus.x, 0.0, eye.z - focus.z).normalize();
+                    assert!(planar_back.abs_diff_eq(Vec3::new(-yaw.sin(), 0.0, -yaw.cos()), 1e-5));
+                }
+                let source = &sample["position"];
+                let expected_position = Vec3::new(
+                    source[0].as_f64().unwrap() as f32 - 7.0,
+                    source[2].as_f64().unwrap() as f32 - 3.0,
+                    -(source[1].as_f64().unwrap() as f32 + 11.0),
+                ) * meteor_core::MODEL_SCALE;
+                let mut actual = app.world().get::<Transform>(fighter).unwrap().translation;
+
+                if !remote {
+                    actual.y = expected_position.y;
+                }
+                assert!(
+                    actual.abs_diff_eq(expected_position, 0.0001),
+                    "pose{id} fps{fps} remote{remote}: {actual:?} != {expected_position:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn remote_zero_move_reaction_does_not_add_local_gravity_or_carry() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        let character = crate::plugins::character_plugin::load_character_asset_for_test(
+            std::slice::from_ref(&root),
+            "p0",
+        )
+        .expect("original p0");
+        let common = meteor_asset::amb::parse_amb(
+            &std::fs::read(root.join("Common/character.amb")).unwrap(),
+        )
+        .unwrap();
+        let mut pose = PoseRuntime::idle();
+        character.apply_pose(&mut pose, 109, true);
+        let mut reaction = getup_reaction_for_pose(109, pose.start, pose.end);
+        reaction.kind = HitReactKind::BeHit;
+        reaction.motion_scale = 0.0;
+        let mut runtime = FighterHitReaction::default();
+        runtime.begin(reaction, false);
+        runtime.airborne = true;
+        runtime.vertical_velocity = -10.0;
+        runtime.carry_x = 7.0;
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .insert_resource(CharacterAssetsSet(std::collections::HashMap::from([(
+                "p0".into(),
+                character,
+            )])))
+            .insert_resource(CommonAmb(common))
+            .insert_resource(StageCollider {
+                mesh: Some(StageMeshCollider::default()),
+            })
+            .add_systems(Update, hit_reaction_root_motion);
+        let position = Vec3::new(3.0, 10.0, 5.0);
+        let entity = app
+            .world_mut()
+            .spawn((
+                RemoteFighter {
+                    player_id: "remote".into(),
+                },
+                Fighter {
+                    character_id: 0,
+                    player_slot: 1,
+                    weapon: 12,
+                    weapon_slots: [12, 0],
+                    weapon_slot: 0,
+                    weapon_slot_variants: [0, 0],
+                    weapon_variant: 0,
+                },
+                pose,
+                Transform::from_translation(position),
+                MotionState {
+                    movement_mode: meteor_core::MovementMode::Airborne,
+                    velocity: Vec3::new(1.0, -5.0, 2.0),
+                    facing: 0.0,
+                },
+                FighterAir::default(),
+                runtime,
+                RemoteTransformTarget {
+                    translation: position,
+                    yaw: 0.0,
+                },
+                RemoteHitMotionWindow { remaining: 0.4 },
+            ))
+            .id();
+        for dt in [1.0 / 60.0, 1.0 / 120.0, 1.0 / 30.0] {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(dt));
+            app.update();
+            assert_eq!(
+                app.world().get::<Transform>(entity).unwrap().translation,
+                position,
+                "stock observer Move=0 must not apply local gravity/carry"
+            );
+            assert_eq!(
+                app.world()
+                    .get::<RemoteTransformTarget>(entity)
+                    .unwrap()
+                    .translation,
+                position
+            );
+            assert_eq!(
+                app.world().get::<MotionState>(entity).unwrap().velocity,
+                Vec3::ZERO,
+                "stock hit root window clears continuous velocity"
+            );
+        }
+
+        let mut sample_pose = app.world().get::<PoseRuntime>(entity).unwrap().clone();
+        let dt = 1.0 / 60.0;
+        let asset = &app.world().resource::<CharacterAssetsSet>().0["p0"];
+        let common = &app.world().resource::<CommonAmb>().0;
+        asset.apply_pose(&mut sample_pose, 100, true);
+        sample_pose.frame = (sample_pose.start..sample_pose.end)
+            .find(|frame| {
+                let mut probe = sample_pose.clone();
+                probe.frame = *frame as f32;
+                asset
+                    .authored_root_step(common, &probe, dt)
+                    .iter()
+                    .any(|v| v.abs() > 1e-5)
+            })
+            .expect("100 contains authored displacement") as f32;
+        let authored = asset.authored_root_step(common, &sample_pose, dt);
+        let scale = 3.0;
+        let (x, z) = meteor_anim::root_motion::root_delta_to_world_xz(
+            authored[0] * scale,
+            authored[1] * scale,
+            0.0,
+            1.0,
+        );
+        let expected = position + Vec3::new(x, authored[2] * scale * meteor_core::MODEL_SCALE, z);
+        app.world_mut().entity_mut(entity).insert(sample_pose);
+        app.world_mut()
+            .get_mut::<FighterHitReaction>(entity)
+            .unwrap()
+            .current
+            .as_mut()
+            .unwrap()
+            .motion_scale = scale;
+        app.world_mut().resource_mut::<StageCollider>().mesh = None;
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(dt));
+        app.update();
+        assert!(app
+            .world()
+            .get::<Transform>(entity)
+            .unwrap()
+            .translation
+            .abs_diff_eq(expected, 1e-5));
+        assert!(app
+            .world()
+            .get::<RemoteTransformTarget>(entity)
+            .unwrap()
+            .translation
+            .abs_diff_eq(expected, 1e-5));
+        assert_eq!(
+            app.world().get::<MotionState>(entity).unwrap().velocity,
+            Vec3::ZERO
+        );
+
+        app.world_mut().entity_mut(entity).insert(
+            super::super::network_plugin::RemoteContactSegment {
+                role_driven: true,
+                skip_stock_motion: true,
+                ..Default::default()
+            },
+        );
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(dt));
+        app.update();
+        assert!(app
+            .world()
+            .get::<Transform>(entity)
+            .unwrap()
+            .translation
+            .abs_diff_eq(expected, 1e-5));
+        assert!(app
+            .world()
+            .get::<FighterHitReaction>(entity)
+            .unwrap()
+            .current
+            .is_some());
+        assert!(
+            app.world()
+                .get::<RemoteHitMotionWindow>(entity)
+                .unwrap()
+                .remaining
+                > 0.0
+        );
+        app.world_mut().entity_mut(entity).insert(
+            super::super::network_plugin::RemoteContactSegment {
+                role_driven: true,
+                state_age: 0.51,
+                ..Default::default()
+            },
+        );
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(dt));
+        app.update();
+        assert!(
+            app.world()
+                .get::<Transform>(entity)
+                .unwrap()
+                .translation
+                .abs_diff_eq(expected, 1e-5),
+            "stock stateAge > 0.5 stops observer root motion too"
+        );
+
+        app.world_mut().entity_mut(entity).insert((
+            super::super::network_plugin::RemoteContactSegment {
+                role_driven: true,
+                ..Default::default()
+            },
+            EntryBlend {
+                preserve_sample_once: true,
+                last_root_sample: Some(([0.25, 0.5, -0.75], 0.7)),
+                ..Default::default()
+            },
+        ));
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(dt));
+        app.update();
+        let retained = expected + Vec3::new(0.25, 0.5, -0.75) * scale;
+        assert!(app
+            .world()
+            .get::<Transform>(entity)
+            .unwrap()
+            .translation
+            .abs_diff_eq(retained, 1e-5));
+        assert!((app.world().get::<MotionState>(entity).unwrap().facing - 0.7).abs() < 1e-6);
+    }
+
+    #[test]
     fn death_clears_published_velocity_without_destroying_facing_or_mode() {
         let mut motion = MotionState {
             movement_mode: meteor_core::MovementMode::Airborne,
@@ -9689,6 +12246,7 @@ mod tests {
         loops: bool,
     ) -> PoseRuntime {
         PoseRuntime {
+            action_id: None,
             pose_id: 1,
             frame: 0.0,
             start,
@@ -9696,6 +12254,7 @@ mod tests {
             loop_start,
             loop_end,
             loops,
+            link_past_end: false,
             pose_instance_id: 0,
         }
     }
@@ -9858,21 +12417,158 @@ mod tests {
         use crate::components::fighter::TargetHitClock;
 
         let clock = TargetHitClock::default();
-        assert!(clock.accepts_target_hit());
+        assert!(clock.accepts_target_hit(0.0));
     }
 
     #[test]
     fn target_hit_clock_blocks_within_interval_and_reopens_after() {
         use crate::components::fighter::{TargetHitClock, TARGET_HIT_INTERVAL_SECONDS};
         let mut clock = TargetHitClock::default();
-        clock.reset();
-        assert!(!clock.accepts_target_hit());
+        clock.reset(10.0);
+        assert!(!clock.accepts_target_hit(10.0));
 
-        clock.tick(TARGET_HIT_INTERVAL_SECONDS);
-        assert!(!clock.accepts_target_hit());
+        let boundary = 10.0 + f64::from(TARGET_HIT_INTERVAL_SECONDS);
+        assert!(!clock.accepts_target_hit(boundary));
 
-        clock.tick(0.01);
-        assert!(clock.accepts_target_hit());
+        assert!(clock.accepts_target_hit(boundary + 0.01));
+    }
+
+    #[test]
+    fn r3_target_hit_clock_uses_wall_time_during_hitstop_and_skipped_simulation() {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .insert_resource(crate::plugins::FrameClock {
+                sim_dt: 0.0,
+                wall_dt: 0.125,
+                wall_step: 0.0,
+                ..Default::default()
+            })
+            .add_systems(Update, tick_target_hit_clocks);
+        let target = app
+            .world_mut()
+            .spawn(TargetHitClock {
+                last_hit_at: 0.0,
+                spawn_elapsed: 0.0,
+            })
+            .id();
+        for step in 1..=3 {
+            if step == 3 {
+                let mut frame = app.world_mut().resource_mut::<crate::plugins::FrameClock>();
+                frame.sim_dt = 0.2;
+                frame.wall_step = 0.375;
+            }
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(0.125));
+            app.update();
+            let clock = app.world().get::<TargetHitClock>(target).unwrap();
+            assert_eq!(clock.spawn_elapsed, step as f32 * 0.125);
+            assert_eq!(
+                clock.last_hit_at, 0.0,
+                "wall-clock hit timestamps never accumulate simulation dt"
+            );
+            assert_eq!(
+                clock.accepts_target_hit(app.world().resource::<Time>().elapsed_secs_f64()),
+                step >= 2
+            );
+        }
+    }
+
+    #[test]
+    fn r3_cure_sends_once_after_pose_22_and_34_finish() {
+        let Some(mut h) = spawn_gameplay_harness(DAGGER) else {
+            return;
+        };
+        {
+            let mut net = h.app.world_mut().resource_mut::<NetState>();
+            net.status = NetStatus::InRoom;
+            net.round_active = true;
+            net.mode = "assassin".into();
+            net.player_id = "healer".into();
+            net.stock_vips[0] = Some("healer".into());
+        }
+        let binding = h.app.world().resource::<crate::app_state::Keymap>().cure;
+        h.press_binding(binding);
+        h.step();
+        h.release_binding(binding);
+        assert_eq!(h.state(), FighterState::Cure);
+        assert_eq!(h.pose_id(), 22);
+        assert!(h
+            .app
+            .world_mut()
+            .resource_mut::<PendingNetActions>()
+            .take()
+            .is_empty());
+        let mut saw_link = false;
+        let mut sent = false;
+        for _ in 0..180 {
+            h.step();
+            saw_link |= h.pose_id() == 34;
+            let actions = h.app.world_mut().resource_mut::<PendingNetActions>().take();
+            if !actions.is_empty() {
+                assert!(saw_link, "the entry pose alone cannot finish Cure");
+                assert_ne!(h.state(), FighterState::Cure);
+                assert_eq!(actions, ["cure"]);
+                sent = true;
+                break;
+            }
+        }
+        assert!(sent, "the authored Cure chain must eventually commit");
+        h.steps(10);
+        assert!(h
+            .app
+            .world_mut()
+            .resource_mut::<PendingNetActions>()
+            .take()
+            .is_empty());
+    }
+
+    #[test]
+    fn r3_cure_rejects_non_vip_and_cancels_when_interrupted() {
+        let Some(mut h) = spawn_gameplay_harness(DAGGER) else {
+            return;
+        };
+        {
+            let mut net = h.app.world_mut().resource_mut::<NetState>();
+            net.status = NetStatus::InRoom;
+            net.round_active = true;
+            net.mode = "assassin".into();
+            net.player_id = "healer".into();
+        }
+        let binding = h.app.world().resource::<crate::app_state::Keymap>().cure;
+        h.press_binding(binding);
+        h.step();
+        h.release_binding(binding);
+        assert_ne!(h.state(), FighterState::Cure);
+        h.step();
+        h.app.world_mut().resource_mut::<NetState>().stock_vips[0] = Some("healer".into());
+        h.press_binding(binding);
+        h.step();
+        h.release_binding(binding);
+        assert_eq!(h.state(), FighterState::Cure);
+
+        h.app
+            .world_mut()
+            .get_mut::<Health>(h.fighter)
+            .unwrap()
+            .current = 0.0;
+        h.app
+            .world_mut()
+            .get_mut::<SmState>(h.fighter)
+            .unwrap()
+            .current = FighterState::Dead;
+        h.app
+            .world_mut()
+            .get_mut::<CombatState>(h.fighter)
+            .unwrap()
+            .state = FighterState::Dead;
+        h.steps(180);
+        assert!(h
+            .app
+            .world_mut()
+            .resource_mut::<PendingNetActions>()
+            .take()
+            .is_empty());
     }
 
     #[test]
@@ -9881,7 +12577,7 @@ mod tests {
         let mut clock = TargetHitClock::default();
 
         assert!(clock.spawn_protected());
-        clock.tick(SPAWN_INVULNERABLE_SECONDS);
+        clock.tick_spawn(SPAWN_INVULNERABLE_SECONDS);
         assert!(!clock.spawn_protected());
     }
 
@@ -9889,7 +12585,7 @@ mod tests {
     fn target_hit_clock_reset_spawn_restarts_protection() {
         use crate::components::fighter::TargetHitClock;
         let mut clock = TargetHitClock::default();
-        clock.tick(10.0);
+        clock.tick_spawn(10.0);
         assert!(!clock.spawn_protected());
 
         clock.reset_spawn();
@@ -9902,31 +12598,69 @@ mod tests {
 
         let mut clock = TargetHitClock::default();
         assert_eq!(
-            admit_intersecting_target(&mut clock),
+            admit_intersecting_target(&mut clock, None, 0.0),
             IntersectingTargetAdmission::SpawnProtected
         );
-        assert_eq!(clock.elapsed, 0.0);
 
-        clock.tick_target(TARGET_HIT_INTERVAL_SECONDS + 0.01);
         assert_eq!(
-            admit_intersecting_target(&mut clock),
+            admit_intersecting_target(&mut clock, None, 0.21),
             IntersectingTargetAdmission::SpawnProtected
         );
-        assert_eq!(clock.elapsed, 0.0);
 
         clock.spawn_elapsed = SPAWN_INVULNERABLE_SECONDS;
-        clock.tick_target(TARGET_HIT_INTERVAL_SECONDS);
+
         assert_eq!(
-            admit_intersecting_target(&mut clock),
+            admit_intersecting_target(&mut clock, None, 0.41),
             IntersectingTargetAdmission::IntervalBlocked,
             "the interval is strict even after spawn protection expires"
         );
-        clock.tick_target(0.01);
         assert_eq!(
-            admit_intersecting_target(&mut clock),
+            admit_intersecting_target(
+                &mut clock,
+                None,
+                0.41 + f64::from(TARGET_HIT_INTERVAL_SECONDS) + 0.01
+            ),
             IntersectingTargetAdmission::Accepted
         );
-        assert_eq!(clock.elapsed, 0.0);
+    }
+
+    #[test]
+    fn stock_flight_intervals_distinguish_wheel_flight_from_gun_ray() {
+        use IntersectingTargetAdmission::{Accepted, IntervalBlocked, SpawnProtected};
+        let mut clock = TargetHitClock {
+            last_hit_at: 0.0,
+            spawn_elapsed: 2.0,
+        };
+        let wheel = Some(ProjectileKind::FlyingWheel);
+        let gun_ray = Some(ProjectileKind::GunRay);
+        assert_eq!(
+            admit_intersecting_target(&mut clock, wheel, 0.4),
+            IntervalBlocked
+        );
+        assert_eq!(
+            admit_intersecting_target(&mut clock, gun_ray, 0.4),
+            Accepted
+        );
+        assert_eq!(
+            clock.last_hit_at, 0.0,
+            "a ray must leave the shared clock alone"
+        );
+        assert_eq!(admit_intersecting_target(&mut clock, wheel, 0.41), Accepted);
+        assert_eq!(clock.last_hit_at, 0.41);
+        assert_eq!(
+            admit_intersecting_target(&mut clock, gun_ray, 0.41),
+            Accepted
+        );
+        assert_eq!(
+            admit_intersecting_target(&mut clock, None, 0.41),
+            IntervalBlocked
+        );
+        clock.spawn_elapsed = 1.0;
+        assert_eq!(
+            admit_intersecting_target(&mut clock, gun_ray, 0.41),
+            SpawnProtected
+        );
+        assert_eq!(clock.last_hit_at, 0.41);
     }
 
     #[test]
@@ -9962,6 +12696,10 @@ mod tests {
             false,
             true,
         ));
+        assert!(
+            attack_window_owner_active_for_scope(100.0, true, FighterState::Name, false, true,),
+            "siege prop replay must follow living HP after a stuck death flag"
+        );
         assert!(!attack_window_owner_active_for_scope(
             100.0,
             false,
@@ -9969,8 +12707,16 @@ mod tests {
             true,
             true,
         ));
+        assert!(!attack_window_owner_active_for_scope(
+            100.0,
+            true,
+            FighterState::Attack1,
+            false,
+            false,
+        ));
 
         let snapshot = |id: u64, slot: u8, live| AttackSnapshot {
+            all_candidates: true,
             entity: Entity::from_bits(id),
             weapon: 6,
             weapon_stats: None,
@@ -9981,6 +12727,7 @@ mod tests {
             combat_team: 1,
             script_character_id: 0,
             script_team: None,
+            notice_name: format!("slot{slot}"),
             atk_pos: Vec3::ZERO,
             forward: Vec3::Z,
             active_window: None,
@@ -10084,6 +12831,16 @@ mod tests {
     ) {
         let now = time.elapsed_secs_f64();
         for (pose, mut blend) in &mut query {
+            if blend.preserve_sample_once {
+                continue;
+            }
+            if blend.zero_duration_pending && blend.pose_id == pose.pose_id {
+                if !blend.advance_zero_duration_sample(pose.pose_id, now) {
+                    blend.elapsed = 0.0;
+                    blend.started_at_seconds = None;
+                }
+                continue;
+            }
             if blend.duration <= 0.0 || blend.pose_id != pose.pose_id {
                 continue;
             }
@@ -10239,7 +12996,10 @@ mod tests {
         }
 
         fn step_dt(&mut self, dt: f32) {
-            let dt = std::time::Duration::from_secs_f32(dt);
+            self.step_duration(std::time::Duration::from_secs_f32(dt));
+        }
+
+        fn step_duration(&mut self, dt: std::time::Duration) {
             self.app.world_mut().resource_mut::<Time>().advance_by(dt);
             self.app
                 .world_mut()
@@ -10587,6 +13347,44 @@ mod tests {
     }
 
     #[test]
+    fn network_pause_blocks_move_jump_and_sidebar_click_attacks_but_resumes() {
+        for state in [AppState::Paused, AppState::Settings] {
+            let mut h =
+                spawn_gameplay_harness_with_order(6, true).expect("original p1 resources required");
+            h.app.insert_resource(State::new(state));
+            h.app.world_mut().resource_mut::<NetState>().status = NetStatus::InRoom;
+            h.app.world_mut().resource_mut::<NetState>().round_active = true;
+            let origin = h.position();
+            let keymap = h.app.world().resource::<crate::app_state::Keymap>().clone();
+            h.press_binding(keymap.move_up);
+            h.press_binding(keymap.jump);
+            h.press_binding(keymap.attack);
+            h.steps(8);
+            assert!(!is_attacking_state(h.state()));
+            assert!(
+                !h.app
+                    .world()
+                    .get::<FighterAir>(h.fighter)
+                    .unwrap()
+                    .air
+                    .airborne
+            );
+            assert!((h.position() - origin).length() < 0.001);
+            h.release_binding(keymap.move_up);
+            h.release_binding(keymap.jump);
+            h.release_binding(keymap.attack);
+            h.step();
+            h.app.insert_resource(State::new(AppState::Playing));
+            h.press_binding(keymap.attack);
+            h.step();
+            assert!(
+                is_attacking_state(h.state()),
+                "fresh attack resumes after {state:?}"
+            );
+        }
+    }
+
+    #[test]
     fn sn13_perform_release_accepts_attack_on_same_frame_with_or_without_lock() {
         use crate::plugins::stage_plugin::{
             drive_player_performance, NpcPerformCommand, PlayerPerformance,
@@ -10596,7 +13394,7 @@ mod tests {
             let mut h =
                 spawn_gameplay_harness_with_order(6, true).expect("original p1 resources required");
             let mut performance = PlayerPerformance::default();
-            for (action, value) in [("block", 0.0), ("pause", 20.0), ("block", 1.0)] {
+            for (action, value) in [("block", 1.0), ("pause", 20.0), ("block", 0.0)] {
                 performance.queue.push_back(NpcPerformCommand {
                     action: action.into(),
                     args: vec![PstValue::Num(value)],
@@ -10642,6 +13440,94 @@ mod tests {
                 fresh_attack,
                 "locked={locked}"
             );
+        }
+    }
+
+    #[test]
+    fn production_turn_in_place_keyboard_and_touch_share_step_selection() {
+        use crate::plugins::mobile_controls_plugin::MobileLookDelta;
+        for touch in [false, true] {
+            let mut h = spawn_gameplay_harness(6).unwrap();
+            crate::plugins::camera_plugin::install_camera_input_for_test(&mut h.app);
+            h.app.world_mut().spawn((
+                crate::plugins::camera_plugin::GameplayCamera,
+                crate::plugins::camera_plugin::ThirdPersonState::default(),
+            ));
+            h.app.init_resource::<MobileLookDelta>();
+            let start = h.position();
+            if touch {
+                h.app.world_mut().resource_mut::<MobileLookDelta>().0 = Vec2::new(16.0, 0.0);
+                h.step();
+            } else {
+                h.press_key(KeyCode::ArrowRight);
+                h.steps(36);
+            }
+            assert_eq!(h.pose_id(), L::WALK_R, "touch={touch}");
+            assert!(h.app.world().get::<MotionState>(h.fighter).unwrap().facing < 0.0);
+            assert!(h.position().distance(start) < 0.001);
+            h.release_key(KeyCode::ArrowRight);
+            h.steps(14);
+            assert_eq!(h.pose_id(), L::IDLE, "touch={touch}");
+        }
+    }
+
+    #[test]
+    fn production_turn_in_place_steps_before_sampling_without_translation() {
+        use bevy::input::mouse::MouseMotion;
+        for serial in [false, true] {
+            for crouching in [false, true] {
+                let mut h = spawn_gameplay_harness_with_order(5, serial).unwrap();
+                crate::plugins::camera_plugin::install_camera_input_for_test(&mut h.app);
+                h.app.world_mut().spawn((
+                    crate::plugins::camera_plugin::GameplayCamera,
+                    crate::plugins::camera_plugin::ThirdPersonState::default(),
+                ));
+                h.app.world_mut().spawn((
+                    bevy::window::PrimaryWindow,
+                    bevy::window::CursorOptions {
+                        grab_mode: bevy::window::CursorGrabMode::Locked,
+                        ..default()
+                    },
+                ));
+                if crouching {
+                    let binding = h.app.world().resource::<crate::app_state::Keymap>().crouch;
+                    h.press_binding(binding);
+                    h.step_dt(1.0 / 60.0);
+                }
+                let start = h.position();
+                let (right, left, idle) = if crouching {
+                    (146, 147, 10)
+                } else {
+                    (141, 142, 0)
+                };
+                for (dx, expected) in [(8.0, right), (-8.0, left), (0.1, left)] {
+                    h.app.world_mut().write_message(MouseMotion {
+                        delta: Vec2::new(dx, 0.0),
+                    });
+                    h.step_dt(1.0 / 60.0);
+                    assert_eq!(h.pose_id(), expected, "serial={serial} crouch={crouching}");
+                    assert_eq!(
+                        h.app.world().resource::<HarnessPoseBeforeAdvance>().0,
+                        Some(expected),
+                        "before sample: serial={serial} crouch={crouching} dx={dx}"
+                    );
+                    assert!(h.position().distance(start) < 0.001);
+                }
+                for _ in 0..10 {
+                    h.step_dt(1.0 / 60.0);
+                }
+                assert_eq!(h.pose_id(), left, "step remains for the stock 0.2s hold");
+                for _ in 0..4 {
+                    h.step_dt(1.0 / 60.0);
+                }
+                assert_eq!(h.pose_id(), idle, "turn stop releases the step");
+                h.press_key(KeyCode::KeyW);
+                h.app.world_mut().write_message(MouseMotion {
+                    delta: Vec2::new(8.0, 0.0),
+                });
+                h.step_dt(1.0 / 60.0);
+                assert_eq!(h.pose_id(), if crouching { L::CROUCH_F } else { L::RUN_F });
+            }
         }
     }
 
@@ -10999,7 +13885,7 @@ mod tests {
                             } else {
                                 let target_pos =
                                     h.app.world().get::<Transform>(target).unwrap().translation;
-                                locked_attack_facing_yaw(
+                                meteor_combat::lock_on::locked_attack_facing_yaw(
                                     after.to_array().into(),
                                     target_pos.to_array().into(),
                                 )
@@ -11159,6 +14045,7 @@ mod tests {
         use meteor_scene::hazards::{Aabb, HazardVolume};
         let mut h = spawn_gameplay_harness(1).expect("original character assets");
         h.app
+            .init_resource::<OfflineScores>()
             .init_resource::<StageHazardRuntime>()
             .init_resource::<super::super::stage_plugin::StageScriptRuntime>()
             .add_message::<super::super::render_plugin::OfflineWeaponDeathDrop>();
@@ -11254,7 +14141,8 @@ mod tests {
             .world_mut()
             .resource_mut::<Time>()
             .advance_by(std::time::Duration::from_secs_f32(0.05));
-        for _ in 0..10 {
+
+        for _ in 0..25 {
             h.app
                 .world_mut()
                 .run_system_once(stage_hazard_damage)
@@ -11270,6 +14158,16 @@ mod tests {
             FighterState::Dead
         );
         assert!(h.app.world().get::<DeathRespawn>(h.fighter).unwrap().active);
+        let rows = h
+            .app
+            .world()
+            .resource::<OfflineScores>()
+            .rows(&default(), &default());
+        assert_eq!(
+            rows.iter().find(|row| row.id == "local").unwrap().deaths,
+            1,
+            "repeated hazard ticks after death must not recount it"
+        );
         assert_eq!(
             h.app
                 .world()
@@ -11425,17 +14323,21 @@ mod tests {
                 "contact commit must not reverse lock facing at {fps} FPS"
             );
             let distance = (target_after - target_before).length();
+
             assert!(
-                (5.5..7.3).contains(&distance),
+                distance > 6.8 && distance < 12.0,
                 "three-second push speed at {fps} FPS: {distance}"
             );
             distances.push(distance);
         }
-        let range = distances.iter().copied().fold(f32::NEG_INFINITY, f32::max)
-            - distances.iter().copied().fold(f32::INFINITY, f32::min);
+
         assert!(
-            range < 0.3,
+            distances[1] <= distances[0] && distances[2] <= distances[1],
             "push distance must not grow with FPS: {distances:?}"
+        );
+        assert!(
+            distances[0] - distances[2] < 3.0,
+            "push distance taper must follow the dt² term: {distances:?}"
         );
     }
 
@@ -11679,7 +14581,7 @@ mod tests {
             FighterDodge::default(),
             FighterAttackMotion::default(),
             crate::components::fighter::TargetHitClock {
-                elapsed: f32::INFINITY,
+                last_hit_at: f64::NEG_INFINITY,
                 spawn_elapsed: 3.0,
             },
         ));
@@ -11707,7 +14609,7 @@ mod tests {
                 .world_mut()
                 .get_mut::<crate::components::fighter::TargetHitClock>(target)
                 .unwrap()
-                .tick(HARNESS_DT);
+                .tick_spawn(HARNESS_DT);
             crate::plugins::character_plugin::drive_fighter_animation_for_test(h.app.world_mut());
             h.app
                 .world_mut()
@@ -11809,7 +14711,7 @@ mod tests {
             FighterDodge::default(),
             FighterAttackMotion::default(),
             crate::components::fighter::TargetHitClock {
-                elapsed: f32::INFINITY,
+                last_hit_at: f64::NEG_INFINITY,
                 spawn_elapsed: 3.0,
             },
         ));
@@ -11834,6 +14736,133 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
+    fn production_stock_melee_target_order_uses_actor_ids() {
+        use bevy::ecs::system::RunSystemOnce;
+        #[derive(Component)]
+        struct ReorderedDefender;
+        for (migrate_archetype, reverse_ids) in [false, true]
+            .into_iter()
+            .flat_map(|m| [(m, false), (m, true)])
+        {
+            let (mut h, first, take_hits) = spawn_local_stock_hit_harness(6);
+            let mut fighter = h.app.world().get::<Fighter>(first).unwrap().clone();
+            fighter.player_slot = 2;
+            let transform = *h.app.world().get::<Transform>(first).unwrap();
+            let second = h
+                .app
+                .world_mut()
+                .spawn((
+                    fighter,
+                    transform,
+                    Health::default(),
+                    Qi::default(),
+                    PoseRuntime::idle(),
+                    EntryBlend::default(),
+                    MotionState {
+                        movement_mode: meteor_core::MovementMode::Idle,
+                        velocity: Vec3::ZERO,
+                        facing: std::f32::consts::PI,
+                    },
+                    CombatState::default(),
+                    SmState::default(),
+                    DeathRespawn::default(),
+                    crate::components::fighter::TargetHitClock {
+                        last_hit_at: f64::NEG_INFINITY,
+                        spawn_elapsed: 3.0,
+                    },
+                    WeaponForm::default(),
+                    FighterHitReaction::default(),
+                ))
+                .id();
+            crate::plugins::character_plugin::spawn_fighter_model_for_test(
+                h.app.world_mut(),
+                second,
+            );
+            {
+                let mut net = h.app.world_mut().resource_mut::<NetState>();
+                net.stock_npc_actors
+                    .insert(first, if reverse_ids { 2 } else { 3 });
+                net.stock_npc_actors
+                    .insert(second, if reverse_ids { 3 } else { 2 });
+                net.stock_npc_ready.insert(second);
+            }
+            if migrate_archetype {
+                h.app
+                    .world_mut()
+                    .entity_mut(first)
+                    .insert(ReorderedDefender);
+            }
+            h.press_mouse(MouseButton::Left);
+            let mut claims = Vec::new();
+            for tick in 0..150 {
+                h.step();
+                if tick == 0 {
+                    h.release_mouse(MouseButton::Left);
+                }
+                crate::plugins::character_plugin::drive_fighter_animation_for_test(
+                    h.app.world_mut(),
+                );
+                h.app.world_mut().run_system_once(attack_windows).unwrap();
+                claims = take_hits()
+                    .into_iter()
+                    .map(|(_, hit)| hit.target_actor_id)
+                    .collect();
+                if !claims.is_empty() {
+                    break;
+                }
+            }
+            assert_eq!(claims, vec![2, 3], "actor tree order, archetype migration={migrate_archetype}, reverse IDs={reverse_ids}");
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn production_melee_candidate_cache_exclusion_precedes_geometry() {
+        use bevy::ecs::system::RunSystemOnce;
+        let (mut h, target, take_hits) = spawn_local_stock_hit_harness(6);
+        h.press_mouse(MouseButton::Left);
+        let mut positive = false;
+        for tick in 0..150 {
+            h.step();
+            if tick == 0 {
+                h.release_mouse(MouseButton::Left);
+            }
+            h.app
+                .world_mut()
+                .get_mut::<crate::components::fighter::TargetHitClock>(target)
+                .unwrap()
+                .tick_spawn(HARNESS_DT);
+            crate::plugins::character_plugin::drive_fighter_animation_for_test(h.app.world_mut());
+            let origin = h.position();
+            let mut cached = CharacterContactFrame::default();
+
+            cached.cache_candidates(
+                h.fighter,
+                origin,
+                [(target, origin + Vec3::X * 13.0)].into_iter(),
+            );
+            h.app.insert_resource(cached);
+            h.app.world_mut().run_system_once(attack_windows).unwrap();
+            assert!(
+                take_hits().is_empty(),
+                "range-cache exclusion must precede live bone collision"
+            );
+
+            h.app.insert_resource(CharacterContactFrame::default());
+            h.app.world_mut().run_system_once(attack_windows).unwrap();
+            if !take_hits().is_empty() {
+                positive = true;
+                break;
+            }
+        }
+        assert!(
+            positive,
+            "the positive control must reach real sword geometry"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
     fn production_local_melee_hit_on_stock_npc_acquires_actual_target_lock() {
         use bevy::ecs::system::RunSystemOnce;
         let (mut h, target, take_hits) = spawn_local_stock_hit_harness(6);
@@ -11849,7 +14878,7 @@ mod tests {
                 .world_mut()
                 .get_mut::<crate::components::fighter::TargetHitClock>(target)
                 .unwrap()
-                .tick(HARNESS_DT);
+                .tick_spawn(HARNESS_DT);
             crate::plugins::character_plugin::drive_fighter_animation_for_test(h.app.world_mut());
             h.app
                 .world_mut()
@@ -11980,6 +15009,105 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
+    fn production_stock_ray_and_wheel_send_base_reactions_from_behind() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        for (weapon, pose_id, kind) in [
+            (3, 217, ProjectileKind::GunRay),
+            (2, 222, ProjectileKind::FlyingWheel),
+        ] {
+            let (mut h, target, take_hits) = spawn_local_stock_hit_harness(weapon);
+            let world = h.app.world_mut();
+
+            world
+                .resource_mut::<NetState>()
+                .stock_npc_ready
+                .remove(&target);
+            world.entity_mut(target).insert(RemoteFighter {
+                player_id: "stock-2".into(),
+            });
+            world.get_mut::<MotionState>(target).unwrap().facing = 0.0;
+            let point = world.get::<Transform>(target).unwrap().translation;
+            let attack =
+                world.resource::<CharacterAssetsSet>().0["p1"].poses[&pose_id].attacks[0].clone();
+            assert_ne!(attack.target_pose, attack.target_pose_back);
+            let target_pose = attack.target_pose.unwrap();
+            let defense_move = attack.defense_move;
+            let defense_value = attack.defense_value;
+            let projectile = world.spawn_empty().id();
+            let start = point + Vec3::new(0.0, 2.0, -2.0);
+            let hit = crate::components::projectile::RangedSegmentHit {
+                projectile,
+                kind,
+                source: RangedHitSource {
+                    owner: h.fighter,
+                    weapon,
+                    weapon_stats: None,
+                    pose_id,
+                    pose_frame: attack.start as f32,
+                    pose_start: attack.start,
+                    pose_instance_id: 1,
+                    attack_index: 0,
+                    attack,
+                    player_slot: 0,
+                    combat_team: 0,
+                    script_character_id: 0,
+                    script_team: None,
+                    attack_origin: start,
+                    attack_forward: Vec3::Z,
+                },
+                start,
+                end: point + Vec3::new(0.0, 2.0, 2.0),
+                hit_scale: 1.0,
+                despawn_after: false,
+            };
+            let now = world.resource::<Time>().elapsed_secs_f64();
+            world.get_mut::<TargetHitClock>(target).unwrap().last_hit_at = now - 0.4;
+            world
+                .resource_mut::<PendingRangedHits>()
+                .0
+                .push(hit.clone());
+            world.run_system_once(attack_windows).unwrap();
+            let mut requests = take_hits();
+            if kind == ProjectileKind::FlyingWheel {
+                assert!(requests.is_empty());
+                world
+                    .resource_mut::<Time>()
+                    .advance_by(std::time::Duration::from_millis(10));
+                world.resource_mut::<PendingRangedHits>().0.push(hit);
+                world.run_system_once(attack_windows).unwrap();
+                requests = take_hits();
+                assert!(world.get_entity(projectile).is_ok());
+            }
+            let [(None, request)] = requests.as_slice() else {
+                panic!("expected one stock peer hit for pose {pose_id}, got {requests:?}");
+            };
+            assert_eq!(request.target_pose_word, u32::from(target_pose));
+            assert!(world.get::<PendingRemoteHit>(target).is_none());
+            if kind == ProjectileKind::FlyingWheel {
+                assert_eq!(
+                    (request.defense_move(), request.defense_value()),
+                    (0.0, 0.0)
+                );
+                assert_eq!(
+                    world.get::<TargetHitClock>(target).unwrap().last_hit_at,
+                    world.resource::<Time>().elapsed_secs_f64()
+                );
+            } else {
+                assert_eq!(
+                    (request.defense_move(), request.defense_value()),
+                    (defense_move, defense_value)
+                );
+                assert_eq!(
+                    world.get::<TargetHitClock>(target).unwrap().last_hit_at,
+                    now - 0.4
+                );
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
     fn production_ranged_hit_applies_authored_status_only_after_accepted_unguarded_hit() {
         use crate::components::fighter::FighterStatusEffects;
         use bevy::ecs::system::RunSystemOnce;
@@ -12019,6 +15147,11 @@ mod tests {
                 .0
                 .push(crate::components::projectile::RangedSegmentHit {
                     projectile,
+                    kind: if weapon == 2 {
+                        ProjectileKind::FlyingWheel
+                    } else {
+                        ProjectileKind::Dart
+                    },
                     source: RangedHitSource {
                         owner: h.fighter,
                         weapon,
@@ -12039,7 +15172,6 @@ mod tests {
                     start: point + Vec3::new(0.0, 2.0, -2.0),
                     end: point + Vec3::new(0.0, 2.0, 2.0),
                     hit_scale: 1.0,
-                    stop_after_first: true,
                     despawn_after: true,
                 });
             h.app.world_mut().run_system_once(attack_windows).unwrap();
@@ -12083,7 +15215,7 @@ mod tests {
                     .world_mut()
                     .get_mut::<crate::components::fighter::TargetHitClock>(target)
                     .unwrap()
-                    .tick(HARNESS_DT);
+                    .tick_spawn(HARNESS_DT);
                 crate::plugins::character_plugin::drive_fighter_animation_for_test(
                     h.app.world_mut(),
                 );
@@ -12102,6 +15234,33 @@ mod tests {
                 }),
                 "weapon {weapon} must reach the hosted stock NPC through its real POS/AMB/model geometry"
             );
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn production_hammer_side_swings_sample_authored_weapon_collision() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        for (pose_id, frame, offset) in [
+            (322, 5025.0, Vec3::new(-5.0, 0.0, 5.0)),
+            (323, 5149.0, Vec3::new(-2.0, 0.0, 5.0)),
+        ] {
+            let (mut h, target, take_hits) = spawn_local_stock_hit_harness(9);
+            let attacker = h.fighter;
+            let world = h.app.world_mut();
+            world.resource_scope(|world, assets: Mut<CharacterAssetsSet>| {
+                let mut pose = world.get_mut::<PoseRuntime>(attacker).unwrap();
+                assets.0["p1"].apply_pose(&mut pose, pose_id, true);
+                pose.frame = frame;
+            });
+            world.get_mut::<SmState>(attacker).unwrap().current = FighterState::Attack1;
+            world.get_mut::<CombatState>(attacker).unwrap().state = FighterState::Attack1;
+            let origin = world.get::<Transform>(attacker).unwrap().translation;
+            world.get_mut::<Transform>(target).unwrap().translation = origin + offset;
+            crate::plugins::character_plugin::drive_fighter_animation_for_test(world);
+            world.run_system_once(attack_windows).unwrap();
+            assert_eq!(take_hits().len(), 1, "pose {pose_id} at offset {offset:?}");
         }
     }
 
@@ -12377,10 +15536,9 @@ mod tests {
                 .app
                 .world_mut()
                 .resource_mut::<super::super::item_plugin::ItemBuffs>();
-            buffs.poison_total = 30.;
-            buffs.poison_tick_every = 5.;
-            buffs.poison_tick = 0.;
-            buffs.poison_per_tick = 10;
+            buffs.refresh_periodic("item0103");
+
+            assert_eq!(buffs.tick_periodic(4.999).0.health, 0);
         }
         h.step();
         assert_eq!(h.pose_id(), 90);
@@ -12492,7 +15650,7 @@ mod tests {
                 .world_mut()
                 .get_mut::<crate::components::fighter::TargetHitClock>(target)
                 .unwrap()
-                .tick(HARNESS_DT);
+                .tick_spawn(HARNESS_DT);
             crate::plugins::character_plugin::drive_fighter_animation_for_test(h.app.world_mut());
             h.app
                 .world_mut()
@@ -12614,22 +15772,23 @@ mod tests {
         let (mut h, _) = spawn_npc_combat_harness(6, [0.0; 3]);
         h.app.world_mut().get_mut::<Qi>(h.fighter).unwrap().current = 100.0;
         h.step();
-        for _ in 0..60 {
-            h.app
-                .world_mut()
-                .get_mut::<Health>(h.fighter)
-                .unwrap()
-                .current -= 1.0;
-            h.app
-                .world_mut()
-                .get_mut::<AiIntent>(h.fighter)
-                .unwrap()
-                .attack_cooldown = 0.0;
-            h.step();
-            if h.pose_id() == QI_BURST_POSE_ID {
-                break;
-            }
-        }
+
+        h.app
+            .world_mut()
+            .get_mut::<Health>(h.fighter)
+            .unwrap()
+            .current -= 1.0;
+        h.app
+            .world_mut()
+            .get_mut::<crate::plugins::ai_plugin::NpcPatrol>(h.fighter)
+            .unwrap()
+            .set_decision_for_test(0.0, 11);
+        h.app
+            .world_mut()
+            .get_mut::<crate::plugins::ai_plugin::NpcPatrol>(h.fighter)
+            .unwrap()
+            .return_combat_to_parent_for_test();
+        h.step();
         assert_eq!(h.pose_id(), QI_BURST_POSE_ID);
         assert_eq!(
             h.app.world().get::<Qi>(h.fighter).unwrap().current,
@@ -12664,7 +15823,13 @@ mod tests {
                 net.stock_npc_ready.insert(h.fighter);
             }
             h.app.world_mut().get_mut::<Qi>(h.fighter).unwrap().current = 100.0;
-            h.steps(180);
+
+            for _ in 0..600 {
+                h.step();
+                if h.app.world().get::<Qi>(h.fighter).unwrap().current < 100.0 {
+                    break;
+                }
+            }
             let spent = take();
             assert!(
                 !spent.is_empty(),
@@ -12696,22 +15861,23 @@ mod tests {
         }
         h.app.world_mut().get_mut::<Qi>(h.fighter).unwrap().current = 100.0;
         h.step();
-        for _ in 0..60 {
-            h.app
-                .world_mut()
-                .get_mut::<Health>(h.fighter)
-                .unwrap()
-                .current -= 1.0;
-            h.app
-                .world_mut()
-                .get_mut::<AiIntent>(h.fighter)
-                .unwrap()
-                .attack_cooldown = 0.0;
-            h.step();
-            if h.pose_id() == QI_BURST_POSE_ID {
-                break;
-            }
-        }
+
+        h.app
+            .world_mut()
+            .get_mut::<Health>(h.fighter)
+            .unwrap()
+            .current -= 1.0;
+        h.app
+            .world_mut()
+            .get_mut::<crate::plugins::ai_plugin::NpcPatrol>(h.fighter)
+            .unwrap()
+            .set_decision_for_test(0.0, 11);
+        h.app
+            .world_mut()
+            .get_mut::<crate::plugins::ai_plugin::NpcPatrol>(h.fighter)
+            .unwrap()
+            .return_combat_to_parent_for_test();
+        h.step();
         assert_eq!(h.pose_id(), QI_BURST_POSE_ID);
         assert_eq!(take(), [(Some(h.fighter), StockAngerSpend::Burst)]);
         assert_eq!(h.app.world().get::<Qi>(h.fighter).unwrap().current, 40.0);
@@ -12747,6 +15913,12 @@ mod tests {
                 crate::plugins::ai_plugin::NpcPatrol::default(),
             ))
             .id();
+
+        h.app
+            .world_mut()
+            .get_mut::<crate::plugins::ai_plugin::NpcPatrol>(other)
+            .unwrap()
+            .set_decision_for_test(0.0, npc_decision_seed(1));
         h.step();
         assert_eq!(
             h.app
@@ -12797,6 +15969,8 @@ mod tests {
             assert_ne!(h.pose_id(), QI_BURST_POSE_ID);
         }
     }
+
+    include!("combat_tests/npc_ranged_aim.rs");
 
     #[test]
     fn production_npc_combat_ranged_aim_tracks_height_without_camera_lock() {
@@ -12878,22 +16052,23 @@ mod tests {
                     },
                     false,
                 );
-            for _ in 0..60 {
-                h.app
-                    .world_mut()
-                    .get_mut::<Health>(h.fighter)
-                    .unwrap()
-                    .current -= 1.0;
-                h.app
-                    .world_mut()
-                    .get_mut::<AiIntent>(h.fighter)
-                    .unwrap()
-                    .attack_cooldown = 0.0;
-                h.step();
-                if h.pose_id() == QI_BURST_POSE_ID {
-                    break;
-                }
-            }
+
+            h.app
+                .world_mut()
+                .get_mut::<Health>(h.fighter)
+                .unwrap()
+                .current -= 1.0;
+            h.app
+                .world_mut()
+                .get_mut::<crate::plugins::ai_plugin::NpcPatrol>(h.fighter)
+                .unwrap()
+                .set_decision_for_test(0.0, 11);
+            h.app
+                .world_mut()
+                .get_mut::<crate::plugins::ai_plugin::NpcPatrol>(h.fighter)
+                .unwrap()
+                .return_combat_to_parent_for_test();
+            h.step();
             assert_eq!(
                 h.pose_id(),
                 QI_BURST_POSE_ID,
@@ -13395,6 +16570,53 @@ mod tests {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn production_weapon_attack_geometry_drives_water_without_a_damage_target() {
+        use super::super::stage_material::water::{
+            combat::WaterCombat, interaction::LiquidSurface,
+        };
+        use bevy::ecs::system::RunSystemOnce;
+        for weapon in [5, 6, 9] {
+            let (mut h, target, take_hits) = spawn_local_stock_hit_harness(weapon);
+            h.app.insert_resource(NetState::default());
+            h.app
+                .world_mut()
+                .get_mut::<Transform>(target)
+                .unwrap()
+                .translation = Vec3::splat(100.0);
+            crate::plugins::character_plugin::refresh_collision_fixture(h.app.world_mut(), target);
+            let hp = h.app.world().get::<Health>(target).unwrap().current;
+            h.app.init_resource::<WaterCombat>();
+            let surface = LiquidSurface::test_pool(3.0);
+            let water = Entity::from_bits(991);
+            h.press_mouse(MouseButton::Left);
+            h.step_dt(1.0 / 60.0);
+            h.release_mouse(MouseButton::Left);
+            let mut impacts = 0;
+            for _ in 0..180 {
+                h.step_dt(1.0 / 60.0);
+                crate::plugins::character_plugin::drive_fighter_animation_for_test(
+                    h.app.world_mut(),
+                );
+                h.app.world_mut().run_system_once(attack_windows).unwrap();
+                let now = h.app.world().resource::<Time>().elapsed_secs_f64();
+                impacts += h
+                    .app
+                    .world_mut()
+                    .resource_mut::<WaterCombat>()
+                    .drain(now, &[(water, &surface)], Vec3::ZERO)
+                    .len();
+            }
+            assert_eq!(h.app.world().get::<Health>(target).unwrap().current, hp);
+            assert!(take_hits().is_empty());
+            assert!(
+                impacts > 0,
+                "weapon {weapon} must disturb chest-deep water during its authored attack"
+            );
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     fn place_target_in_current_attack(h: &mut GameplayHarness, target: Entity) {
         use bevy::ecs::system::RunSystemOnce;
         let attacker = h.fighter;
@@ -13430,6 +16652,7 @@ mod tests {
             .get_mut::<Transform>(target)
             .unwrap()
             .translation += offset;
+        crate::plugins::character_plugin::refresh_collision_fixture(h.app.world_mut(), target);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -13578,11 +16801,1191 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
+    fn production_hammer_attack_ball_follows_the_active_weapon_endpoint() {
+        use crate::plugins::effect_plugin::{EfCache, PonEfInstance};
+        use bevy::ecs::system::RunSystemOnce;
+
+        let (mut h, _, _) = spawn_local_stock_hit_harness(9);
+        let attacker = h.fighter;
+        let world = h.app.world_mut();
+        let ef = world.resource_mut::<EfCache>().load("pos326").unwrap();
+        let ball = ef
+            .nodes
+            .iter()
+            .find(|node| node.name == "AttackBall02")
+            .unwrap();
+        assert_eq!(ball.parents, ["d_wpnRE", "d_wpnRE"]);
+        let elapsed = (ball.start_time + ball.end_time) * 0.5;
+        let duration = ef
+            .nodes
+            .iter()
+            .map(|node| node.end_time)
+            .fold(0.0, f32::max);
+        let (endpoint, active) = world
+            .query::<(Entity, &WeaponEndpoint)>()
+            .iter(world)
+            .find(|(_, endpoint)| endpoint.fighter == attacker && endpoint.name == "d_wpnre")
+            .map(|(entity, endpoint)| (entity, endpoint.clone()))
+            .expect("authored hammer endpoint");
+        let mut inactive = active;
+        inactive.slot += 1;
+        world.spawn((inactive, Transform::from_xyz(50.0, 50.0, 50.0)));
+        world.spawn((
+            PonEfInstance {
+                ef: ef.clone(),
+                elapsed,
+                duration,
+                looping: false,
+                audio_playing: vec![None; ef.nodes.len()],
+                audio_triggered: vec![false; ef.nodes.len()],
+            },
+            ChildOf(attacker),
+        ));
+        let sample = move |geometry: HitGeometryQueries,
+                           assets: Res<CharacterAssetsSet>,
+                           fighters: Query<(&Fighter, &WeaponForm)>| {
+            let (fighter, form) = fighters.get(attacker).unwrap();
+            geometry.live_effect_obbs(attacker, fighter, form, 326, &assets.0["p1"])
+        };
+        let before = world.run_system_once(sample).unwrap();
+        world.get_mut::<Transform>(endpoint).unwrap().translation.y += 10.0;
+        let after = world.run_system_once(sample).unwrap();
+        assert_eq!(before.len(), after.len());
+        assert_eq!(
+            before
+                .iter()
+                .zip(after)
+                .filter(|(a, b)| (a.center - b.center).length() > 0.1)
+                .count(),
+            1,
+            "only the authored endpoint-bound hitbox must follow the hammer"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn production_heavy_air_kick_has_body_geometry_and_resolves_contact() {
+        use bevy::ecs::system::RunSystemOnce;
+        for weapon in [7, 8, 9] {
+            let (mut h, target, take_hits) = spawn_local_stock_hit_harness(weapon);
+            let mut pose = PoseRuntime::idle();
+            let character = &h.app.world().resource::<CharacterAssetsSet>().0["p1"];
+            character.apply_pose(&mut pose, 338, true);
+            let attack = &character.poses[&338].attacks[0];
+            assert!(attack.bones.iter().any(|bone| bone == "effect"));
+            pose.frame = (attack.start + attack.end) as f32 * 0.5;
+            h.app
+                .world_mut()
+                .entity_mut(h.fighter)
+                .insert((pose, EntryBlend::default()));
+            h.app
+                .world_mut()
+                .get_mut::<SmState>(h.fighter)
+                .unwrap()
+                .current = FighterState::Attack1;
+            h.app
+                .world_mut()
+                .get_mut::<CombatState>(h.fighter)
+                .unwrap()
+                .state = FighterState::Attack1;
+            crate::plugins::character_plugin::drive_fighter_animation_for_test(h.app.world_mut());
+
+            place_target_in_current_attack(&mut h, target);
+            crate::plugins::character_plugin::drive_fighter_animation_for_test(h.app.world_mut());
+            h.app.world_mut().run_system_once(attack_windows).unwrap();
+            assert!(
+                !take_hits().is_empty(),
+                "weapon {weapon}: Pose 338 body contact must hit"
+            );
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn production_heavy_low_jump_kick_hits_npc_with_live_effect() {
+        use crate::plugins::effect_plugin as fx;
+        use bevy::ecs::system::RunSystemOnce;
+        for weapon in [7, 8, 9] {
+            for fps in [30, 60, 120] {
+                let dt = 1.0 / fps as f32;
+                let (mut h, target, _) = spawn_local_stock_hit_harness(weapon);
+                h.app.insert_resource(NetState::default());
+                for entity in [h.fighter, target] {
+                    h.app
+                        .world_mut()
+                        .entity_mut(entity)
+                        .insert(crate::components::fighter::VisualRootPin::default());
+                }
+                h.app
+                    .init_resource::<Assets<fx::PonEfMaterial>>()
+                    .init_resource::<Assets<Mesh>>()
+                    .init_resource::<Assets<Image>>()
+                    .init_resource::<Assets<StandardMaterial>>()
+                    .init_resource::<fx::EfTextureCache>()
+                    .init_resource::<Assets<crate::plugins::stage_material::GmdlMaterial>>();
+                h.app
+                    .world_mut()
+                    .run_system_once(fx::setup_effect_assets)
+                    .unwrap();
+                h.app.add_systems(
+                    Update,
+                    fx::advance_pon_ef_clocks
+                        .after(crate::plugins::FighterFrameSet::SkeletonSample)
+                        .before(crate::plugins::FighterFrameSet::HitJudge),
+                );
+                h.app.add_systems(
+                    Update,
+                    (
+                        fx::clear_interrupted_pose_effects,
+                        fx::pose_effect_spawn,
+                        fx::tick_pon_ef_players,
+                    )
+                        .chain()
+                        .after(crate::plugins::FighterFrameSet::CameraFinalize),
+                );
+                h.app.add_systems(
+                    Update,
+                    (|world: &mut World| {
+                        crate::plugins::character_plugin::drive_fighter_animation_for_test(world);
+                    })
+                    .in_set(crate::plugins::FighterFrameSet::SkeletonSample),
+                );
+                h.app.add_systems(
+                    Update,
+                    (tick_target_hit_clocks, attack_windows)
+                        .chain()
+                        .in_set(crate::plugins::FighterFrameSet::HitJudge),
+                );
+                h.app
+                    .world_mut()
+                    .get_mut::<Transform>(target)
+                    .unwrap()
+                    .translation = Vec3::new(0.0, 0.0, 3.0);
+                let before = h.app.world().get::<Health>(target).unwrap().current;
+                let keys = crate::app_state::Keymap::default();
+                h.press_binding(keys.jump);
+                h.step_dt(dt);
+                h.release_binding(keys.jump);
+                h.step_dt(dt);
+                assert!(h.airborne(), "short jump must take off");
+                h.press_mouse(MouseButton::Left);
+                h.step_dt(dt);
+                h.release_mouse(MouseButton::Left);
+                assert_eq!(h.pose_id(), 338, "weapon {weapon}, {fps} FPS");
+                for _ in 0..fps {
+                    h.step_dt(dt);
+                }
+                let after = h.app.world().get::<Health>(target).unwrap().current;
+                assert!(after < before,
+                    "low jump kick must damage NPC: weapon {weapon}, {fps} FPS, hp {before}->{after}");
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn original_spear_mrc_inputs_reach_the_recorded_289_to_291_chain() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let origin = root.join("origin_res");
+        for mode in ["keys", "mrc-full", "mrc-full-clock", "mrc-full-slow"] {
+            let replay_mrc = mode != "keys";
+            let full_mrc = mode.starts_with("mrc-full");
+            let slow = mode == "mrc-full-slow";
+            let (mut h, _target, _hits) = spawn_local_stock_hit_harness_with_order(7, true);
+            h.app.insert_resource(State::new(AppState::Playing));
+            if mode == "mrc-full-clock" || slow {
+                h.app.world_mut().resource_mut::<Settings>().target_fps = 60;
+                crate::plugins::install_frame_clock(&mut h.app);
+            }
+            let models: Vec<_> = h
+                .app
+                .world_mut()
+                .query::<(Entity, &FighterModel)>()
+                .iter(h.app.world())
+                .map(|(entity, _)| entity)
+                .collect();
+            for model in models {
+                h.app.world_mut().despawn(model);
+            }
+            let p0 = crate::plugins::character_plugin::load_character_asset_for_test(
+                std::slice::from_ref(&origin),
+                "p0",
+            )
+            .expect("original p0");
+            h.app
+                .world_mut()
+                .resource_mut::<CharacterAssetsSet>()
+                .0
+                .insert("p0".into(), p0);
+            h.app
+                .world_mut()
+                .get_mut::<Fighter>(h.fighter)
+                .unwrap()
+                .character_id = 0;
+            h.app
+                .world_mut()
+                .entity_mut(h.fighter)
+                .insert(crate::components::fighter::VisualRootPin::default());
+            crate::plugins::character_plugin::spawn_fighter_model_for_test(
+                h.app.world_mut(),
+                h.fighter,
+            );
+            crate::plugins::character_plugin::install_crowd_animation_for_test(&mut h.app);
+            let doc = meteor_asset::mrc::decode_mrc(
+                &std::fs::read(root.join("mrcs/tests/长枪三连.mrc")).unwrap(),
+            )
+            .unwrap();
+            let recorded_actions: Vec<_> = doc
+                .queue_a
+                .iter()
+                .filter(|event| event.id == 51)
+                .filter_map(|event| {
+                    meteor_network::stock_protocol::StockPoseChainEvent::decode(&event.blob)
+                        .ok()
+                        .filter(|action| {
+                            action.actor_id == 2 && matches!(action.pose_id, 289 | 291)
+                        })
+                        .map(|action| (event.time, action.pose_id))
+                })
+                .collect();
+            let recorded_hits: Vec<_> = doc
+                .queue_a
+                .iter()
+                .filter(|event| event.id == 11)
+                .filter_map(|event| {
+                    meteor_network::stock_protocol::StockHitReactionEvent::decode(&event.blob)
+                        .ok()
+                        .filter(|hit| hit.target_actor_id == 1)
+                        .map(|hit| (event.time, hit))
+                })
+                .collect();
+            let input: Vec<_> = doc
+                .queue_b
+                .iter()
+                .filter(|event| (10.5..14.2).contains(&event.time))
+                .cloned()
+                .collect();
+            if replay_mrc {
+                h.app
+                    .add_plugins(crate::plugins::replay_plugin::ReplayPlugin);
+                h.app
+                    .insert_resource(crate::plugins::replay_plugin::MrcPlayback {
+                        active: true,
+                        doc: Some(doc),
+                        ..default()
+                    });
+            }
+            let keymap = crate::app_state::Keymap::default();
+            let mut next = 0;
+            let mut transitions = Vec::new();
+            let mut diagnostic = Vec::new();
+            let mut attack_windows_seen = Vec::new();
+            let mut selected_metadata = Vec::new();
+            let mut previous = h.pose_id();
+            let start = if full_mrc { 0.0 } else { 10.5 };
+            let ticks = if slow {
+                25 * 20
+            } else if full_mrc {
+                25 * 60
+            } else {
+                4 * 60
+            };
+            for tick in 0..ticks {
+                let input_until = start + (tick + 1) as f32 / 60.0;
+                while !replay_mrc && next < input.len() && input[next].time <= input_until {
+                    let event = &input[next];
+                    let binding = match event.code {
+                        0x57 => keymap.move_up,
+                        0x53 => keymap.move_down,
+                        0x1000 => keymap.attack,
+                        0x1200 => keymap.jump,
+                        code => panic!("unexpected spear MRC input {code:x}"),
+                    };
+                    if event.value != 0 {
+                        h.press_binding(binding);
+                    } else {
+                        h.release_binding(binding);
+                    }
+                    next += 1;
+                }
+                let host_dt = if slow {
+                    std::time::Duration::from_millis(100)
+                } else {
+                    std::time::Duration::from_nanos(1_000_000_000 / 60)
+                };
+                h.step_duration(host_dt);
+                let until = if replay_mrc {
+                    h.app
+                        .world()
+                        .resource::<crate::plugins::replay_plugin::MrcPlayback>()
+                        .elapsed
+                } else {
+                    input_until
+                };
+                let pose = h.pose_id();
+                if matches!(pose, 289 | 291) {
+                    let runtime = h.app.world().get::<PoseRuntime>(h.fighter).unwrap();
+                    let blend = h.app.world().get::<EntryBlend>(h.fighter).unwrap();
+                    let assets = &h.app.world().resource::<CharacterAssetsSet>().0["p0"];
+                    if let Some((index, window)) = sampled_attack_window(assets, runtime, blend) {
+                        if attack_windows_seen.last().is_none_or(
+                            |(_, previous_pose, previous_index)| {
+                                *previous_pose != pose || *previous_index != index
+                            },
+                        ) {
+                            attack_windows_seen.push((until, pose, index));
+                            selected_metadata.push((
+                                pose,
+                                index,
+                                window.target_pose,
+                                window.target_move,
+                                window.target_value,
+                            ));
+                        }
+                    }
+                }
+                if (12.9..13.7).contains(&until) && tick % 6 == 0 {
+                    let runtime = h.app.world().get::<PoseRuntime>(h.fighter).unwrap();
+                    let sm = h.app.world().get::<SmState>(h.fighter).unwrap();
+                    diagnostic.push((
+                        until,
+                        pose,
+                        runtime.frame,
+                        sm.current,
+                        sm.attack_queued.clone(),
+                    ));
+                }
+                if pose != previous {
+                    if until >= 10.5 && until <= (if full_mrc { 25.0 } else { 14.2 }) {
+                        transitions.push((until, pose));
+                    }
+                    previous = pose;
+                }
+            }
+            let spear_chain: Vec<_> = transitions
+                .iter()
+                .filter(|(_, pose)| matches!(pose, 289 | 291))
+                .collect();
+            let expected = if full_mrc {
+                vec![289, 291, 289, 291, 289, 291]
+            } else {
+                vec![289, 291]
+            };
+            assert_eq!(
+                spear_chain
+                    .iter()
+                    .map(|(_, pose)| *pose)
+                    .collect::<Vec<_>>(),
+                expected,
+                "mode={mode} recorded spear poses: {transitions:?}; diagnostic: {diagnostic:?}"
+            );
+            if full_mrc {
+                for ((actual, pose), (recorded, recorded_pose)) in
+                    spear_chain.iter().zip(&recorded_actions)
+                {
+                    assert_eq!(*pose, *recorded_pose);
+                    assert!(
+                        (*actual - *recorded).abs() < 0.1,
+                        "mode={mode} action {pose} at {actual} vs recorded {recorded}"
+                    );
+                }
+                let first_289 = attack_windows_seen
+                    .iter()
+                    .find(|(_, pose, index)| *pose == 289 && *index == 0)
+                    .unwrap()
+                    .0;
+                let first_291 = attack_windows_seen
+                    .iter()
+                    .find(|(_, pose, index)| *pose == 291 && *index == 0)
+                    .unwrap()
+                    .0;
+                assert!(
+                    (first_289 - recorded_hits[0].0).abs() < 0.06,
+                    "mode={mode} first attack vs recorded hit: {attack_windows_seen:?}"
+                );
+                assert!(
+                    (first_291 - recorded_hits[1].0).abs() < 0.06,
+                    "mode={mode} followup vs recorded hit: {attack_windows_seen:?}"
+                );
+                for (pose, recorded) in [(289, recorded_hits[0].1), (291, recorded_hits[1].1)] {
+                    let (_, _, reaction, movement, minimum) = selected_metadata
+                        .iter()
+                        .find(|(selected_pose, index, ..)| *selected_pose == pose && *index == 0)
+                        .expect("recorded first spear Attack[0]");
+                    assert_eq!(reaction.map(u32::from), Some(recorded.pose_id));
+                    assert_eq!((*movement * 100.0).round() as u32, recorded.move_hundred);
+                    assert_eq!((*minimum * 100.0).round() as u32, recorded.value_hundred);
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn original_ninja_mrc_local_actions_follow_recorded_entries() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let (mut h, _target, _hits) = spawn_local_stock_hit_harness_with_order(12, true);
+        h.app.insert_resource(State::new(AppState::Playing));
+        let models: Vec<_> = h
+            .app
+            .world_mut()
+            .query::<(Entity, &FighterModel)>()
+            .iter(h.app.world())
+            .map(|(entity, _)| entity)
+            .collect();
+        for model in models {
+            h.app.world_mut().despawn(model);
+        }
+        let p0 = crate::plugins::character_plugin::load_character_asset_for_test(
+            std::slice::from_ref(&root.join("origin_res")),
+            "p0",
+        )
+        .expect("original p0");
+        h.app
+            .world_mut()
+            .resource_mut::<CharacterAssetsSet>()
+            .0
+            .insert("p0".into(), p0);
+        h.app
+            .world_mut()
+            .get_mut::<Fighter>(h.fighter)
+            .unwrap()
+            .character_id = 0;
+        h.app
+            .world_mut()
+            .entity_mut(h.fighter)
+            .insert(crate::components::fighter::VisualRootPin::default());
+        crate::plugins::character_plugin::spawn_fighter_model_for_test(
+            h.app.world_mut(),
+            h.fighter,
+        );
+        crate::plugins::character_plugin::install_crowd_animation_for_test(&mut h.app);
+        let doc = meteor_asset::mrc::decode_mrc(
+            &std::fs::read(root.join("mrcs/tests/忍烧.mrc")).unwrap(),
+        )
+        .unwrap();
+        let expected: Vec<_> = doc
+            .queue_a
+            .iter()
+            .filter(|event| matches!(event.id, 50 | 51))
+            .filter_map(|event| {
+                meteor_network::stock_protocol::StockPoseChainEvent::decode(&event.blob)
+                    .ok()
+                    .filter(|action| action.actor_id == 2 && (33.8..37.1).contains(&event.time))
+                    .map(|action| (event.time, action.pose_id))
+            })
+            .collect();
+        assert_eq!(
+            expected.iter().map(|(_, pose)| *pose).collect::<Vec<_>>(),
+            vec![464, 466, 467, 474]
+        );
+        let checkpoints: Vec<_> = doc
+            .queue_d
+            .iter()
+            .filter(|entry| {
+                (11.5..14.2).contains(&entry.time) || (33.8..37.1).contains(&entry.time)
+            })
+            .cloned()
+            .collect();
+        let center = meteor_scene::stage_loader::get_stage_center("sn06", None);
+        h.app
+            .add_plugins(crate::plugins::replay_plugin::ReplayPlugin);
+        h.app
+            .insert_resource(crate::plugins::replay_plugin::MrcPlayback {
+                active: true,
+                doc: Some(doc),
+                ..default()
+            });
+        let mut transitions = Vec::new();
+        let mut positions = Vec::new();
+        let mut next_checkpoint = 0;
+        let mut previous = h.pose_id();
+        for _ in 0..38 * 60 {
+            h.step_duration(std::time::Duration::from_nanos(1_000_000_000 / 60));
+            let time = h
+                .app
+                .world()
+                .resource::<crate::plugins::replay_plugin::MrcPlayback>()
+                .elapsed;
+            let pose = h.pose_id();
+            while next_checkpoint < checkpoints.len() && checkpoints[next_checkpoint].time <= time {
+                let entry = &checkpoints[next_checkpoint];
+                let source = Vec3::new(
+                    f32::from_bits(entry.a),
+                    f32::from_bits(entry.b),
+                    f32::from_bits(entry.c),
+                );
+                let expected_root = Vec3::new(
+                    (source.x - center[0]) * meteor_core::MODEL_SCALE,
+                    (source.z - center[2]) * meteor_core::MODEL_SCALE,
+                    (center[1] - source.y) * meteor_core::MODEL_SCALE,
+                );
+                positions.push((entry.time, (h.position() - expected_root).length()));
+                next_checkpoint += 1;
+            }
+            if pose != previous && (33.8..37.1).contains(&time) {
+                transitions.push((time, pose));
+            }
+            previous = pose;
+        }
+        let actual: Vec<_> = transitions
+            .iter()
+            .filter(|(_, pose)| matches!(pose, 464 | 466 | 467 | 474))
+            .collect();
+        assert_eq!(
+            actual.iter().map(|(_, pose)| *pose).collect::<Vec<_>>(),
+            vec![464, 466, 467, 474],
+            "local ninja entries: {transitions:?}"
+        );
+        for ((actual_time, pose), (recorded_time, recorded_pose)) in actual.iter().zip(&expected) {
+            assert_eq!(*pose, *recorded_pose);
+            assert!((*actual_time - *recorded_time).abs() < 0.1,
+                "local Pose {pose}: actual {actual_time}, recorded {recorded_time}; {transitions:?}");
+        }
+        assert!(
+            positions.iter().all(|(_, distance)| *distance < 0.1),
+            "local root must be close to each authored D checkpoint: {positions:?}"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn mrc_playback_does_not_resolve_a_second_melee_hit() {
+        use bevy::ecs::system::RunSystemOnce;
+        let (mut h, target, take_hits) = spawn_local_stock_hit_harness(6);
+        let original_hp = h.app.world().get::<Health>(target).unwrap().current;
+        h.app
+            .insert_resource(crate::plugins::replay_plugin::MrcPlayback {
+                active: true,
+                ..default()
+            });
+        h.press_mouse(MouseButton::Left);
+        let mut sampled_window = false;
+        for tick in 0..150 {
+            h.step();
+            if tick == 0 {
+                h.release_mouse(MouseButton::Left);
+            }
+            h.app
+                .world_mut()
+                .get_mut::<crate::components::fighter::TargetHitClock>(target)
+                .unwrap()
+                .tick_spawn(HARNESS_DT);
+            crate::plugins::character_plugin::drive_fighter_animation_for_test(h.app.world_mut());
+            let pose = h.app.world().get::<PoseRuntime>(h.fighter).unwrap();
+            let blend = h.app.world().get::<EntryBlend>(h.fighter).unwrap();
+            let assets = h.app.world().resource::<CharacterAssetsSet>();
+            sampled_window |= sampled_attack_window(&assets.0["p1"], pose, blend).is_some();
+            h.app.world_mut().run_system_once(attack_windows).unwrap();
+            assert!(
+                take_hits().is_empty(),
+                "MRC must not invent a second hit at tick {tick}"
+            );
+        }
+        assert!(
+            sampled_window,
+            "the recorded attack must still animate through its hit window"
+        );
+        assert_eq!(
+            h.app.world().get::<Health>(target).unwrap().current,
+            original_hp
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn production_hammer_turn_slam_keeps_its_authored_effect_through_link() {
+        use crate::plugins::effect_plugin as fx;
+        use bevy::ecs::system::RunSystemOnce;
+        let origin = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        let output = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../analysis/mrc-moves-20260928");
+        #[derive(Resource, Default)]
+        struct HammerBeforeCombat(Option<serde_json::Value>);
+        let bypass_primary_contact = std::env::var_os("METEOR_AUDIT_HAMMER_CONTACT").is_some();
+        let early_start = std::env::var_os("METEOR_AUDIT_HAMMER_EARLY_START").is_some();
+        for (fps, recorded, networked) in [30, 60, 120]
+            .into_iter()
+            .flat_map(|fps| [(fps, false, false), (fps, true, false), (fps, true, true)])
+        {
+            let (mut h, target, take_hits) = spawn_local_stock_hit_harness_with_order(9, true);
+            h.app.insert_resource(NetState::default());
+            h.app
+                .world_mut()
+                .run_system_once(load_combat_resource_data)
+                .unwrap();
+            h.app.insert_resource(State::new(AppState::Playing));
+            h.app
+                .add_plugins(crate::plugins::character_contact_plugin::CharacterContactPlugin);
+            configure_lock_updates(&mut h.app);
+            h.app.world_mut().entity_mut(target).insert((
+                GunAimState::default(),
+                RangedFireGate::default(),
+                FighterHitReaction::default(),
+                WeaponForm::default(),
+                AiIntent::default(),
+                FighterWall::default(),
+            ));
+            let attacker = h.fighter;
+            h.app
+                .world_mut()
+                .resource_mut::<CharacterContactFrame>()
+                .audit_record_moves(attacker);
+            h.app
+                .world_mut()
+                .entity_mut(attacker)
+                .insert(HeadTrackState::default());
+
+            let models: Vec<_> = h
+                .app
+                .world_mut()
+                .query::<(Entity, &FighterModel)>()
+                .iter(h.app.world())
+                .map(|(entity, _)| entity)
+                .collect();
+            for model in models {
+                h.app.world_mut().despawn(model);
+            }
+            let p0 = crate::plugins::character_plugin::load_character_asset_for_test(
+                std::slice::from_ref(&origin),
+                "p0",
+            )
+            .unwrap();
+            h.app
+                .world_mut()
+                .resource_mut::<CharacterAssetsSet>()
+                .0
+                .insert("p0".into(), p0);
+            for entity in [attacker, target] {
+                h.app
+                    .world_mut()
+                    .get_mut::<Fighter>(entity)
+                    .unwrap()
+                    .character_id = 0;
+                h.app
+                    .world_mut()
+                    .entity_mut(entity)
+                    .insert(crate::components::fighter::VisualRootPin::default());
+                crate::plugins::character_plugin::spawn_fighter_model_for_test(
+                    h.app.world_mut(),
+                    entity,
+                );
+            }
+            *h.app.world_mut().get_mut::<Health>(target).unwrap() = Health {
+                current: 2000.0,
+                max: 2000.0,
+            };
+            h.app
+                .world_mut()
+                .get_mut::<Transform>(target)
+                .unwrap()
+                .translation = Vec3::new(0.0, 0.0, 3.0);
+            h.app.world_mut().get_mut::<Qi>(attacker).unwrap().current =
+                meteor_core::DEFAULT_QI_MAX;
+            h.app
+                .init_resource::<Assets<fx::PonEfMaterial>>()
+                .init_resource::<Assets<Mesh>>()
+                .init_resource::<Assets<Image>>()
+                .init_resource::<Assets<StandardMaterial>>()
+                .init_resource::<fx::EfTextureCache>()
+                .init_resource::<Assets<crate::plugins::stage_material::GmdlMaterial>>()
+                .add_message::<fx::SceneEffectEvent>();
+            h.app
+                .world_mut()
+                .run_system_once(fx::setup_effect_assets)
+                .unwrap();
+            fx::install_effect_playback_systems(&mut h.app);
+            crate::plugins::character_plugin::install_crowd_animation_for_test(&mut h.app);
+            let schedule = super::super::fighter_frame::schedule(&h.app);
+            h.app.add_systems(
+                Update,
+                tick_target_hit_clocks.in_set(crate::plugins::FighterFrameSet::PoseDecision),
+            );
+            h.app.add_systems(
+                schedule,
+                attack_windows.in_set(crate::plugins::FighterFrameSet::HitJudge),
+            );
+            h.app.add_systems(
+                schedule,
+                hit_reaction_root_motion
+                    .in_set(crate::plugins::FighterFrameSet::RootMotion)
+                    .after(crate::plugins::movement_plugin::attack_root_motion)
+                    .after(crate::plugins::movement_plugin::dodge_root_motion)
+                    .after(crate::plugins::ai_plugin::npc_ballistic_air_root_motion),
+            );
+            h.app.init_resource::<HammerBeforeCombat>().add_systems(schedule,
+                (|mut sample: ResMut<HammerBeforeCombat>,
+                  local: Query<(&Transform, &PoseRuntime, &MotionState), With<LocalFighter>>| {
+                    if let Ok((transform, pose, motion)) = local.single() {
+                        sample.0 = Some(serde_json::json!({"position":transform.translation.to_array(),
+                            "pose":pose.pose_id,"velocity":motion.velocity.to_array(),"yaw":motion.facing}));
+                    }
+                }).before(combat_tick)
+                  .in_set(crate::plugins::FighterFrameSet::PoseDecision)
+                  .run_if(crate::plugins::fighter_frame::current_is_local));
+            let dt = std::time::Duration::from_nanos(1_000_000_000 / fps as u64);
+            if recorded {
+                let doc = meteor_asset::mrc::decode_mrc(
+                    &std::fs::read(origin.parent().unwrap().join("mrcs/tests/大锤左右后A.mrc"))
+                        .unwrap(),
+                )
+                .unwrap();
+                let start = if networked && early_start {
+                    9.166438102722168
+                } else {
+                    9.9
+                };
+                let mut received = Vec::new();
+                if networked {
+                    use crate::plugins::network_plugin as network;
+                    use meteor_network::stock_game::StockGameEvent;
+                    use meteor_network::stock_protocol::{
+                        decode_role_state_event, StockSceneFrame,
+                    };
+                    let anchor = doc
+                        .queue_d
+                        .iter()
+                        .filter(|row| f64::from(row.time) <= start)
+                        .last()
+                        .unwrap();
+                    let center = [
+                        f32::from_bits(anchor.a),
+                        f32::from_bits(anchor.b),
+                        f32::from_bits(anchor.c),
+                    ];
+                    let scene = StockSceneFrame(center);
+                    if bypass_primary_contact {
+                        h.app
+                            .world_mut()
+                            .resource_mut::<CharacterContactFrame>()
+                            .audit_bypass_primary_contact(attacker);
+                    }
+                    let stage = origin.join("sn06");
+                    let mesh = meteor_asset::gmdl::decode_gmdl(
+                        &std::fs::read(stage.join("sn06.gmb")).unwrap(),
+                    )
+                    .unwrap();
+                    let description = meteor_asset::des::parse_stage_description(
+                        &crate::text_codec::decode_text(
+                            &std::fs::read(stage.join("sn06.des")).unwrap(),
+                        ),
+                    );
+                    let collision = meteor_asset::cob::parse_cob(
+                        &std::fs::read(stage.join("sn06.cob")).unwrap(),
+                    )
+                    .unwrap();
+                    let collider = StageMeshCollider::from_gmdl(
+                        &mesh,
+                        &description,
+                        Some(&collision.face_ids),
+                        center,
+                    );
+                    assert_eq!(collider.triangle_count(), 3528);
+                    h.replace_stage_mesh(collider);
+                    let direction = doc
+                        .queue_e
+                        .iter()
+                        .filter(|row| f64::from(row.time) <= start)
+                        .last()
+                        .unwrap();
+                    let yaw = f32::from_bits(direction.a).atan2(-f32::from_bits(direction.b));
+                    h.app
+                        .world_mut()
+                        .get_mut::<MotionState>(attacker)
+                        .unwrap()
+                        .facing = yaw;
+                    h.app
+                        .world_mut()
+                        .resource_mut::<crate::plugins::camera_plugin::CameraBasis>()
+                        .yaw = yaw;
+                    let initial = doc
+                        .queue_a
+                        .iter()
+                        .filter(|row| row.id == 2 && f64::from(row.time) <= start)
+                        .flat_map(|row| decode_role_state_event(&row.blob).unwrap())
+                        .filter(|row| row.actor_id == 1)
+                        .last()
+                        .unwrap();
+                    let initial_state = scene.to_scene(initial.state);
+                    let initial_position = Vec3::new(
+                        initial_state.position.x,
+                        initial_state.position.y,
+                        initial_state.position.z,
+                    );
+                    h.app
+                        .world_mut()
+                        .get_mut::<Transform>(target)
+                        .unwrap()
+                        .translation = initial_position;
+                    h.app.world_mut().entity_mut(target).insert((
+                        network::RemoteFighter {
+                            player_id: "stock-1".into(),
+                        },
+                        network::RemoteTransformTarget {
+                            translation: initial_position,
+                            yaw: initial_state.forward.x.atan2(initial_state.forward.z),
+                        },
+                        network::RemoteContactSegment::default(),
+                        network::RemoteHitMotionWindow::default(),
+                        network::RemoteAuthorityGeneration::default(),
+                    ));
+                    {
+                        let mut net = h.app.world_mut().resource_mut::<NetState>();
+                        net.status = NetStatus::InRoom;
+                        net.address = "udp://127.0.0.1:5230".into();
+                        net.player_id = "stock-2".into();
+                        net.round_active = true;
+                        net.stock_npc_actors.clear();
+                        net.stock_npc_ready.clear();
+                        net.remote_actor_profiles.insert("stock-1".into(), (0, 6));
+                    }
+
+                    let fighter = h.app.world().get::<Fighter>(attacker).unwrap().clone();
+                    h.app
+                        .world_mut()
+                        .entity_mut(attacker)
+                        .remove::<Fighter>()
+                        .insert(fighter);
+                    network::install_stock_observer_projection_for_test(&mut h.app);
+                    network::feed_stock_observer_event_for_test(
+                        h.app.world_mut(),
+                        StockGameEvent::RoleStates(vec![
+                            meteor_network::stock_protocol::StockRoleStateRecord {
+                                actor_id: 1,
+                                state: initial_state,
+                            },
+                        ]),
+                    );
+                    for row in doc
+                        .queue_a
+                        .iter()
+                        .filter(|row| f64::from(row.time) > start && row.time < 15.9)
+                    {
+                        let event = match row.id {
+                            2 => Some(StockGameEvent::RoleStates(
+                                decode_role_state_event(&row.blob)
+                                    .unwrap()
+                                    .into_iter()
+                                    .map(|mut role| {
+                                        role.state = scene.to_scene(role.state);
+                                        role
+                                    })
+                                    .collect(),
+                            )),
+                            11 | 14 => Some(StockGameEvent::HitReaction {
+                                guarded: row.id == 14,
+                                event:
+                                    meteor_network::stock_protocol::StockHitReactionEvent::decode(
+                                        &row.blob,
+                                    )
+                                    .unwrap(),
+                            }),
+                            51 => Some(StockGameEvent::PoseChain(
+                                meteor_network::stock_protocol::StockPoseChainEvent::decode(
+                                    &row.blob,
+                                )
+                                .unwrap(),
+                            )),
+                            _ => None,
+                        };
+                        if let Some(event) = event {
+                            received.push((row.time, event));
+                        }
+                    }
+                }
+                let mut next_received = 0;
+                let mut sent_requests = 0;
+                let mut sent_records = Vec::new();
+                let input: Vec<_> = doc
+                    .queue_b
+                    .into_iter()
+                    .filter(|event| f64::from(event.time) >= start && event.time < 13.5)
+                    .collect();
+                let keys = crate::app_state::Keymap::default();
+                let mut next = 0;
+                let mut seen = std::collections::HashSet::new();
+                let mut rows = Vec::new();
+                let mut entry = None;
+                let mut turn_instance = None;
+                let mut turn_effects = std::collections::HashSet::new();
+                let mut inherited_slam_samples = 0;
+                for tick in 0..fps * 6 {
+                    let until = start + (tick + 1) as f64 / fps as f64;
+                    while next < input.len() && f64::from(input[next].time) <= until {
+                        let event = &input[next];
+                        let binding = match event.code {
+                            0x57 => keys.move_up,
+                            0x41 => keys.move_left,
+                            0x44 => keys.move_right,
+                            0x53 => keys.move_down,
+                            0x1000 => keys.attack,
+                            0x1200 => keys.jump,
+                            0x51 => keys.lock_toggle,
+                            code => panic!("unexpected recording input {code:x}"),
+                        };
+                        if event.value != 0 {
+                            h.press_binding(binding);
+                        } else {
+                            h.release_binding(binding);
+                        }
+                        next += 1;
+                    }
+                    while next_received < received.len()
+                        && f64::from(received[next_received].0) <= until
+                    {
+                        crate::plugins::network_plugin::feed_stock_observer_event_for_test(
+                            h.app.world_mut(),
+                            received[next_received].1.clone(),
+                        );
+                        next_received += 1;
+                    }
+                    h.step_duration(dt);
+                    let batch = take_hits();
+                    sent_records.extend(batch.iter().map(|(_, hit)| (until, *hit)));
+                    let requests: Vec<_> = batch.into_iter().map(|(_, hit)| serde_json::json!({
+                        "target":hit.target_actor_id,"move":hit.target_move(),"minimum":hit.target_value(),"reaction":hit.target_pose(),
+                        "direction":hit.direction_selector(),"strategy":hit.hit_word >> 16
+                    })).collect();
+                    sent_requests += requests.len();
+                    let pose = h.app.world().get::<PoseRuntime>(attacker).unwrap().clone();
+                    let blend = h.app.world().get::<EntryBlend>(attacker).unwrap().clone();
+                    seen.insert(pose.pose_id);
+                    if pose.pose_id == 372 && entry.is_none() {
+                        entry = Some((blend.duration, blend.kind));
+                        turn_instance = Some(pose.pose_instance_id);
+                    }
+                    let effects: Vec<_> = h
+                        .app
+                        .world_mut()
+                        .query::<(Entity, &fx::PoseOwnedPonEf, &fx::PonEfInstance)>()
+                        .iter(h.app.world())
+                        .filter(|(_, owner, _)| owner.fighter == attacker)
+                        .map(|(entity, owner, effect)| {
+                            (
+                                entity,
+                                owner.pose_instance_id,
+                                effect.elapsed,
+                                effect.duration,
+                            )
+                        })
+                        .collect();
+                    for &(entity, instance, _, _) in &effects {
+                        if Some(instance) == turn_instance {
+                            turn_effects.insert(entity);
+                        }
+                    }
+                    if pose.pose_id == 373 {
+                        assert_eq!(Some(pose.pose_instance_id), turn_instance);
+                        let assets = &h.app.world().resource::<CharacterAssetsSet>().0["p0"];
+                        if sampled_attack_window(assets, &pose, &blend).is_some() {
+                            inherited_slam_samples += 1;
+                            assert_eq!(
+                                effects
+                                    .iter()
+                                    .filter(|(_, instance, age, duration)| Some(*instance)
+                                        == turn_instance
+                                        && age <= duration)
+                                    .count(),
+                                1
+                            );
+                        }
+                    }
+                    rows.push(serde_json::json!({"time":until,"pose":pose.pose_id,"frame":pose.frame,
+                        "action_id":pose.action_id,
+                        "before_combat":h.app.world().resource::<HammerBeforeCombat>().0,
+                        "movement_audit":h.app.world().resource::<CharacterContactFrame>().audit_moves(attacker),
+                        "blend":blend.duration,"record":blend.frame_record_for(&pose),"requests":requests,
+                        "attacker":h.position().to_array(),"attacker_yaw":h.app.world().get::<MotionState>(attacker).unwrap().facing,
+                        "camera_yaw":h.app.world().resource::<crate::plugins::camera_plugin::CameraBasis>().yaw,
+                        "locked":h.app.world().resource::<LockOnController>().lock_entity.is_some(),
+                        "target":h.app.world().get::<Transform>(target).unwrap().translation.to_array(),
+                        "target_yaw":h.app.world().get::<MotionState>(target).unwrap().facing,
+                        "target_pose":h.app.world().get::<PoseRuntime>(target).unwrap().pose_id,
+                        "hp":h.app.world().get::<Health>(target).unwrap().current,
+                        "effects":effects.iter().map(|(_,instance,age,duration)| serde_json::json!([instance,age,duration])).collect::<Vec<_>>() }));
+                }
+                std::fs::write(output.join(if networked && early_start { format!("hammer-network-early-start-{fps}.json") }
+                        else if networked && bypass_primary_contact { format!("hammer-network-no-primary-contact-{fps}.json") }
+                        else if networked { format!("hammer-network-stream-{fps}.json") } else { format!("hammer-recorded-input-{fps}.json") }), serde_json::to_vec_pretty(
+                    &serde_json::json!({"boundary":if networked { "MRC queueB plus received event2/11/14/51 through production network projection; latest initial D/E anchors, original actor registration order, original sn06 GMB/DES/COB collider rebased with the same StockSceneFrame. Original camera history and earlier controller state are NOT reconstructed; incoming hits are recorded observations, not responses to generated requests." } else { "Actual MRC queueB times 9.9..13.5, p0, offline flat-floor fixture; original starting coordinates/camera/network are NOT reconstructed." },"fps":fps,"start":start,"primary_contact_bypassed":networked && bypass_primary_contact,"rows":rows})).unwrap()).unwrap();
+                eprintln!("HAMMER RECORDING fps={fps} networked={networked} requests={sent_requests} poses={seen:?} entry={entry:?}");
+                if networked {
+                    assert!(
+                        sent_requests > 0,
+                        "must exercise the real request5 sender, not just local pending markers"
+                    );
+                }
+                assert!(seen.contains(&316), "recorded forward attack must produce the launcher matching event11 Pose100/Move1.5");
+                assert!(
+                    seen.contains(&372) && seen.contains(&373),
+                    "recorded input must reach the full turn/slam chain"
+                );
+                if networked && fps == 120 && !bypass_primary_contact && !early_start {
+                    let observed: Vec<_> = doc
+                        .queue_a
+                        .iter()
+                        .filter(|event| event.id == 11 && event.time > 9.9 && event.time < 13.5)
+                        .map(|event| {
+                            (
+                                event.time,
+                                meteor_network::stock_protocol::StockHitReactionEvent::decode(
+                                    &event.blob,
+                                )
+                                .unwrap(),
+                            )
+                        })
+                        .filter(|(_, hit)| hit.target_actor_id == 1)
+                        .collect();
+                    assert_eq!(
+                        sent_records.len(),
+                        observed.len(),
+                        "conditional original-input/network-stream reference"
+                    );
+                    for ((time, request), (received_at, reaction)) in
+                        sent_records.iter().zip(&observed)
+                    {
+                        assert!(
+                            *time <= f64::from(*received_at),
+                            "a generated request must precede its recorded reply"
+                        );
+                        assert_eq!(request.target_actor_id, reaction.target_actor_id);
+                        assert_eq!(u32::from(request.target_pose()), reaction.pose_id);
+                        assert!((request.target_move() - reaction.motion_scale()).abs() < 0.005);
+                        assert!(
+                            (request.target_value() - reaction.minimum_seconds()).abs() < 0.005
+                        );
+                        assert_eq!(request.hit_word >> 16, reaction.context);
+                    }
+                }
+                if fps == 120 {
+                    assert!(
+                        rows.iter()
+                            .any(|row| row["pose"] == 316 && row["action_id"] == 80),
+                        "accepted queued action must latch while the source pose is still playing"
+                    );
+                }
+                assert_eq!(
+                    turn_effects.len(),
+                    1,
+                    "the recorded chain must retain one Pos324 action instance"
+                );
+                assert!(inherited_slam_samples > 0);
+                assert_eq!(
+                    entry,
+                    Some((0.5, EntryBlendKind::Chained)),
+                    "MRC event51 at10.67306 carries .50s from316 NextPose"
+                );
+                continue;
+            }
+            for key in [KeyCode::KeyA, KeyCode::KeyD, KeyCode::KeyS] {
+                h.press_key(key);
+
+                for _ in 0..fps / 30 {
+                    h.step_duration(dt);
+                }
+                h.release_key(key);
+            }
+            let command_position = h.position();
+            h.press_mouse(MouseButton::Left);
+            h.step_duration(dt);
+            h.release_mouse(MouseButton::Left);
+            assert_eq!(
+                h.pose_id(),
+                372,
+                "left/right/back+A must enter authored hammer turn, fps={fps}"
+            );
+            let instance = h
+                .app
+                .world()
+                .get::<PoseRuntime>(attacker)
+                .unwrap()
+                .pose_instance_id;
+            let mut roots = std::collections::HashSet::new();
+            let mut linked = false;
+            let mut slam_windows = 0;
+            let mut rows = Vec::new();
+            for tick in 0..fps * 6 {
+                let pose = h.app.world().get::<PoseRuntime>(attacker).unwrap().clone();
+                let blend = h.app.world().get::<EntryBlend>(attacker).unwrap().clone();
+                let record = blend.frame_record_for(&pose);
+                let fx_rows: Vec<_> = h
+                    .app
+                    .world_mut()
+                    .query::<(Entity, &fx::PoseOwnedPonEf, &fx::PonEfInstance)>()
+                    .iter(h.app.world())
+                    .filter(|(_, owner, _)| owner.fighter == attacker)
+                    .map(|(entity, owner, fx)| {
+                        (entity, owner.pose_instance_id, fx.elapsed, fx.duration)
+                    })
+                    .collect();
+                for &(entity, _, _, _) in &fx_rows {
+                    roots.insert(entity);
+                }
+                if pose.pose_id == 373 {
+                    linked = true;
+                    assert_eq!(pose.pose_instance_id, instance);
+                    let assets = &h.app.world().resource::<CharacterAssetsSet>().0["p0"];
+                    if sampled_attack_window(assets, &pose, &blend).is_some() {
+                        slam_windows += 1;
+                        assert_eq!(
+                            fx_rows.len(),
+                            1,
+                            "373 must retain the 372 Pos324 instance, fps={fps}"
+                        );
+                        assert_eq!(fx_rows[0].1, instance);
+                        assert!(fx_rows[0].2 > 0.5 && fx_rows[0].2 < fx_rows[0].3);
+                    }
+                }
+                rows.push(serde_json::json!({"tick":tick,"pose":pose.pose_id,"frame":pose.frame,
+                    "record":record,"blend":blend.duration,"zero":blend.zero_duration_pending,
+                    "attacker":h.position().to_array(),"attacker_yaw":h.app.world().get::<MotionState>(attacker).unwrap().facing,
+                        "camera_yaw":h.app.world().resource::<crate::plugins::camera_plugin::CameraBasis>().yaw,
+                        "locked":h.app.world().resource::<LockOnController>().lock_entity.is_some(),
+                        "target":h.app.world().get::<Transform>(target).unwrap().translation.to_array(),
+                        "target_yaw":h.app.world().get::<MotionState>(target).unwrap().facing,
+                    "target_pose":h.app.world().get::<PoseRuntime>(target).unwrap().pose_id,
+                    "hp":h.app.world().get::<Health>(target).unwrap().current,
+                    "effects":fx_rows.iter().map(|(_,instance,age,duration)| serde_json::json!([instance,age,duration])).collect::<Vec<_>>() }));
+                if linked && h.state() == FighterState::Name {
+                    break;
+                }
+                h.step_duration(dt);
+            }
+            std::fs::write(output.join(format!("hammer-full-chain-{fps}.json")), serde_json::to_vec_pretty(
+                &serde_json::json!({"boundary":"Offline p0, flat floor, target initially 3 units ahead; real input/animation/effect/hit/reaction/contact systems. Not an original MRC trajectory comparison.",
+                    "fps":fps,"command_position":command_position.to_array(),"rows":rows})).unwrap()).unwrap();
+            assert!(
+                linked && slam_windows > 0,
+                "must naturally run 372->373 and its attack window"
+            );
+            assert_eq!(
+                roots.len(),
+                1,
+                "the effect must not restart or duplicate across the natural Link"
+            );
+            assert_eq!(
+                h.state(),
+                FighterState::Name,
+                "full authored chain must release control"
+            );
+            eprintln!("HAMMER fps={fps} ticks={} slam_windows={slam_windows} hp={} attacker={:?} target={:?}", rows.len(),
+                h.app.world().get::<Health>(target).unwrap().current, h.position(), h.app.world().get::<Transform>(target).unwrap().translation);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
     fn production_area_ultimates_use_live_effects_beyond_melee_bones() {
         use crate::plugins::effect_plugin::{EfCache, PonEfInstance};
         use bevy::ecs::system::RunSystemOnce;
         for (weapon, pose_id, effect_name) in [
+            (7, 338, "pos338"),
+            (8, 338, "pos338"),
+            (9, 338, "pos338"),
             (11, 421, "pos421"),
+            (11, 425, "pos421"),
+            (12, 473, "pos473"),
+            (12, 474, "pos474"),
             (5, 259, "pos259"),
             (9, 327, "pos326"),
             (9, 373, "pos324"),
@@ -13640,13 +18043,6 @@ mod tests {
                 .find(|node| node.is_attack_node())
                 .expect("attack shape");
             let elapsed = (node.start_time + node.end_time) * 0.5;
-            let model = h
-                .app
-                .world_mut()
-                .query::<(Entity, &FighterModel)>()
-                .iter(h.app.world())
-                .find_map(|(entity, model)| (model.fighter == attacker).then_some(entity))
-                .unwrap();
             let effect = h
                 .app
                 .world_mut()
@@ -13659,7 +18055,7 @@ mod tests {
                         audio_playing: vec![None; ef.nodes.len()],
                         audio_triggered: vec![false; ef.nodes.len()],
                     },
-                    ChildOf(model),
+                    ChildOf(attacker),
                 ))
                 .id();
             crate::plugins::character_plugin::drive_fighter_animation_for_test(h.app.world_mut());
@@ -13667,8 +18063,11 @@ mod tests {
                 .app
                 .world_mut()
                 .run_system_once(
-                    move |geometry: HitGeometryQueries, assets: Res<CharacterAssetsSet>| {
-                        geometry.live_effect_obbs(attacker, &assets.0["p1"])
+                    move |geometry: HitGeometryQueries,
+                          assets: Res<CharacterAssetsSet>,
+                          fighters: Query<(&Fighter, &WeaponForm)>| {
+                        let (fighter, form) = fighters.get(attacker).unwrap();
+                        geometry.live_effect_obbs(attacker, fighter, form, pose_id, &assets.0["p1"])
                     },
                 )
                 .unwrap();
@@ -13690,6 +18089,10 @@ mod tests {
                             .get_mut::<Transform>(target)
                             .unwrap()
                             .translation = position;
+                        crate::plugins::character_plugin::refresh_collision_fixture(
+                            h.app.world_mut(),
+                            target,
+                        );
                         let names = window.bones.clone();
                         let area_only =
                             h.app
@@ -13720,7 +18123,13 @@ mod tests {
                                             .iter()
                                             .any(|a| hurt.iter().any(|b| obbs_intersect(a, b)))
                                             && geometry
-                                                .live_effect_obbs(attacker, character)
+                                                .live_effect_obbs(
+                                                    attacker,
+                                                    fighter,
+                                                    form,
+                                                    pose.pose_id,
+                                                    character,
+                                                )
                                                 .iter()
                                                 .any(|a| obbs_intersect(a, &body))
                                     },
@@ -13737,15 +18146,83 @@ mod tests {
                 chosen.is_some(),
                 "pose {pose_id} needs a point beyond bone range"
             );
+            let all_policy_expected = matches!(
+                (weapon, pose_id),
+                (11, 421 | 425) | (12, 473 | 474) | (5, 259) | (9, 327)
+            );
+            if all_policy_expected {
+                let mut frame = CharacterContactFrame::default();
+                if pose_id != 421 {
+                    frame.cache_candidates(attacker, h.position(), std::iter::empty());
+                }
+                h.app.insert_resource(frame);
+            }
             h.app.world_mut().run_system_once(attack_windows).unwrap();
             let claims = take_hits();
             assert_eq!(claims.len(), 1, "pose {pose_id}, point {chosen:?}");
             assert_eq!(claims[0].1.target_actor_id, 2);
+            if pose_id == 421 {
+                assert_eq!(
+                    h.app
+                        .world()
+                        .resource::<CharacterContactFrame>()
+                        .cached_candidate_contains(attacker, target),
+                    None,
+                    "all-candidate attack must not create the pre-root range cache"
+                );
+            }
+
             h.app
                 .world_mut()
                 .get_mut::<TargetHitClock>(target)
                 .unwrap()
-                .elapsed = f32::INFINITY;
+                .last_hit_at = f64::NEG_INFINITY;
+            if pose_id == 425 {
+                h.app
+                    .world_mut()
+                    .get_mut::<PoseRuntime>(attacker)
+                    .unwrap()
+                    .frame = def.start as f32;
+                *h.app.world_mut().get_mut::<EntryBlend>(attacker).unwrap() = EntryBlend {
+                    pose_id,
+                    duration: 0.12,
+                    motion_source: Some((424, 14331)),
+                    frame_record_source: Some((424, 14331)),
+                    ..Default::default()
+                };
+                h.app.world_mut().run_system_once(attack_windows).unwrap();
+                let claims = take_hits();
+                assert_eq!(
+                    claims.len(),
+                    1,
+                    "retained old frame must select new Attack record during morph"
+                );
+                assert_eq!(claims[0].1.target_actor_id, 2);
+                assert!((claims[0].1.target_move() - window.target_move).abs() < 0.005);
+                assert!((claims[0].1.target_value() - window.target_value).abs() < 0.005);
+                h.app
+                    .world_mut()
+                    .get_mut::<TargetHitClock>(target)
+                    .unwrap()
+                    .last_hit_at = f64::NEG_INFINITY;
+
+                h.app
+                    .world_mut()
+                    .get_mut::<EntryBlend>(attacker)
+                    .unwrap()
+                    .frame_record_source = Some((425, def.start));
+                h.app.world_mut().run_system_once(attack_windows).unwrap();
+                assert!(
+                    take_hits().is_empty(),
+                    "target Start must not inherit the source Attack index"
+                );
+                *h.app.world_mut().get_mut::<EntryBlend>(attacker).unwrap() = EntryBlend::default();
+                h.app
+                    .world_mut()
+                    .get_mut::<PoseRuntime>(attacker)
+                    .unwrap()
+                    .frame = window.start as f32;
+            }
 
             let (from, to) = h
                 .app
@@ -13806,7 +18283,7 @@ mod tests {
                 .world_mut()
                 .get_mut::<TargetHitClock>(target)
                 .unwrap()
-                .elapsed = f32::INFINITY;
+                .last_hit_at = f64::NEG_INFINITY;
             h.app.world_mut().run_system_once(attack_windows).unwrap();
             assert!(take_hits().is_empty(), "expired {effect_name} cannot hit");
         }
@@ -13876,11 +18353,46 @@ mod tests {
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn production_spear_hit_locks_immediately_and_freezes_entry_frames() {
-        use bevy::ecs::system::RunSystemOnce;
         for fps in [30, 60, 120] {
             let dt = 1.0 / fps as f32;
-            let (mut h, target, _) = spawn_local_stock_hit_harness(7);
-            h.app.insert_resource(NetState::default());
+            let (mut h, target, _) = spawn_local_stock_hit_harness_with_order(7, true);
+            h.app
+                .insert_resource(NetState::default())
+                .insert_resource(State::new(AppState::Playing));
+            let schedule = crate::plugins::fighter_frame::schedule(&h.app);
+            h.app.add_systems(
+                schedule,
+                crate::plugins::character_plugin::drive_fighter_animation_for_test
+                    .in_set(crate::plugins::FighterFrameSet::SkeletonSample),
+            );
+            h.app.add_systems(
+                Update,
+                tick_target_hit_clocks.in_set(crate::plugins::FighterFrameSet::PoseDecision),
+            );
+            h.app.add_systems(
+                schedule,
+                attack_windows.in_set(crate::plugins::FighterFrameSet::HitJudge),
+            );
+            h.app.add_systems(
+                schedule,
+                hit_reaction_root_motion
+                    .after(crate::plugins::movement_plugin::attack_root_motion)
+                    .in_set(crate::plugins::FighterFrameSet::RootMotion),
+            );
+            if std::env::var_os("METEOR_SPEAR_ENTRY_AUDIT").is_some() {
+                h.app
+                    .insert_resource(SpearClosePair {
+                        attacker: h.fighter,
+                        defender: target,
+                    })
+                    .init_resource::<SpearCloseGeometry>()
+                    .add_systems(
+                        schedule,
+                        export_spear_close_geometry
+                            .in_set(crate::plugins::FighterFrameSet::HitJudge)
+                            .before(attack_windows),
+                    );
+            }
             for entity in [h.fighter, target] {
                 h.app
                     .world_mut()
@@ -13910,10 +18422,13 @@ mod tests {
                     h.release_key(KeyCode::KeyW);
                     h.release_mouse(MouseButton::Left);
                 }
-                crate::plugins::character_plugin::drive_fighter_animation_for_test(
-                    h.app.world_mut(),
-                );
-                h.app.world_mut().run_system_once(attack_windows).unwrap();
+                if std::env::var_os("METEOR_SPEAR_ENTRY_AUDIT").is_some() {
+                    let pose = h.app.world().get::<PoseRuntime>(h.fighter).unwrap();
+                    eprintln!("spear-entry fps={fps} tick={tick} pose={} frame={} source={:?} target={:?} state={:?}",
+                        pose.pose_id, pose.frame, h.position(),
+                        h.app.world().get::<Transform>(target).unwrap().translation,
+                        h.state());
+                }
                 if h.app
                     .world()
                     .get::<FighterHitReaction>(target)
@@ -13924,6 +18439,11 @@ mod tests {
                     accepted = true;
                     break;
                 }
+            }
+            if std::env::var_os("METEOR_SPEAR_ENTRY_AUDIT").is_some() {
+                let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+                std::fs::write(root.join(format!("analysis/mrc-moves-20260928/spear-entry-{fps}fps-geometry.json")),
+                    serde_json::to_vec_pretty(&serde_json::json!({"frames":h.app.world().resource::<SpearCloseGeometry>().0})).unwrap()).unwrap();
             }
             assert!(accepted, "spear front A must hit at {fps} FPS");
             let state = h.app.world().get::<SmState>(target).unwrap();
@@ -14057,6 +18577,18 @@ mod tests {
         distances: &[f32],
         require_chain: bool,
     ) {
+        run_ninja_spacing_case(frame_rates, contacts, distances, require_chain, 471, None);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn run_ninja_spacing_case(
+        frame_rates: &[u32],
+        contacts: &[bool],
+        distances: &[f32],
+        require_chain: bool,
+        followup: u16,
+        output: Option<&str>,
+    ) {
         use crate::components::fighter::VisualRootPin;
         let mut rows = String::from("fps,contacts,yaw,distance,tick,source_pose,source_frame,source_x,source_y,source_z,source_yaw,target_pose,target_frame,target_x,target_y,target_z,target_yaw,hp,vx,vz\n");
         for &fps in frame_rates {
@@ -14064,6 +18596,8 @@ mod tests {
                 for (source_degrees, target_degrees) in [(0.0_f32, 180.0_f32)] {
                     for &distance in distances {
                         let (mut h, target, _) = spawn_local_stock_hit_harness_with_order(12, true);
+                        dagger_crouch_tests::install_pose_effects(&mut h.app);
+                        ninja_collision_oracle_tests::install(&mut h.app);
 
                         h.app
                             .world_mut()
@@ -14147,11 +18681,19 @@ mod tests {
                                     phase = 1;
                                 }
                                 1 if pose.pose_id == 464 && pose.frame >= 14876.0 => {
-                                    h.press_key(KeyCode::KeyS);
+                                    h.press_key(if followup == 471 {
+                                        KeyCode::KeyS
+                                    } else {
+                                        KeyCode::KeyW
+                                    });
                                     phase = 2;
                                 }
                                 2 => {
-                                    h.press_key(KeyCode::KeyW);
+                                    h.press_key(if followup == 471 {
+                                        KeyCode::KeyW
+                                    } else {
+                                        KeyCode::KeyS
+                                    });
                                     h.press_mouse(MouseButton::Left);
                                     phase = 3;
                                 }
@@ -14159,8 +18701,19 @@ mod tests {
                             }
                             h.step_dt(1.0 / fps as f32);
                             let source_pose = h.app.world().get::<PoseRuntime>(h.fighter).unwrap();
-                            saw_launch |= source_pose.pose_id == 471;
+                            saw_launch |= source_pose.pose_id == followup;
                             let target_pose = h.app.world().get::<PoseRuntime>(target).unwrap();
+                            if let Some(hit) = h
+                                .app
+                                .world()
+                                .get::<FighterHitReaction>(target)
+                                .unwrap()
+                                .current
+                                .as_ref()
+                            {
+                                assert_eq!(hit.rewind_count, 0,
+                                    "reaction tail replay: followup={followup} fps={fps} tick={tick}");
+                            }
                             let s = h
                                 .app
                                 .world()
@@ -14198,27 +18751,63 @@ mod tests {
                                 previous_hp = hp;
                             }
                         }
-                        assert!(saw_launch, "471 command: fps={fps} contact={contact} distance={distance} phase={phase} hits={hits:?}");
-                        if require_chain {
+                        ninja_collision_oracle_tests::save(h.app.world(), fps, contact, distance);
+                        assert!(saw_launch, "{followup} command: fps={fps} contact={contact} distance={distance} phase={phase} hits={hits:?}");
+                        if require_chain && followup == 471 {
                             assert!((5.5..7.0).contains(&source_peak),
                                 "stock launcher height: fps={fps} distance={distance} peak={source_peak}");
                             assert!(
                                 (ascent_speed - 24.41806).abs() < 0.01,
                                 "stock launcher vertical speed: fps={fps} speed={ascent_speed}"
                             );
-                            assert!(hits.iter().any(|hit| hit.1 == 464) && hits.iter().any(|hit| hit.1 == 471),
-                                "slash and launcher must both hit: fps={fps} distance={distance} hits={hits:?}");
+                            assert!(
+                                hits.iter().any(|hit| hit.1 == 464),
+                                "slash must hit: {hits:?}"
+                            );
+
+                            let expected: serde_json::Value = serde_json::from_str(include_str!(
+                                "combat_plugin/ninja_stock_collision_expectations.json"
+                            ))
+                            .unwrap();
+                            let case = expected["cases"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .find(|case| {
+                                    case["fps"].as_u64() == Some(fps as u64)
+                                        && case["distance"].as_f64() == Some(distance as f64)
+                                })
+                                .unwrap();
+                            assert_eq!(hits.iter().any(|hit| hit.1 == 471), case["launcher_hit"].as_bool().unwrap(),
+                                "stock launcher geometry: fps={fps} distance={distance} hits={hits:?}");
+                        }
+                        if require_chain && followup == 466 {
+                            assert!(
+                                hits.iter().any(|hit| hit.1 == 464),
+                                "slash must hit: {hits:?}"
+                            );
+                            assert!(
+                                hits.iter().any(|hit| hit.1 == 466),
+                                "followup must connect: {hits:?}"
+                            );
                         }
                         eprintln!("fps={fps} contacts={contact} source={source_degrees} target={target_degrees} distance={distance} phase={phase} hits={hits:?}");
                     }
                 }
             }
         }
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(if require_chain {
-            "../../../analysis/ninja-chain-20260919/ninja-spacing-regression.csv"
-        } else {
-            "../../../analysis/ninja-chain-20260919/ninja-spacing.csv"
-        });
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(if let Some(path) = output {
+                path
+            } else if require_chain {
+                "../../../analysis/ninja-chain-20260919/ninja-spacing-regression.csv"
+            } else {
+                "../../../analysis/ninja-chain-20260919/ninja-spacing.csv"
+            });
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let path = std::env::var_os("METEOR_NINJA_TRACE_DIR")
+            .map(|directory| std::path::PathBuf::from(directory).join(path.file_name().unwrap()))
+            .unwrap_or(path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, rows).unwrap();
     }
@@ -14458,7 +19047,7 @@ mod tests {
         use bevy::ecs::system::RunSystemOnce;
         for fps in [30, 60, 120] {
             let mut h = spawn_gameplay_harness(6).expect("original P1 assets");
-            let (pose, mut reaction, root) = {
+            let (pose, mut reaction, root, authored_planar_speed) = {
                 let assets = &h.app.world().resource::<CharacterAssetsSet>().0["p1"];
                 let common = &h.app.world().resource::<CommonAmb>().0;
                 let available: Vec<_> = assets.poses.keys().copied().collect();
@@ -14473,7 +19062,13 @@ mod tests {
                 let mut reaction = getup_reaction_for_pose(60, pose.start, pose.end);
                 reaction.kind = HitReactKind::Guard;
                 reaction.motion_scale = assets.poses[&419].attacks[0].defense_move;
-                (pose, reaction, assets.motion_root_at(common, 60, 8480.0))
+                let root = assets.motion_root_at(common, 60, 8480.0);
+                let next = assets.motion_root_at(common, 60, 8481.0);
+                let planar_speed = (next[0] - root[0]).hypot(next[1] - root[1])
+                    * 30.0
+                    * meteor_core::MODEL_SCALE
+                    * reaction.motion_scale;
+                (pose, reaction, root, planar_speed)
             };
             reaction.minimum_remaining = 1.0;
             let mut runtime = FighterHitReaction::default();
@@ -14499,9 +19094,17 @@ mod tests {
             eprintln!(
                 "GUARD_CAP fps={fps} attack=419 reaction=60 defense_move=8 delta={delta:?} speed={speed} cap={CARRY_MAX_SPEED}"
             );
+
+            assert!(authored_planar_speed > 72.0);
+            let expected =
+                72.0 * authored_planar_speed / authored_planar_speed.hypot(105.84 / fps as f32);
             assert!(
-                (speed - CARRY_MAX_SPEED).abs() < 1e-3,
-                "authored DefenseMove=8 must enter the shared 72 world/s mover: {speed}"
+                delta.y.abs() < 1e-6,
+                "flat support must clip the vertical request"
+            );
+            assert!(
+                (speed - expected).abs() < 1e-3,
+                "DefenseMove=8: original XYZ clamp before floor collision: {speed} != {expected}"
             );
         }
     }
@@ -14737,7 +19340,7 @@ mod tests {
             else {
                 return;
             };
-            if entry_blend_is_active(blend.duration, blend.pose_id, pose.pose_id) {
+            if blend.is_active_for(pose.pose_id) {
                 return;
             }
             let attack = geometry.attack_obbs(
@@ -14765,7 +19368,7 @@ mod tests {
                 target_pose.pose_id,
                 attack.len(),
                 hurt.len(),
-                clock.elapsed,
+                clock.last_hit_at,
                 clock.spawn_elapsed,
                 source_pos.translation.x,
                 source_pos.translation.y,
@@ -15328,6 +19931,67 @@ mod tests {
     }
 
     #[test]
+    fn production_stinger_seabed_needle_links_to_ground_dash() {
+        let mut h = spawn_gameplay_harness(4).expect("original resources");
+        let keys = crate::app_state::Keymap::default();
+        h.press_binding(keys.jump);
+        h.step();
+        h.release_binding(keys.jump);
+        h.steps(4);
+        for pose_id in [235, 236] {
+            h.press_binding(keys.move_down);
+            h.press_binding(keys.attack);
+            h.step();
+            h.release_binding(keys.attack);
+            h.release_binding(keys.move_down);
+            for _ in 0..60 {
+                if h.pose_id() == pose_id {
+                    break;
+                }
+                h.step();
+            }
+            assert_eq!(h.pose_id(), pose_id);
+            if pose_id == 235 {
+                for _ in 0..15 {
+                    let pose = h.app.world().get::<PoseRuntime>(h.fighter).unwrap();
+                    if pose.frame >= 10971.0 {
+                        break;
+                    }
+                    h.step();
+                }
+            }
+        }
+        for _ in 0..60 {
+            let world = h.app.world();
+            let pose = world.get::<PoseRuntime>(h.fighter).unwrap();
+            let air = world.get::<FighterAir>(h.fighter).unwrap();
+            if pose.pose_id != 236 {
+                panic!("pose 236 ended without a grounded NextPose frame");
+            }
+            if (!air.air.airborne || air.ground_contact) && (11008.0..11026.0).contains(&pose.frame)
+            {
+                break;
+            }
+            h.step();
+        }
+        h.press_binding(keys.move_down);
+        h.step();
+        h.release_binding(keys.move_down);
+        h.press_binding(keys.move_up);
+        h.press_binding(keys.attack);
+        h.step();
+        h.release_binding(keys.attack);
+        h.release_binding(keys.move_up);
+        for _ in 0..60 {
+            if h.pose_id() == 240 {
+                return;
+            }
+            h.step();
+        }
+        panic!("grounded 236 → 240 command must commit");
+    }
+
+    #[test]
     fn production_fake_held_guard_and_direction_recovery() {
         for direction in [false, true] {
             let mut h = spawn_gameplay_harness(7).expect("original resources");
@@ -15507,6 +20171,95 @@ mod tests {
             assert!(matches!(h.pose_id(), 119 | 120));
             h.steps(90);
             assert_eq!(h.state(), FighterState::Guard);
+        }
+    }
+
+    #[test]
+    fn hit_sway_preserves_production_hit_trajectories_and_stun_at_all_frame_rates() {
+        use bevy::render::mesh::skinning::SkinnedMesh;
+        for fps in [30, 60, 120] {
+            for id in [93, 95, 96, 109] {
+                let mut baseline = None;
+                for enabled in [false, true] {
+                    let mut h =
+                        spawn_gameplay_harness_with_order(4, true).expect("original resources");
+                    h.app.add_plugins(bevy::transform::TransformPlugin);
+                    install_guard_test_animation(&mut h);
+                    crate::plugins::character_plugin::install_hit_sway_for_test(&mut h.app);
+                    h.app.world_mut().resource_mut::<Settings>().hit_sway = enabled;
+                    h.app.add_systems(
+                        super::super::fighter_frame::schedule(&h.app),
+                        hit_reaction_root_motion
+                            .in_set(crate::plugins::FighterFrameSet::RootMotion),
+                    );
+                    let mut pose = PoseRuntime::idle();
+                    h.app.world().resource::<CharacterAssetsSet>().0["p1"]
+                        .apply_pose(&mut pose, id, true);
+                    let mut reaction = getup_reaction_for_pose(id, pose.start, pose.end);
+                    reaction.kind = HitReactKind::BeHit;
+                    reaction.bucket = meteor_combat::hit_reaction::FacingBucket::Front;
+                    reaction.minimum_remaining = 0.3;
+                    reaction.authored_minimum = 0.3;
+                    reaction.motion_scale = 5.0;
+                    h.app.world_mut().entity_mut(h.fighter).insert(pose);
+                    h.app
+                        .world_mut()
+                        .get_mut::<SmState>(h.fighter)
+                        .unwrap()
+                        .current = FighterState::BeHit;
+                    h.app
+                        .world_mut()
+                        .get_mut::<CombatState>(h.fighter)
+                        .unwrap()
+                        .state = FighterState::BeHit;
+                    h.app
+                        .world_mut()
+                        .get_mut::<FighterHitReaction>(h.fighter)
+                        .unwrap()
+                        .begin(reaction, false);
+                    let mut trace = Vec::new();
+                    let mut saw_sway = false;
+                    for _ in 0..fps * 3 {
+                        h.step_dt(1.0 / fps as f32);
+                        let world = h.app.world_mut();
+                        saw_sway |= world.query::<&SkinnedMesh>().iter(world).any(|skin| {
+                            skin.joints
+                                .iter()
+                                .any(|joint| world.get::<FighterBone>(*joint).is_none())
+                        });
+                        trace.push((
+                            world.get::<Transform>(h.fighter).unwrap().translation,
+                            world.get::<SmState>(h.fighter).unwrap().current,
+                            format!("{:?}", world.get::<PoseRuntime>(h.fighter).unwrap()),
+                            format!("{:?}", world.get::<FighterHitReaction>(h.fighter).unwrap()),
+                        ));
+                    }
+                    assert_eq!(
+                        saw_sway, enabled,
+                        "pose {id}, {fps} FPS must exercise the renderer"
+                    );
+                    assert!(
+                        h.app
+                            .world_mut()
+                            .query::<&SkinnedMesh>()
+                            .iter(h.app.world())
+                            .all(|skin| skin.joints.iter().all(|joint| h
+                                .app
+                                .world()
+                                .get::<FighterBone>(*joint)
+                                .is_some())),
+                        "final pose must use exact original joints"
+                    );
+                    if let Some(baseline) = &baseline {
+                        assert_eq!(
+                            &trace, baseline,
+                            "pose {id}, {fps} FPS changed trajectory/stun"
+                        );
+                    } else {
+                        baseline = Some(trace);
+                    }
+                }
+            }
         }
     }
 
@@ -15731,6 +20484,38 @@ mod tests {
             }
             assert_eq!(h.state(), FighterState::Guard, "dodge={dodge}");
             assert_eq!(h.pose_id(), 15);
+        }
+    }
+
+    #[test]
+    fn production_ranged_weapons_reject_guard_press_and_held_reentry() {
+        for weapon in [1, 2, 3, 6] {
+            let mut h = spawn_gameplay_harness_with_order(weapon, true)
+                .expect("original character resources");
+            install_guard_test_animation(&mut h);
+            let keys = crate::app_state::Keymap::default();
+            h.press_binding(keys.guard);
+            h.step_dt(1.0 / 60.0);
+            assert_eq!(
+                h.state() == FighterState::Guard,
+                weapon == 6,
+                "weapon {weapon}"
+            );
+
+            h.press_binding(keys.jump);
+            h.step_dt(1.0 / 60.0);
+            h.release_binding(keys.jump);
+            for _ in 0..180 {
+                h.step_dt(1.0 / 60.0);
+            }
+            assert_eq!(
+                h.state() == FighterState::Guard,
+                weapon == 6,
+                "landing weapon {weapon}"
+            );
+            h.release_binding(keys.guard);
+            h.step_dt(1.0 / 60.0);
+            assert_eq!(h.state(), FighterState::Name);
         }
     }
 
@@ -16116,6 +20901,38 @@ mod tests {
             assert!(!h.airborne(), "side jump must land");
         }
     }
+
+    include!("combat_plugin/ninja_air_chain_tests.rs");
+    include!("combat_plugin/sn11_bridge_tests.rs");
+    include!("combat_tests/stock_impact_feedback.rs");
+    include!("combat_tests/down_jump.rs");
+    include!("combat_tests/fake_forward_roll.rs");
+    include!("combat_tests/npc_recovery_chase.rs");
+    include!("combat_tests/npc_pursuit_recovery.rs");
+    include!("combat_tests/npc_boss_decision_audit.rs");
+    include!("combat_tests/recovery_timing.rs");
+    include!("combat_tests/cure.rs");
+    include!("combat_tests/dagger_clock_replay.rs");
+    include!("combat_tests/dagger_double_stomp.rs");
+    include!("combat_tests/authored_motion_audit.rs");
+    include!("combat_tests/mrc_small_jump.rs");
+    mod lightfoot_mrc_tests {
+        use super::*;
+        include!("combat_tests/lightfoot_mrc.rs");
+    }
+    include!("combat_tests/mrc_fist_chain.rs");
+    include!("combat_tests/mrc_ninja_burn.rs");
+    include!("combat_tests/mrc_spear_close.rs");
+    include!("combat_tests/guard_recovery.rs");
+    include!("combat_tests/falling_hit_audit.rs");
+    include!("combat_tests/falling_ranged_audit.rs");
+    include!("combat_tests/falling_scene_audit.rs");
+    include!("combat_tests/land_then_hit_audit.rs");
+    include!("combat_tests/dagger_ledge_diagnostic.rs");
+    include!("combat_tests/dagger_ledge_regressions.rs");
+    include!("combat_tests/fake_push.rs");
+    include!("combat_tests/contact_facing_audit.rs");
+    include!("combat_tests/contact_parity.rs");
 
     #[test]
     fn production_plain_jump_is_ballistic_and_lands_forward() {
@@ -16643,17 +21460,19 @@ mod tests {
                             (pushed - mover).xz().length() >= 2.0 * CHARACTER_CONTACT_RADIUS - 1e-4,
                             "{fps} fps: controller penetration {mover:?} {pushed:?}"
                         );
+
                         assert!(
                             (pushed - previous_target).xz().length()
-                                <= CHARACTER_PUSH_SPEED * dt + 1e-4,
+                                <= CHARACTER_PUSH_SPEED * dt + 45.0 * dt * dt + 1e-4,
                             "a single contact source must not amplify push speed"
                         );
                     }
                     assert!(stage.can_occupy(Point3::new(mover.x, mover.y, mover.z)));
                     assert!(stage.can_occupy(Point3::new(pushed.x, pushed.y, pushed.z)));
                     if !attack {
+                        let back_wash = 45.0 * dt * dt + 1e-3;
                         assert!(
-                            mover.z >= previous_mover.z - 1e-4,
+                            mover.z >= previous_mover.z - back_wash,
                             "walk contact must not pop backward"
                         );
                     }
@@ -17108,6 +21927,7 @@ mod tests {
                 .movement_mode = meteor_core::MovementMode::Airborne;
             {
                 let mut air = h.app.world_mut().get_mut::<FighterAir>(h.fighter).unwrap();
+                air.recovery_ground_mode = None;
                 air.air.airborne = true;
                 air.air.vertical_speed = -6.0;
                 air.air.motion_mode = meteor_physics::jump::AirMotionMode::Ballistic;
@@ -17239,7 +22059,7 @@ mod tests {
                             .world_mut()
                             .get_mut::<FighterWall>(h.fighter)
                             .unwrap()
-                            .remaining = dt * 0.5
+                            .remaining = f64::from(dt) * 0.5
                     }
                 }
                 let before = h.position();

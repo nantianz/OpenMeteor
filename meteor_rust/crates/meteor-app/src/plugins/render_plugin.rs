@@ -1,9 +1,10 @@
-use crate::plugins::ifl_plugin::{load_ifl_frames, IflAnim};
+use crate::plugins::ifl_plugin::{load_scene_ifl_frames, IflAnim};
 use crate::plugins::pak_textures::{
     image_handle_with_legacy_style_quality, image_handle_with_quality, legacy_alpha_companion_name,
     pak_files_root, PakCache,
 };
 use crate::plugins::stage_collider::{StageCollider, StageMeshCollider};
+use crate::plugins::stage_material::scene_textures::SceneTexturePack;
 use crate::plugins::stage_material::{GmdlMaterial, GmdlMaterialParams, GmdlMode};
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
@@ -19,6 +20,8 @@ use meteor_physics::collision::{CollisionSystem, Point3};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 mod gem_visual;
+#[cfg(test)]
+mod tree_opacity_tests;
 #[cfg(test)]
 mod weapon_drop_tests;
 
@@ -307,6 +310,7 @@ pub(crate) fn load_prop_model_with(
     None
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn spawn_stage_props(
     commands: &mut Commands,
@@ -323,7 +327,49 @@ fn spawn_stage_props(
     collider: &mut StageMeshCollider,
     script: Option<&meteor_scene::scene_script_runtime::SceneScriptRuntime>,
     escort: Option<&meteor_network::escort_definition::EscortDefinition>,
+    ticket_mask: Option<u32>,
 ) {
+    spawn_stage_props_with_hd(
+        commands,
+        meshes,
+        materials,
+        images,
+        pak_cache,
+        root,
+        candidates,
+        loaded,
+        des_override,
+        texture_quality,
+        None,
+        texture_handles,
+        collider,
+        script,
+        escort,
+        ticket_mask,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_stage_props_with_hd(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<GmdlMaterial>,
+    images: &mut Assets<bevy::image::Image>,
+    pak_cache: &mut PakCache,
+    root: &std::path::Path,
+    candidates: &[std::path::PathBuf],
+    loaded: &crate::app_state::LoadedStageInfo,
+    des_override: Option<&str>,
+    texture_quality: u8,
+    hd_pack: Option<&SceneTexturePack>,
+    texture_handles: &mut Vec<Handle<bevy::image::Image>>,
+    collider: &mut StageMeshCollider,
+    script: Option<&meteor_scene::scene_script_runtime::SceneScriptRuntime>,
+    escort: Option<&meteor_network::escort_definition::EscortDefinition>,
+    ticket_mask: Option<u32>,
+) {
+    let original_pack = SceneTexturePack::default();
+    let hd_pack = hd_pack.unwrap_or(&original_pack);
     let des_path = format!("{}/{}.des", loaded.stage_id, loaded.stage_id);
     let disk_des = candidates
         .iter()
@@ -349,7 +395,12 @@ fn spawn_stage_props(
     let mut spawned = 0usize;
     let mut missing = 0usize;
     let mut textured = 0usize;
-    for dummy in &desc.dummies {
+    for (dummy_index, dummy) in desc
+        .dummies
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| ticket_mask.is_none_or(|mask| d.admits_ticket(mask)))
+    {
         let Some(model) = dummy.model.as_ref() else {
             continue;
         };
@@ -424,13 +475,17 @@ fn spawn_stage_props(
                 || is_solid_prop(dummy),
                 |instance| instance.collision_enabled(),
             );
-        let active = runtime_instance.map_or(dummy.visible, |instance| {
-            instance.get("active").as_f64() != 0.0
+
+        let active =
+            runtime_instance.map_or(true, |instance| instance.get("active").as_f64() != 0.0);
+        let visible = runtime_instance.map_or(dummy.visible, |instance| {
+            instance.get("visible").as_f64() != 0.0
         });
         let interactive =
             runtime_instance.is_none_or(|instance| instance.get("interactive").as_f64() != 0.0);
-        let collision_capable =
-            !objective_model && (collision_enabled || is_collision_capable_prop(dummy));
+        let damage_sensor = !objective_model && super::hazard_plugin::is_damage_sensor_prop(dummy);
+        let collision_capable = !objective_model
+            && (collision_enabled || is_collision_capable_prop(dummy) || damage_sensor);
 
         let prop_marker = crate::plugins::item_plugin::StageProp {
             name: dummy.name.clone(),
@@ -485,19 +540,22 @@ fn spawn_stage_props(
                     PlayingSceneEntity,
                     prop_transform,
                     prop_marker.clone(),
+                    super::item_plugin::SceneRecordOrder(desc.scene_objects.len() + dummy_index),
                     super::hazard_plugin::HazardPart::from_positions(&object.positions),
-                    prop_visibility(active),
+                    prop_visibility(super::stage_plugin::script_item_is_rendered(
+                        active, visible,
+                    )),
                 ));
                 if mat_idx >= 0 {
                     let mat = &model_mesh.materials[mat_idx as usize];
-                    let (mode, opacity, mut alpha_cutoff) = classify_gmdl_material(mat);
+                    let (mode, opacity, alpha_cutoff) = classify_gmdl_material(mat);
                     let animation_key = (key.clone(), mat_idx);
                     if let Some(name) = model_mesh
                         .resolve_texture_name(mat)
                         .filter(|name| name.to_ascii_lowercase().ends_with(".ifl"))
                     {
                         if !ifl_cache.contains_key(&animation_key) {
-                            let frames = load_ifl_frames(
+                            let frames = load_scene_ifl_frames(
                                 pak_cache,
                                 root,
                                 images,
@@ -505,6 +563,7 @@ fn spawn_stage_props(
                                 &loaded.stage_id,
                                 mat.blend.eq_ignore_ascii_case("COLORKEY"),
                                 texture_quality,
+                                hd_pack,
                             )
                             .unwrap_or_default();
                             texture_handles.extend(frames.iter().cloned());
@@ -515,7 +574,7 @@ fn spawn_stage_props(
                         .resolve_texture_name(mat)
                         .filter(|name| !name.to_ascii_lowercase().ends_with(".ifl"))
                         .map(|name| {
-                            load_or_cache_texture(
+                            load_or_cache_scene_texture(
                                 images,
                                 &mut image_cache,
                                 pak_cache,
@@ -525,12 +584,10 @@ fn spawn_stage_props(
                                 mat.blend.eq_ignore_ascii_case("COLORKEY"),
                                 mat.blend.eq_ignore_ascii_case("ALPHACHANNEL"),
                                 texture_quality,
+                                hd_pack,
                             )
                         })
                         .unwrap_or_default();
-                    if loaded_texture.alpha_test && mode == GmdlMode::Opaque {
-                        alpha_cutoff = 127.0 / 255.0;
-                    }
                     let texture = ifl_cache
                         .get(&animation_key)
                         .and_then(|frames| frames.first().cloned())
@@ -619,6 +676,9 @@ fn spawn_stage_props(
                 if !collider_owner_attached {
                     if let Some(owner) = prop_collider_owner {
                         bundle.insert(PropColliderOwner(owner));
+                        if damage_sensor && !collision_enabled {
+                            bundle.insert(super::hazard_plugin::DamageSensorOwner(owner));
+                        }
                         collider_owner_attached = true;
                     }
                 }
@@ -643,8 +703,6 @@ fn spawn_stage_props(
                             anim_time: 0.0,
                             state: 3,
                             frame_set: None,
-
-                            multi: fmc.frames.first().is_some_and(|f| f.parts.len() > 1),
                             base_translation: prop_transform.translation,
                             base_rotation: prop_transform.rotation,
 
@@ -667,7 +725,10 @@ fn spawn_stage_props(
                 PlayingSceneEntity,
                 prop_transform,
                 prop_marker,
-                prop_visibility(active),
+                super::item_plugin::SceneRecordOrder(desc.scene_objects.len() + dummy_index),
+                prop_visibility(super::stage_plugin::script_item_is_rendered(
+                    active, visible,
+                )),
             ));
             if objective_model {
                 bundle.insert(super::escort_assets::EscortPropVisual {
@@ -677,6 +738,9 @@ fn spawn_stage_props(
             }
             if let Some(owner) = prop_collider_owner {
                 bundle.insert(PropColliderOwner(owner));
+                if damage_sensor && !collision_enabled {
+                    bundle.insert(super::hazard_plugin::DamageSensorOwner(owner));
+                }
             }
         }
         spawned += 1;
@@ -899,7 +963,10 @@ fn prop_bounds(mesh: &meteor_asset::gmdl::GmdlMesh, scale: f32) -> (Vec3, Vec3) 
     (center, half_extents)
 }
 
-fn prop_transform(dummy: &meteor_asset::des::StageObject, center: [f32; 3]) -> Transform {
+pub(crate) fn prop_transform(
+    dummy: &meteor_asset::des::StageObject,
+    center: [f32; 3],
+) -> Transform {
     let p = dummy.position;
     let q = dummy.quaternion;
     Transform {
@@ -954,10 +1021,34 @@ fn build_prop_mesh(object: &meteor_asset::gmdl::GmdlObject, indices: &[u32]) -> 
     .with_inserted_indices(Indices::U32(indices.to_vec()))
 }
 
+fn install_stage_lifecycle(app: &mut App) {
+    app.add_systems(
+        OnEnter(crate::app_state::AppState::Playing),
+        setup_stage_scene
+            .after(crate::plugins::stage_plugin::start_stage_script)
+            .run_if(crate::plugins::starts_fresh_playing_session),
+    );
+    install_stage_cleanup(app);
+}
+
+fn install_stage_cleanup(app: &mut App) {
+    app.add_systems(
+        OnExit(crate::app_state::AppState::Playing),
+        (
+            clear_playing_scene,
+            clear_stage_collision,
+            clear_stage_mesh,
+            clear_stage_texture_handles,
+        )
+            .run_if(crate::plugins::ends_playing_session),
+    );
+}
+
 pub struct RenderPlugin;
 
 impl Plugin for RenderPlugin {
     fn build(&self, app: &mut App) {
+        install_stage_lifecycle(app);
         app.init_resource::<super::stage_material::FrameUniforms>();
         app.insert_resource(ClearColor(Color::BLACK))
             .insert_resource(StageCollision::default())
@@ -966,19 +1057,6 @@ impl Plugin for RenderPlugin {
             .init_resource::<OfflineWeaponDropSerial>()
             .add_message::<OfflineWeaponDeathDrop>()
             .add_plugins(crate::plugins::stage_material::GmdlMaterialPlugin)
-            .add_systems(
-                OnEnter(crate::app_state::AppState::Playing),
-                setup_stage_scene.after(crate::plugins::stage_plugin::start_stage_script),
-            )
-            .add_systems(
-                OnExit(crate::app_state::AppState::Playing),
-                (
-                    clear_playing_scene,
-                    clear_stage_collision,
-                    clear_stage_mesh,
-                    clear_stage_texture_handles,
-                ),
-            )
             .add_systems(
                 Update,
                 (
@@ -991,6 +1069,12 @@ impl Plugin for RenderPlugin {
                 )
                     .chain()
                     .after(crate::plugins::input_plugin::capture_local_command_input)
+                    .run_if(in_state(crate::app_state::AppState::Playing)),
+            )
+            .add_systems(
+                Update,
+                spawn_npc_weapon_drops
+                    .after(super::fighter_frame::SerialFighterSet)
                     .run_if(in_state(crate::app_state::AppState::Playing)),
             )
             .add_systems(
@@ -1078,6 +1162,129 @@ fn prepare_offline_weapon_drop(
         return None;
     }
     Some(model)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_npc_weapon_drops(
+    mut commands: Commands,
+    net: Res<crate::plugins::network_plugin::NetState>,
+    tx: Option<Res<crate::plugins::network_plugin::NetTx>>,
+    mut serial: ResMut<OfflineWeaponDropSerial>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<GmdlMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    loaded: Res<crate::app_state::LoadedStageInfo>,
+    mut npcs: Query<
+        (
+            Entity,
+            &mut crate::components::fighter::Fighter,
+            &crate::components::fighter::Health,
+            &crate::plugins::ai_plugin::NpcWeaponDropRequest,
+        ),
+        With<crate::plugins::combat_plugin::NpcFighter>,
+    >,
+) {
+    for (entity, mut fighter, health, request) in &mut npcs {
+        commands
+            .entity(entity)
+            .remove::<crate::plugins::ai_plugin::NpcWeaponDropRequest>();
+        let slot = 1 - usize::from(fighter.weapon_slot.min(1));
+        if health.current <= 0.0
+            || (
+                fighter.weapon_slots[slot],
+                fighter.weapon_slot_variants[slot],
+            ) != request.spare
+        {
+            continue;
+        }
+        if net.status == crate::plugins::network_plugin::NetStatus::InRoom {
+            #[cfg(not(target_arch = "wasm32"))]
+            if net.is_stock_host() && net.round_active && net.stock_npc_ready.contains(&entity) {
+                use meteor_network::{role_state::RoleVec3, stock_game::StockWeaponDropCommand};
+                let item_id = meteor_network::stock_protocol::stock_weapon_item_id(
+                    request.spare.0,
+                    request.spare.1,
+                );
+                let remaining = meteor_network::stock_protocol::stock_weapon_item_id(
+                    fighter.weapon,
+                    fighter.weapon_variant,
+                );
+                if let (Some(tx), Some(item_id), Some(remaining)) =
+                    (tx.as_deref(), item_id, remaining)
+                {
+                    let forward = meteor_network::role_state::forward_from_yaw(request.facing);
+                    if tx.send_stock_npc_weapon_drop(
+                        entity,
+                        StockWeaponDropCommand {
+                            item_id,
+                            position: RoleVec3 {
+                                x: request.position.x,
+                                y: request.position.y,
+                                z: request.position.z,
+                            },
+                            forward,
+                            copy_only: false,
+                            remaining_item_id: Some(remaining),
+                        },
+                    ) {
+                        crate::plugins::item_plugin::drop_spare_weapon(&mut fighter);
+                        commands
+                            .entity(entity)
+                            .insert(crate::components::fighter::WeaponVariantChanged);
+                    }
+                }
+            }
+            continue;
+        }
+        let _ = &tx;
+        let Some(model) = prepare_offline_weapon_drop(&mut fighter, true) else {
+            continue;
+        };
+        let forward = meteor_network::role_state::forward_from_yaw(request.facing);
+        serial.0 = serial.0.wrapping_add(1);
+        spawn_network_weapon_drop(
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+            &mut images,
+            &loaded,
+            &crate::plugins::network_plugin::AuthorityWeaponDrop {
+                reference: format!("D_wpDropped{}", serial.0),
+                model,
+                position: (request.position + Vec3::Y * NETWORK_WEAPON_DROP_HEIGHT).to_array(),
+                velocity: Some([forward.x * 12.0, 0.0, forward.z * 12.0]),
+                settled: false,
+                pickup_ready: false,
+            },
+        );
+        commands
+            .entity(entity)
+            .insert(crate::components::fighter::WeaponVariantChanged);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_npc_drop_test_systems(app: &mut App) {
+    app.init_resource::<StageCollider>()
+        .init_resource::<Assets<Mesh>>()
+        .init_resource::<Assets<GmdlMaterial>>()
+        .init_resource::<Assets<Image>>()
+        .init_resource::<crate::plugins::network_plugin::NetState>()
+        .init_resource::<OfflineWeaponDropSerial>()
+        .insert_resource(crate::app_state::LoadedStageInfo {
+            stage_id: "sn10".into(),
+            ..default()
+        })
+        .add_systems(
+            Update,
+            (
+                spawn_npc_weapon_drops,
+                advance_network_weapon_drop_flight,
+                advance_dynamic_weapon_drop_pickup_delay,
+            )
+                .chain()
+                .after(crate::plugins::ai_plugin::move_npc_fighters),
+        );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1294,7 +1501,7 @@ fn spawn_network_weapon_drop(
         }
         for (material_index, indices) in groups {
             let material = &model_mesh.materials[material_index as usize];
-            let (mode, opacity, mut alpha_cutoff) = classify_gmdl_material(material);
+            let (mode, opacity, alpha_cutoff) = classify_gmdl_material(material);
             let loaded_texture = model_mesh
                 .resolve_texture_name(material)
                 .filter(|name| !name.to_ascii_lowercase().ends_with(".ifl"))
@@ -1312,9 +1519,6 @@ fn spawn_network_weapon_drop(
                     )
                 })
                 .unwrap_or_default();
-            if loaded_texture.alpha_test && mode == GmdlMode::Opaque {
-                alpha_cutoff = 127.0 / 255.0;
-            }
             let texture = loaded_texture.handle;
             let material_handle = material_cache
                 .entry(material_index)
@@ -1512,7 +1716,22 @@ fn advance_network_weapon_drop_flight(
                     if let Some(tx) = tx.as_ref() {
                         if net.is_stock_udp() {
                             #[cfg(not(target_arch = "wasm32"))]
-                            if let Some(id) = drop
+                            if let Some((owner, id)) = drop
+                                .reference
+                                .strip_prefix("D_wpStockNpcThrow")
+                                .and_then(|value| value.split_once('_'))
+                                .and_then(|(owner, id)| {
+                                    Some((
+                                        owner
+                                            .parse::<u64>()
+                                            .ok()
+                                            .and_then(Entity::try_from_bits)?,
+                                        id.parse::<u32>().ok()?,
+                                    ))
+                                })
+                            {
+                                tx.send_stock_npc_weapon_rest(owner, id, rest.to_array());
+                            } else if let Some(id) = drop
                                 .reference
                                 .strip_prefix("D_wpStockThrow")
                                 .and_then(|id| id.parse().ok())
@@ -1648,8 +1867,6 @@ pub struct FmcClip {
 
     pub frame_set: Option<u32>,
 
-    pub multi: bool,
-
     pub base_translation: Vec3,
     pub base_rotation: Quat,
 
@@ -1671,7 +1888,7 @@ fn uv_scroll_offset(base: Vec2, scroll: Vec4, time: Vec2) -> Vec2 {
     wrap(base + wrap(scroll.xy() * elapsed.x) + wrap(scroll.xy() * elapsed.y))
 }
 
-fn update_uv_scroll(
+pub(crate) fn update_uv_scroll(
     time: Res<Time>,
     frame_clock: Option<Res<crate::plugins::FrameClock>>,
     mut materials: ResMut<Assets<GmdlMaterial>>,
@@ -1766,27 +1983,17 @@ pub(crate) fn update_fmc_clips(
 
         let q_delta = Quat::from_xyzw(part.q.x, part.q.y, part.q.z, part.q.w)
             * Quat::from_xyzw(rest_part.q.x, rest_part.q.y, rest_part.q.z, rest_part.q.w).inverse();
-        if clip.multi {
-            let pivot = q_delta * Vec3::new(rest_part.t.x, rest_part.t.y, rest_part.t.z);
-            let part_pos = Vec3::new(part.t.x - pivot.x, part.t.y - pivot.y, part.t.z - pivot.z);
-            let root = Transform {
-                translation: clip.base_translation,
-                rotation: clip.base_rotation,
-                scale: transform.scale,
-            };
-            let part_t = Transform::from_translation(part_pos).with_rotation(q_delta);
-            let combined = root * part_t;
-            transform.translation = combined.translation;
-            transform.rotation = combined.rotation;
-        } else {
-            transform.translation = clip.base_translation
-                + Vec3::new(
-                    (part.t.x - rest_part.t.x) * MODEL_SCALE,
-                    (part.t.z - rest_part.t.z) * MODEL_SCALE,
-                    -(part.t.y - rest_part.t.y) * MODEL_SCALE,
-                );
-            transform.rotation = clip.base_rotation * q_delta;
-        }
+
+        let pivot = q_delta * Vec3::new(rest_part.t.x, rest_part.t.y, rest_part.t.z);
+        let part_pos = Vec3::new(part.t.x, part.t.y, part.t.z) - pivot;
+        let root = Transform {
+            translation: clip.base_translation,
+            rotation: clip.base_rotation,
+            scale: transform.scale,
+        };
+        let combined = root * Transform::from_translation(part_pos).with_rotation(q_delta);
+        transform.translation = combined.translation;
+        transform.rotation = combined.rotation;
 
         if let Some(owner) = clip.collider_owner {
             if !clip.local_verts.is_empty() {
@@ -1820,14 +2027,19 @@ pub(crate) fn sync_fmc_with_script(
         .map(|(i, inst)| (inst.name.to_lowercase(), i))
         .collect();
 
-    let frame_commands: std::collections::HashMap<String, u32> = runtime
+    let frame_commands: std::collections::HashMap<String, (u32, bool)> = runtime
         .host()
         .instances()
         .iter()
         .filter_map(|instance| {
             let frame = instance.get("frame").as_f64();
             (frame.is_finite() && frame >= 0.0)
-                .then_some((instance.name.to_lowercase(), frame as u32))
+                .then_some((frame as u32, false))
+                .or_else(|| {
+                    let frame = instance.props.get("snapshot_frame")?.as_f64();
+                    (frame.is_finite() && frame >= 0.0).then_some((frame as u32, true))
+                })
+                .map(|seek| (instance.name.to_lowercase(), seek))
         })
         .collect();
     for (_entity, mut clip) in &mut query {
@@ -1853,6 +2065,9 @@ pub(crate) fn sync_fmc_with_script(
         };
 
         if pose != clip.pose_index || pose_revision != clip.pose_revision {
+            debug!(target: "meteor_app::scene_sync",
+                "FMC consume name={} part={} pose={} revision={}",
+                clip.name, clip.part_index, pose, pose_revision);
             clip.pose_index = pose;
             clip.pose_revision = pose_revision;
             clip.anim_time = 0.0;
@@ -1866,8 +2081,12 @@ pub(crate) fn sync_fmc_with_script(
         }
         clip.pose_loop = pose_loop;
 
-        if let Some(frame) = frame_commands.get(&clip.name.to_lowercase()) {
-            clip.frame_set = Some(*frame);
+        if let Some(&(frame, absolute)) = frame_commands.get(&clip.name.to_lowercase()) {
+            clip.frame_set = Some(if absolute {
+                frame.saturating_sub(clip.pose_start)
+            } else {
+                frame
+            });
         }
 
         let inst = &mut runtime.host_mut().instances_mut()[inst_index];
@@ -1885,12 +2104,13 @@ pub(crate) fn sync_fmc_with_script(
     }
     for name in frame_commands.keys() {
         if let Some(index) = by_name.get(name) {
-            runtime.host_mut().instances_mut()[*index]
-                .set("frame", meteor_scene::pst_runtime::PstValue::Num(-1.0));
+            let instance = &mut runtime.host_mut().instances_mut()[*index];
+            instance.set("frame", meteor_scene::pst_runtime::PstValue::Num(-1.0));
+            instance.props.remove("snapshot_frame");
         }
     }
 }
-fn update_scene_deform(
+pub(crate) fn update_scene_deform(
     time: Res<Time>,
     frame_clock: Option<Res<crate::plugins::FrameClock>>,
     mut query: Query<(&Mesh3d, &mut SceneDeform)>,
@@ -2275,6 +2495,7 @@ fn setup_stage_scene(
             return;
         }
     };
+    hazards.0.world_bounds = super::hazard_plugin::build_world_bounds(&gmdl, loaded.center);
 
     let des_path = format!("{}/{}.des", loaded.stage_id, loaded.stage_id);
     let mut stage_desc: Option<meteor_asset::des::StageDescription> = None;
@@ -2288,7 +2509,10 @@ fn setup_stage_scene(
                 .find_map(|base| crate::resource_io::read_to_string(base.join(&des_path)).ok())
         });
     if let Some(text) = &des_text {
-        let desc = meteor_asset::des::parse_stage_description(text);
+        let mut desc = meteor_asset::des::parse_stage_description(text);
+        if let Some(mask) = loaded_assets.ticket_mask {
+            desc.apply_ticket_mask(mask);
+        }
         let mesh = StageMeshCollider::from_gmdl(
             &gmdl,
             &desc,
@@ -2320,7 +2544,7 @@ fn setup_stage_scene(
     let mut pak_cache = PakCache::default();
     let paks = pak_cache.chain(&pak_root, &loaded.stage_id);
     if paks.is_empty() {
-        if meteor_asset::runtime_assets::registered_pack_count() > 0 {
+        if meteor_asset::runtime_assets::runtime_texture_source_active() {
             info!(
                 "legacy texture paks not mounted for {}; using runtime MPK texture scopes",
                 loaded.stage_id
@@ -2347,6 +2571,10 @@ fn setup_stage_scene(
         &loaded.stage_id,
     );
 
+    let mut normal_cache = HashMap::new();
+    let hd_pack = SceneTexturePack::load(&loaded.stage_id, settings.hd_scene);
+    let mut water_cache = super::stage_material::water::WaterCache::default();
+    let mut normal_batches = 0usize;
     let mut world_min = Vec3::splat(f32::MAX);
     let mut world_max = Vec3::splat(f32::MIN);
     let mut image_cache: HashMap<String, LoadedStageTexture> = HashMap::new();
@@ -2398,16 +2626,16 @@ fn setup_stage_scene(
             drawn_objects += 1;
             drawn_faces += indices.len() / 3;
             let mat = &gmdl.materials[mat_idx as usize];
-            let (mode, opacity, mut alpha_cutoff) = classify_gmdl_material(mat);
+            let (mode, opacity, alpha_cutoff) = classify_gmdl_material(mat);
 
             let color_key = mat.blend == "COLORKEY";
+            let mut used_hd_texture = false;
             let mut ifl_frames: Option<Vec<Handle<bevy::image::Image>>> = None;
-            let mut mask_alpha_test = false;
             let texture = match gmdl.resolve_texture_name(mat) {
                 Some(name) => {
                     if name.to_ascii_lowercase().ends_with(".ifl") {
                         ifl_materials += 1;
-                        ifl_frames = load_ifl_frames(
+                        ifl_frames = load_scene_ifl_frames(
                             &mut pak_cache,
                             &pak_root,
                             &mut images,
@@ -2415,6 +2643,7 @@ fn setup_stage_scene(
                             &loaded.stage_id,
                             color_key,
                             settings.texture_quality,
+                            &hd_pack,
                         );
                         ifl_frames_total += ifl_frames.as_ref().map_or(0, Vec::len);
                         if let Some(frames) = &ifl_frames {
@@ -2423,7 +2652,7 @@ fn setup_stage_scene(
                         ifl_frames.as_ref().and_then(|f| f.first().cloned())
                     } else {
                         textured_faces += indices.len() / 3;
-                        let loaded_texture = load_or_cache_texture(
+                        let loaded_texture = load_or_cache_scene_texture(
                             &mut images,
                             &mut image_cache,
                             &mut pak_cache,
@@ -2433,8 +2662,9 @@ fn setup_stage_scene(
                             color_key,
                             mat.blend.eq_ignore_ascii_case("ALPHACHANNEL"),
                             settings.texture_quality,
+                            &hd_pack,
                         );
-                        mask_alpha_test = loaded_texture.alpha_test;
+                        used_hd_texture = loaded_texture.hd_texture;
                         if let Some(handle) = &loaded_texture.handle {
                             stage_texture_handles.push(handle.clone());
                         }
@@ -2443,9 +2673,6 @@ fn setup_stage_scene(
                 }
                 None => None,
             };
-            if mask_alpha_test && mode == GmdlMode::Opaque {
-                alpha_cutoff = 127.0 / 255.0;
-            }
             let material_handle = material_cache
                 .entry((obj_idx, mat_idx))
                 .or_insert_with(|| {
@@ -2476,8 +2703,107 @@ fn setup_stage_scene(
             let scene_obj = stage_desc
                 .as_ref()
                 .and_then(|d| d.scene_objects.iter().find(|obj| obj.name == object.name));
-            let (mesh, transform) = build_scene_mesh(object, &indices, loaded.center, scene_obj);
+            let (mut mesh, transform) =
+                build_scene_mesh(object, &indices, loaded.center, scene_obj);
             let deform = scene_obj.and_then(|obj| SceneDeform::from_mesh(object, &mesh, obj));
+
+            let scrolling = scene_obj.is_some_and(|obj| obj.texture_animation.enabled);
+            let curated_surface = alpha_cutoff == 0.0
+                && ifl_frames.is_none()
+                && deform.is_none()
+                && scene_obj.is_none_or(|obj| obj.billboard != 1)
+                && match mode {
+                    GmdlMode::Opaque => opacity == 1.0,
+                    GmdlMode::Blend => scrolling,
+                    _ => false,
+                };
+            if curated_surface {
+                let mut hd_normal_used = false;
+                if let Some(normal) = gmdl.resolve_texture_name(mat).and_then(|name| {
+                    let hd_normal = used_hd_texture
+                        .then(|| hd_pack.normal(&loaded.stage_id, name))
+                        .flatten()
+                        .and_then(|bytes| {
+                            super::stage_material::scene_normals::load_hd_scene_normal(
+                                &loaded.stage_id,
+                                name,
+                                bytes,
+                                &mut images,
+                                &mut normal_cache,
+                                settings.texture_quality,
+                            )
+                        });
+                    hd_normal_used = hd_normal.is_some();
+                    hd_normal.or_else(|| {
+                        super::stage_material::scene_normals::load_scene_normal(
+                            &loaded.stage_id,
+                            name,
+                            &mut images,
+                            &mut normal_cache,
+                            settings.texture_quality,
+                        )
+                    })
+                }) {
+                    match mesh.generate_tangents() {
+                        Ok(()) => {
+                            let mut material = materials.get_mut(&material_handle).unwrap();
+                            material.normal_texture = Some(normal);
+                            if hd_normal_used {
+                                let style = hd_pack.normal_style();
+                                material.normal_strength = style.strength;
+                                material.normal_contrast = style.contrast;
+                            }
+                            normal_batches += 1;
+                        }
+                        Err(error) => warn!("scene normal skipped for {}: {error}", object.name),
+                    }
+                }
+            }
+
+            let mut liquid_surface = None;
+            if scrolling
+                && alpha_cutoff == 0.0
+                && ifl_frames.is_none()
+                && scene_obj.is_none_or(|obj| obj.billboard != 1)
+            {
+                if let Some(name) = gmdl.resolve_texture_name(mat) {
+                    let mut material = materials.get_mut(&material_handle).unwrap();
+                    if water_cache.configure(
+                        &mut material,
+                        &loaded.stage_id,
+                        &object.name,
+                        name,
+                        loaded.center,
+                        &mut images,
+                    ) {
+                        liquid_surface = Some(
+                            super::stage_material::water::interaction::LiquidSurface::from_geometry(
+                                object,
+                                &indices,
+                                loaded.center,
+                                material.water.x,
+                                material.water.y,
+                            ),
+                        );
+                    }
+                }
+            }
+            let wave_mesh = if liquid_surface.as_ref().is_some_and(|s| s.is_clear_water()) {
+                if let Some((refined, wave)) =
+                    super::stage_material::water::waves::WaterWaveMesh::refine(&mesh, &indices)
+                {
+                    mesh = refined;
+                    Some(wave)
+                } else {
+                    warn!(
+                        "{} {} water geometry could not be refined; keeping original mesh",
+                        loaded.stage_id, object.name
+                    );
+                    None
+                }
+            } else {
+                None
+            };
             let entity = commands
                 .spawn((
                     PlayingSceneEntity,
@@ -2486,6 +2812,12 @@ fn setup_stage_scene(
                     transform,
                 ))
                 .id();
+            if let Some(surface) = liquid_surface {
+                commands.entity(entity).insert(surface);
+            }
+            if let Some(wave) = wave_mesh {
+                commands.entity(entity).insert(wave);
+            }
             if let Some(frames) = ifl_frames {
                 commands.entity(entity).insert(IflAnim {
                     frames,
@@ -2523,7 +2855,7 @@ fn setup_stage_scene(
     );
 
     if let Some(mesh) = stage_collider.mesh.as_mut() {
-        spawn_stage_props(
+        spawn_stage_props_with_hd(
             &mut commands,
             &mut meshes,
             &mut materials,
@@ -2534,13 +2866,15 @@ fn setup_stage_scene(
             &loaded,
             des_text.as_deref(),
             settings.texture_quality,
+            Some(&hd_pack),
             &mut stage_texture_handles,
             mesh,
             script.script(),
             escort.0.as_deref(),
+            loaded_assets.ticket_mask,
         );
     } else {
-        spawn_stage_props(
+        spawn_stage_props_with_hd(
             &mut commands,
             &mut meshes,
             &mut materials,
@@ -2551,10 +2885,12 @@ fn setup_stage_scene(
             &loaded,
             des_text.as_deref(),
             settings.texture_quality,
+            Some(&hd_pack),
             &mut stage_texture_handles,
             &mut StageMeshCollider::default(),
             script.script(),
             escort.0.as_deref(),
+            loaded_assets.ticket_mask,
         );
     }
     if drawn_objects > 0 {
@@ -2567,10 +2903,17 @@ fn setup_stage_scene(
     } else {
         warn!("stage mesh contains no drawable objects");
     }
+    info!(
+        "stage {}: {} curated normal textures, {} wall/floor batches",
+        loaded.stage_id,
+        normal_cache.len(),
+        normal_batches
+    );
+    stage_texture_handles.extend(normal_cache.into_values());
     commands.insert_resource(StageTextureHandles(stage_texture_handles));
 }
 
-fn build_scene_mesh(
+pub(crate) fn build_scene_mesh(
     object: &meteor_asset::gmdl::GmdlObject,
     indices: &[u32],
     center: [f32; 3],
@@ -2664,8 +3007,211 @@ fn gmdl_vertex_color(bytes: &[u8]) -> [f32; 4] {
 #[derive(Clone, Default)]
 struct LoadedStageTexture {
     handle: Option<Handle<bevy::image::Image>>,
+    hd_texture: bool,
+}
 
-    alpha_test: bool,
+#[allow(clippy::too_many_arguments)]
+fn load_or_cache_scene_texture(
+    images: &mut Assets<bevy::image::Image>,
+    cache: &mut HashMap<String, LoadedStageTexture>,
+    pak_cache: &mut PakCache,
+    root: &std::path::Path,
+    scope: &str,
+    name: &str,
+    color_key: bool,
+    alpha_channel: bool,
+    texture_quality: u8,
+    hd_pack: &SceneTexturePack,
+) -> LoadedStageTexture {
+    {
+        if let Some(bytes) = hd_pack.diffuse(scope, name) {
+            let key = format!(
+                "hd/{scope}/{}|ck={color_key}|alpha={alpha_channel}|quality={texture_quality}",
+                name.to_ascii_lowercase()
+            );
+            if let Some(cached) = cache.get(&key) {
+                return cached.clone();
+            }
+            let original = pak_cache.resolve(root, scope, name);
+            let companion = legacy_alpha_companion_name(name)
+                .map(|companion| sibling_texture_name(name, &companion))
+                .and_then(|companion| pak_cache.resolve_exact(root, scope, &companion));
+            let luminance_fallback = alpha_channel
+                && companion.is_none()
+                && !name.to_ascii_lowercase().ends_with(".tga");
+            if let Some(handle) = super::pak_textures::hd_image_handle_with_legacy_style_quality(
+                images,
+                bytes,
+                original.as_deref(),
+                companion.as_deref(),
+                luminance_fallback,
+                color_key,
+                texture_quality,
+            ) {
+                let loaded = LoadedStageTexture {
+                    handle: Some(handle),
+                    hd_texture: true,
+                };
+                cache.insert(key, loaded.clone());
+                return loaded;
+            }
+            warn!("HD scene texture decode failed: {scope}/{name}; using original");
+            let fallback = load_or_cache_texture(
+                images,
+                cache,
+                pak_cache,
+                root,
+                scope,
+                name,
+                color_key,
+                alpha_channel,
+                texture_quality,
+            );
+            cache.insert(key, fallback.clone());
+            return fallback;
+        }
+    }
+    load_or_cache_texture(
+        images,
+        cache,
+        pak_cache,
+        root,
+        scope,
+        name,
+        color_key,
+        alpha_channel,
+        texture_quality,
+    )
+}
+
+#[cfg(test)]
+mod hd_scene_texture_tests {
+    use super::*;
+
+    #[cfg(feature = "original-assets")]
+    #[test]
+    fn hd_scene_masked_images_keep_original_transparency_at_hd_resolution() {
+        let origin = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        let hd_bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../asset-tools/generated/scene-textures/sn06/sn06mian5.jpg"),
+        )
+        .unwrap();
+        let mut cache = PakCache::default();
+        for name in ["kmzb01.jpg", "sn3tr.JPG"] {
+            let bytes = cache.resolve(&origin, "sn03", name).unwrap();
+            let companion = legacy_alpha_companion_name(name)
+                .and_then(|name| cache.resolve_exact(&origin, "sn03", &name));
+            let mut images = Assets::<bevy::image::Image>::default();
+            let old = image_handle_with_legacy_style_quality(
+                &mut images,
+                &bytes,
+                companion.as_deref(),
+                false,
+                true,
+                0,
+            )
+            .unwrap();
+            let hd = super::super::pak_textures::hd_image_handle_with_legacy_style_quality(
+                &mut images,
+                &hd_bytes,
+                Some(&bytes),
+                companion.as_deref(),
+                false,
+                true,
+                0,
+            )
+            .unwrap();
+            let old = images.get(&old).unwrap();
+            let hd = images.get(&hd).unwrap();
+            let old_size = old.texture_descriptor.size;
+            let size = hd.texture_descriptor.size;
+            assert!(size.width > old_size.width);
+            let old_rgba = old.data.as_ref().unwrap();
+            let hd_rgba = hd.data.as_ref().unwrap();
+            assert!(old_rgba[..(old_size.width * old_size.height * 4) as usize]
+                .chunks_exact(4)
+                .any(|p| p[3] == 0));
+            for y in (0..size.height).step_by(17) {
+                for x in (0..size.width).step_by(17) {
+                    let sy = y * old_size.height / size.height;
+                    let sx = x * old_size.width / size.width;
+                    assert_eq!(
+                        hd_rgba[((y * size.width + x) * 4 + 3) as usize],
+                        old_rgba[((sy * old_size.width + sx) * 4 + 3) as usize],
+                        "{name}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hd_scene_enabled_disabled_missing_and_corrupt_images_use_the_expected_source() {
+        let origin = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        if !origin.join("sn06.pak").is_file() {
+            return;
+        }
+        let mut images = Assets::<bevy::image::Image>::default();
+        let mut cache = HashMap::new();
+        let mut pak_cache = PakCache::default();
+        let packs = meteor_asset::pack_repository::PackRepository::open(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../asset-tools/packs"),
+        )
+        .unwrap();
+        let hd_pack =
+            SceneTexturePack::load_with_reader("sn06", true, |name| packs.read(name).ok());
+        let disabled =
+            SceneTexturePack::load_with_reader("sn06", false, |_| panic!("disabled reads HD data"));
+        let load = |pack: &SceneTexturePack,
+                    images: &mut Assets<bevy::image::Image>,
+                    cache: &mut HashMap<String, LoadedStageTexture>,
+                    pak_cache: &mut PakCache| {
+            load_or_cache_scene_texture(
+                images,
+                cache,
+                pak_cache,
+                &origin,
+                "sn06",
+                "sn06mian5.jpg",
+                false,
+                false,
+                0,
+                pack,
+            )
+        };
+        let hd = load(&hd_pack, &mut images, &mut cache, &mut pak_cache);
+        let original = load(&disabled, &mut images, &mut cache, &mut pak_cache);
+        let absent = load(
+            &SceneTexturePack::default(),
+            &mut images,
+            &mut cache,
+            &mut pak_cache,
+        );
+        assert!(hd.hd_texture);
+        assert!(!original.hd_texture && !absent.hd_texture);
+        assert_eq!(original.handle, absent.handle);
+        assert_ne!(
+            images.get(hd.handle.as_ref().unwrap()).unwrap().data,
+            images.get(original.handle.as_ref().unwrap()).unwrap().data
+        );
+        let corrupt = SceneTexturePack::load_with_reader("sn06", true, |name| {
+            if name.ends_with("manifest.json") {
+                Some(
+                    br#"{"version":1,"textures":{"sn06mian5.jpg":{"diffuse":"corrupt.png"}}}"#
+                        .to_vec(),
+                )
+            } else {
+                Some(b"not an image".to_vec())
+            }
+        });
+        let fallback = load(&corrupt, &mut images, &mut HashMap::new(), &mut pak_cache);
+        assert!(!fallback.hd_texture);
+        assert_eq!(
+            images.get(fallback.handle.as_ref().unwrap()).unwrap().data,
+            images.get(original.handle.as_ref().unwrap()).unwrap().data
+        );
+    }
 }
 
 fn sibling_texture_name(name: &str, sibling: &str) -> String {
@@ -2710,16 +3256,11 @@ fn load_or_cache_texture(
                     info!("stage texture companion alpha: {name} <- {companion_name}");
                 }
             }
-            let mask_companion = pak_cache.resolve_mask(root, scope, name);
-            if let Some((mask_name, _)) = &mask_companion {
-                info!("stage texture 8-bit mask: {name} <- {mask_name}");
-            }
-            let companion = named_companion
-                .as_deref()
-                .or_else(|| mask_companion.as_ref().map(|(_, bytes)| bytes.as_slice()));
+            let companion = named_companion.as_deref();
             let luminance_fallback = alpha_channel
                 && companion.is_none()
                 && !name.to_ascii_lowercase().ends_with(".tga");
+
             let handle = if alpha_channel || color_key || companion.is_some() {
                 image_handle_with_legacy_style_quality(
                     images,
@@ -2738,7 +3279,7 @@ fn load_or_cache_texture(
             });
             LoadedStageTexture {
                 handle,
-                alpha_test: mask_companion.is_some(),
+                hd_texture: false,
             }
         }
         None => {
@@ -2758,6 +3299,60 @@ mod tests {
         image_handle_with_legacy_alpha, resolve_pak_texture, stage_pak_chain,
     };
     use bevy::ecs::system::RunSystemOnce;
+
+    #[test]
+    fn pause_retains_scene_collision_and_textures_until_real_session_exit() {
+        use crate::app_state::AppState;
+        let mut app = App::new();
+        app.add_plugins(bevy::state::app::StatesPlugin)
+            .init_state::<AppState>()
+            .insert_resource(StageCollision {
+                stage_id: "sn03".into(),
+                face_ids: BTreeSet::from([1]),
+                ..default()
+            })
+            .insert_resource(StageCollider {
+                mesh: Some(StageMeshCollider::default()),
+            })
+            .insert_resource(StageTextureHandles(vec![Handle::default()]))
+            .add_systems(
+                OnTransition {
+                    exited: AppState::Paused,
+                    entered: AppState::Menu,
+                },
+                crate::plugins::cleanup_suspended_playing_session,
+            );
+        install_stage_cleanup(&mut app);
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::Playing);
+        app.update();
+        let scene = app.world_mut().spawn(PlayingSceneEntity).id();
+        for state in [
+            AppState::Paused,
+            AppState::Settings,
+            AppState::Paused,
+            AppState::Playing,
+            AppState::Paused,
+        ] {
+            app.world_mut()
+                .resource_mut::<NextState<AppState>>()
+                .set(state);
+            app.update();
+            assert!(app.world().get::<PlayingSceneEntity>(scene).is_some());
+            assert_eq!(app.world().resource::<StageCollision>().stage_id, "sn03");
+            assert!(app.world().resource::<StageCollider>().mesh.is_some());
+            assert_eq!(app.world().resource::<StageTextureHandles>().0.len(), 1);
+        }
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::Menu);
+        app.update();
+        assert!(app.world().get::<PlayingSceneEntity>(scene).is_none());
+        assert!(app.world().resource::<StageCollision>().face_ids.is_empty());
+        assert!(app.world().resource::<StageCollider>().mesh.is_none());
+        assert!(app.world().resource::<StageTextureHandles>().0.is_empty());
+    }
 
     #[test]
     fn uv_scroll_uses_simulation_time_without_per_frame_material_changes() {
@@ -2894,18 +3489,7 @@ mod tests {
             .map(|(index, d)| SceneItemInstance {
                 name: d.name.clone(),
                 index,
-                props: [
-                    ("active".into(), PstValue::Num(d.visible as i32 as f64)),
-                    ("damagevalue".into(), PstValue::Num(d.damage_name as f64)),
-                    (
-                        "collision".into(),
-                        PstValue::Num(is_solid_prop(d) as i32 as f64),
-                    ),
-                    ("interactive".into(), PstValue::Num(1.0)),
-                    ("frame".into(), PstValue::Num(-1.0)),
-                    ("state".into(), PstValue::Num(3.0)),
-                ]
-                .into(),
+                props: crate::plugins::stage_plugin::scene_item_props_from_dummy(d),
             })
             .collect();
         let mut script = SceneScriptRuntime::load(&sources, instances, 250_000).unwrap();
@@ -2950,6 +3534,7 @@ mod tests {
                         &mut Vec::new(),
                         collider.mesh.as_mut().unwrap(),
                         script.script(),
+                        None,
                         None,
                     );
                 },
@@ -3025,23 +3610,116 @@ mod tests {
             }
         }
         assert!(checked >= 3);
+
+        for frame in [0, 112, 225, 337, 450, 562, 675, 787, 900] {
+            for mut clip in world.query::<&mut FmcClip>().iter_mut(&mut world) {
+                clip.frame_set = Some(frame);
+            }
+            world.run_system_once(update_fmc_clips).unwrap();
+            world.run_system_once(sync_hazard_machines).unwrap();
+            for (prop, transform, clip) in world
+                .query::<(
+                    &crate::plugins::item_plugin::StageProp,
+                    &Transform,
+                    &FmcClip,
+                )>()
+                .iter(&world)
+                .filter(|(prop, _, _)| prop.name == "D_sn08B02")
+            {
+                let rest = &clip.clip.frames[0].parts[0];
+                let current = clip.clip.sample_part(frame as f32, 0).unwrap();
+                let base = Transform {
+                    translation: clip.base_translation,
+                    rotation: clip.base_rotation,
+                    scale: transform.scale,
+                };
+                let expected =
+                    base.transform_point(Vec3::new(current.t.x, current.t.y, current.t.z));
+                let actual = transform.transform_point(Vec3::new(rest.t.x, rest.t.y, rest.t.z));
+                assert!(
+                    actual.distance(expected) < 0.002,
+                    "{} frame={frame}: pivot {actual:?} != authored {expected:?}; error={}",
+                    prop.name,
+                    actual.distance(expected)
+                );
+            }
+        }
         world.run_system_once(sync_hazard_machines).unwrap();
-        let mut hazards = world.resource::<StageHazardRuntime>().0.clone();
-        let machine = hazards
+        let machine = world
+            .resource::<StageHazardRuntime>()
+            .0
             .machines
             .iter()
             .find(|m| m.name == "D_sn08B02")
+            .cloned()
             .expect("hidden roller damage proxy remains enabled");
-        assert!(!machine.boxes.is_empty());
-        let b = machine.boxes[0];
-        let point = std::array::from_fn(|i| (b.min[i] + b.max[i]) * 0.5);
-        let mut hits = Vec::new();
-        hazards.update(
-            0.016,
-            &[("player".into(), point, false, false)],
-            &mut |_, source, damage, _| hits.push((source.to_owned(), damage)),
+        assert!(
+            !machine.obbs.is_empty(),
+            "damage proxy must expose part OBBs"
         );
-        assert!(hits.contains(&("D_sn08B02".into(), 300)), "{hits:?}");
+
+        {
+            let mut sensors = world.query::<(
+                &crate::plugins::item_plugin::StageProp,
+                &super::super::hazard_plugin::DamageSensorOwner,
+            )>();
+            assert!(
+                sensors.iter(&world).any(|(p, sensor)| {
+                    p.name == "D_sn08B02" && !p.collision_enabled && sensor.0 >= 0
+                }),
+                "D_sn08B02 must register as a non-blocking damage sensor"
+            );
+        }
+        let points: Vec<Vec3> = {
+            let mut query = world.query::<(
+                &crate::plugins::item_plugin::StageProp,
+                &Transform,
+                &super::super::hazard_plugin::HazardPart,
+            )>();
+            query
+                .iter(&world)
+                .filter(|(p, _, _)| p.name == "D_sn08B02")
+                .flat_map(|(_, transform, part)| {
+                    part.0
+                        .iter()
+                        .map(|p| transform.transform_point(*p))
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        };
+        assert!(!points.is_empty(), "B02 proxy verts");
+        let mid = points.iter().copied().sum::<Vec3>() / points.len() as f32;
+        let top = *points.iter().max_by(|a, b| a.y.total_cmp(&b.y)).unwrap();
+        let side = *points.iter().min_by(|a, b| a.x.total_cmp(&b.x)).unwrap();
+        for (label, feet) in [
+            ("center", [mid.x, mid.y - 0.1, mid.z]),
+            ("top", [top.x, top.y, top.z]),
+            ("side", [side.x - 0.2, side.y, side.z]),
+        ] {
+            assert!(
+                meteor_scene::hazards::StageHazards::actor_touches_machine(feet, &machine),
+                "{label} feet={feet:?} obbs={:?}",
+                machine.obbs
+            );
+        }
+        let far = [mid.x + 25.0, mid.y, mid.z + 25.0];
+        assert!(
+            !meteor_scene::hazards::StageHazards::actor_touches_machine(far, &machine),
+            "far feet={far:?} must miss proxy OBB"
+        );
+        {
+            let mut contact_hits = Vec::new();
+            let mut contact = world.resource::<StageHazardRuntime>().0.clone();
+            contact.update(
+                0.016,
+                &[("player".into(), [mid.x, mid.y - 0.1, mid.z], false, false)],
+                &mut |_, source, damage, _| contact_hits.push((source.to_owned(), damage)),
+            );
+            assert!(
+                contact_hits.contains(&("D_sn08B02".into(), 300)),
+                "{contact_hits:?}"
+            );
+        }
         let mut script = world.resource_mut::<StageScriptRuntime>();
         let index = script
             .script()
@@ -3152,6 +3830,7 @@ mod tests {
                         &mut Vec::new(),
                         collider.mesh.as_mut().unwrap(),
                         script.script(),
+                        None,
                         None,
                     );
                 },
@@ -3282,7 +3961,6 @@ mod tests {
                                 anim_time: 0.0,
                                 state: 3,
                                 frame_set: None,
-                                multi: true,
                                 base_translation: base.translation,
                                 base_rotation: base.rotation,
                                 collider_owner: Some(owner),
@@ -3435,7 +4113,6 @@ mod tests {
                         anim_time: 0.0,
                         state: 1,
                         frame_set: None,
-                        multi: false,
                         base_translation: base.translation,
                         base_rotation: base.rotation,
                         collider_owner: Some(owner),
@@ -3739,6 +4416,7 @@ mod tests {
                         &mut StageMeshCollider::default(),
                         None,
                         None,
+                        None,
                     );
                 },
             )
@@ -3823,7 +4501,7 @@ mod tests {
                 Some("SceneObjects 0 DummeyObjects 2\n\
                     Object D_itTest\n{\nPosition: 0 0 0\nQuaternion: 1 0 0 0\nCustom:\n{\nmodel=Item01\n}\n}\n\
                     Object D_wpTest\n{\nPosition: 1000 0 0\nQuaternion: 1 0 0 0\nCustom:\n{\nmodel=W0_0\n}\n}\n"),
-                0, &mut Vec::new(), &mut StageMeshCollider::default(), None, None);
+                0, &mut Vec::new(), &mut StageMeshCollider::default(), None, None, None);
         }).unwrap();
         let player = app
             .world_mut()
@@ -4163,6 +4841,120 @@ mod tests {
         assert!((off - 5.0).abs() < 1e-4);
     }
 
+    #[test]
+    fn curated_wall_floor_normals_have_valid_original_mesh_tangents() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        let manifest: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../asset-tools/data/scene-normal-sources.json"
+        )))
+        .unwrap();
+        let selected = manifest["sources"].as_array().unwrap();
+        let stages: std::collections::BTreeSet<&str> = selected
+            .iter()
+            .map(|entry| entry["stage"].as_str().unwrap())
+            .collect();
+        let required: std::collections::BTreeSet<&str> = super::super::campaign_ui::MISSIONS
+            .iter()
+            .map(|mission| mission.id)
+            .chain(["sn06", "sn19"])
+            .collect();
+        assert_eq!(
+            stages, required,
+            "cover every solo mission plus the two requested arenas"
+        );
+        for stage in stages {
+            let gmdl =
+                decode_gmdl(&std::fs::read(root.join(format!("{stage}/{stage}.gmb"))).unwrap())
+                    .unwrap();
+            let mut images = Assets::<Image>::default();
+            let mut cache = HashMap::new();
+            let mut used = std::collections::HashSet::new();
+            let mut batches = 0;
+            for object in &gmdl.objects {
+                for (index, mat) in gmdl.materials.iter().enumerate() {
+                    let Some(name) = gmdl.resolve_texture_name(mat) else {
+                        continue;
+                    };
+                    let (mode, opacity, cutoff) = classify_gmdl_material(mat);
+
+                    let eligible = cutoff == 0.0
+                        && match mode {
+                            GmdlMode::Opaque => opacity == 1.0,
+                            GmdlMode::Blend => true,
+                            _ => false,
+                        };
+                    if !eligible {
+                        continue;
+                    }
+                    let indices: Vec<u32> = object
+                        .face_mat
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, material)| **material == index as i32)
+                        .flat_map(|(face, _)| {
+                            object.indices[face * 3..face * 3 + 3].iter().copied()
+                        })
+                        .collect();
+                    if indices.is_empty() {
+                        continue;
+                    }
+                    if super::super::stage_material::scene_normals::load_scene_normal(
+                        stage,
+                        name,
+                        &mut images,
+                        &mut cache,
+                        0,
+                    )
+                    .is_none()
+                    {
+                        continue;
+                    }
+                    let mut mesh = build_mesh(object, &indices, [0.0; 3]);
+                    mesh.generate_tangents().unwrap();
+                    let Some(bevy::mesh::VertexAttributeValues::Float32x4(tangents)) =
+                        mesh.attribute(Mesh::ATTRIBUTE_TANGENT)
+                    else {
+                        panic!("missing tangents")
+                    };
+
+                    for vertex in &indices {
+                        let tangent = tangents[*vertex as usize];
+                        assert!(
+                            tangent.iter().all(|v| v.is_finite()),
+                            "{stage} {name} {}",
+                            object.name
+                        );
+                        let length =
+                            Vec3::from_array([tangent[0], tangent[1], tangent[2]]).length();
+
+                        assert!(
+                            length < 1e-6 || (length - 1.0).abs() < 0.01,
+                            "{stage} {name} {} vertex={} tangent={tangent:?}",
+                            object.name,
+                            vertex
+                        );
+                    }
+                    used.insert(name.to_ascii_lowercase());
+                    batches += 1;
+                }
+            }
+            eprintln!(
+                "{stage}: {} selected wall/floor textures used in {batches} batches",
+                used.len()
+            );
+            let expected: std::collections::HashSet<String> = selected
+                .iter()
+                .filter(|entry| entry["stage"] == stage)
+                .map(|entry| entry["texture"].as_str().unwrap().to_owned())
+                .collect();
+            assert_eq!(
+                used, expected,
+                "curated resources must actually be used by {stage}"
+            );
+        }
+    }
+
     fn mat(blend: &str, state: &str, alpha: f32) -> RawGmdlMaterial {
         RawGmdlMaterial {
             tex_index: 0,
@@ -4465,41 +5257,43 @@ mod tests {
     }
 
     #[test]
-    fn origin_sn03_grass_uses_8bit_mask_and_source_scope() {
+    fn origin_sn03_tree_bark_stays_opaque_across_scope_and_quality() {
         let origin = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
-        if !origin.join("sn03.pak").is_file() {
-            eprintln!("origin_res missing, skipping");
-            return;
-        }
         let mut pak_cache = PakCache::default();
-        let direct = pak_cache
-            .resolve(&origin, "sn03", "sn3tr.JPG")
-            .expect("sn03 grass color");
-        let scoped = pak_cache
-            .resolve(&origin, "sn01", "sn03/sn3tr.JPG")
-            .expect("cross-stage grass color");
-        assert_eq!(direct, scoped, "sn03/ prefix owns the texture scope");
-
         let mut images = Assets::<bevy::image::Image>::default();
         let mut cache = HashMap::new();
-        let loaded = load_or_cache_texture(
-            &mut images,
-            &mut cache,
-            &mut pak_cache,
-            &origin,
-            "sn01",
-            "sn03/sn3tr.JPG",
-            false,
-            false,
-            0,
-        );
-        assert!(loaded.alpha_test, "NORMAL grass mask promotes alpha-test");
-        let rgba = images
-            .get(&loaded.handle.expect("masked grass image"))
-            .and_then(|image| image.data.as_deref())
-            .expect("grass CPU pixels");
-        assert!(rgba.chunks_exact(4).any(|pixel| pixel[3] < 16));
-        assert!(rgba.chunks_exact(4).any(|pixel| pixel[3] > 200));
+        for name in ["sn3tr.JPG", "sn3tr4.JPG"] {
+            let direct = pak_cache
+                .resolve(&origin, "sn03", name)
+                .expect("tree bark JPEG");
+            let decoded = meteor_asset::texture::decode_image(&direct).unwrap();
+            let scoped = format!("sn03/{name}");
+            assert_eq!(pak_cache.resolve(&origin, "sn01", &scoped).unwrap(), direct);
+            for quality in 0..=2 {
+                let loaded = load_or_cache_texture(
+                    &mut images,
+                    &mut cache,
+                    &mut pak_cache,
+                    &origin,
+                    "sn01",
+                    &scoped,
+                    false,
+                    false,
+                    quality,
+                );
+                let image = images.get(loaded.handle.as_ref().unwrap()).unwrap();
+                let rgba = image.data.as_ref().unwrap();
+                assert_eq!(
+                    &rgba[..decoded.rgba.len()],
+                    decoded.rgba.as_slice(),
+                    "{name} quality={quality} keeps authored JPEG pixels"
+                );
+                assert!(
+                    rgba.chunks_exact(4).all(|pixel| pixel[3] == 255),
+                    "{name} quality={quality} must remain solid, including mip levels"
+                );
+            }
+        }
     }
 
     #[test]
@@ -4759,7 +5553,6 @@ mod tests {
                     anim_time: 0.0,
                     state: 1,
                     frame_set: None,
-                    multi: true,
                     base_translation: Vec3::ZERO,
                     base_rotation: Quat::IDENTITY,
                     collider_owner: None,
@@ -4810,6 +5603,64 @@ mod tests {
         world.run_system_once(update_fmc_clips).unwrap();
         assert!(world.get::<Transform>(entity).unwrap().translation.length() < 1e-5);
         assert_eq!(world.get::<FmcClip>(entity).unwrap().state, 3);
+    }
+
+    #[test]
+    fn stock_scene_snapshot_seeks_absolute_fmc_frame_once() {
+        use super::super::stage_plugin::StageScriptRuntime;
+        use meteor_scene::scene_script_runtime::{PstValue, SceneItemInstance, SceneScriptRuntime};
+
+        let source = meteor_asset::fmc::parse_fmc(include_str!(
+            "../../../../../origin_res/cmodel/BBox02.fmc"
+        ));
+        let script = SceneScriptRuntime::load(
+            "",
+            vec![SceneItemInstance {
+                name: "D_BBox01".into(),
+                index: 0,
+                props: [
+                    ("pose".into(), PstValue::Num(1.0)),
+                    ("frame".into(), PstValue::Num(-1.0)),
+                    ("snapshot_frame".into(), PstValue::Num(24.0)),
+                ]
+                .into(),
+            }],
+            1024,
+        )
+        .unwrap();
+        let mut world = World::new();
+        world.insert_resource(StageScriptRuntime::from_script(script));
+        let entity = world
+            .spawn(FmcClip {
+                name: "D_BBox01".into(),
+                clip: source,
+                part_index: 0,
+                poses: vec![
+                    meteor_asset::fmc::PropPose { start: 0, end: 0 },
+                    meteor_asset::fmc::PropPose { start: 19, end: 40 },
+                ],
+                pose_index: 0,
+                pose_start: 0,
+                pose_end: 0,
+                pose_loop: 0,
+                pose_revision: 0,
+                anim_time: 0.0,
+                state: 3,
+                frame_set: None,
+                base_translation: Vec3::ZERO,
+                base_rotation: Quat::IDENTITY,
+                collider_owner: None,
+                collider_vertex_offset: 0,
+                local_verts: vec![],
+                last_reported_state: 3,
+            })
+            .id();
+        world.run_system_once(sync_fmc_with_script).unwrap();
+        let mut clip = world.get_mut::<FmcClip>(entity).unwrap();
+        assert_eq!(clip.pose_start, 19);
+        assert_eq!(clip.frame_set.take(), Some(5));
+        world.run_system_once(sync_fmc_with_script).unwrap();
+        assert_eq!(world.get::<FmcClip>(entity).unwrap().frame_set, None);
     }
 
     #[test]
@@ -5035,3 +5886,6 @@ Object D_roller { Position: 0 0 0 Quaternion: 1 0 0 0 Custom: { model="sn08B01" 
         assert_eq!(prop_visibility(false), Visibility::Hidden);
     }
 }
+#[cfg(test)]
+#[path = "render_plugin/ticket_tests.rs"]
+mod ticket_tests;

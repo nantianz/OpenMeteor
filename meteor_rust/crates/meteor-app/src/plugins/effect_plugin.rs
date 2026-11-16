@@ -1,5 +1,5 @@
 use crate::components::fighter::{
-    EntryBlend, EscortFlagCarrier, Fighter, PoseEffectSpawn, PoseRuntime,
+    CombatState, EntryBlend, EscortFlagCarrier, Fighter, PoseEffectSpawn, PoseRuntime,
 };
 use crate::plugins::audio_plugin::{resource_roots, SfxCache};
 use crate::plugins::character_plugin::{CharacterAssetsSet, FighterModel};
@@ -15,7 +15,14 @@ use bevy::render::render_resource::{
     AsBindGroup, BlendComponent, BlendFactor, BlendOperation, BlendState, Face,
     RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
 };
-use bevy::shader::{Shader, ShaderRef};
+use bevy::shader::{Shader, ShaderDefVal, ShaderRef};
+
+fn is_prepass_pipeline(descriptor: &RenderPipelineDescriptor) -> bool {
+    descriptor
+        .vertex
+        .shader_defs
+        .contains(&ShaderDefVal::Bool("PREPASS_PIPELINE".into(), true))
+}
 
 #[derive(Component, Debug, Clone)]
 pub struct HitSpark {
@@ -33,7 +40,10 @@ pub struct SceneEffectEvent {
 }
 
 #[derive(Component, Debug, Clone)]
-pub(crate) struct PickupEffectRequest(pub SceneEffectEvent);
+pub(crate) struct PickupEffectRequest {
+    pub effect: String,
+    pub collector: Entity,
+}
 
 #[derive(Component, Debug, Clone, Copy)]
 pub(crate) struct SceneEffectAnchor;
@@ -88,6 +98,7 @@ mod dynamic_uniforms;
 struct PonEfMaterialParams {
     color: Vec4,
     has_texture: u32,
+    uv_offset: Vec2,
 }
 
 #[derive(Asset, TypePath, Clone)]
@@ -131,12 +142,19 @@ impl Material for PonEfMaterial {
         }
     }
 
+    fn enable_shadows() -> bool {
+        false
+    }
+
     fn specialize(
         _pipeline: &MaterialPipeline,
         descriptor: &mut RenderPipelineDescriptor,
         _layout: &bevy::render::mesh::MeshVertexBufferLayoutRef,
         key: MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
+        if is_prepass_pipeline(descriptor) {
+            return Ok(());
+        }
         if key.bind_group_data.instanced {
             descriptor.vertex.shader = PON_EF_PARTICLE_SHADER_HANDLE;
             if let Some(fragment) = &mut descriptor.fragment {
@@ -193,6 +211,12 @@ pub struct PonEfInstance {
     pub audio_playing: Vec<Option<Entity>>,
 
     pub audio_triggered: Vec<bool>,
+}
+
+#[derive(Component, Debug, Clone, Copy)]
+pub(crate) struct PoseOwnedPonEf {
+    pub fighter: Entity,
+    pub pose_instance_id: u32,
 }
 
 #[derive(Component)]
@@ -559,7 +583,15 @@ fn pon_ef_shape_mesh(node: &meteor_asset::pon_ef::PonEfNode) -> Option<Mesh> {
         meteor_asset::pon_ef::TYPE_PLANE | meteor_asset::pon_ef::TYPE_BILLBOARD => {
             let width = pon_ef_shape_value(values, 0, 10.0, 0.01);
             let height = pon_ef_shape_value(values, 1, 10.0, 0.01);
-            let mesh = Mesh::from(Rectangle::new(width, height));
+            let mut mesh = Mesh::from(Rectangle::new(width, height));
+
+            if let Some(bevy::mesh::VertexAttributeValues::Float32x2(uvs)) =
+                mesh.attribute_mut(Mesh::ATTRIBUTE_UV_0)
+            {
+                for uv in uvs {
+                    uv[1] = 1.0 - uv[1];
+                }
+            }
             if node.type_id == meteor_asset::pon_ef::TYPE_PLANE {
                 mesh.transformed_by(Transform::from_rotation(Quat::from_rotation_x(
                     std::f32::consts::FRAC_PI_2,
@@ -657,7 +689,22 @@ pub fn effect_file_name(effect_id: &meteor_asset::pos::EffectId) -> Option<Strin
     }
 }
 
-#[derive(Resource, Default)]
+fn sync_ef_texture_quality(
+    settings: Res<crate::app_state::Settings>,
+    mut cache: ResMut<EfTextureCache>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    if settings.is_changed() && cache.texture_quality != settings.texture_quality {
+        cache.texture_quality = settings.texture_quality;
+        for handle in &cache.images {
+            if let Some(mut image) = images.get_mut(handle) {
+                super::pak_textures::apply_texture_quality(&mut image, settings.texture_quality);
+            }
+        }
+    }
+}
+
+#[derive(Resource)]
 pub struct EfTextureCache {
     paks: Option<Vec<meteor_asset::pak::PakArchive>>,
 
@@ -666,6 +713,22 @@ pub struct EfTextureCache {
     materials: std::collections::HashMap<(String, u8, u8, bool), Handle<PonEfMaterial>>,
 
     ifl_frames: std::collections::HashMap<String, Vec<Handle<Image>>>,
+
+    texture_quality: u8,
+    images: Vec<Handle<Image>>,
+}
+
+impl Default for EfTextureCache {
+    fn default() -> Self {
+        Self {
+            paks: None,
+            model_paks: None,
+            materials: Default::default(),
+            ifl_frames: Default::default(),
+            texture_quality: 0,
+            images: Vec::new(),
+        }
+    }
 }
 
 impl EfTextureCache {
@@ -747,14 +810,17 @@ impl EfTextureCache {
         } else {
             None
         };
-        super::pak_textures::image_handle_with_legacy_style(
+        let handle = super::pak_textures::image_handle_with_legacy_style_quality(
             images,
             &bytes,
             alpha.as_deref(),
             mat.blend.eq_ignore_ascii_case("ALPHACHANNEL")
                 && !name.to_ascii_lowercase().ends_with(".tga"),
             mat.blend.eq_ignore_ascii_case("COLORKEY"),
-        )
+            self.texture_quality,
+        )?;
+        self.images.push(handle.clone());
+        Some(handle)
     }
 
     pub fn material_for(
@@ -780,15 +846,24 @@ impl EfTextureCache {
         } else if texture.to_ascii_lowercase().ends_with(".ifl") {
             self.ifl_frames(images, texture).first().cloned()
         } else {
-            self.texture_bytes(texture)
-                .and_then(|bytes| crate::plugins::pak_textures::image_handle(images, &bytes))
+            self.texture_bytes(texture).and_then(|bytes| {
+                crate::plugins::pak_textures::image_handle_with_quality(
+                    images,
+                    &bytes,
+                    self.texture_quality,
+                )
+            })
         };
+        if let Some(handle) = &image {
+            self.images.push(handle.clone());
+        }
         let handle = materials.add(PonEfMaterial {
             uniform_id: dynamic_uniforms::new_uniform_id(),
             particle_colors: None,
             params: PonEfMaterialParams {
                 color: Vec4::ONE,
                 has_texture: u32::from(image.is_some()),
+                uv_offset: Vec2::ZERO,
             },
             texture: image,
             blend: PonEfBlendMode::from_state(state),
@@ -811,10 +886,14 @@ impl EfTextureCache {
                     if line.is_empty() || line.starts_with('#') || line.starts_with("//") {
                         continue;
                     }
-                    if let Some(image) = self
-                        .texture_bytes(line)
-                        .and_then(|b| crate::plugins::pak_textures::image_handle(images, &b))
-                    {
+                    if let Some(image) = self.texture_bytes(line).and_then(|b| {
+                        crate::plugins::pak_textures::image_handle_with_quality(
+                            images,
+                            &b,
+                            self.texture_quality,
+                        )
+                    }) {
+                        self.images.push(image.clone());
                         frames.push(image);
                     }
                 }
@@ -884,7 +963,7 @@ const SPARK_SPEED: f32 = 3.0;
 
 pub struct EffectPlugin;
 
-fn install_effect_playback_systems(app: &mut App) {
+pub(crate) fn install_effect_playback_systems(app: &mut App) {
     let clocks = advance_pon_ef_clocks.run_if(crate::plugins::simulation_frame);
     app.add_systems(
         Update,
@@ -900,11 +979,19 @@ fn install_effect_playback_systems(app: &mut App) {
     );
 
     app.add_systems(
+        super::fighter_frame::schedule(app),
+        pose_effect_spawn
+            .after(crate::plugins::FighterFrameSet::SkeletonSample)
+            .before(crate::plugins::FighterFrameSet::HitJudge)
+            .run_if(crate::plugins::simulation_frame),
+    );
+
+    app.add_systems(
         Update,
         (
             scene_script_effects,
             combat_hit_effects,
-            pose_effect_spawn,
+            clear_interrupted_pose_effects,
             tick_pon_ef_players,
             tick_pon_ef_drags,
             tick_pon_ef_particles,
@@ -936,6 +1023,7 @@ impl Plugin for EffectPlugin {
             .init_resource::<EfCache>()
             .add_message::<SceneEffectEvent>()
             .add_systems(PreStartup, setup_effect_assets)
+            .add_systems(Update, sync_ef_texture_quality)
             .add_systems(
                 OnEnter(crate::app_state::AppState::Playing),
                 spawn_stage_ambient_effects,
@@ -962,11 +1050,16 @@ impl Plugin for EffectPlugin {
     }
 }
 
-fn stage_ambient_effects(des: &str, center: [f32; 3]) -> Vec<(String, Vec3)> {
+fn stage_ambient_effects(
+    des: &str,
+    center: [f32; 3],
+    ticket_mask: Option<u32>,
+) -> Vec<(String, Vec3)> {
     let desc = meteor_asset::des::parse_stage_description(des);
     desc.scene_objects
         .iter()
         .chain(&desc.dummies)
+        .filter(|object| ticket_mask.is_none_or(|mask| object.admits_ticket(mask)))
         .filter_map(|object| {
             let effect = object.effect.as_ref()?.clone();
             let p = object.position;
@@ -980,6 +1073,21 @@ fn stage_ambient_effects(des: &str, center: [f32; 3]) -> Vec<(String, Vec3)> {
             ))
         })
         .collect()
+}
+
+#[cfg(feature = "original-assets")]
+#[test]
+fn ticket_siege_goal_effects_follow_original_rule() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+    let des = std::fs::read_to_string(root.join("sn04/sn04.des")).unwrap();
+    let goals = |mask| {
+        stage_ambient_effects(&des, [0.0; 3], Some(mask))
+            .into_iter()
+            .filter(|(name, _)| name == "GoalBlue" || name == "GoalRed")
+            .count()
+    };
+    assert_eq!(goals(1 << 1), 0);
+    assert_eq!(goals(1 << 3), 2);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1003,7 +1111,7 @@ fn spawn_stage_ambient_effects(
     else {
         return;
     };
-    let effects = stage_ambient_effects(&des, loaded.center);
+    let effects = stage_ambient_effects(&des, loaded.center, loaded_assets.ticket_mask);
     let mut spawned = 0usize;
     for (effect, position) in &effects {
         let mut ctx = EfSpawnContext {
@@ -1157,24 +1265,32 @@ fn despawn_hit_sparks(mut commands: Commands, query: Query<Entity, With<HitSpark
 fn vip_effect_for_fighter(
     request: &crate::app_state::LaunchRequest,
     net: &crate::plugins::network_plugin::NetState,
+    level: Option<&crate::plugins::stage_plugin::StageMissionRuntime>,
     local: Option<&crate::plugins::stage_plugin::LocalFighter>,
     mission: Option<&crate::plugins::stage_plugin::MissionNpc>,
     remote: Option<&crate::plugins::network_plugin::RemoteFighter>,
 ) -> Option<&'static str> {
-    if request.mode != "assassin" {
-        return None;
-    }
-    let team = mission
-        .filter(|mission| mission.is_vip)
-        .map(|mission| mission.team)
-        .or_else(|| {
-            let player_id = if local.is_some() {
-                (!net.player_id.is_empty()).then_some(net.player_id.as_str())
-            } else {
-                remote.map(|remote| remote.player_id.as_str())
-            }?;
-            net.vip_team(player_id)
-        })?;
+    let team = if request.mode == "single"
+        && !request.spawn_room_npcs
+        && net.status != crate::plugins::network_plugin::NetStatus::InRoom
+    {
+        level?.vip_team_for_actor(local.is_some(), mission)?
+    } else {
+        if request.mode != "assassin" {
+            return None;
+        }
+        mission
+            .filter(|mission| mission.is_vip)
+            .map(|mission| mission.team)
+            .or_else(|| {
+                let player_id = if local.is_some() {
+                    (!net.player_id.is_empty()).then_some(net.player_id.as_str())
+                } else {
+                    remote.map(|remote| remote.player_id.as_str())
+                }?;
+                net.vip_team(player_id)
+            })?
+    };
     match team {
         1 => Some("vipblue.ef"),
         2 => Some("vipred.ef"),
@@ -1185,6 +1301,7 @@ fn vip_effect_for_fighter(
 fn wanted_worn_effects(
     request: &crate::app_state::LaunchRequest,
     net: &crate::plugins::network_plugin::NetState,
+    level: Option<&crate::plugins::stage_plugin::StageMissionRuntime>,
     worn: Option<&crate::components::fighter::WornEffect>,
     flag_carrier: bool,
     local: Option<&crate::plugins::stage_plugin::LocalFighter>,
@@ -1203,7 +1320,7 @@ fn wanted_worn_effects(
     if flag_carrier && !effects.iter().any(|effect| effect == "Flag.ef") {
         effects.push("Flag.ef".to_string());
     }
-    if let Some(vip) = vip_effect_for_fighter(request, net, local, mission, remote) {
+    if let Some(vip) = vip_effect_for_fighter(request, net, level, local, mission, remote) {
         if !effects.iter().any(|effect| effect == vip) {
             effects.push(vip.to_string());
         }
@@ -1216,6 +1333,7 @@ fn worn_effect_visual(
     mut commands: Commands,
     request: Res<crate::app_state::LaunchRequest>,
     net: Res<crate::plugins::network_plugin::NetState>,
+    level: Option<Res<crate::plugins::stage_plugin::StageMissionRuntime>>,
     assets: Res<EffectAssets>,
     mut cache: ResMut<EfCache>,
     shapes: Option<Res<PonEfShapeMeshes>>,
@@ -1235,6 +1353,7 @@ fn worn_effect_visual(
                     !wanted_worn_effects(
                         &request,
                         &net,
+                        level.as_deref(),
                         worn,
                         flag_carrier.is_some() || local_carrying.is_some(),
                         local,
@@ -1254,6 +1373,7 @@ fn worn_effect_visual(
         let effects = wanted_worn_effects(
             &request,
             &net,
+            level.as_deref(),
             worn,
             flag_carrier.is_some() || local_carrying.is_some(),
             local,
@@ -1755,26 +1875,25 @@ pub(crate) fn tick_pon_ef_players(
             .iter()
             .filter_map(|(entity, endpoint, transform)| {
                 let (fighter, form, pose) = fighters.get(endpoint.fighter).ok()?;
-                (fighter.weapon_slot == endpoint.slot
-                    && fighter.weapon == endpoint.weapon
-                    && fighter.weapon_variant == endpoint.variant
-                    && endpoint.forms.as_ref().is_none_or(|forms| {
-                        forms.contains(&meteor_combat::combo_engine::weapon_visual_form(
+                endpoint
+                    .is_active_for(
+                        fighter,
+                        meteor_combat::combo_engine::weapon_visual_form(
                             fighter.weapon,
                             form.current,
                             pose.pose_id,
-                        ))
-                    }))
-                .then(|| {
-                    (
-                        (endpoint.fighter, endpoint.name.clone()),
-                        node_access
-                            .p0()
-                            .compute_global_transform(entity)
-                            .unwrap_or(*transform)
-                            .to_matrix(),
+                        ),
                     )
-                })
+                    .then(|| {
+                        (
+                            (endpoint.fighter, endpoint.name.clone()),
+                            node_access
+                                .p0()
+                                .compute_global_transform(entity)
+                                .unwrap_or(*transform)
+                                .to_matrix(),
+                        )
+                    })
             })
             .collect();
     let mut model_frames = std::collections::HashMap::<(Entity, String), bevy::math::Mat4>::new();
@@ -2033,6 +2152,13 @@ pub(crate) fn tick_pon_ef_players(
                     &material_handle.0,
                     Vec4::new(color[0], color[1], color[2], opacity),
                 );
+                dynamic_uniforms::advance_uv(
+                    &mut materials,
+                    &material_handle.0,
+                    Vec2::from_array(meteor_asset::pon_ef::texture_scroll_speed(
+                        &node.transform_header,
+                    )) * dt,
+                );
             }
             if let Some(mut visibility) = visibility {
                 let degenerate = node_transform.scale.abs().max_element() <= 1e-4;
@@ -2235,22 +2361,21 @@ pub(crate) fn tick_pon_ef_particles(
             .filter_map(|(entity, endpoint, transform)| {
                 let transform = root_frames.get(&entity).unwrap_or(transform);
                 let (fighter, form, pose) = fighters.get(endpoint.fighter).ok()?;
-                (fighter.weapon_slot == endpoint.slot
-                    && fighter.weapon == endpoint.weapon
-                    && fighter.weapon_variant == endpoint.variant
-                    && endpoint.forms.as_ref().is_none_or(|forms| {
-                        forms.contains(&meteor_combat::combo_engine::weapon_visual_form(
+                endpoint
+                    .is_active_for(
+                        fighter,
+                        meteor_combat::combo_engine::weapon_visual_form(
                             fighter.weapon,
                             form.current,
                             pose.pose_id,
-                        ))
-                    }))
-                .then(|| {
-                    (
-                        (endpoint.fighter, endpoint.name.clone()),
-                        transform.to_matrix(),
+                        ),
                     )
-                })
+                    .then(|| {
+                        (
+                            (endpoint.fighter, endpoint.name.clone()),
+                            transform.to_matrix(),
+                        )
+                    })
             })
             .collect();
     let mut model_frames = std::collections::HashMap::<(Entity, String), bevy::math::Mat4>::new();
@@ -2693,7 +2818,14 @@ fn despawn_pon_ef(mut commands: Commands, query: EffectCleanupEntities<'_, '_>) 
 fn combat_hit_effects(
     mut commands: Commands,
     mut events: MessageReader<crate::plugins::impact_fx_plugin::CombatImpactEvent>,
-    fighters: Query<(&Fighter, &PoseRuntime, &Transform)>,
+    fighters: Query<(
+        &Fighter,
+        &PoseRuntime,
+        &Transform,
+        Has<crate::plugins::stage_plugin::LocalFighter>,
+        Has<crate::plugins::network_plugin::RemoteFighter>,
+    )>,
+    net: Option<Res<crate::plugins::network_plugin::NetState>>,
     mut cache: ResMut<EfCache>,
     shapes: Option<Res<PonEfShapeMeshes>>,
     assets: Option<Res<EffectAssets>>,
@@ -2709,13 +2841,24 @@ fn combat_hit_effects(
     let roots =
         resource_roots(&std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
     for event in events.read() {
-        let Ok((_, pose, transform)) = fighters.get(event.defender) else {
+        let Ok((_, pose, transform, _, remote)) = fighters.get(event.defender) else {
             continue;
         };
+
+        if remote
+            && net.as_deref().is_some_and(|net| net.is_stock_udp())
+            && fighters
+                .get(event.attacker)
+                .is_ok_and(|(_, _, _, local, _)| local)
+        {
+            continue;
+        }
         let strategy = event.effect_strategy.unwrap_or_else(|| {
-            fighters.get(event.attacker).map_or(0, |(fighter, _, _)| {
-                meteor_combat::weapon_strategy::weapon_to_strategy(fighter.weapon)
-            })
+            fighters
+                .get(event.attacker)
+                .map_or(0, |(fighter, _, _, _, _)| {
+                    meteor_combat::weapon_strategy::weapon_to_strategy(fighter.weapon)
+                })
         });
         let guard = event.kind == crate::plugins::impact_fx_plugin::CombatImpactKind::Guard;
         let kind = if guard { "GD" } else { "BL" };
@@ -2774,15 +2917,22 @@ fn scene_script_effects(
     mut images: ResMut<Assets<bevy::image::Image>>,
     mut gmdl_materials: ResMut<Assets<GmdlMaterial>>,
     pickups: Query<(Entity, &PickupEffectRequest)>,
+    collectors: Query<(), With<crate::components::fighter::Fighter>>,
 ) {
     let (Some(shapes), Some(assets)) = (shapes, assets) else {
         return;
     };
-    for event in events
+    let scene = events
         .read()
-        .chain(pickups.iter().map(|(_, request)| &request.0))
-    {
-        if event.effect.is_empty() {
+        .map(|event| (event.effect.as_str(), event.position, None));
+    let claimed = pickups.iter().filter_map(|(_, request)| {
+        collectors
+            .get(request.collector)
+            .ok()
+            .map(|_| (request.effect.as_str(), Vec3::ZERO, Some(request.collector)))
+    });
+    for (effect, position, parent) in scene.chain(claimed) {
+        if effect.is_empty() {
             continue;
         }
         let mut ctx = EfSpawnContext {
@@ -2798,9 +2948,9 @@ fn scene_script_effects(
             &mut commands,
             &mut cache,
             &mut ctx,
-            &event.effect,
-            event.position,
-            None,
+            effect,
+            position,
+            parent,
             false,
         );
     }
@@ -2899,12 +3049,41 @@ fn pose_effect_spawn_ready(
         spawn.pose_instance_id = pose.pose_instance_id;
         spawn.spawned = false;
     }
-    let blend_active = blend.duration > 0.0 && blend.pose_id == pose.pose_id;
+    let blend_active = blend.is_active_for(pose.pose_id);
     !spawn.spawned && !blend_active && pose.frame >= pose.start as f32 && !pose.finished()
+}
+
+pub(crate) fn clear_interrupted_pose_effects(
+    mut commands: Commands,
+    fighters: Query<(&PoseRuntime, Option<&CombatState>), With<Fighter>>,
+    effects: Query<(Entity, &PoseOwnedPonEf)>,
+) {
+    for (entity, owned) in &effects {
+        let stale = fighters
+            .get(owned.fighter)
+            .map(|(pose, combat)| {
+                pose.pose_instance_id != owned.pose_instance_id
+                    && combat.is_some_and(|combat| {
+                        matches!(
+                            combat.state,
+                            meteor_core::FighterState::BeHit
+                                | meteor_core::FighterState::Down
+                                | meteor_core::FighterState::Dead
+                        )
+                    })
+            })
+            .unwrap_or(true);
+        if stale {
+            if let Ok(mut entity_commands) = commands.get_entity(entity) {
+                entity_commands.despawn();
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pose_effect_spawn(
+    active_fighter: Option<Res<super::fighter_frame::ActiveFighter>>,
     mut commands: Commands,
     assets: Option<Res<CharacterAssetsSet>>,
     mut cache: ResMut<EfCache>,
@@ -2928,6 +3107,9 @@ pub(crate) fn pose_effect_spawn(
         return;
     };
     for (entity, fighter, pose, blend, mut spawn) in &mut query {
+        if !super::fighter_frame::accepts(active_fighter.as_deref(), entity) {
+            continue;
+        }
         if !pose_effect_spawn_ready(&mut spawn, pose, blend) {
             continue;
         }
@@ -2962,9 +3144,21 @@ pub(crate) fn pose_effect_spawn(
             Some(entity),
             false,
         ) {
-            commands.entity(effect).insert(PonEfStartTime(
-                meteor_anim::pose_controller::pose_elapsed_seconds_at_frame(pose_rec, pose.frame),
+            let entry_time =
+                meteor_anim::pose_controller::pose_elapsed_seconds_at_frame(pose_rec, pose.frame);
+            commands.entity(effect).insert((
+                PoseOwnedPonEf {
+                    fighter: entity,
+                    pose_instance_id: pose.pose_instance_id,
+                },
+                PonEfStartTime(entry_time),
             ));
+
+            commands.queue(move |world: &mut World| {
+                if let Some(mut player) = world.get_mut::<PonEfInstance>(effect) {
+                    player.elapsed = entry_time;
+                }
+            });
         }
     }
 }
@@ -3065,6 +3259,10 @@ mod tests {
     }
 
     fn feedback_test_app() -> App {
+        feedback_test_app_with_serial(false)
+    }
+
+    fn feedback_test_app_with_serial(serial: bool) -> App {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .add_plugins(bevy::transform::TransformPlugin)
@@ -3084,8 +3282,107 @@ mod tests {
             .add_message::<crate::plugins::impact_fx_plugin::CombatImpactEvent>()
             .add_systems(Startup, setup_effect_assets);
         crate::plugins::configure_fighter_frame_sets(&mut app);
+        if serial {
+            super::super::fighter_frame::install(&mut app);
+        }
         install_effect_playback_systems(&mut app);
         app
+    }
+
+    #[test]
+    fn pose_effects_are_initialized_before_the_owners_hit_judge() {
+        #[derive(Resource, Default)]
+        struct Samples(Vec<(Entity, usize, usize, f32)>);
+        for serial in [false, true] {
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+            let character = crate::plugins::character_plugin::load_character_asset_for_test(
+                std::slice::from_ref(&root),
+                "p0",
+            )
+            .unwrap();
+            let mut app = feedback_test_app_with_serial(serial);
+            app.update();
+            app.insert_resource(crate::plugins::character_plugin::CharacterAssetsSet(
+                std::collections::HashMap::from([("p0".into(), character)]),
+            ));
+            let mut actors = Vec::new();
+            let mut expected = Vec::new();
+            for pose_id in [421, 372] {
+                let assets = &app
+                    .world()
+                    .resource::<crate::plugins::character_plugin::CharacterAssetsSet>()
+                    .0["p0"];
+                let mut pose = PoseRuntime::idle();
+                assets.apply_pose(&mut pose, pose_id, true);
+                pose.frame += 2.0;
+                expected.push(meteor_anim::pose_controller::pose_elapsed_seconds_at_frame(
+                    &assets.poses[&pose_id],
+                    pose.frame,
+                ));
+                let entity = app
+                    .world_mut()
+                    .spawn((
+                        feedback_fighter(11),
+                        pose,
+                        EntryBlend::default(),
+                        PoseEffectSpawn::default(),
+                        Transform::default(),
+                    ))
+                    .id();
+                app.world_mut().spawn((
+                    FighterModel {
+                        fighter: entity,
+                        character: "p0".into(),
+                    },
+                    Transform::default(),
+                ));
+                actors.push(entity);
+            }
+            let ids = actors.clone();
+            let actor_schedule = super::super::fighter_frame::schedule(&app);
+            app.init_resource::<Samples>().add_systems(
+                actor_schedule,
+                (move |active: Option<Res<super::super::fighter_frame::ActiveFighter>>,
+                       effects: Query<(&PoseOwnedPonEf, &PonEfInstance)>,
+                       mut samples: ResMut<Samples>| {
+                    for &owner in &ids {
+                        if !super::super::fighter_frame::accepts(active.as_deref(), owner) {
+                            continue;
+                        }
+                        let owned: Vec<_> = effects
+                            .iter()
+                            .filter(|(tag, _)| tag.fighter == owner)
+                            .collect();
+                        samples.0.push((
+                            owner,
+                            owned.len(),
+                            effects.iter().count(),
+                            owned.first().map_or(-1.0, |(_, ef)| ef.elapsed),
+                        ));
+                    }
+                })
+                .in_set(crate::plugins::FighterFrameSet::HitJudge),
+            );
+            app.update();
+            let samples = &app.world().resource::<Samples>().0;
+            assert_eq!(samples.len(), 2);
+            for (i, &(owner, count, total, elapsed)) in samples.iter().enumerate() {
+                assert_eq!(owner, actors[i]);
+                assert_eq!(
+                    count, 1,
+                    "serial={serial}: first hit judgement must see its pose effect"
+                );
+                assert!(
+                    (elapsed - expected[i]).abs() < 1e-6,
+                    "serial={serial}: authored start time must be initialized before judgement"
+                );
+                assert_eq!(
+                    total,
+                    if serial { i + 1 } else { 2 },
+                    "future actors must not spawn early"
+                );
+            }
+        }
     }
 
     fn feedback_fighter(weapon: u8) -> Fighter {
@@ -3097,6 +3394,99 @@ mod tests {
             weapon_slot: 0,
             weapon_slot_variants: [0, 0],
             weapon_variant: 0,
+        }
+    }
+
+    #[test]
+    fn original_hammer_and_shield_uv_scroll_only_during_node_window() {
+        for (effect, node_name, speed) in [
+            ("pos325", "AttackBall", Vec2::new(-5.0, 0.0)),
+            ("pos326", "AttackBall02", Vec2::new(15.0, 10.0)),
+            ("DefUPSlf", "Sphere_8", Vec2::new(0.0, 1.0)),
+            ("DefUPSlf", "Sphere_7", Vec2::new(0.0, -2.0)),
+        ] {
+            let mut app = feedback_test_app();
+            app.update();
+            app.world_mut().write_message(SceneEffectEvent {
+                effect: effect.into(),
+                position: Vec3::ZERO,
+            });
+            app.update();
+            let (root, index, start, end) = app
+                .world_mut()
+                .query::<(Entity, &PonEfInstance)>()
+                .iter(app.world())
+                .find_map(|(root, player)| {
+                    player
+                        .ef
+                        .nodes
+                        .iter()
+                        .enumerate()
+                        .find(|(_, node)| node.name == node_name)
+                        .map(|(index, node)| {
+                            assert_eq!(
+                                Vec2::from_array(meteor_asset::pon_ef::texture_scroll_speed(
+                                    &node.transform_header,
+                                )),
+                                speed
+                            );
+                            (root, index, node.start_time, node.end_time)
+                        })
+                })
+                .expect("authored effect node");
+            let handle = app
+                .world_mut()
+                .query::<(
+                    &PonEfNodeOwner,
+                    &PonEfNodeEntity,
+                    &MeshMaterial3d<PonEfMaterial>,
+                )>()
+                .iter(app.world())
+                .find(|(owner, node, _)| owner.0 == root && node.0 == index)
+                .unwrap()
+                .2
+                 .0
+                .clone();
+            let read_uv = |app: &App| {
+                app.world()
+                    .resource::<Assets<PonEfMaterial>>()
+                    .get(&handle)
+                    .unwrap()
+                    .params
+                    .uv_offset
+            };
+            let mut previous = read_uv(&app);
+            let mut moving_frames = 0;
+            let mut inactive_frames = 0;
+            for _ in 0..190 {
+                app.update();
+                let Some(player) = app.world().get::<PonEfInstance>(root) else {
+                    break;
+                };
+                let active = player.elapsed >= start - 1e-4 && player.elapsed <= end + 1e-4;
+                let dt = app.world().resource::<Time>().delta_secs();
+                let expected = if active {
+                    moving_frames += 1;
+                    (previous + speed * dt).rem_euclid(Vec2::ONE)
+                } else {
+                    inactive_frames += 1;
+                    previous
+                };
+                let actual = read_uv(&app);
+                assert!(
+                    actual.distance(expected) < 1e-5,
+                    "{effect}:{node_name} at {}: {actual:?} != {expected:?}",
+                    player.elapsed
+                );
+                previous = actual;
+            }
+            assert!(
+                moving_frames > 20,
+                "must actually animate {effect}:{node_name}"
+            );
+            if effect.starts_with("pos") {
+                assert!(inactive_frames > 20, "must retain UV outside the window");
+            }
         }
     }
 
@@ -3116,13 +3506,16 @@ mod tests {
             let position = Vec3::new(6.0, 0.0, 8.0);
             let mut fighter = feedback_fighter(5);
             fighter.weapon_slots = [5, 0];
-            app.world_mut().spawn((
-                fighter,
-                crate::plugins::stage_plugin::LocalFighter,
-                Health::default(),
-                Qi::default(),
-                Transform::from_translation(position),
-            ));
+            let collector = app
+                .world_mut()
+                .spawn((
+                    fighter,
+                    crate::plugins::stage_plugin::LocalFighter,
+                    Health::default(),
+                    Qi::default(),
+                    Transform::from_translation(position),
+                ))
+                .id();
             let prop = app
                 .world_mut()
                 .spawn((
@@ -3176,6 +3569,24 @@ mod tests {
             assert!(std::sync::Arc::ptr_eq(&instance.ef, &expected_ef));
             assert!(!instance.looping);
             assert_eq!(transform.translation(), position);
+            assert_eq!(
+                app.world().get::<ChildOf>(root).unwrap().parent(),
+                collector
+            );
+            assert!(app.world().get::<SceneEffectAnchor>(root).is_none());
+            let moved = position + Vec3::new(3.0, 0.5, -2.0);
+            app.world_mut()
+                .get_mut::<Transform>(collector)
+                .unwrap()
+                .translation = moved;
+            app.update();
+            assert_eq!(
+                app.world()
+                    .get::<GlobalTransform>(root)
+                    .unwrap()
+                    .translation(),
+                moved
+            );
             assert_eq!(
                 app.world_mut()
                     .query::<&PickupEffectRequest>()
@@ -3262,6 +3673,7 @@ mod tests {
                 .spawn((
                     feedback_fighter(5),
                     PoseRuntime {
+                        action_id: None,
                         pose_id,
                         frame: pose.action_entry_frame as f32,
                         start: pose.start,
@@ -3269,6 +3681,7 @@ mod tests {
                         loop_start: pose.start,
                         loop_end: pose.end,
                         loops: false,
+                        link_past_end: false,
                         pose_instance_id: 1,
                     },
                     EntryBlend {
@@ -3336,6 +3749,8 @@ mod tests {
             assert!((player.elapsed - expected_time - 1.0 / 60.0).abs() < 1e-5);
         }
     }
+
+    include!("effect_plugin/stock_impact_feedback_tests.rs");
 
     #[test]
     fn production_hit_feedback_uses_attacker_strategy_and_remote_reaction_override() {
@@ -3438,6 +3853,7 @@ mod tests {
         let effects = stage_ambient_effects(
             &std::fs::read_to_string(path).expect("sn22.des"),
             meteor_scene::stage_loader::ARENA_CENTER,
+            None,
         );
         assert_eq!(effects.len(), 64);
         assert_eq!(
@@ -4483,6 +4899,7 @@ mod tests {
             params: PonEfMaterialParams {
                 color: Vec4::ONE,
                 has_texture: 0,
+                uv_offset: Vec2::ZERO,
             },
             texture: None,
             blend: PonEfBlendMode::Opaque,
@@ -4503,6 +4920,7 @@ mod tests {
 
     fn test_pose(pose_id: u16, pose_instance_id: u32) -> PoseRuntime {
         PoseRuntime {
+            action_id: None,
             pose_id,
             frame: 10.0,
             start: 10,
@@ -4510,6 +4928,7 @@ mod tests {
             loop_start: 10,
             loop_end: 20,
             loops: false,
+            link_past_end: false,
             pose_instance_id,
         }
     }
@@ -4560,6 +4979,114 @@ mod tests {
         spawn.pose_instance_id = finished.pose_instance_id;
         spawn.spawned = false;
         assert!(!pose_effect_spawn_ready(&mut spawn, &finished, &blend));
+    }
+
+    #[test]
+    fn interrupted_pose_instance_despawns_owned_effects_natural_link_keeps_them() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut world = World::new();
+        let fighter = world
+            .spawn((
+                Fighter {
+                    character_id: 0,
+                    player_slot: 0,
+                    weapon: 9,
+                    weapon_slots: [9, 9],
+                    weapon_slot: 0,
+                    weapon_slot_variants: [0, 0],
+                    weapon_variant: 0,
+                },
+                test_pose(326, 11),
+            ))
+            .id();
+
+        let owned = world
+            .spawn((
+                PonEfInstance {
+                    ef: std::sync::Arc::new(meteor_asset::pon_ef::PonEf {
+                        signature: "PonEF V1.00".into(),
+                        count: 0,
+                        nodes: Vec::new(),
+                        byte_length: 0,
+                    }),
+                    elapsed: 0.1,
+                    duration: 4.0,
+                    looping: false,
+                    audio_playing: Vec::new(),
+                    audio_triggered: Vec::new(),
+                },
+                PoseOwnedPonEf {
+                    fighter,
+                    pose_instance_id: 11,
+                },
+                ChildOf(fighter),
+            ))
+            .id();
+        let untagged = world
+            .spawn((
+                PonEfInstance {
+                    ef: std::sync::Arc::new(meteor_asset::pon_ef::PonEf {
+                        signature: "PonEF V1.00".into(),
+                        count: 0,
+                        nodes: Vec::new(),
+                        byte_length: 0,
+                    }),
+                    elapsed: 0.1,
+                    duration: 4.0,
+                    looping: false,
+                    audio_playing: Vec::new(),
+                    audio_triggered: Vec::new(),
+                },
+                ChildOf(fighter),
+            ))
+            .id();
+
+        world.entity_mut(fighter).insert(test_pose(327, 11));
+        world
+            .run_system_once(clear_interrupted_pose_effects)
+            .expect("clear interrupted");
+        assert!(
+            world.get_entity(owned).is_ok(),
+            "natural Link must keep the previous pose effect"
+        );
+        assert!(world.get_entity(untagged).is_ok());
+
+        let audio = world.spawn(ChildOf(owned)).id();
+        for state in [
+            meteor_core::FighterState::Attack2,
+            meteor_core::FighterState::Name,
+        ] {
+            world
+                .entity_mut(fighter)
+                .insert((test_pose(268, 12), CombatState { state }));
+            world
+                .run_system_once(clear_interrupted_pose_effects)
+                .expect("combo cleanup");
+            assert!(world.get_entity(owned).is_ok());
+            assert!(
+                world.get_entity(audio).is_ok(),
+                "combo must not truncate audio"
+            );
+        }
+
+        world.entity_mut(fighter).insert((
+            test_pose(100, 13),
+            CombatState {
+                state: meteor_core::FighterState::BeHit,
+            },
+        ));
+        world
+            .run_system_once(clear_interrupted_pose_effects)
+            .expect("clear interrupted");
+        assert!(
+            world.get_entity(owned).is_err(),
+            "interrupted ultimates must despawn pose-owned light effects"
+        );
+        assert!(
+            world.get_entity(untagged).is_ok(),
+            "worn/scene effects without PoseOwnedPonEf stay"
+        );
     }
 
     #[test]
@@ -4652,6 +5179,7 @@ mod tests {
             vip_effect_for_fighter(
                 &request,
                 &net,
+                None,
                 Some(&crate::plugins::stage_plugin::LocalFighter),
                 None,
                 None,
@@ -4664,8 +5192,68 @@ mod tests {
             player_id: "stock-9".into(),
         };
         assert_eq!(
-            vip_effect_for_fighter(&request, &net, None, None, Some(&remote)),
+            vip_effect_for_fighter(&request, &net, None, None, None, Some(&remote)),
             Some("vipred.ef")
+        );
+    }
+
+    #[test]
+    fn real_sn13_vip_effect_marks_player_and_wangqiang_but_not_lengyan() {
+        let (level, actors) = crate::plugins::stage_plugin::solo_identity_tests::sn13();
+        let request = crate::app_state::LaunchRequest {
+            mode: "single".into(),
+            stage_id: "sn13".into(),
+            stock_camp: 2,
+            ..default()
+        };
+        let net = crate::plugins::network_plugin::NetState::default();
+        assert_eq!(
+            vip_effect_for_fighter(
+                &request,
+                &net,
+                Some(&level),
+                Some(&crate::plugins::stage_plugin::LocalFighter),
+                None,
+                None
+            ),
+            Some("vipblue.ef"),
+        );
+        for npc in &actors {
+            assert_eq!(
+                vip_effect_for_fighter(&request, &net, Some(&level), None, Some(npc), None),
+                (npc.id == 2).then_some("vipred.ef"),
+                "{}",
+                npc.name,
+            );
+        }
+        assert_eq!(
+            vip_effect_for_fighter(
+                &request,
+                &net,
+                None,
+                Some(&crate::plugins::stage_plugin::LocalFighter),
+                None,
+                None
+            ),
+            None,
+            "a discarded mission must remove the old captain effect",
+        );
+        let ordinary = crate::plugins::stage_plugin::StageMissionRuntime::from_script(
+            meteor_scene::mission_runtime::MissionScriptRuntime::new(
+                "int Rule=10;",
+                meteor_scene::mission_runtime::parse_mission_definition("int Rule=10;").values,
+            ),
+        );
+        assert_eq!(
+            vip_effect_for_fighter(
+                &request,
+                &net,
+                Some(&ordinary),
+                Some(&crate::plugins::stage_plugin::LocalFighter),
+                None,
+                None
+            ),
+            None,
         );
     }
 
@@ -4688,6 +5276,77 @@ mod tests {
                 }),
                 "{} must contain at least one visible node",
                 path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn original_lock_marker_triangle_tips_point_inward() {
+        let origin = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        let pak = meteor_asset::pak::PakArchive::from_bytes(
+            &std::fs::read(origin.join("ETexture.pak")).unwrap(),
+        )
+        .unwrap();
+        let bitmap =
+            meteor_asset::texture::decode_image(&pak.read_entry("ETexture/lock.bmp").unwrap())
+                .unwrap();
+        let bright_width = |row: usize| {
+            bitmap.rgba[row * bitmap.width as usize * 4..(row + 1) * bitmap.width as usize * 4]
+                .chunks_exact(4)
+                .filter(|pixel| pixel[..3].iter().copied().max().unwrap_or(0) > 150)
+                .count()
+        };
+        assert!(
+            bright_width(0) > bright_width(bitmap.height as usize - 1) * 2,
+            "decoded Lock.BMP has its wide triangle base at v=0"
+        );
+
+        let effect =
+            meteor_asset::pon_ef::parse_pon_ef(&std::fs::read(origin.join("SFX/Lock.ef")).unwrap())
+                .unwrap();
+        for name in ["Rectangle_5", "Rectangle_7", "Rectangle_3"] {
+            let node = effect.nodes.iter().find(|node| node.name == name).unwrap();
+            let mesh = pon_ef_shape_mesh(node).unwrap();
+            let bevy::mesh::VertexAttributeValues::Float32x3(positions) =
+                mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap()
+            else {
+                panic!("{name}: expected positions");
+            };
+            let bevy::mesh::VertexAttributeValues::Float32x2(uvs) =
+                mesh.attribute(Mesh::ATTRIBUTE_UV_0).unwrap()
+            else {
+                panic!("{name}: expected UVs");
+            };
+
+            let tip_edge = positions
+                .iter()
+                .zip(uvs)
+                .filter(|(_, uv)| uv[1] > 0.5)
+                .map(|(position, _)| Vec3::from_array(*position))
+                .sum::<Vec3>()
+                / 2.0;
+            let center = positions
+                .iter()
+                .map(|position| Vec3::from_array(*position))
+                .sum::<Vec3>()
+                / 4.0;
+            let mut memo = std::collections::HashMap::new();
+            let mut visiting = std::collections::HashSet::new();
+            let world = meteor_asset::pon_ef::node_world_matrix(
+                &effect,
+                node.index,
+                0.1,
+                &mut memo,
+                &mut visiting,
+                &mut |_| Some(scene_effect_source_frame()),
+            )
+            .unwrap();
+            let world = bevy::math::Mat4::from_cols_array(&world.m);
+            let center = world.transform_point3(center);
+            let tip_edge = world.transform_point3(tip_edge);
+            assert!(
+                (tip_edge - center).dot(-center) > 0.0,
+                "{name}: original Lock.BMP triangle tip must face the target center"
             );
         }
     }
@@ -4757,6 +5416,7 @@ mod tests {
                     weapon_variant: 0,
                 },
                 PoseRuntime {
+                    action_id: None,
                     pose_id: 253,
                     frame: 9193.0,
                     start: 9193,
@@ -4764,6 +5424,7 @@ mod tests {
                     loop_start: 9193,
                     loop_end: 9236,
                     loops: false,
+                    link_past_end: false,
                     pose_instance_id: 1,
                 },
                 EntryBlend::default(),
@@ -4864,6 +5525,7 @@ mod tests {
                     weapon_variant: 0,
                 },
                 PoseRuntime {
+                    action_id: None,
                     pose_id: 24,
                     frame: pose_start as f32,
                     start: pose_start,
@@ -4871,6 +5533,7 @@ mod tests {
                     loop_start: pose_start,
                     loop_end: pose_start + 30,
                     loops: false,
+                    link_past_end: false,
                     pose_instance_id: 1,
                 },
                 EntryBlend::default(),
@@ -5003,6 +5666,7 @@ mod tests {
                     weapon_variant: 0,
                 },
                 PoseRuntime {
+                    action_id: None,
                     pose_id: 256,
                     frame: 9377.0,
                     start: 9377,
@@ -5010,6 +5674,7 @@ mod tests {
                     loop_start: 9377,
                     loop_end: 9413,
                     loops: false,
+                    link_past_end: false,
                     pose_instance_id: 1,
                 },
                 EntryBlend::default(),
@@ -5184,6 +5849,41 @@ mod texture_tests {
     use super::*;
 
     #[test]
+    fn cached_ifl_frames_follow_texture_quality_changes() {
+        let mut cache = EfTextureCache::default();
+        let mut images = Assets::<Image>::default();
+        let frames = cache.ifl_frames(&mut images, "bom.ifl");
+        assert!(frames.len() > 1);
+        let mut app = App::new();
+        app.insert_resource(cache)
+            .insert_resource(images)
+            .insert_resource(crate::app_state::Settings {
+                texture_quality: 2,
+                ..default()
+            })
+            .add_systems(Update, sync_ef_texture_quality);
+        app.update();
+        for handle in &frames {
+            let image = app.world().resource::<Assets<Image>>().get(handle).unwrap();
+            let bevy::image::ImageSampler::Descriptor(sampler) = &image.sampler else {
+                panic!("explicit sampler")
+            };
+            assert_eq!(sampler.mag_filter, bevy::image::ImageFilterMode::Nearest);
+        }
+        app.world_mut()
+            .resource_mut::<crate::app_state::Settings>()
+            .texture_quality = 0;
+        app.update();
+        for handle in &frames {
+            let image = app.world().resource::<Assets<Image>>().get(handle).unwrap();
+            let bevy::image::ImageSampler::Descriptor(sampler) = &image.sampler else {
+                panic!("explicit sampler")
+            };
+            assert_eq!(sampler.anisotropy_clamp, 16);
+        }
+    }
+
+    #[test]
     fn all_original_visible_effect_textures_resolve_except_missing_item12_art() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
         let mut cache = EfTextureCache::default();
@@ -5280,6 +5980,7 @@ mod texture_tests {
                     .as_ref()
                     .unwrap()
                     .chunks_exact(4)
+                    .take((alpha.width * alpha.height) as usize)
                     .map(|p| p[3])
                     .collect();
                 let expected: Vec<_> = alpha.rgba.chunks_exact(4).map(|p| p[0]).collect();
@@ -5359,6 +6060,18 @@ mod texture_tests {
         let shader = include_str!("pon_ef_material.wgsl");
         assert!(shader.contains("#{MATERIAL_BIND_GROUP}"));
         assert!(shader.contains("return texel * params.color"));
+    }
+
+    #[test]
+    fn pon_ef_material_skips_shadow_prepass_to_avoid_forward_uv_layout() {
+        assert!(!PonEfMaterial::enable_shadows());
+        let mut descriptor = RenderPipelineDescriptor::default();
+        assert!(!is_prepass_pipeline(&descriptor));
+        descriptor
+            .vertex
+            .shader_defs
+            .push(ShaderDefVal::Bool("PREPASS_PIPELINE".into(), true));
+        assert!(is_prepass_pipeline(&descriptor));
     }
 
     #[test]

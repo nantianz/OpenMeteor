@@ -1,7 +1,37 @@
 use super::*;
-use meteor_scene::hazards::{build_volumes, StageHazards};
+use meteor_scene::hazards::{build_volumes, build_world_bounds, StageHazards};
 
-pub(super) fn load_hazards(root: Option<&Path>, stage: &str) -> StageHazards {
+pub(super) fn load_escort(
+    root: &Path,
+    stage: &str,
+) -> Result<crate::escort_definition::EscortDefinition, String> {
+    if !meteor_scene::stage_registry::is_official_stage_id(stage) {
+        return Err("escort requires an installed official stage".into());
+    }
+    let read = |path: &str| read_resource(root, path).map_err(|e| format!("{path}: {e}"));
+    let des = read(&format!("{stage}/{stage}.des"))?;
+    let text = std::str::from_utf8(&des)
+        .map(std::borrow::Cow::Borrowed)
+        .unwrap_or_else(|_| encoding_rs::GB18030.decode(&des).0);
+    let desc = meteor_asset::des::parse_stage_description(&text);
+    let mesh = meteor_asset::gmdl::decode_gmdl(&read(&format!("{stage}/{stage}.gmb"))?)
+        .map_err(|e| e.to_string())?;
+    let registry =
+        meteor_asset::res::parse_meteor_res(&read("Meteor.res")?).map_err(|e| e.to_string())?;
+    let wp = read(&format!("Level/{stage}.wp"))
+        .ok()
+        .map(|b| encoding_rs::GB18030.decode(&b).0.into_owned());
+    let center = meteor_scene::stage_loader::get_stage_center(stage, wp.as_deref());
+    crate::escort_definition::EscortDefinition::from_assets(
+        &desc,
+        &mesh,
+        &registry,
+        center,
+        |model| meteor_asset::gmdl::decode_gmdl(&read(&format!("cmodel/{model}.gmb")).ok()?).ok(),
+    )
+}
+
+pub(super) fn load_hazards(root: Option<&Path>, stage: &str, mode: &str) -> StageHazards {
     let mut hazards = StageHazards::new();
     let Some(root) = root else { return hazards };
 
@@ -14,17 +44,26 @@ pub(super) fn load_hazards(root: Option<&Path>, stage: &str) -> StageHazards {
         let text = std::str::from_utf8(&des)
             .map(std::borrow::Cow::Borrowed)
             .unwrap_or_else(|_| encoding_rs::GB18030.decode(&des).0);
-        let desc = meteor_asset::des::parse_stage_description(&text);
+        let mut desc = meteor_asset::des::parse_stage_description(&text);
+        desc.apply_ticket_mask(1u32.wrapping_shl(mode_rule_id(mode).unwrap_or(1) as u32));
         let gmb = read_resource(root, &paths.gmb).map_err(|e| e.to_string())?;
         let mesh = meteor_asset::gmdl::decode_gmdl(&gmb).map_err(|e| e.to_string())?;
-        Ok(build_volumes(
-            &mesh,
-            &desc,
-            meteor_scene::stage_loader::get_stage_center(stage, None),
+        let waypoint_path = format!("Level/{stage}.wp");
+        let waypoint = read_resource(root, &waypoint_path).ok().map(|bytes| {
+            String::from_utf8(bytes.clone())
+                .unwrap_or_else(|_| encoding_rs::GB18030.decode(&bytes).0.into_owned())
+        });
+        let center = meteor_scene::stage_loader::get_stage_center(stage, waypoint.as_deref());
+        Ok((
+            build_volumes(&mesh, &desc, center),
+            build_world_bounds(&mesh, center),
         ))
     })();
     match loaded {
-        Ok(volumes) => hazards.build_from_stage(volumes, Vec::new()),
+        Ok((volumes, bounds)) => {
+            hazards.build_from_stage(volumes, Vec::new());
+            hazards.world_bounds = bounds;
+        }
         Err(error) => log::warn!("WS environment resources for {stage}: {error}"),
     }
     hazards
@@ -137,4 +176,25 @@ pub(super) fn read_resource(root: &Path, path: &str) -> std::io::Result<Vec<u8>>
     }
     let _ = root;
     meteor_asset::runtime_assets::read_file(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(feature = "original-assets")]
+    #[test]
+    fn ws_authority_loads_original_scene_bounds_with_waypoint_center() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        let hazards = load_hazards(Some(&root), "sn21", "deathmatch");
+        assert!(hazards.volumes.is_empty());
+        let bounds = hazards.world_bounds.expect("scene root bounds");
+        let gmb = std::fs::read(root.join("sn21/sn21.gmb")).unwrap();
+        let mesh = meteor_asset::gmdl::decode_gmdl(&gmb).unwrap();
+        let wp = std::fs::read_to_string(root.join("Level/sn21.wp")).unwrap();
+        let center = meteor_scene::stage_loader::get_stage_center("sn21", Some(&wp));
+        let expected = build_world_bounds(&mesh, center).unwrap();
+        assert_eq!(bounds.min, expected.min);
+        assert_eq!(bounds.max, expected.max);
+    }
 }

@@ -64,9 +64,13 @@ impl HitStatusEffects {
                 next_tick: now + f64::from(definition.tick_every),
             });
         }
-        StatusDelta {
-            health: definition.health,
-            anger: definition.anger,
+        if definition.defer_first_tick {
+            StatusDelta::default()
+        } else {
+            StatusDelta {
+                health: definition.health,
+                anger: definition.anger,
+            }
         }
     }
 
@@ -108,6 +112,33 @@ impl HitStatusEffects {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zero_interval_timed_items_wait_for_property_tick_and_keep_cadence_on_refresh() {
+        let mut effects = HitStatusEffects::default();
+        let hat = table().status_effect_for_model("item15").unwrap();
+        let phone = table().status_effect_for_model("item16").unwrap();
+        assert_eq!(effects.apply(hat, 0.0), StatusDelta::default());
+        assert_eq!(effects.apply(phone, 0.0), StatusDelta::default());
+        assert_eq!(effects.tick(0.19), StatusDelta::default());
+        assert_eq!(
+            effects.tick(0.200001),
+            StatusDelta {
+                health: 50,
+                anger: 1
+            }
+        );
+        assert_eq!(effects.apply(hat, 0.3), StatusDelta::default());
+        assert_eq!(
+            effects.tick(0.400001),
+            StatusDelta {
+                health: 50,
+                anger: 1
+            }
+        );
+        assert_eq!(effects.tick(0.400001), StatusDelta::default());
+        assert_eq!(effects.active.len(), 2);
+    }
 
     #[test]
     fn periodic_damage_flag_survives_simultaneous_healing_and_is_consumed_once() {

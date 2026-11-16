@@ -619,6 +619,12 @@ pub trait PstHost {
         true
     }
     fn initialize_script_actor(&mut self, _id: i64, _globals: &HashMap<String, PstValue>) {}
+    fn finish_script_actor_initialization(
+        &mut self,
+        _id: i64,
+        _globals: &HashMap<String, PstValue>,
+    ) {
+    }
 }
 
 pub struct NullHost;
@@ -686,6 +692,14 @@ impl<H: PstHost> Runtime<H> {
         self.initialized_scripts.contains(&id)
     }
 
+    pub fn script_values(&self, id: i64) -> Option<&HashMap<String, PstValue>> {
+        if self.active_script == Some(id) {
+            Some(&self.globals)
+        } else {
+            self.scripts.get(&id).map(|(_, values)| values)
+        }
+    }
+
     pub fn activate_script(&mut self, id: i64) -> Result<(), String> {
         self.steps = 0;
         self.activate_script_inner(id)
@@ -702,7 +716,10 @@ impl<H: PstHost> Runtime<H> {
         self.scripts.insert(id, (program, globals));
         self.initialized_scripts.insert(id);
         self.call_script_inner(id, "OnInit", &[PstValue::Num(id as f64)])?;
-        self.call_script_inner(id, "OnStart", &[])?;
+
+        if let Some(values) = self.script_values(id).cloned() {
+            self.host.finish_script_actor_initialization(id, &values);
+        }
         Ok(())
     }
 

@@ -8,6 +8,12 @@ pub struct DesktopArgs {
 }
 
 impl DesktopArgs {
+    pub fn resource_directory(&self) -> Option<PathBuf> {
+        self.original_dir
+            .clone()
+            .or_else(|| cfg!(feature = "original-directory-default").then(|| PathBuf::from(".")))
+    }
+
     pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Self, String> {
         let mut options = Self::default();
         let mut args = args.into_iter();
@@ -88,6 +94,23 @@ mod tests {
         ] {
             assert!(parse(&args).is_err(), "{args:?}");
         }
+    }
+    #[test]
+    fn resource_selection_obeys_build_default_and_explicit_override() {
+        assert_eq!(
+            parse(&[]).unwrap().resource_directory(),
+            cfg!(feature = "original-directory-default").then(|| PathBuf::from("."))
+        );
+        assert_eq!(
+            parse(&["--original-dir", "custom game"])
+                .unwrap()
+                .resource_directory(),
+            Some(PathBuf::from("custom game"))
+        );
+        assert_eq!(
+            parse(&["--check-resources"]).unwrap().resource_directory(),
+            parse(&[]).unwrap().resource_directory()
+        );
     }
     #[cfg(unix)]
     #[test]

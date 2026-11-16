@@ -18,7 +18,7 @@ use crate::plugins::movement_plugin::{
     FighterWall,
 };
 use crate::plugins::stage_collider::StageCollider;
-use crate::plugins::stage_plugin::{LocalFighter, MissionNpc, NpcCombatProfile, NpcPerformance};
+use crate::plugins::stage_plugin::{LocalFighter, MissionNpc, NpcPerformance};
 use crate::plugins::ui_scale_plugin::SafeAreaInsets;
 use bevy::gizmos as bevy_gizmos;
 use bevy::gizmos::{
@@ -78,7 +78,7 @@ impl Default for DebugPanelState {
             npc_model: 0,
             npc_weapon: 6,
             npc_team: 0,
-            npc_behavior: DebugNpcBehavior::Follow,
+            npc_behavior: DebugNpcBehavior::Run,
         }
     }
 }
@@ -418,6 +418,7 @@ enum DebugPanelTab {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DebugNpcBehavior {
+    Run,
     Follow,
     Dummy,
     Wait,
@@ -427,15 +428,22 @@ enum DebugNpcBehavior {
 impl DebugNpcBehavior {
     fn label(self) -> &'static str {
         match self {
-            Self::Follow => "追击 follow",
-            Self::Dummy => "固定木桩 dummy",
+            Self::Run => "游走接敌 run",
+            Self::Follow => "跟随目标 follow",
+            Self::Dummy => "被动木桩 dummy",
             Self::Wait => "待命 wait",
             Self::Patrol => "巡逻 patrol",
         }
     }
 
     fn cycle(self, delta: i8) -> Self {
-        let values = [Self::Follow, Self::Dummy, Self::Wait, Self::Patrol];
+        let values = [
+            Self::Run,
+            Self::Follow,
+            Self::Dummy,
+            Self::Wait,
+            Self::Patrol,
+        ];
         let index = values.iter().position(|value| *value == self).unwrap_or(0) as i8;
         values[(index + delta).rem_euclid(values.len() as i8) as usize]
     }
@@ -2452,6 +2460,9 @@ fn pose_cmd(
     }
     character_assets.apply_pose(&mut pose, id_raw, true);
     blend.duration = 0.0;
+    blend.zero_duration_pending = false;
+    blend.preserve_sample_once = false;
+    blend.retain_root_delta_once = false;
     log.print(format!("播放动作 {id_raw}"), ConsoleTone::Ok);
 }
 
@@ -2591,7 +2602,7 @@ fn add_dummy(
         if passive {
             DebugNpcBehavior::Dummy
         } else {
-            DebugNpcBehavior::Follow
+            DebugNpcBehavior::Run
         },
         local,
         npcs,
@@ -2654,6 +2665,7 @@ fn spawn_debug_npc(
     let spawn_pos = Vec3::new(base.x, ground_y, base.z);
     let serial = spawned.0.len() + 1;
     let (forced_behavior, behavior_args) = match behavior {
+        DebugNpcBehavior::Run => (Some(BehaviorMode::Run), Vec::new()),
         DebugNpcBehavior::Follow => (
             Some(BehaviorMode::Follow),
             vec![meteor_scene::pst_runtime::PstValue::Num(0.0)],
@@ -2678,8 +2690,8 @@ fn spawn_debug_npc(
                 name: format!("DebugNPC_{serial}"),
                 team: team.min(2),
                 in_scene_roster: false,
-                view: 200.0,
-                think: 50.0,
+                view: crate::plugins::ai_plugin::STOCK_NPC_VIEW,
+                think: crate::plugins::ai_plugin::STOCK_NPC_THINK,
                 forced_behavior,
                 is_vip: false,
                 attack_target_slot: None,
@@ -2721,7 +2733,7 @@ fn spawn_debug_npc(
             FighterDodge::default(),
             AiIntent::default(),
             crate::plugins::ai_plugin::NpcPatrol::default(),
-            NpcCombatProfile::web_debug(),
+            crate::plugins::ai_plugin::stock_npc_profile(),
             Transform::from_translation(spawn_pos),
         ),
     ));
@@ -3235,7 +3247,8 @@ fn visit_debug_hitboxes(
                 .iter()
                 .any(|name| name.eq_ignore_ascii_case("effect"))
             {
-                for obb in geometry.live_effect_obbs(entity, character) {
+                for obb in geometry.live_effect_obbs(entity, fighter, form, pose.pose_id, character)
+                {
                     draw(obb, true);
                 }
             }
@@ -3776,6 +3789,21 @@ mod tests {
         }
         state.apply(app.world_mut());
         let npc = *spawned.0.last().expect("debug NPC spawned");
+        let brain = app.world().get::<MissionNpc>(npc).unwrap();
+        assert_eq!(
+            (brain.view, brain.think),
+            (
+                crate::plugins::ai_plugin::STOCK_NPC_VIEW,
+                crate::plugins::ai_plugin::STOCK_NPC_THINK
+            )
+        );
+        assert_eq!(
+            app.world()
+                .get::<crate::plugins::stage_plugin::NpcCombatProfile>(npc)
+                .unwrap()
+                .dodge,
+            0.0
+        );
 
         let model = app
             .world_mut()

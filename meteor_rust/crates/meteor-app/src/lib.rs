@@ -114,6 +114,7 @@ impl Plugin for MeteorPlugin {
             .add_plugins(plugins::AnimPlugin)
             .add_plugins(plugins::PhysicsPlugin)
             .add_plugins(plugins::CombatPlugin)
+            .add_plugins(plugins::rebalance_plugin::RebalancePlugin)
             .add_plugins(plugins::RangedPlugin)
             .add_plugins(plugins::AiPlugin)
             .add_plugins(plugins::InputPlugin)
@@ -125,6 +126,7 @@ impl Plugin for MeteorPlugin {
             .add_plugins(plugins::WeaponTrailPlugin)
             .add_plugins(plugins::CameraPlugin)
             .add_plugins(plugins::DisplaySettingsPlugin)
+            .add_plugins(plugins::DynamicShadowsPlugin)
             .add_plugins(plugins::ImpactFxPlugin)
             .add_plugins(plugins::EffectPlugin)
             .add_plugins(plugins::NetworkPlugin)
@@ -157,8 +159,10 @@ pub fn build_app() -> App {
         target_arch = "x86_64",
         target_env = "msvc"
     ))]
-    let graphics_settings = neural_rendering::install(&mut app, graphics_settings);
+    let graphics_settings =
+        neural_rendering::install(&mut app, graphics_settings, settings.dlss5_neural_rendering);
     app.insert_resource(settings).insert_resource(keymap);
+    app.insert_resource(plugins::battle_result::timing::BestTimes::load());
     let default_plugins = DefaultPlugins
         .set(bevy::asset::AssetPlugin {
             file_path: "packs".into(),
@@ -205,6 +209,8 @@ pub fn build_app() -> App {
     #[cfg(target_os = "android")]
     app.add_systems(Startup, log_android_skinning_buffer_mode);
     app.add_plugins(MeteorPlugin);
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    plugins::stage_material::water::startup::install(&mut app);
     app.add_systems(Update, graphics_settings::update_current_renderer);
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     app.add_systems(Update, window_settings::sync_window_settings);

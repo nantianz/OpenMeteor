@@ -447,7 +447,33 @@ pub fn role_yaw_correction_factor(dt: f32, hit_age: f32) -> f32 {
     } else {
         1.0
     };
-    (step * 8.0 * hit_scale).min(1.0)
+    step * 8.0 * hit_scale
+}
+
+pub fn correct_role_forward(
+    current: RoleVec3,
+    target: RoleVec3,
+    dt: f32,
+    hit_age: f32,
+) -> RoleVec3 {
+    let current = current.finite_or_zero();
+    let target = target.finite_or_zero();
+    let weight = role_yaw_correction_factor(dt, hit_age);
+    let mixed = RoleVec3 {
+        x: current.x + (target.x - current.x) * weight,
+        y: current.y + (target.y - current.y) * weight,
+        z: current.z + (target.z - current.z) * weight,
+    };
+    let length = (mixed.x * mixed.x + mixed.y * mixed.y + mixed.z * mixed.z).sqrt();
+    if length > 0.01 {
+        RoleVec3 {
+            x: mixed.x / length,
+            y: mixed.y / length,
+            z: mixed.z / length,
+        }
+    } else {
+        target
+    }
 }
 
 fn canonical_state(state: RoleState) -> RoleState {
@@ -697,6 +723,31 @@ mod tests {
             }
         );
         assert_eq!(role_yaw_correction_factor(0.1, 0.25), 0.4);
+    }
+
+    #[test]
+    fn direction_correction_matches_original_model_methods() {
+        let golden: serde_json::Value =
+            serde_json::from_str(include_str!("stock_direction_correction.json")).unwrap();
+        for sample in golden["samples"].as_array().unwrap() {
+            let angle = (sample["target_degrees"].as_f64().unwrap() as f32).to_radians();
+            let dt = sample["dt"].as_f64().unwrap() as f32;
+            let age = sample["hit_age"].as_f64().unwrap() as f32;
+            let result =
+                correct_role_forward(forward_from_yaw(0.0), forward_from_yaw(angle), dt, age);
+            let source = &sample["forward_source"];
+            let expected = RoleVec3 {
+                x: source[0].as_f64().unwrap() as f32,
+                y: source[2].as_f64().unwrap() as f32,
+                z: -source[1].as_f64().unwrap() as f32,
+            };
+            assert!(
+                (result.x - expected.x).abs() < 1e-5
+                    && (result.y - expected.y).abs() < 1e-5
+                    && (result.z - expected.z).abs() < 1e-5,
+                "angle={angle} dt={dt} age={age}: {result:?} != {expected:?}"
+            );
+        }
     }
 
     #[test]

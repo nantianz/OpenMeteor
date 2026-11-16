@@ -1,4 +1,4 @@
-use crate::app_state::{AppState, InputBinding, Keymap};
+use crate::app_state::{AppState, InputBinding, KeyField, Keymap};
 use crate::components::fighter::MotionState;
 use crate::plugins::camera_plugin::CameraBasis;
 use crate::plugins::input_plugin::{SyntheticAction, SyntheticInputStream};
@@ -6,7 +6,8 @@ use crate::plugins::stage_plugin::LocalFighter;
 use bevy::prelude::*;
 use meteor_core::MODEL_SCALE;
 use meteor_input::command_parser::Dir;
-use std::collections::HashMap;
+use meteor_network::stock_protocol::StockSceneFrame;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 #[derive(Debug, Clone)]
@@ -68,6 +69,96 @@ pub struct MrcPlayback {
     pub file_name: String,
 
     pub prev_c: i32,
+    pub(crate) burst_tracks: HashMap<u16, Vec<MrcRemoteBurst>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct MrcRemoteBurst {
+    start_time: f32,
+    end_time: f32,
+
+    points: Vec<Vec3>,
+}
+
+impl MrcRemoteBurst {
+    fn position_at(&self, time: f32) -> Vec3 {
+        let steps = (self.points.len() - 1) as f32;
+        let at = ((time - self.start_time) / (self.end_time - self.start_time) * steps)
+            .clamp(0.0, steps);
+        let index = (at.floor() as usize).min(self.points.len() - 2);
+        self.points[index].lerp(self.points[index + 1], at - index as f32)
+    }
+}
+
+fn mrc_remote_bursts(doc: &meteor_asset::mrc::MrcDocument) -> HashMap<u16, Vec<MrcRemoteBurst>> {
+    let mut packets: HashMap<u16, Vec<(f32, meteor_network::role_state::RoleState)>> =
+        HashMap::new();
+    for entry in &doc.queue_a {
+        if entry.id != 2 {
+            continue;
+        }
+        for chunk in entry.blob.chunks_exact(16) {
+            let actor_id = u16::from_le_bytes([chunk[0], chunk[1]]);
+            if !(1..=64).contains(&actor_id) {
+                continue;
+            }
+            if let Ok(state) = meteor_network::role_state::decode_event2_state(&chunk[2..]) {
+                packets
+                    .entry(actor_id)
+                    .or_default()
+                    .push((entry.time, state));
+            }
+        }
+    }
+    let mut tracks = HashMap::new();
+    for (actor_id, states) in packets {
+        let mut bursts = Vec::new();
+        let mut previous_end: Option<(f32, meteor_network::role_state::RoleState)> = None;
+        let mut group_start = 0;
+        while group_start < states.len() {
+            let mut group_end = group_start + 1;
+            while group_end < states.len() && states[group_end].0 - states[group_start].0 < 0.001 {
+                group_end += 1;
+            }
+            let group = &states[group_start..group_end];
+            if let Some((start_time, start_state)) = previous_end {
+                let end_time = group.last().unwrap().0;
+                let span = end_time - start_time;
+                if group.len() > 1
+                    && span >= 0.15
+                    && group.iter().all(|(_, state)| {
+                        state.state_words.pose_id == start_state.state_words.pose_id
+                    })
+                {
+                    let mut points = Vec::with_capacity(group.len() + 1);
+                    points.push(role_position(start_state));
+                    points.extend(group.iter().map(|(_, state)| role_position(*state)));
+                    let path_length: f32 = points
+                        .windows(2)
+                        .map(|pair| pair[0].distance(pair[1]))
+                        .sum();
+                    let max_speed = std::iter::once(start_state)
+                        .chain(group.iter().map(|(_, state)| *state))
+                        .map(|state| role_velocity(state).length())
+                        .fold(0.0_f32, f32::max);
+
+                    if path_length / span <= max_speed * 2.0 + 1.0 {
+                        bursts.push(MrcRemoteBurst {
+                            start_time,
+                            end_time,
+                            points,
+                        });
+                    }
+                }
+            }
+            previous_end = group.last().copied();
+            group_start = group_end;
+        }
+        if !bursts.is_empty() {
+            tracks.insert(actor_id, bursts);
+        }
+    }
+    tracks
 }
 
 #[derive(Resource, Default)]
@@ -76,8 +167,77 @@ pub(crate) struct MrcFrameOverride {
     pub(crate) facing_applied: bool,
 }
 
+#[derive(Resource, Default)]
+struct MrcHeldInput {
+    bindings: HashSet<InputBinding>,
+}
+
+fn mrc_gameplay_bindings(keymap: &Keymap) -> HashSet<InputBinding> {
+    KeyField::BINDING_ACTIONS
+        .iter()
+        .map(|field| field.get(keymap))
+        .chain(std::iter::once(keymap.dodge))
+        .collect()
+}
+
+fn isolate_mrc_hardware_input(
+    playback: Res<MrcPlayback>,
+    keymap: Res<Keymap>,
+    held: Res<MrcHeldInput>,
+    mut keys: ResMut<ButtonInput<KeyCode>>,
+    mut mouse: ResMut<ButtonInput<MouseButton>>,
+) {
+    if !playback.active {
+        return;
+    }
+    for binding in mrc_gameplay_bindings(&keymap) {
+        match binding {
+            InputBinding::Key(key) => {
+                if held.bindings.contains(&binding) {
+                    keys.press(key);
+                    keys.clear_just_pressed(key);
+                    keys.clear_just_released(key);
+                } else {
+                    keys.reset(key);
+                }
+            }
+            InputBinding::Mouse(button) => {
+                if held.bindings.contains(&binding) {
+                    mouse.press(button);
+                    mouse.clear_just_pressed(button);
+                    mouse.clear_just_released(button);
+                } else {
+                    mouse.reset(button);
+                }
+            }
+        }
+    }
+}
+
+fn capture_mrc_held_input(
+    playback: Res<MrcPlayback>,
+    keymap: Res<Keymap>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut held: ResMut<MrcHeldInput>,
+) {
+    held.bindings.clear();
+    if playback.active {
+        held.bindings.extend(
+            mrc_gameplay_bindings(&keymap)
+                .into_iter()
+                .filter(|binding| binding.pressed(&keys, &mouse)),
+        );
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum MrcSessionEvent {
+    Identity {
+        actor_id: u16,
+        character_id: u8,
+        item_id: u32,
+    },
     Vitals {
         hp: f32,
         max_hp: f32,
@@ -91,11 +251,25 @@ enum MrcSessionEvent {
         actor_id: u16,
         state: meteor_network::role_state::RoleState,
     },
+    Action {
+        actor_id: u16,
+        chain: meteor_network::role_state::PoseChain,
+        start: bool,
+    },
+    Hit {
+        guarded: bool,
+        event: meteor_network::stock_protocol::StockHitReactionEvent,
+    },
+    Property(meteor_network::stock_protocol::StockPropertyEffectEvent),
 }
 
 #[derive(Resource, Default)]
 struct MrcSessionRuntime {
     pending: Vec<MrcSessionEvent>,
+    pending_actions: Vec<(u16, meteor_network::role_state::PoseChain, bool)>,
+    pending_hits: Vec<(bool, meteor_network::stock_protocol::StockHitReactionEvent)>,
+    pending_properties: Vec<meteor_network::stock_protocol::StockPropertyEffectEvent>,
+    character_by_slot: HashMap<u16, u8>,
     equip_by_slot: HashMap<u32, (u8, u8)>,
     event_counts: HashMap<u32, u64>,
     unhandled_counts: HashMap<u32, u64>,
@@ -106,8 +280,16 @@ struct MrcSessionRuntime {
 struct MrcRemoteFighter {
     actor_id: u16,
     pose_sequence: u16,
+    ground_sequence: u16,
     desired_pose_id: u16,
-    desired_pose_sequence: u16,
+    pose_pending: bool,
+    action_sequence: Option<u16>,
+    pending_action: Option<meteor_network::role_state::PoseChain>,
+    pending_start: bool,
+    applied_character_id: u8,
+    state_age: f32,
+    hit_age: f32,
+    pending_stock_state: bool,
 }
 
 impl MrcPlayback {
@@ -117,7 +299,12 @@ impl MrcPlayback {
 
     pub fn load(&mut self, path: &Path) -> Result<(), String> {
         let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-        let doc = meteor_asset::mrc::decode_mrc(&bytes).map_err(|e| e.to_string())?;
+        self.load_bytes(path.display().to_string(), &bytes)
+    }
+
+    pub fn load_bytes(&mut self, file_name: String, bytes: &[u8]) -> Result<(), String> {
+        let doc = meteor_asset::mrc::decode_mrc(bytes).map_err(|e| e.to_string())?;
+        self.burst_tracks = mrc_remote_bursts(&doc);
         self.doc = Some(doc);
         self.index_a = 0;
         self.index_b = 0;
@@ -128,7 +315,7 @@ impl MrcPlayback {
         self.prev_c = 0;
         self.active = true;
         self.paused = false;
-        self.file_name = path.display().to_string();
+        self.file_name = file_name;
         Ok(())
     }
 
@@ -139,8 +326,34 @@ impl MrcPlayback {
         Some(u32::from_le_bytes(bytes.try_into().ok()?))
     }
 
+    fn stock_scene_coordinates(&self) -> bool {
+        self.doc
+            .as_ref()
+            .is_some_and(|doc| doc.mark0 == 9 && doc.mark1 == 7)
+    }
+
     pub(crate) fn local_slot(&self) -> Option<u32> {
         self.state_word(1).filter(|slot| *slot > 0)
+    }
+
+    pub(crate) fn local_character(&self) -> Option<u8> {
+        let slot = self.local_slot()?;
+        self.doc
+            .as_ref()?
+            .queue_a
+            .iter()
+            .find_map(|entry| match entry.id {
+                4 => meteor_network::stock_protocol::decode_stock_roster(&entry.blob)
+                    .ok()?
+                    .into_iter()
+                    .find(|member| member.actor_id == slot && member.entered && member.hero < 20)
+                    .map(|member| member.hero as u8),
+                9 => meteor_network::stock_protocol::StockRoleEnteredEvent::decode(&entry.blob)
+                    .ok()
+                    .filter(|member| member.actor_id == slot && member.hero < 20)
+                    .map(|member| member.hero as u8),
+                _ => None,
+            })
     }
 
     pub(crate) fn local_weapon(&self) -> Option<(u8, u8)> {
@@ -168,6 +381,15 @@ impl MrcPlayback {
                 .flatten()
         })
     }
+
+    pub(crate) fn first_stock_local_position(&self, center: [f32; 3]) -> Option<Vec3> {
+        if !self.stock_scene_coordinates() {
+            return None;
+        }
+        let entry = self.doc.as_ref()?.queue_d.first()?;
+        let source = decode_mrc_pose(entry)?;
+        Some(mrc_scene_pose(source, Some(StockSceneFrame(center))))
+    }
 }
 
 fn decode_mrc_vitals(blob: &[u8]) -> Option<(f32, f32, f32)> {
@@ -193,6 +415,34 @@ fn route_mrc_session_entry(
     *runtime.event_counts.entry(entry.id).or_default() += 1;
     let mut handled = false;
     match entry.id {
+        4 => {
+            if let Ok(roster) = meteor_network::stock_protocol::decode_stock_roster(&entry.blob) {
+                for member in roster {
+                    if member.entered && (1..=64).contains(&member.actor_id) && member.hero < 20 {
+                        runtime.pending.push(MrcSessionEvent::Identity {
+                            actor_id: member.actor_id as u16,
+                            character_id: member.hero as u8,
+                            item_id: member.weapon_item_id,
+                        });
+                    }
+                }
+                handled = true;
+            }
+        }
+        9 => {
+            if let Ok(member) =
+                meteor_network::stock_protocol::StockRoleEnteredEvent::decode(&entry.blob)
+            {
+                if (1..=64).contains(&member.actor_id) && member.hero < 20 {
+                    runtime.pending.push(MrcSessionEvent::Identity {
+                        actor_id: member.actor_id as u16,
+                        character_id: member.hero as u8,
+                        item_id: member.hero_checksum,
+                    });
+                    handled = true;
+                }
+            }
+        }
         2 => {
             for chunk in entry.blob.chunks_exact(16) {
                 let actor_id = u16::from_le_bytes([chunk[0], chunk[1]]);
@@ -203,6 +453,49 @@ fn route_mrc_session_entry(
                     runtime
                         .pending
                         .push(MrcSessionEvent::Remote { actor_id, state });
+                    handled = true;
+                }
+            }
+        }
+        61 => {
+            if let Ok(event) =
+                meteor_network::stock_protocol::StockPropertyEffectEvent::decode(&entry.blob)
+            {
+                if (1..=64).contains(&event.actor_id) {
+                    runtime.pending.push(MrcSessionEvent::Property(event));
+                    handled = true;
+                }
+            }
+        }
+        11 | 14 => {
+            if let Ok(event) =
+                meteor_network::stock_protocol::StockHitReactionEvent::decode(&entry.blob)
+            {
+                let pose_id = if entry.id == 14 {
+                    event.pose_id >> 16
+                } else {
+                    event.pose_id
+                };
+                if (1..=64).contains(&event.target_actor_id) && pose_id <= 2048 {
+                    runtime.pending.push(MrcSessionEvent::Hit {
+                        guarded: entry.id == 14,
+                        event,
+                    });
+                    handled = true;
+                }
+            }
+        }
+        50 | 51 => {
+            if let Ok(event) =
+                meteor_network::stock_protocol::StockPoseChainEvent::decode(&entry.blob)
+            {
+                let chain: meteor_network::role_state::PoseChain = event.into();
+                if (1..=64).contains(&event.actor_id) && chain.is_valid() {
+                    runtime.pending.push(MrcSessionEvent::Action {
+                        actor_id: event.actor_id,
+                        chain,
+                        start: entry.id == 50,
+                    });
                     handled = true;
                 }
             }
@@ -252,6 +545,39 @@ fn decode_mrc_facing(entry: &meteor_asset::mrc::MrcQueueEEntry) -> Option<f32> {
     (x.is_finite() && z.is_finite() && length > 1e-6).then(|| (x / length).atan2(z / length))
 }
 
+fn mrc_scene_frame(
+    playback: &MrcPlayback,
+    waypoints: Option<&meteor_scene::stage_loader::WaypointGraph>,
+) -> Option<StockSceneFrame> {
+    if !playback.stock_scene_coordinates() {
+        return None;
+    }
+    let center = waypoints.map(|graph| graph.center).unwrap_or_else(|| {
+        let stage = playback.stage_id().unwrap_or_default();
+        meteor_scene::stage_loader::get_stage_center(&stage, None)
+    });
+    Some(StockSceneFrame(center))
+}
+
+fn mrc_scene_pose(position: Vec3, frame: Option<StockSceneFrame>) -> Vec3 {
+    let Some(StockSceneFrame(center)) = frame else {
+        return position;
+    };
+    Vec3::new(
+        position.x - center[0] * MODEL_SCALE,
+        position.y - center[2] * MODEL_SCALE,
+        center[1] * MODEL_SCALE - position.z,
+    )
+}
+
+fn mrc_scene_facing(yaw: f32, frame: Option<StockSceneFrame>) -> f32 {
+    if frame.is_some() {
+        yaw.sin().atan2(-yaw.cos())
+    } else {
+        yaw
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn tick_mrc_playback(
     time: Res<Time>,
@@ -261,6 +587,7 @@ fn tick_mrc_playback(
     mut mouse: ResMut<ButtonInput<MouseButton>>,
     mut synthetic: ResMut<SyntheticInputStream>,
     mut playback: ResMut<MrcPlayback>,
+    waypoints: Option<Res<meteor_scene::stage_loader::WaypointGraph>>,
     seek: Res<ReplaySeekRequest>,
     mut frame_override: ResMut<MrcFrameOverride>,
     mut session: ResMut<MrcSessionRuntime>,
@@ -277,27 +604,42 @@ fn tick_mrc_playback(
     }
     playback.elapsed += crate::plugins::simulation_dt(frame_clock.as_deref(), time.delta_secs());
     let t = playback.elapsed;
+    let scene_frame = mrc_scene_frame(&playback, waypoints.as_deref());
     synthetic.set_frame_clock_seconds(f64::from(t));
 
     let (index_a, index_b, index_c, index_d, index_e, packed, pose, facing, finished) = {
         let Some(doc) = playback.doc.as_ref() else {
             return;
         };
+
+        let session_cutoff = doc.queue_b[playback.index_b..]
+            .iter()
+            .take_while(|entry| entry.time <= t)
+            .find(|entry| {
+                entry.value != 0
+                    && (mrc_code_to_synthetic_action(entry.code).is_some()
+                        || matches!(entry.code, 0x11 | 0x12))
+            })
+            .map_or(t, |entry| entry.time);
         let mut i_a = playback.index_a;
-        while i_a < doc.queue_a.len() && doc.queue_a[i_a].time <= t {
+        while i_a < doc.queue_a.len() && doc.queue_a[i_a].time <= session_cutoff {
             route_mrc_session_entry(&doc.queue_a[i_a], &mut session);
             i_a += 1;
         }
         let mut pose = None;
         let mut i_d = playback.index_d;
         while i_d < doc.queue_d.len() && doc.queue_d[i_d].time <= t {
-            pose = decode_mrc_pose(&doc.queue_d[i_d]).or(pose);
+            pose = decode_mrc_pose(&doc.queue_d[i_d])
+                .map(|position| mrc_scene_pose(position, scene_frame))
+                .or(pose);
             i_d += 1;
         }
         let mut facing = None;
         let mut i_e = playback.index_e;
         while i_e < doc.queue_e.len() && doc.queue_e[i_e].time <= t {
-            facing = decode_mrc_facing(&doc.queue_e[i_e]).or(facing);
+            facing = decode_mrc_facing(&doc.queue_e[i_e])
+                .map(|yaw| mrc_scene_facing(yaw, scene_frame))
+                .or(facing);
             i_e += 1;
         }
 
@@ -314,22 +656,22 @@ fn tick_mrc_playback(
             } else if let Some(action) = mrc_code_to_synthetic_action(entry.code) {
                 if let Some(binding) = mrc_code_to_key(entry.code, &keymap) {
                     set_replay_input(&mut keys, &mut mouse, binding, entry.value != 0);
-                    synthetic.push_action(
-                        binding,
-                        action,
-                        entry.value != 0,
-                        Some(f64::from(entry.time)),
-                    );
+                    synthetic.push_action(binding, action, entry.value != 0, Some(f64::from(t)));
                 }
             } else if let Some(binding) = mrc_code_to_key(entry.code, &keymap) {
-                inject_replay_binding(
-                    &mut keys,
-                    &mut mouse,
-                    &mut synthetic,
-                    binding,
-                    entry.value != 0,
-                    Some(f64::from(entry.time)),
-                );
+                if matches!(entry.code, 0x57 | 0x53 | 0x41 | 0x44) {
+                    set_replay_input(&mut keys, &mut mouse, binding, entry.value != 0);
+                    synthetic.push_mrc_direction(binding, entry.value != 0, Some(f64::from(t)));
+                } else {
+                    inject_replay_binding(
+                        &mut keys,
+                        &mut mouse,
+                        &mut synthetic,
+                        binding,
+                        entry.value != 0,
+                        Some(f64::from(t)),
+                    );
+                }
             }
             i_b += 1;
         }
@@ -365,8 +707,7 @@ fn tick_mrc_playback(
         if let Ok((mut transform, mut motion)) = fighters.single_mut() {
             if let Some(position) = pose {
                 transform.translation = position;
-                motion.velocity.x = 0.0;
-                motion.velocity.z = 0.0;
+
                 frame_override.position_applied = true;
             }
             if let Some(yaw) = facing {
@@ -414,6 +755,8 @@ type MrcRemoteQuery<'w, 's> = Query<
         &'static mut MotionState,
         &'static mut crate::plugins::movement_plugin::FighterAir,
         &'static mut crate::plugins::network_plugin::RemoteTransformTarget,
+        Option<&'static crate::plugins::network_plugin::RemoteHitMotionWindow>,
+        &'static mut Transform,
     ),
     (With<MrcRemoteFighter>, Without<LocalFighter>),
 >;
@@ -436,6 +779,84 @@ fn role_movement_mode(state: meteor_network::role_state::RoleState) -> meteor_co
     }
 }
 
+fn apply_mrc_action_pose(
+    assets: Option<&crate::plugins::character_plugin::CharacterAssetsSet>,
+    fighter: &crate::components::fighter::Fighter,
+    pose: &mut crate::components::fighter::PoseRuntime,
+    blend: &mut crate::components::fighter::EntryBlend,
+    chain: meteor_network::role_state::PoseChain,
+) -> bool {
+    let Some(character) =
+        assets.and_then(|assets| assets.0.get(&format!("p{}", fighter.character_id)))
+    else {
+        return false;
+    };
+    if !character.poses.contains_key(&chain.pose_id) {
+        return false;
+    }
+
+    character.apply_pose_with_blend(
+        pose,
+        blend,
+        chain.pose_id,
+        true,
+        Some(chain.blend_seconds),
+        crate::components::fighter::EntryBlendKind::Chained,
+        false,
+        true,
+        None,
+    );
+    blend.duration = chain.blend_seconds.max(0.0);
+    pose.loops = false;
+    true
+}
+
+fn apply_mrc_start_pose(
+    assets: Option<&crate::plugins::character_plugin::CharacterAssetsSet>,
+    fighter: &crate::components::fighter::Fighter,
+    pose: &mut crate::components::fighter::PoseRuntime,
+    blend: &mut crate::components::fighter::EntryBlend,
+    chain: meteor_network::role_state::PoseChain,
+) -> bool {
+    let Some(character) =
+        assets.and_then(|assets| assets.0.get(&format!("p{}", fighter.character_id)))
+    else {
+        return false;
+    };
+    if !character.poses.contains_key(&chain.pose_id) {
+        return false;
+    }
+
+    character.apply_pose_with_blend(
+        pose,
+        blend,
+        chain.pose_id,
+        true,
+        (chain.blend_seconds > 0.01).then_some(chain.blend_seconds),
+        crate::components::fighter::EntryBlendKind::Generic,
+        false,
+        true,
+        None,
+    );
+    pose.link_past_end = true;
+    true
+}
+
+fn apply_mrc_discrete_pose(
+    assets: Option<&crate::plugins::character_plugin::CharacterAssetsSet>,
+    fighter: &crate::components::fighter::Fighter,
+    pose: &mut crate::components::fighter::PoseRuntime,
+    blend: &mut crate::components::fighter::EntryBlend,
+    chain: meteor_network::role_state::PoseChain,
+    start: bool,
+) -> bool {
+    if start {
+        apply_mrc_start_pose(assets, fighter, pose, blend, chain)
+    } else {
+        apply_mrc_action_pose(assets, fighter, pose, blend, chain)
+    }
+}
+
 fn apply_mrc_remote_pose(
     assets: Option<&crate::plugins::character_plugin::CharacterAssetsSet>,
     fighter: &crate::components::fighter::Fighter,
@@ -454,12 +875,10 @@ fn apply_mrc_remote_pose(
         pose_id,
         true,
         Some(0.1),
-        crate::components::fighter::EntryBlendKind::Network,
+        crate::components::fighter::EntryBlendKind::Generic,
         false,
-        false,
-        Some(meteor_combat::weapon_strategy::weapon_to_strategy(
-            fighter.weapon,
-        )),
+        true,
+        None,
     );
     true
 }
@@ -468,6 +887,7 @@ fn apply_mrc_remote_pose(
 fn apply_mrc_session_events(
     mut commands: Commands,
     playback: Res<MrcPlayback>,
+    waypoints: Option<Res<meteor_scene::stage_loader::WaypointGraph>>,
     assets: Option<Res<crate::plugins::character_plugin::CharacterAssetsSet>>,
     mut session: ResMut<MrcSessionRuntime>,
     mut local: MrcLocalVitalsQuery<'_, '_>,
@@ -475,7 +895,7 @@ fn apply_mrc_session_events(
 ) {
     let events = std::mem::take(&mut session.pending);
     let rebuild_remotes = std::mem::take(&mut session.rebuild_remotes);
-    if events.is_empty() && !rebuild_remotes {
+    if events.is_empty() && session.pending_actions.is_empty() && !rebuild_remotes {
         return;
     }
     if rebuild_remotes {
@@ -486,8 +906,22 @@ fn apply_mrc_session_events(
     let mut vitals = None;
     let mut remote_states = HashMap::new();
     let local_slot = playback.local_slot();
+    let mut actions = std::mem::take(&mut session.pending_actions);
+    let scene_frame = mrc_scene_frame(&playback, waypoints.as_deref());
     for event in &events {
         match *event {
+            MrcSessionEvent::Identity {
+                actor_id,
+                character_id,
+                item_id,
+            } => {
+                session.character_by_slot.insert(actor_id, character_id);
+                if let Some(weapon) =
+                    crate::plugins::character_plugin::weapon_slot_from_item(item_id as i64)
+                {
+                    session.equip_by_slot.insert(u32::from(actor_id), weapon);
+                }
+            }
             MrcSessionEvent::Vitals { hp, max_hp, anger } => {
                 vitals = Some((hp, max_hp, anger));
             }
@@ -503,6 +937,17 @@ fn apply_mrc_session_events(
                     remote_states.insert(actor_id, state);
                 }
             }
+            MrcSessionEvent::Action {
+                actor_id,
+                chain,
+                start,
+            } => {
+                actions.push((actor_id, chain, start));
+            }
+            MrcSessionEvent::Hit { guarded, event } => {
+                session.pending_hits.push((guarded, event));
+            }
+            MrcSessionEvent::Property(event) => session.pending_properties.push(event),
         }
     }
     if let Some((hp, max_hp, anger)) = vitals {
@@ -565,6 +1010,7 @@ fn apply_mrc_session_events(
     }
 
     for (actor_id, state) in remote_states {
+        let state = scene_frame.map_or(state, |frame| frame.to_scene(state));
         let position = role_position(state);
         let velocity = role_velocity(state);
         let yaw = meteor_network::role_state::yaw_from_forward(state.forward);
@@ -578,36 +1024,79 @@ fn apply_mrc_session_events(
                 mut motion,
                 mut air,
                 mut target,
+                hit_window,
+                _transform,
             )) = remotes
                 .iter_mut()
                 .find(|(_, remote, ..)| remote.actor_id == actor_id)
             {
-                remote.desired_pose_id = state.state_words.pose_id;
-                remote.desired_pose_sequence = state.state_words.pose_sequence;
+                let transition = meteor_network::role_state::decide_pose_transition(
+                    meteor_network::role_state::RemotePoseRuntime {
+                        pose_id: remote.desired_pose_id,
+                        ground_sequence: remote.ground_sequence,
+                        applied_sequence: remote.pose_sequence,
+                    },
+                    state,
+                );
+                remote.ground_sequence = transition.ground_sequence;
+                remote.pose_sequence = transition.applied_sequence;
+                if transition.apply {
+                    remote.desired_pose_id = state.state_words.pose_id;
+                    remote.pose_pending = true;
+                    if remote.pending_action.is_some_and(|action| {
+                        meteor_network::role_state::pose_sequence_is_newer(
+                            state.state_words.pose_sequence,
+                            action.sequence,
+                        )
+                    }) {
+                        remote.pending_action = None;
+                        remote.pending_start = false;
+                    }
+                }
                 target.translation = position;
                 target.yaw = yaw;
+
+                remote.state_age = 0.0;
+                remote.pending_stock_state = true;
                 motion.velocity = velocity;
-                motion.facing = yaw;
                 motion.movement_mode = role_movement_mode(state);
                 air.air.airborne = !state.state_words.grounded;
                 air.ground_contact = state.state_words.grounded;
-                if (pose.pose_id != state.state_words.pose_id
-                    || remote.pose_sequence != state.state_words.pose_sequence)
-                    && apply_mrc_remote_pose(
-                        assets.as_deref(),
-                        &fighter,
-                        &mut pose,
-                        &mut blend,
-                        state.state_words.pose_id,
-                    )
+                if remote.pose_pending
+                    && !(hit_window.is_some_and(|window| window.remaining > 0.0)
+                        && remote.pending_action.is_none())
+                    && match remote.pending_action {
+                        Some(chain) => apply_mrc_discrete_pose(
+                            assets.as_deref(),
+                            &fighter,
+                            &mut pose,
+                            &mut blend,
+                            chain,
+                            remote.pending_start,
+                        ),
+                        None => apply_mrc_remote_pose(
+                            assets.as_deref(),
+                            &fighter,
+                            &mut pose,
+                            &mut blend,
+                            remote.desired_pose_id,
+                        ),
+                    }
                 {
-                    remote.pose_sequence = state.state_words.pose_sequence;
+                    remote.pose_pending = false;
+                    remote.pending_action = None;
+                    remote.pending_start = false;
+                    remote.applied_character_id = fighter.character_id;
                 }
                 continue;
             }
         }
 
-        let character_id = (actor_id.saturating_sub(1) % 20) as u8;
+        let character_id = session
+            .character_by_slot
+            .get(&actor_id)
+            .copied()
+            .unwrap_or(0);
         let (weapon, variant) = session
             .equip_by_slot
             .get(&(actor_id as u32))
@@ -631,6 +1120,20 @@ fn apply_mrc_session_events(
             &mut blend,
             state.state_words.pose_id,
         );
+        let visible_position = if rebuild_remotes {
+            playback
+                .burst_tracks
+                .get(&actor_id)
+                .and_then(|bursts| {
+                    bursts.iter().find(|burst| {
+                        burst.start_time <= playback.elapsed && playback.elapsed <= burst.end_time
+                    })
+                })
+                .map(|burst| mrc_scene_pose(burst.position_at(playback.elapsed), scene_frame))
+                .unwrap_or(position)
+        } else {
+            position
+        };
         let mut air = crate::plugins::movement_plugin::FighterAir::default();
         air.air.airborne = !state.state_words.grounded;
         air.ground_contact = state.state_words.grounded;
@@ -643,8 +1146,16 @@ fn apply_mrc_session_events(
                     } else {
                         0
                     },
+                    ground_sequence: state.state_words.pose_sequence,
                     desired_pose_id: state.state_words.pose_id,
-                    desired_pose_sequence: state.state_words.pose_sequence,
+                    pose_pending: !applied,
+                    action_sequence: None,
+                    pending_action: None,
+                    pending_start: false,
+                    applied_character_id: character_id,
+                    state_age: 0.0,
+                    hit_age: 10.0,
+                    pending_stock_state: false,
                 },
                 crate::plugins::network_plugin::RemoteFighter {
                     player_id: format!("mrc:{actor_id}"),
@@ -672,17 +1183,85 @@ fn apply_mrc_session_events(
                 },
                 air,
                 crate::plugins::movement_plugin::FighterDodge::default(),
-                Transform::from_translation(position),
+                Transform::from_translation(visible_position),
                 crate::plugins::network_plugin::RemoteTransformTarget {
                     translation: position,
                     yaw,
                 },
                 crate::components::fighter::TargetHitClock::default(),
+                crate::plugins::network_plugin::RemoteHitMotionWindow::default(),
                 crate::components::fighter::VisualRootPin::default(),
                 Visibility::default(),
                 InheritedVisibility::default(),
             ),
         ));
+    }
+
+    for (actor_id, chain, start) in actions {
+        if local_slot == Some(u32::from(actor_id)) {
+            let Ok((fighter, _, _, _, mut combat, mut sm, mut pose, mut blend)) =
+                local.single_mut()
+            else {
+                session.pending_actions.push((actor_id, chain, start));
+                continue;
+            };
+            if !apply_mrc_discrete_pose(
+                assets.as_deref(),
+                fighter,
+                &mut pose,
+                &mut blend,
+                chain,
+                start,
+            ) {
+                session.pending_actions.push((actor_id, chain, start));
+                continue;
+            }
+
+            sm.previous = sm.current;
+            sm.current = meteor_core::FighterState::Attack1;
+            sm.time_in_state = 0.0;
+            sm.locked = true;
+            sm.attack_stage = 1;
+            sm.attack_queued = None;
+            sm.linked_recovery_pose_id = None;
+            combat.state = meteor_core::FighterState::Attack1;
+            continue;
+        }
+        let Some((_, mut remote, fighter, mut pose, mut blend, ..)) = remotes
+            .iter_mut()
+            .find(|(_, remote, ..)| remote.actor_id == actor_id)
+        else {
+            session.pending_actions.push((actor_id, chain, start));
+            continue;
+        };
+        if remote.action_sequence == Some(chain.sequence)
+            || (remote.pose_sequence != chain.sequence
+                && meteor_network::role_state::pose_sequence_is_newer(
+                    remote.pose_sequence,
+                    chain.sequence,
+                ))
+        {
+            continue;
+        }
+        remote.action_sequence = Some(chain.sequence);
+        remote.pose_sequence = chain.sequence;
+        remote.desired_pose_id = chain.pose_id;
+        remote.pending_action = Some(chain);
+        remote.pending_start = start;
+        remote.pose_pending = true;
+        if apply_mrc_discrete_pose(
+            assets.as_deref(),
+            &fighter,
+            &mut pose,
+            &mut blend,
+            chain,
+            start,
+        ) {
+            remote.pose_pending = false;
+            remote.pending_action = None;
+            remote.pending_start = false;
+            remote.applied_character_id = fighter.character_id;
+        }
     }
 
     if rebuild_remotes {
@@ -709,6 +1288,307 @@ fn apply_mrc_session_events(
     }
 }
 
+fn apply_mrc_hit_events(
+    assets: Option<Res<crate::plugins::character_plugin::CharacterAssetsSet>>,
+    playback: Res<MrcPlayback>,
+    mut session: ResMut<MrcSessionRuntime>,
+    mut local: Query<
+        (
+            &crate::components::fighter::Fighter,
+            &mut crate::components::fighter::PoseRuntime,
+            &mut crate::components::fighter::EntryBlend,
+            &mut crate::components::fighter::FighterHitReaction,
+            &crate::plugins::movement_plugin::FighterAir,
+            &mut crate::components::fighter::CombatState,
+            &mut crate::components::fighter::SmState,
+        ),
+        (With<LocalFighter>, Without<MrcRemoteFighter>),
+    >,
+    mut remotes: Query<
+        (
+            &mut MrcRemoteFighter,
+            &crate::components::fighter::Fighter,
+            &mut crate::components::fighter::PoseRuntime,
+            &mut crate::components::fighter::EntryBlend,
+            &mut crate::components::fighter::FighterHitReaction,
+            &crate::plugins::movement_plugin::FighterAir,
+            &mut crate::plugins::network_plugin::RemoteHitMotionWindow,
+        ),
+        (With<MrcRemoteFighter>, Without<LocalFighter>),
+    >,
+) {
+    let hits = std::mem::take(&mut session.pending_hits);
+    for (guarded, event) in hits {
+        if playback.local_slot() == Some(event.target_actor_id) {
+            let Ok((fighter, mut pose, mut blend, mut reaction, air, mut combat, mut sm)) =
+                local.single_mut()
+            else {
+                session.pending_hits.push((guarded, event));
+                continue;
+            };
+            let Some(character) = assets
+                .as_deref()
+                .and_then(|assets| assets.0.get(&format!("p{}", fighter.character_id)))
+            else {
+                session.pending_hits.push((guarded, event));
+                continue;
+            };
+            let pose_id = if guarded {
+                (event.pose_id >> 16) as u16
+            } else {
+                event.pose_id as u16
+            };
+            let chain = meteor_network::role_state::PoseChain {
+                pose_id,
+                minimum_seconds: event.minimum_seconds(),
+                sequence: 0,
+                blend_seconds: 0.05,
+            };
+            if !apply_mrc_action_pose(assets.as_deref(), fighter, &mut pose, &mut blend, chain) {
+                continue;
+            }
+            let minimum = event.minimum_seconds().max(0.0);
+            let (start, end) = character
+                .pose_frames
+                .get(&pose_id)
+                .copied()
+                .unwrap_or((0, 0));
+            let bucket = match event.pose_id & 0xffff {
+                1 if guarded => meteor_combat::hit_reaction::FacingBucket::Right,
+                2 if guarded => meteor_combat::hit_reaction::FacingBucket::Left,
+                3 if guarded => meteor_combat::hit_reaction::FacingBucket::Back,
+                _ => meteor_combat::hit_reaction::FacingBucket::Front,
+            };
+            reaction.begin(
+                meteor_combat::hit_reaction::HitReact {
+                    kind: if guarded {
+                        meteor_combat::hit_reaction::HitReactKind::Guard
+                    } else {
+                        meteor_combat::hit_reaction::HitReactKind::BeHit
+                    },
+                    pose_id: Some(pose_id),
+                    head_pose_id: None,
+                    lock_remaining: minimum.max(
+                        meteor_combat::hit_reaction::pose_duration_seconds(start, end),
+                    ),
+                    minimum_remaining: minimum,
+                    authored_minimum: minimum,
+                    motion_scale: event.motion_scale(),
+                    down_remaining: 0.0,
+                    bucket,
+                    environmental: false,
+                    selector: 0,
+                    rewind_count: 0,
+                    play_to_end_pose_id: None,
+                },
+                air.air.airborne,
+            );
+            let state = if guarded {
+                meteor_core::FighterState::Guard
+            } else {
+                meteor_core::FighterState::BeHit
+            };
+            combat.state = state;
+            sm.previous = sm.current;
+            sm.current = state;
+            sm.time_in_state = 0.0;
+            sm.locked = true;
+            sm.attack_stage = 0;
+            sm.attack_queued = None;
+            sm.linked_recovery_pose_id = None;
+            sm.exe_ground_mode_ticks = 0;
+            continue;
+        }
+        let Some((mut remote, fighter, mut pose, mut blend, mut reaction, air, mut window)) =
+            remotes
+                .iter_mut()
+                .find(|(remote, ..)| u32::from(remote.actor_id) == event.target_actor_id)
+        else {
+            session.pending_hits.push((guarded, event));
+            continue;
+        };
+        let Some(character) = assets
+            .as_deref()
+            .and_then(|assets| assets.0.get(&format!("p{}", fighter.character_id)))
+        else {
+            session.pending_hits.push((guarded, event));
+            continue;
+        };
+        let pose_id = if guarded {
+            (event.pose_id >> 16) as u16
+        } else {
+            event.pose_id as u16
+        };
+        let chain = meteor_network::role_state::PoseChain {
+            pose_id,
+            minimum_seconds: event.minimum_seconds(),
+            sequence: 0,
+            blend_seconds: 0.05,
+        };
+        if !apply_mrc_action_pose(assets.as_deref(), fighter, &mut pose, &mut blend, chain) {
+            continue;
+        }
+        let minimum = event.minimum_seconds().max(0.0);
+        let (start, end) = character
+            .pose_frames
+            .get(&pose_id)
+            .copied()
+            .unwrap_or((0, 0));
+        let bucket = match event.pose_id & 0xffff {
+            1 if guarded => meteor_combat::hit_reaction::FacingBucket::Right,
+            2 if guarded => meteor_combat::hit_reaction::FacingBucket::Left,
+            3 if guarded => meteor_combat::hit_reaction::FacingBucket::Back,
+            _ => meteor_combat::hit_reaction::FacingBucket::Front,
+        };
+        reaction.begin(
+            meteor_combat::hit_reaction::HitReact {
+                kind: if guarded {
+                    meteor_combat::hit_reaction::HitReactKind::Guard
+                } else {
+                    meteor_combat::hit_reaction::HitReactKind::BeHit
+                },
+                pose_id: Some(pose_id),
+                head_pose_id: None,
+                lock_remaining: minimum.max(meteor_combat::hit_reaction::pose_duration_seconds(
+                    start, end,
+                )),
+                minimum_remaining: minimum,
+                authored_minimum: minimum,
+                motion_scale: event.motion_scale(),
+                down_remaining: 0.0,
+                bucket,
+                environmental: false,
+                selector: 0,
+                rewind_count: 0,
+                play_to_end_pose_id: None,
+            },
+            air.air.airborne,
+        );
+        window.remaining = 0.4;
+        remote.hit_age = 0.0;
+        remote.desired_pose_id = pose_id;
+        remote.pose_pending = false;
+        remote.pending_action = None;
+        remote.applied_character_id = fighter.character_id;
+    }
+}
+
+fn apply_mrc_property_events(
+    playback: Res<MrcPlayback>,
+    resources: Option<Res<crate::plugins::combat_plugin::CombatResourceData>>,
+    mut session: ResMut<MrcSessionRuntime>,
+    mut fighters: Query<(
+        &mut crate::components::fighter::FighterStatusEffects,
+        Option<&MrcRemoteFighter>,
+        Option<&LocalFighter>,
+    )>,
+) {
+    let pending = std::mem::take(&mut session.pending_properties);
+    for event in pending {
+        let Some(effect) = resources.as_deref().and_then(|resources| {
+            (event.category == 2)
+                .then(|| resources.0.status_effect(event.resource_id))
+                .flatten()
+        }) else {
+            if resources.is_none() {
+                session.pending_properties.push(event);
+            }
+            continue;
+        };
+        let mut consumed = false;
+        for (mut status, remote, local) in &mut fighters {
+            let actor = remote
+                .map(|remote| u32::from(remote.actor_id))
+                .or_else(|| local.and_then(|_| playback.local_slot()));
+            if actor == Some(event.actor_id) {
+                status.apply(effect);
+                consumed = true;
+                break;
+            }
+        }
+        if !consumed {
+            session.pending_properties.push(event);
+        }
+    }
+}
+
+fn smooth_mrc_remote_fighters(
+    time: Res<Time>,
+    frame_clock: Option<Res<crate::plugins::FrameClock>>,
+    playback: Res<MrcPlayback>,
+    waypoints: Option<Res<meteor_scene::stage_loader::WaypointGraph>>,
+    mut remotes: Query<(
+        &mut MrcRemoteFighter,
+        &mut Transform,
+        &mut MotionState,
+        &mut crate::plugins::network_plugin::RemoteTransformTarget,
+    )>,
+) {
+    if !playback.active || playback.paused {
+        return;
+    }
+    let dt = crate::plugins::simulation_dt(frame_clock.as_deref(), time.delta_secs());
+    if dt <= 0.0 {
+        return;
+    }
+    let scene_frame = mrc_scene_frame(&playback, waypoints.as_deref());
+    for (mut remote, mut transform, mut motion, mut target) in &mut remotes {
+        let skip_motion = std::mem::take(&mut remote.pending_stock_state);
+        if skip_motion {
+            remote.state_age = 0.0;
+        } else {
+            remote.state_age += dt;
+        }
+        remote.hit_age += dt;
+        let correction = target.translation - transform.translation;
+        let factor = meteor_network::role_state::role_position_correction_factor(
+            correction.length_squared(),
+            motion.velocity.length_squared(),
+            dt,
+            remote.hit_age,
+        );
+        transform.translation = transform.translation.lerp(target.translation, factor);
+        motion.facing = meteor_network::role_state::yaw_from_forward(
+            meteor_network::role_state::correct_role_forward(
+                meteor_network::role_state::forward_from_yaw(motion.facing),
+                meteor_network::role_state::forward_from_yaw(target.yaw),
+                dt,
+                remote.hit_age,
+            ),
+        );
+        if !skip_motion {
+            let delta = meteor_network::role_state::remote_velocity_delta(
+                remote.state_age,
+                remote.hit_age,
+                meteor_network::role_state::RoleVec3 {
+                    x: motion.velocity.x,
+                    y: motion.velocity.y,
+                    z: motion.velocity.z,
+                },
+                dt,
+            );
+            let delta = Vec3::new(delta.x, delta.y, delta.z);
+            transform.translation += delta;
+            target.translation += delta;
+        }
+        if remote.hit_age > 0.5 {
+            if let Some(position) = playback
+                .burst_tracks
+                .get(&remote.actor_id)
+                .and_then(|bursts| {
+                    bursts.iter().find(|burst| {
+                        burst.start_time <= playback.elapsed && playback.elapsed <= burst.end_time
+                    })
+                })
+                .map(|burst| mrc_scene_pose(burst.position_at(playback.elapsed), scene_frame))
+            {
+                transform.translation = position;
+            }
+        }
+        transform.rotation = Quat::IDENTITY;
+    }
+}
+
 fn sync_mrc_remote_pose(
     assets: Option<Res<crate::plugins::character_plugin::CharacterAssetsSet>>,
     mut remotes: Query<(
@@ -716,20 +1596,71 @@ fn sync_mrc_remote_pose(
         &crate::components::fighter::Fighter,
         &mut crate::components::fighter::PoseRuntime,
         &mut crate::components::fighter::EntryBlend,
+        Option<&crate::plugins::network_plugin::RemoteHitMotionWindow>,
     )>,
 ) {
-    for (mut remote, fighter, mut pose, mut blend) in &mut remotes {
-        if (pose.pose_id != remote.desired_pose_id
-            || remote.pose_sequence != remote.desired_pose_sequence)
-            && apply_mrc_remote_pose(
-                assets.as_deref(),
-                fighter,
-                &mut pose,
-                &mut blend,
-                remote.desired_pose_id,
-            )
+    for (mut remote, fighter, mut pose, mut blend, hit_window) in &mut remotes {
+        if (remote.pose_pending || fighter.character_id != remote.applied_character_id)
+            && !(hit_window.is_some_and(|window| window.remaining > 0.0)
+                && remote.pending_action.is_none())
+            && match remote.pending_action {
+                Some(chain) => apply_mrc_discrete_pose(
+                    assets.as_deref(),
+                    fighter,
+                    &mut pose,
+                    &mut blend,
+                    chain,
+                    remote.pending_start,
+                ),
+                None => apply_mrc_remote_pose(
+                    assets.as_deref(),
+                    fighter,
+                    &mut pose,
+                    &mut blend,
+                    remote.desired_pose_id,
+                ),
+            }
         {
-            remote.pose_sequence = remote.desired_pose_sequence;
+            remote.pose_pending = false;
+            remote.pending_action = None;
+            remote.pending_start = false;
+            remote.applied_character_id = fighter.character_id;
+        }
+    }
+}
+
+fn apply_mrc_identities(
+    mut commands: Commands,
+    playback: Res<MrcPlayback>,
+    session: Res<MrcSessionRuntime>,
+    fighters: Query<(
+        Entity,
+        &crate::components::fighter::Fighter,
+        Option<&MrcRemoteFighter>,
+        Option<&LocalFighter>,
+    )>,
+) {
+    if !playback.active {
+        return;
+    }
+    for (entity, fighter, remote, local) in &fighters {
+        let actor_id = remote.map(|remote| remote.actor_id).or_else(|| {
+            local
+                .and_then(|_| playback.local_slot())
+                .and_then(|slot| u16::try_from(slot).ok())
+        });
+        let Some(character_id) = actor_id
+            .and_then(|id| session.character_by_slot.get(&id))
+            .copied()
+        else {
+            continue;
+        };
+        if fighter.character_id != character_id {
+            commands
+                .entity(entity)
+                .insert(crate::components::fighter::CharacterVariantChanged {
+                    requested_character_id: character_id,
+                });
         }
     }
 }
@@ -740,7 +1671,6 @@ fn mrc_code_to_key(code: u32, keymap: &Keymap) -> Option<InputBinding> {
         0x53 => keymap.move_down,
         0x41 => keymap.move_left,
         0x44 => keymap.move_right,
-        0x10 => keymap.run,
         0x1000 => keymap.attack,
         0x1200 => keymap.jump,
         0x20 => keymap.guard,
@@ -857,7 +1787,6 @@ fn continuous_replay_inputs(keymap: &Keymap) -> Vec<InputBinding> {
         keymap.move_down,
         keymap.move_left,
         keymap.move_right,
-        keymap.run,
         keymap.camera_up,
         keymap.camera_down,
         keymap.left_turn,
@@ -869,12 +1798,9 @@ fn continuous_replay_inputs(keymap: &Keymap) -> Vec<InputBinding> {
 }
 
 fn continuous_mrc_binding(code: u32, keymap: &Keymap) -> Option<InputBinding> {
-    matches!(
-        code,
-        0x57 | 0x53 | 0x41 | 0x44 | 0x10 | 0x26 | 0x28 | 0x25 | 0x27
-    )
-    .then(|| mrc_code_to_key(code, keymap))
-    .flatten()
+    matches!(code, 0x57 | 0x53 | 0x41 | 0x44 | 0x26 | 0x28 | 0x25 | 0x27)
+        .then(|| mrc_code_to_key(code, keymap))
+        .flatten()
 }
 
 fn apply_mrc_packed_input(
@@ -890,9 +1816,6 @@ fn apply_mrc_packed_input(
     set_replay_held_binding(keys, mouse, synthetic, keymap.move_down, forward < 0);
     set_replay_held_binding(keys, mouse, synthetic, keymap.move_right, strafe > 0);
     set_replay_held_binding(keys, mouse, synthetic, keymap.move_left, strafe < 0);
-    if packed & 0x10000 != 0 {
-        set_replay_held_binding(keys, mouse, synthetic, keymap.run, true);
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -903,10 +1826,12 @@ fn apply_replay_seek(
     mut mouse: ResMut<ButtonInput<MouseButton>>,
     mut player: ResMut<ReplayPlayer>,
     mut playback: ResMut<MrcPlayback>,
+    waypoints: Option<Res<meteor_scene::stage_loader::WaypointGraph>>,
     mut session: ResMut<MrcSessionRuntime>,
     mut frame_override: ResMut<MrcFrameOverride>,
     mut basis: ResMut<CameraBasis>,
     mut fighters: Query<(&mut Transform, &mut MotionState), With<LocalFighter>>,
+    mut local_blends: Query<&mut crate::components::fighter::EntryBlend, With<LocalFighter>>,
 ) {
     let Some(target) = request.0.take() else {
         return;
@@ -922,7 +1847,12 @@ fn apply_replay_seek(
 
     if playback.active {
         let t = target.clamp(0.0, playback.duration());
+        let scene_frame = mrc_scene_frame(&playback, waypoints.as_deref());
         session.pending.clear();
+        session.pending_actions.clear();
+        session.pending_hits.clear();
+        session.pending_properties.clear();
+        session.character_by_slot.clear();
         session.equip_by_slot.clear();
         session.event_counts.clear();
         session.unhandled_counts.clear();
@@ -933,7 +1863,9 @@ fn apply_replay_seek(
             };
             let mut i_a = 0;
             while i_a < doc.queue_a.len() && doc.queue_a[i_a].time <= t {
-                route_mrc_session_entry(&doc.queue_a[i_a], &mut session);
+                if !matches!(doc.queue_a[i_a].id, 11 | 14 | 50 | 51 | 61) {
+                    route_mrc_session_entry(&doc.queue_a[i_a], &mut session);
+                }
                 i_a += 1;
             }
             let mut held = HashMap::new();
@@ -957,13 +1889,17 @@ fn apply_replay_seek(
             let mut pose = None;
             let mut i_d = 0;
             while i_d < doc.queue_d.len() && doc.queue_d[i_d].time <= t {
-                pose = decode_mrc_pose(&doc.queue_d[i_d]).or(pose);
+                pose = decode_mrc_pose(&doc.queue_d[i_d])
+                    .map(|position| mrc_scene_pose(position, scene_frame))
+                    .or(pose);
                 i_d += 1;
             }
             let mut facing = None;
             let mut i_e = 0;
             while i_e < doc.queue_e.len() && doc.queue_e[i_e].time <= t {
-                facing = decode_mrc_facing(&doc.queue_e[i_e]).or(facing);
+                facing = decode_mrc_facing(&doc.queue_e[i_e])
+                    .map(|yaw| mrc_scene_facing(yaw, scene_frame))
+                    .or(facing);
                 i_e += 1;
             }
             (i_a, i_b, i_c, i_d, i_e, packed, pose, facing)
@@ -976,6 +1912,10 @@ fn apply_replay_seek(
             playback.prev_c = 0;
         }
         playback.elapsed = t;
+        if let Ok(mut blend) = local_blends.single_mut() {
+            blend.started_at_seconds = None;
+            blend.elapsed = 0.0;
+        }
         playback.index_a = index_a;
         playback.index_b = index_b;
         playback.index_c = index_c;
@@ -1050,6 +1990,7 @@ impl Plugin for ReplayPlugin {
             .init_resource::<ReplayPlayer>()
             .init_resource::<ReplaySeekRequest>()
             .init_resource::<MrcPlayback>()
+            .init_resource::<MrcHeldInput>()
             .init_resource::<MrcFrameOverride>()
             .init_resource::<MrcSessionRuntime>()
             .init_resource::<SyntheticInputStream>()
@@ -1065,18 +2006,38 @@ impl Plugin for ReplayPlugin {
             )
             .add_systems(
                 Update,
-                (
-                    tick_mrc_playback,
-                    apply_replay_seek,
-                    apply_mrc_session_events,
-                )
-                    .chain()
+                isolate_mrc_hardware_input
+                    .in_set(crate::plugins::FighterFrameSet::Movement)
+                    .before(crate::plugins::camera_plugin::CameraInputSet)
+                    .before(tick_mrc_playback)
+                    .before(apply_replay_seek)
+                    .run_if(in_state(AppState::Playing)),
+            )
+            .add_systems(
+                Update,
+                tick_mrc_playback
                     .in_set(crate::plugins::FighterFrameSet::Movement)
                     .after(crate::plugins::camera_plugin::prepare_move_basis)
                     .before(crate::plugins::input_plugin::capture_local_command_input)
-                    .before(crate::plugins::ai_plugin::drive_npc_ai)
                     .run_if(in_state(AppState::Playing))
                     .run_if(crate::plugins::simulation_frame),
+            )
+            .add_systems(
+                Update,
+                (
+                    apply_replay_seek,
+                    apply_mrc_session_events,
+                    apply_mrc_hit_events,
+                    apply_mrc_property_events,
+                    apply_mrc_identities,
+                    smooth_mrc_remote_fighters.run_if(crate::plugins::simulation_frame),
+                )
+                    .chain()
+                    .in_set(crate::plugins::FighterFrameSet::Movement)
+                    .after(tick_mrc_playback)
+                    .before(crate::plugins::input_plugin::capture_local_command_input)
+                    .before(crate::plugins::ai_plugin::drive_npc_ai)
+                    .run_if(in_state(AppState::Playing)),
             )
             .add_systems(
                 Update,
@@ -1087,6 +2048,15 @@ impl Plugin for ReplayPlugin {
                     .before(crate::plugins::ai_plugin::drive_npc_ai)
                     .run_if(in_state(AppState::Playing))
                     .run_if(crate::plugins::simulation_frame),
+            )
+            .add_systems(
+                Update,
+                capture_mrc_held_input
+                    .in_set(crate::plugins::FighterFrameSet::Movement)
+                    .after(apply_replay_seek)
+                    .after(replay_playback)
+                    .before(crate::plugins::input_plugin::capture_local_command_input)
+                    .run_if(in_state(AppState::Playing)),
             )
             .add_systems(
                 Update,
@@ -1138,6 +2108,7 @@ fn stop_mrc_playback(
     mut keys: ResMut<ButtonInput<KeyCode>>,
     mut mouse: ResMut<ButtonInput<MouseButton>>,
     mut playback: ResMut<MrcPlayback>,
+    mut held: ResMut<MrcHeldInput>,
     mut frame_override: ResMut<MrcFrameOverride>,
     session: Res<MrcSessionRuntime>,
 ) {
@@ -1148,6 +2119,7 @@ fn stop_mrc_playback(
     }
     playback.active = false;
     playback.paused = false;
+    held.bindings.clear();
     frame_override.position_applied = false;
     frame_override.facing_applied = false;
     if !session.unhandled_counts.is_empty() {
@@ -1165,8 +2137,11 @@ fn reset_replay_session(
     mut recorder: ResMut<ReplayRecorder>,
     mut player: ResMut<ReplayPlayer>,
     mut session: ResMut<MrcSessionRuntime>,
+    mut held: ResMut<MrcHeldInput>,
     request: Res<crate::app_state::LaunchRequest>,
 ) {
+    held.bindings.clear();
+
     recorder.active = recorder.auto;
     recorder.elapsed = 0.0;
     recorder.events.clear();
@@ -1185,6 +2160,10 @@ fn reset_replay_session(
     player.elapsed = 0.0;
     player.index = 0;
     session.pending.clear();
+    session.pending_actions.clear();
+    session.pending_hits.clear();
+    session.pending_properties.clear();
+    session.character_by_slot.clear();
     session.equip_by_slot.clear();
     session.event_counts.clear();
     session.unhandled_counts.clear();
@@ -1439,7 +2418,6 @@ fn key_to_mrc_code(key: InputBinding, keymap: &Keymap) -> Option<u32> {
         (keymap.move_down, 0x53),
         (keymap.move_left, 0x41),
         (keymap.move_right, 0x44),
-        (keymap.run, 0x10),
         (keymap.attack, 0x1000),
         (keymap.jump, 0x1200),
         (keymap.guard, 0x20),
@@ -1602,6 +2580,77 @@ mod tests {
 mod mrc_tests {
     use super::*;
     use crate::app_state::Keymap;
+    use bevy::ecs::system::RunSystemOnce;
+
+    #[test]
+    fn mrc_input_isolation_keeps_recorded_holds_without_live_controls() {
+        let keymap = Keymap::default();
+        let mut app = App::new();
+        app.insert_resource(keymap.clone())
+            .insert_resource(MrcPlayback {
+                active: true,
+                ..default()
+            })
+            .init_resource::<MrcHeldInput>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<ButtonInput<MouseButton>>();
+
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyW);
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        app.world_mut()
+            .run_system_once(isolate_mrc_hardware_input)
+            .unwrap();
+        assert!(!keymap.move_up.pressed(
+            app.world().resource::<ButtonInput<KeyCode>>(),
+            app.world().resource::<ButtonInput<MouseButton>>(),
+        ));
+        assert!(!keymap.attack.pressed(
+            app.world().resource::<ButtonInput<KeyCode>>(),
+            app.world().resource::<ButtonInput<MouseButton>>(),
+        ));
+
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyS);
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        app.world_mut()
+            .run_system_once(capture_mrc_held_input)
+            .unwrap();
+
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .clear();
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .clear();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release(KeyCode::KeyS);
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .release(MouseButton::Left);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyW);
+        app.world_mut()
+            .run_system_once(isolate_mrc_hardware_input)
+            .unwrap();
+        let keys = app.world().resource::<ButtonInput<KeyCode>>();
+        let mouse = app.world().resource::<ButtonInput<MouseButton>>();
+        assert!(!keys.pressed(KeyCode::KeyW));
+        assert!(keys.pressed(KeyCode::KeyS));
+        assert!(!keys.just_pressed(KeyCode::KeyS));
+        assert!(!keys.just_released(KeyCode::KeyS));
+        assert!(mouse.pressed(MouseButton::Left));
+        assert!(!mouse.just_pressed(MouseButton::Left));
+        assert!(!mouse.just_released(MouseButton::Left));
+    }
 
     fn empty_mrc_document() -> meteor_asset::mrc::MrcDocument {
         meteor_asset::mrc::MrcDocument {
@@ -1618,6 +2667,300 @@ mod mrc_tests {
             queue_d: Vec::new(),
             queue_e: Vec::new(),
         }
+    }
+
+    #[test]
+    fn mrc_remote_event2_updates_authority_target_and_smooths_visible_root() {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<MrcPlayback>()
+            .init_resource::<MrcSessionRuntime>()
+            .add_systems(
+                Update,
+                (apply_mrc_session_events, smooth_mrc_remote_fighters).chain(),
+            );
+        app.world_mut().resource_mut::<MrcPlayback>().active = true;
+        let state_at = |x| {
+            meteor_network::role_state::role_state_from_runtime(
+                meteor_network::role_state::RoleStateRuntime {
+                    position: meteor_network::role_state::RoleVec3 { x, y: 0.0, z: 2.0 },
+                    forward: meteor_network::role_state::forward_from_yaw(0.0),
+                    velocity: meteor_network::role_state::RoleVec3::ZERO,
+                    pose_id: 0,
+                    grounded: true,
+                    guard_route: false,
+                    playback_arg: 0,
+                    pose_sequence: 1,
+                },
+            )
+        };
+        app.world_mut()
+            .resource_mut::<MrcSessionRuntime>()
+            .pending
+            .push(MrcSessionEvent::Remote {
+                actor_id: 1,
+                state: state_at(1.0),
+            });
+        app.update();
+        let entity = app
+            .world_mut()
+            .query_filtered::<Entity, With<MrcRemoteFighter>>()
+            .single(app.world())
+            .unwrap();
+        assert!((app.world().get::<Transform>(entity).unwrap().translation.x - 1.0).abs() < 0.03);
+
+        app.world_mut()
+            .resource_mut::<MrcSessionRuntime>()
+            .pending
+            .push(MrcSessionEvent::Remote {
+                actor_id: 1,
+                state: state_at(20.0),
+            });
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_nanos(1_000_000_000 / 60));
+        app.update();
+        let visible = app.world().get::<Transform>(entity).unwrap().translation;
+        let target = app
+            .world()
+            .get::<crate::plugins::network_plugin::RemoteTransformTarget>(entity)
+            .unwrap()
+            .translation;
+        assert!((target.x - 20.0).abs() < 0.03);
+        assert!(
+            visible.x > 1.0 && visible.x < target.x,
+            "visible root must approach the recorded target without snapping: {visible:?}"
+        );
+        for _ in 0..90 {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_nanos(1_000_000_000 / 60));
+            app.update();
+        }
+        let visible = app.world().get::<Transform>(entity).unwrap().translation;
+        assert!(
+            (visible.x - target.x).abs() < 0.05,
+            "visible root did not converge to the recorded target: {visible:?}"
+        );
+    }
+
+    #[test]
+    fn original_dagger_jump_remote_opening_has_no_packet_sized_visual_jump() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let bytes = std::fs::read(root.join("mrcs/tests/匕首小跳.mrc")).expect("dagger recording");
+        let mut playback = MrcPlayback::default();
+        playback
+            .load_bytes("匕首小跳.mrc".into(), &bytes)
+            .expect("valid MRC");
+        assert!(playback.burst_tracks.get(&1).is_some_and(|bursts| bursts
+            .iter()
+            .any(|burst| burst.start_time < 0.7 && burst.end_time > 1.3)));
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<Keymap>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .init_resource::<ReplaySeekRequest>()
+            .init_resource::<MrcFrameOverride>()
+            .init_resource::<MrcSessionRuntime>()
+            .init_resource::<CameraBasis>()
+            .init_resource::<SyntheticInputStream>()
+            .insert_resource(playback)
+            .add_systems(
+                Update,
+                (
+                    tick_mrc_playback,
+                    apply_mrc_session_events,
+                    smooth_mrc_remote_fighters,
+                )
+                    .chain(),
+            );
+        let mut previous: Option<Vec3> = None;
+        let mut max_step = 0.0f32;
+        let mut burst_end_gap = 0.0f32;
+        for _ in 0..120 {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_nanos(1_000_000_000 / 60));
+            app.update();
+            let t = app.world().resource::<MrcPlayback>().elapsed;
+            let pair = app
+                .world_mut()
+                .query_filtered::<(
+                    &Transform,
+                    &crate::plugins::network_plugin::RemoteTransformTarget,
+                ), With<MrcRemoteFighter>>()
+                .single(app.world())
+                .ok();
+            let visible = pair.map(|(transform, _)| transform.translation);
+            if (1.31..1.34).contains(&t) {
+                if let Some((transform, target)) = pair {
+                    burst_end_gap =
+                        burst_end_gap.max(transform.translation.distance(target.translation));
+                }
+            }
+            if let (Some(before), Some(after)) = (previous, visible) {
+                if (0.7..1.6).contains(&t) {
+                    max_step = max_step.max(before.distance(after));
+                }
+            }
+            previous = visible;
+        }
+        assert!(
+            max_step < 2.0,
+            "dagger opening packet burst produced a {max_step:.2} world visual jump"
+        );
+        assert!(
+            burst_end_gap < 2.0,
+            "dagger burst display remained {burst_end_gap:.2} world behind the recorded position"
+        );
+    }
+
+    #[test]
+    fn mrc_burst_reconstruction_keeps_unexplained_teleports_discrete() {
+        let mut doc = empty_mrc_document();
+        let entry = |time, x| {
+            let state = meteor_network::role_state::role_state_from_runtime(
+                meteor_network::role_state::RoleStateRuntime {
+                    position: meteor_network::role_state::RoleVec3 { x, y: 0.0, z: 0.0 },
+                    forward: meteor_network::role_state::forward_from_yaw(0.0),
+                    velocity: meteor_network::role_state::RoleVec3::ZERO,
+                    pose_id: 144,
+                    grounded: true,
+                    guard_route: false,
+                    playback_arg: 0,
+                    pose_sequence: 1,
+                },
+            );
+            meteor_asset::mrc::MrcQueueAEntry {
+                id: 2,
+                time,
+                blob: [
+                    1u16.to_le_bytes().as_slice(),
+                    meteor_network::role_state::encode_event2_state(state).as_slice(),
+                ]
+                .concat(),
+            }
+        };
+        doc.queue_a = vec![entry(0.0, 0.0), entry(0.5, 20.0), entry(0.5, 40.0)];
+        assert!(
+            mrc_remote_bursts(&doc).get(&1).is_none(),
+            "zero recorded speed cannot justify a 40-world interpolation"
+        );
+    }
+
+    #[test]
+    fn paused_seek_into_dagger_packet_burst_shows_the_reconstructed_position() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let bytes = std::fs::read(root.join("mrcs/tests/匕首小跳.mrc")).expect("dagger recording");
+        let mut playback = MrcPlayback::default();
+        playback
+            .load_bytes("匕首小跳.mrc".into(), &bytes)
+            .expect("valid MRC");
+        playback.paused = true;
+        let burst = playback
+            .burst_tracks
+            .get(&1)
+            .unwrap()
+            .iter()
+            .find(|burst| burst.start_time < 1.0 && burst.end_time > 1.0)
+            .unwrap();
+        let expected = mrc_scene_pose(burst.position_at(1.0), mrc_scene_frame(&playback, None));
+        let mut app = App::new();
+        app.init_resource::<Keymap>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .init_resource::<ReplayPlayer>()
+            .init_resource::<ReplaySeekRequest>()
+            .init_resource::<MrcFrameOverride>()
+            .init_resource::<MrcSessionRuntime>()
+            .init_resource::<CameraBasis>()
+            .insert_resource(playback)
+            .add_systems(
+                Update,
+                (apply_replay_seek, apply_mrc_session_events).chain(),
+            );
+        app.world_mut().resource_mut::<ReplaySeekRequest>().0 = Some(1.0);
+        app.update();
+        let (visible, authority) = app
+            .world_mut()
+            .query_filtered::<(
+                &Transform,
+                &crate::plugins::network_plugin::RemoteTransformTarget,
+            ), With<MrcRemoteFighter>>()
+            .single(app.world())
+            .unwrap();
+        assert!(visible.translation.abs_diff_eq(expected, 1e-5));
+        assert!(
+            visible.translation.distance(authority.translation) > 1.0,
+            "seek needs the position between the two sparse packet batches"
+        );
+    }
+
+    #[test]
+    fn fist_ultimate_hit_keeps_the_smoothed_opponent_near_the_recorded_local_pose() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let bytes = std::fs::read(root.join("mrcs/tests/指虎大绝.mrc")).expect("fist recording");
+        let mut playback = MrcPlayback::default();
+        playback
+            .load_bytes("指虎大绝.mrc".into(), &bytes)
+            .expect("valid MRC");
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<Keymap>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .init_resource::<ReplaySeekRequest>()
+            .init_resource::<MrcFrameOverride>()
+            .init_resource::<MrcSessionRuntime>()
+            .init_resource::<CameraBasis>()
+            .init_resource::<SyntheticInputStream>()
+            .insert_resource(playback)
+            .add_systems(
+                Update,
+                (
+                    tick_mrc_playback,
+                    apply_mrc_session_events,
+                    smooth_mrc_remote_fighters,
+                )
+                    .chain(),
+            );
+        let local = app
+            .world_mut()
+            .spawn((
+                LocalFighter,
+                Transform::default(),
+                MotionState {
+                    movement_mode: meteor_core::MovementMode::Idle,
+                    velocity: Vec3::ZERO,
+                    facing: 0.0,
+                },
+            ))
+            .id();
+        let mut distance_at_hit = None;
+        for _ in 0..16 * 60 {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_nanos(1_000_000_000 / 60));
+            app.update();
+            let t = app.world().resource::<MrcPlayback>().elapsed;
+            if distance_at_hit.is_none() && t >= 15.207 {
+                let remote = app
+                    .world_mut()
+                    .query_filtered::<&Transform, With<MrcRemoteFighter>>()
+                    .single(app.world())
+                    .unwrap()
+                    .translation;
+                let local_pos = app.world().get::<Transform>(local).unwrap().translation;
+                distance_at_hit =
+                    Some(Vec2::new(remote.x - local_pos.x, remote.z - local_pos.z).length());
+            }
+        }
+        let distance = distance_at_hit.expect("recorded hit moment");
+        assert!(
+            distance < 3.0,
+            "smoothing left the fist target {distance:.2} world away at the recorded hit"
+        );
     }
 
     fn test_fighter() -> crate::components::fighter::Fighter {
@@ -1651,7 +2994,11 @@ mod mrc_tests {
             mrc_code_to_key(0x44, &keymap),
             Some(InputBinding::Key(KeyCode::KeyD))
         );
-        assert_eq!(mrc_code_to_key(0x10, &keymap), Some(keymap.run));
+        assert_eq!(mrc_code_to_key(0x10, &keymap), None);
+        assert_eq!(
+            key_to_mrc_code(InputBinding::Key(KeyCode::ControlLeft), &keymap),
+            None
+        );
         assert_eq!(mrc_code_to_key(0x1000, &keymap), Some(keymap.attack));
         assert_eq!(mrc_code_to_key(0x1200, &keymap), Some(keymap.jump));
         assert_eq!(mrc_code_to_key(0x20, &keymap), Some(keymap.guard));
@@ -1707,7 +3054,7 @@ mod mrc_tests {
                 Transform::default(),
                 MotionState {
                     movement_mode: meteor_core::MovementMode::Idle,
-                    velocity: Vec3::new(4.0, 0.0, 5.0),
+                    velocity: Vec3::new(4.0, 8.0, 5.0),
                     facing: 0.0,
                 },
                 crate::components::fighter::Health::default(),
@@ -1766,8 +3113,11 @@ mod mrc_tests {
             .abs_diff_eq(Vec3::new(1.2, 3.6, 2.4), 1e-5));
         let motion = app.world().get::<MotionState>(fighter).unwrap();
         assert!((motion.facing - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
-        assert_eq!(motion.velocity.x, 0.0);
-        assert_eq!(motion.velocity.z, 0.0);
+        assert_eq!(
+            motion.velocity,
+            Vec3::new(4.0, 8.0, 5.0),
+            "original MRC vt+118 receives a null velocity pointer and preserves +390..398"
+        );
         assert_eq!(
             app.world()
                 .get::<crate::components::fighter::Health>(fighter)
@@ -1785,6 +3135,62 @@ mod mrc_tests {
         assert!(frame.position_applied && frame.facing_applied);
         assert!((app.world().resource::<CameraBasis>().yaw - motion.facing).abs() < 1e-6);
         assert!(app.world().resource::<MrcPlayback>().paused);
+    }
+
+    #[test]
+    fn paused_mrc_seek_runs_when_simulation_frame_is_frozen() {
+        let mut app = App::new();
+        app.insert_resource(State::new(AppState::Playing))
+            .insert_resource(crate::plugins::FrameClock::default())
+            .init_resource::<Time>()
+            .init_resource::<Keymap>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .init_resource::<CameraBasis>();
+        crate::plugins::configure_fighter_frame_sets(&mut app);
+        app.add_plugins(ReplayPlugin);
+        let mut doc = empty_mrc_document();
+        doc.queue_d.push(meteor_asset::mrc::MrcQueueDEntry {
+            a: 0,
+            b: 0,
+            c: 0,
+            time: 20.0,
+        });
+        app.insert_resource(MrcPlayback {
+            active: true,
+            paused: true,
+            doc: Some(doc),
+            ..default()
+        });
+        let mut blend = crate::components::fighter::EntryBlend::default();
+        blend.duration = 0.3;
+        blend.elapsed = 0.1;
+        blend.started_at_seconds = Some(18.0);
+        let local = app
+            .world_mut()
+            .spawn((
+                LocalFighter,
+                Transform::default(),
+                MotionState {
+                    movement_mode: meteor_core::MovementMode::Idle,
+                    velocity: Vec3::ZERO,
+                    facing: 0.0,
+                },
+                blend,
+            ))
+            .id();
+        app.world_mut().resource_mut::<ReplaySeekRequest>().0 = Some(7.0);
+        app.update();
+        let playback = app.world().resource::<MrcPlayback>();
+        assert_eq!(playback.elapsed, 7.0);
+        assert!(playback.paused);
+        assert!(app.world().resource::<ReplaySeekRequest>().0.is_none());
+        let blend = app
+            .world()
+            .get::<crate::components::fighter::EntryBlend>(local)
+            .unwrap();
+        assert_eq!(blend.started_at_seconds, None);
+        assert_eq!(blend.elapsed, 0.0);
     }
 
     #[test]
@@ -1860,6 +3266,14 @@ mod mrc_tests {
             },
             remote_entry(1.0, 1.0, 10),
             meteor_asset::mrc::MrcQueueAEntry {
+                id: 50,
+                time: 1.25,
+                blob: [1u16, 473, 0, 11, 10]
+                    .into_iter()
+                    .flat_map(u16::to_le_bytes)
+                    .collect(),
+            },
+            meteor_asset::mrc::MrcQueueAEntry {
                 id: 25,
                 time: 3.0,
                 blob: [
@@ -1933,6 +3347,11 @@ mod mrc_tests {
 
         app.world_mut().resource_mut::<ReplaySeekRequest>().0 = Some(3.0);
         app.update();
+        assert!(app
+            .world()
+            .resource::<MrcSessionRuntime>()
+            .pending_actions
+            .is_empty());
         assert_eq!(
             app.world()
                 .get::<crate::components::fighter::Health>(local)
@@ -2185,6 +3604,814 @@ mod mrc_tests {
     }
 
     #[test]
+    fn stock_mrc_uses_the_loaded_stage_frame_for_local_and_remote_positions() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../mrcs/tests/指虎大绝.mrc");
+        let mut playback = MrcPlayback::default();
+        playback.load(&path).expect("original fist recording");
+        assert!(playback.stock_scene_coordinates());
+        let waypoints = meteor_scene::stage_loader::WaypointGraph {
+            center: [100.0, 200.0, 0.0],
+            ..default()
+        };
+        let frame = mrc_scene_frame(&playback, Some(&waypoints)).unwrap();
+        let doc = playback.doc.as_ref().unwrap();
+        let local = decode_mrc_pose(&doc.queue_d[0]).unwrap();
+        let mapped = mrc_scene_pose(local, Some(frame));
+        assert!(mapped.abs_diff_eq(Vec3::new(local.x - 12.0, local.y, 24.0 - local.z,), 1e-4));
+        let source_yaw = decode_mrc_facing(&doc.queue_e[0]).unwrap();
+        let mapped_yaw = mrc_scene_facing(source_yaw, Some(frame));
+        assert!((mapped_yaw.sin() - source_yaw.sin()).abs() < 1e-5);
+        assert!((mapped_yaw.cos() + source_yaw.cos()).abs() < 1e-5);
+        let remote = doc
+            .queue_a
+            .iter()
+            .find_map(|entry| {
+                (entry.id == 2 && entry.blob.len() >= 16)
+                    .then(|| {
+                        meteor_network::role_state::decode_event2_state(&entry.blob[2..16]).ok()
+                    })
+                    .flatten()
+            })
+            .expect("event2 in original recording");
+        let mapped_remote = frame.to_scene(remote);
+        assert!((mapped_remote.position.x - (remote.position.x - 12.0)).abs() < 1e-5);
+        assert!((mapped_remote.position.z - (24.0 - remote.position.z)).abs() < 1e-5);
+        let mut own = empty_mrc_document();
+        own.mark0 = 0;
+        own.mark1 = 0;
+        playback.doc = Some(own);
+        assert!(mrc_scene_frame(&playback, Some(&waypoints)).is_none());
+        assert_eq!(mrc_scene_pose(local, None), local);
+    }
+
+    #[test]
+    fn original_event51_applies_remote_action_blend_once_after_actor_entry() {
+        use crate::plugins::character_plugin::{load_character_asset_for_test, CharacterAssetsSet};
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        let character = load_character_asset_for_test(&[root], "p0").expect("original p0");
+        let mut assets = CharacterAssetsSet::default();
+        assets.0.insert("p0".into(), character);
+        let mut app = App::new();
+        app.insert_resource(assets);
+        let mut doc = empty_mrc_document();
+        doc.state[4..8].copy_from_slice(&1u32.to_le_bytes());
+        app.insert_resource(MrcPlayback {
+            doc: Some(doc),
+            active: true,
+            ..default()
+        });
+        app.init_resource::<MrcSessionRuntime>();
+        app.add_systems(
+            Update,
+            (apply_mrc_session_events, sync_mrc_remote_pose).chain(),
+        );
+        let action = meteor_asset::mrc::MrcQueueAEntry {
+            id: 51,
+            time: 10.67306,
+            blob: [2u16, 372, 0, 19, 50]
+                .into_iter()
+                .flat_map(u16::to_le_bytes)
+                .collect(),
+        };
+        route_mrc_session_entry(
+            &action,
+            &mut app.world_mut().resource_mut::<MrcSessionRuntime>(),
+        );
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<MrcSessionRuntime>()
+                .pending_actions
+                .len(),
+            1
+        );
+        let state = meteor_network::role_state::role_state_from_runtime(
+            meteor_network::role_state::RoleStateRuntime {
+                position: meteor_network::role_state::RoleVec3::ZERO,
+                forward: meteor_network::role_state::forward_from_yaw(0.0),
+                velocity: meteor_network::role_state::RoleVec3::ZERO,
+                pose_id: 372,
+                grounded: true,
+                guard_route: false,
+                playback_arg: 0,
+                pose_sequence: 19,
+            },
+        );
+        app.world_mut()
+            .resource_mut::<MrcSessionRuntime>()
+            .pending
+            .push(MrcSessionEvent::Remote { actor_id: 2, state });
+        app.update();
+        app.update();
+        let entity = app
+            .world_mut()
+            .query_filtered::<Entity, With<MrcRemoteFighter>>()
+            .single(app.world())
+            .unwrap();
+        let pose = app
+            .world()
+            .get::<crate::components::fighter::PoseRuntime>(entity)
+            .unwrap();
+        let instance = pose.pose_instance_id;
+        assert_eq!(pose.pose_id, 372);
+        assert!(!pose.loops);
+        assert_eq!(
+            app.world()
+                .get::<crate::components::fighter::EntryBlend>(entity)
+                .unwrap()
+                .duration,
+            0.5
+        );
+        route_mrc_session_entry(
+            &action,
+            &mut app.world_mut().resource_mut::<MrcSessionRuntime>(),
+        );
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<crate::components::fighter::PoseRuntime>(entity)
+                .unwrap()
+                .pose_instance_id,
+            instance
+        );
+    }
+
+    #[test]
+    fn original_fist_recording_feeds_full_anger_command_through_production_input() {
+        use crate::plugins::input_plugin::{
+            capture_local_command_input, DesktopDodgeInput, LocalCombatInput, LocalCommandInput,
+            LocalCrouchInput, LocalGuardInput, LocalJumpInput,
+        };
+        use meteor_input::command_parser::Dir;
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../mrcs/tests/指虎大绝.mrc");
+        let mut playback = MrcPlayback::default();
+        playback.load(&path).expect("original fist recording");
+        let doc = playback.doc.as_ref().unwrap();
+        let attack_time = doc
+            .queue_b
+            .iter()
+            .find(|entry| {
+                entry.code == 0x1000 && entry.value != 0 && (14.0..15.0).contains(&entry.time)
+            })
+            .unwrap()
+            .time;
+        let first_hit_time = doc
+            .queue_a
+            .iter()
+            .find(|entry| entry.id == 11 && entry.time > attack_time)
+            .unwrap()
+            .time;
+        let pos_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../origin_res/pmodel/P0.POS");
+        let pos_text = crate::text_codec::decode_text(&std::fs::read(pos_path).unwrap());
+        let fist = meteor_asset::pos::parse_poses(&pos_text)
+            .into_iter()
+            .find(|pose| pose.id == 421)
+            .unwrap();
+        let authored_hit_offset =
+            (fist.attacks[0].start - fist.start) as f32 / meteor_core::ANIM_FPS;
+        assert!(((first_hit_time - attack_time) - authored_hit_offset).abs() < 0.02);
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<Time<bevy::time::Real>>()
+            .init_resource::<Keymap>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .init_resource::<ReplaySeekRequest>()
+            .init_resource::<ReplayPlayer>()
+            .init_resource::<MrcFrameOverride>()
+            .init_resource::<MrcSessionRuntime>()
+            .init_resource::<CameraBasis>()
+            .init_resource::<SyntheticInputStream>()
+            .init_resource::<LocalCommandInput>()
+            .init_resource::<LocalCrouchInput>()
+            .init_resource::<LocalGuardInput>()
+            .init_resource::<LocalCombatInput>()
+            .init_resource::<LocalJumpInput>()
+            .init_resource::<DesktopDodgeInput>()
+            .add_message::<bevy::window::WindowEvent>()
+            .insert_resource(playback)
+            .add_systems(
+                Update,
+                (
+                    tick_mrc_playback,
+                    apply_replay_seek,
+                    apply_mrc_session_events,
+                    capture_local_command_input,
+                )
+                    .chain(),
+            );
+        let mut fighter = test_fighter();
+        fighter.weapon = 11;
+        fighter.weapon_slots = [11, 0];
+        app.world_mut().spawn((
+            LocalFighter,
+            fighter,
+            Transform::default(),
+            MotionState {
+                movement_mode: meteor_core::MovementMode::Idle,
+                velocity: Vec3::ZERO,
+                facing: 0.0,
+            },
+            crate::components::fighter::Health::default(),
+            crate::components::fighter::Qi::default(),
+            crate::components::fighter::DeathRespawn::default(),
+            crate::components::fighter::CombatState::default(),
+            crate::components::fighter::SmState::default(),
+            crate::components::fighter::PoseRuntime::idle(),
+            crate::components::fighter::EntryBlend::default(),
+        ));
+        app.world_mut().resource_mut::<ReplaySeekRequest>().0 = Some(14.6);
+        app.update();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .clear();
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .clear();
+        app.world_mut().resource_mut::<MrcPlayback>().paused = false;
+        let mut attack = None;
+        let mut parser = meteor_input::command_parser::CommandInput::default();
+        for _ in 0..22 {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_millis(20));
+            app.world_mut()
+                .resource_mut::<Time<bevy::time::Real>>()
+                .advance_by(std::time::Duration::from_millis(20));
+            app.update();
+            let edges = app.world().resource::<LocalCombatInput>().edges.clone();
+            for edge in &edges {
+                match *edge {
+                    crate::plugins::input_plugin::LocalCombatInputEdge::DirectionPress(dir) => {
+                        parser.push_direction(dir, 14_900.0)
+                    }
+                    crate::plugins::input_plugin::LocalCombatInputEdge::DirectionRelease(dir) => {
+                        parser.release_direction(dir)
+                    }
+                    crate::plugins::input_plugin::LocalCombatInputEdge::Attack => {
+                        let qi = app
+                            .world_mut()
+                            .query_filtered::<&crate::components::fighter::Qi, With<LocalFighter>>()
+                            .single(app.world())
+                            .unwrap()
+                            .current;
+                        attack = Some((parser.peek(), qi));
+                    }
+                    _ => {}
+                }
+            }
+            if attack.is_some() {
+                break;
+            }
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .clear();
+            app.world_mut()
+                .resource_mut::<ButtonInput<MouseButton>>()
+                .clear();
+        }
+        assert_eq!(
+            attack,
+            Some((vec![Dir::Left, Dir::Right, Dir::Down], 100.0))
+        );
+
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_millis(20));
+        app.world_mut()
+            .resource_mut::<Time<bevy::time::Real>>()
+            .advance_by(std::time::Duration::from_millis(20));
+        app.update();
+        let local = app
+            .world_mut()
+            .query_filtered::<&Transform, With<LocalFighter>>()
+            .single(app.world())
+            .unwrap()
+            .translation;
+        let remote = app
+            .world_mut()
+            .query_filtered::<&Transform, With<MrcRemoteFighter>>()
+            .single(app.world())
+            .unwrap()
+            .translation;
+        let distance = Vec2::new(local.x - remote.x, local.z - remote.z).length();
+        assert!(
+            (distance - 2.14).abs() < 0.25,
+            "fist ultimate separation: {distance}"
+        );
+
+        app.world_mut().resource_mut::<ReplaySeekRequest>().0 = Some(14.93);
+        app.update();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .clear();
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .clear();
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_millis(33));
+        app.world_mut()
+            .resource_mut::<Time<bevy::time::Real>>()
+            .advance_by(std::time::Duration::from_millis(33));
+        app.update();
+        assert!(app
+            .world()
+            .resource::<LocalCombatInput>()
+            .edges
+            .contains(&crate::plugins::input_plugin::LocalCombatInputEdge::Attack));
+        let qi_at_attack = app
+            .world_mut()
+            .query_filtered::<&crate::components::fighter::Qi, With<LocalFighter>>()
+            .single(app.world())
+            .unwrap()
+            .current;
+        assert_eq!(qi_at_attack, 100.0, "later MRC vitals overtook attack");
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_millis(16));
+        app.world_mut()
+            .resource_mut::<Time<bevy::time::Real>>()
+            .advance_by(std::time::Duration::from_millis(16));
+        app.update();
+        let qi_after_attack = app
+            .world_mut()
+            .query_filtered::<&crate::components::fighter::Qi, With<LocalFighter>>()
+            .single(app.world())
+            .unwrap()
+            .current;
+        assert_eq!(qi_after_attack, 0.0);
+    }
+
+    #[test]
+    fn original_hit_and_property_events_update_the_remote_without_repeating_local_hits() {
+        use crate::plugins::character_plugin::{load_character_asset_for_test, CharacterAssetsSet};
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        let character = load_character_asset_for_test(&[root.clone()], "p0").expect("original p0");
+        let mut assets = CharacterAssetsSet::default();
+        assets.0.insert("p0".into(), character);
+        let table =
+            meteor_asset::res::parse_meteor_res(&std::fs::read(root.join("Meteor.res")).unwrap())
+                .unwrap()
+                .combat_table();
+        assert_eq!(table.status_effect(37).unwrap().anger, -5);
+        let mut app = App::new();
+        app.insert_resource(assets)
+            .insert_resource(crate::plugins::combat_plugin::CombatResourceData(table));
+        let mut doc = empty_mrc_document();
+        doc.state[4..8].copy_from_slice(&2u32.to_le_bytes());
+        app.insert_resource(MrcPlayback {
+            doc: Some(doc),
+            active: true,
+            ..default()
+        });
+        app.init_resource::<MrcSessionRuntime>();
+        app.add_systems(
+            Update,
+            (
+                apply_mrc_session_events,
+                apply_mrc_hit_events,
+                apply_mrc_property_events,
+                sync_mrc_remote_pose,
+            )
+                .chain(),
+        );
+        let state = meteor_network::role_state::role_state_from_runtime(
+            meteor_network::role_state::RoleStateRuntime {
+                position: meteor_network::role_state::RoleVec3::ZERO,
+                forward: meteor_network::role_state::forward_from_yaw(0.0),
+                velocity: meteor_network::role_state::RoleVec3::ZERO,
+                pose_id: 0,
+                grounded: true,
+                guard_route: false,
+                playback_arg: 0,
+                pose_sequence: 1,
+            },
+        );
+        app.world_mut()
+            .resource_mut::<MrcSessionRuntime>()
+            .pending
+            .push(MrcSessionEvent::Remote { actor_id: 1, state });
+        app.update();
+        let entity = app
+            .world_mut()
+            .query_filtered::<Entity, With<MrcRemoteFighter>>()
+            .single(app.world())
+            .unwrap();
+        let hit = meteor_network::stock_protocol::StockHitReactionEvent {
+            pose_id: 100,
+            move_hundred: 150,
+            value_hundred: 20,
+            context: 4,
+            target_actor_id: 1,
+        };
+        route_mrc_session_entry(
+            &meteor_asset::mrc::MrcQueueAEntry {
+                id: 11,
+                time: 10.44105,
+                blob: hit.encode().to_vec(),
+            },
+            &mut app.world_mut().resource_mut::<MrcSessionRuntime>(),
+        );
+        route_mrc_session_entry(
+            &meteor_asset::mrc::MrcQueueAEntry {
+                id: 61,
+                time: 11.0,
+                blob: meteor_network::stock_protocol::StockPropertyEffectEvent {
+                    actor_id: 1,
+                    category: 2,
+                    resource_id: 37,
+                }
+                .encode(),
+            },
+            &mut app.world_mut().resource_mut::<MrcSessionRuntime>(),
+        );
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<crate::components::fighter::PoseRuntime>(entity)
+                .unwrap()
+                .pose_id,
+            100
+        );
+        let reaction = app
+            .world()
+            .get::<crate::components::fighter::FighterHitReaction>(entity)
+            .unwrap()
+            .current
+            .as_ref()
+            .unwrap();
+        assert!((reaction.motion_scale - 1.5).abs() < 1e-6);
+        assert!((reaction.authored_minimum - 0.2).abs() < 1e-6);
+        assert_eq!(
+            app.world()
+                .get::<crate::plugins::network_plugin::RemoteHitMotionWindow>(entity)
+                .unwrap()
+                .remaining,
+            0.4
+        );
+        assert_eq!(
+            app.world()
+                .get::<crate::components::fighter::FighterStatusEffects>(entity)
+                .unwrap()
+                .pending
+                .anger,
+            -5
+        );
+        let mut later = state;
+        later.state_words.pose_sequence = 2;
+        app.world_mut()
+            .resource_mut::<MrcSessionRuntime>()
+            .pending
+            .push(MrcSessionEvent::Remote {
+                actor_id: 1,
+                state: later,
+            });
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<crate::components::fighter::PoseRuntime>(entity)
+                .unwrap()
+                .pose_id,
+            100
+        );
+        app.world_mut()
+            .get_mut::<crate::plugins::network_plugin::RemoteHitMotionWindow>(entity)
+            .unwrap()
+            .remaining = 0.0;
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<crate::components::fighter::PoseRuntime>(entity)
+                .unwrap()
+                .pose_id,
+            0
+        );
+    }
+
+    #[test]
+    fn original_ninja_burn_uses_recorded_start_hit_pose_and_vitals() {
+        use crate::components::fighter::{
+            CombatState, EntryBlend, FighterHitReaction, Health, PoseRuntime, Qi, SmState,
+        };
+        use crate::plugins::character_plugin::{load_character_asset_for_test, CharacterAssetsSet};
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let doc = meteor_asset::mrc::decode_mrc(
+            &std::fs::read(root.join("mrcs/tests/忍烧.mrc")).expect("ninja recording"),
+        )
+        .expect("valid MRC");
+        assert_eq!(u32::from_le_bytes(doc.state[4..8].try_into().unwrap()), 2);
+        let character =
+            load_character_asset_for_test(&[root.join("origin_res")], "p0").expect("original p0");
+        let mut assets = CharacterAssetsSet::default();
+        assets.0.insert("p0".into(), character);
+        let mut app = App::new();
+        app.insert_resource(assets)
+            .insert_resource(MrcPlayback {
+                doc: Some(doc.clone()),
+                active: true,
+                ..default()
+            })
+            .init_resource::<MrcSessionRuntime>()
+            .add_systems(
+                Update,
+                (apply_mrc_session_events, apply_mrc_hit_events).chain(),
+            );
+        let local = app
+            .world_mut()
+            .spawn((
+                LocalFighter,
+                test_fighter(),
+                PoseRuntime::idle(),
+                EntryBlend::default(),
+                FighterHitReaction::default(),
+                crate::plugins::movement_plugin::FighterAir::default(),
+                CombatState::default(),
+                SmState::default(),
+                Health::default(),
+                Qi::default(),
+                crate::components::fighter::DeathRespawn::default(),
+            ))
+            .id();
+        let start = doc
+            .queue_a
+            .iter()
+            .find(|entry| entry.id == 50 && (entry.time - 10.99837).abs() < 0.001)
+            .expect("recorded ninja Pose 473 start");
+        let remote_state = doc
+            .queue_a
+            .iter()
+            .rev()
+            .find(|entry| entry.id == 2 && entry.time < start.time)
+            .and_then(|entry| {
+                entry
+                    .blob
+                    .chunks_exact(16)
+                    .find(|chunk| u16::from_le_bytes(chunk[..2].try_into().unwrap()) == 1)
+            })
+            .and_then(|chunk| meteor_network::role_state::decode_event2_state(&chunk[2..]).ok())
+            .expect("remote event2 before Pose 473");
+        app.world_mut()
+            .resource_mut::<MrcSessionRuntime>()
+            .pending
+            .push(MrcSessionEvent::Remote {
+                actor_id: 1,
+                state: remote_state,
+            });
+        app.update();
+        let remote = app
+            .world_mut()
+            .query_filtered::<Entity, With<MrcRemoteFighter>>()
+            .single(app.world())
+            .unwrap();
+        route_mrc_session_entry(
+            start,
+            &mut app.world_mut().resource_mut::<MrcSessionRuntime>(),
+        );
+        app.update();
+        assert_eq!(app.world().get::<PoseRuntime>(remote).unwrap().pose_id, 473);
+        assert!((app.world().get::<EntryBlend>(remote).unwrap().duration - 0.10).abs() < 1e-6);
+        assert!(
+            app.world()
+                .get::<PoseRuntime>(remote)
+                .unwrap()
+                .link_past_end
+        );
+        let hit = doc
+            .queue_a
+            .iter()
+            .find(|entry| entry.id == 11 && (entry.time - 11.55843).abs() < 0.001)
+            .expect("first recorded burn hit");
+        let recorded_hit =
+            meteor_network::stock_protocol::StockHitReactionEvent::decode(&hit.blob).unwrap();
+        assert_eq!(
+            (recorded_hit.target_actor_id, recorded_hit.pose_id),
+            (2, 109)
+        );
+        route_mrc_session_entry(
+            hit,
+            &mut app.world_mut().resource_mut::<MrcSessionRuntime>(),
+        );
+        app.update();
+        assert_eq!(app.world().get::<PoseRuntime>(local).unwrap().pose_id, 109);
+        assert_eq!(
+            app.world().get::<SmState>(local).unwrap().current,
+            meteor_core::FighterState::BeHit
+        );
+        assert_eq!(
+            app.world()
+                .get::<FighterHitReaction>(local)
+                .unwrap()
+                .current
+                .as_ref()
+                .unwrap()
+                .authored_minimum,
+            3.0
+        );
+
+        let vitals = doc
+            .queue_a
+            .iter()
+            .find(|entry| entry.id == 25 && (entry.time - 11.61444).abs() < 0.001)
+            .expect("first post-hit HP snapshot");
+        route_mrc_session_entry(
+            vitals,
+            &mut app.world_mut().resource_mut::<MrcSessionRuntime>(),
+        );
+        app.update();
+        assert_eq!(app.world().get::<Health>(local).unwrap().current, 1960.0);
+    }
+
+    #[test]
+    fn production_mrc_snapshot_does_not_rewind_natural_link_or_restart_same_pose() {
+        use crate::components::fighter::{EntryBlend, PoseRuntime};
+        use crate::plugins::character_plugin::{load_character_asset_for_test, CharacterAssetsSet};
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        let character = load_character_asset_for_test(&[root], "p0").expect("original p0");
+        let mut assets = CharacterAssetsSet::default();
+        assets.0.insert("p0".into(), character);
+        let mut app = App::new();
+        app.insert_resource(assets);
+        app.init_resource::<MrcPlayback>();
+        app.init_resource::<MrcSessionRuntime>();
+        app.add_systems(
+            Update,
+            (apply_mrc_session_events, sync_mrc_remote_pose).chain(),
+        );
+        let mut state = meteor_network::role_state::role_state_from_runtime(
+            meteor_network::role_state::RoleStateRuntime {
+                position: meteor_network::role_state::RoleVec3::ZERO,
+                forward: meteor_network::role_state::forward_from_yaw(0.0),
+                velocity: meteor_network::role_state::RoleVec3::ZERO,
+                pose_id: 421,
+                grounded: true,
+                guard_route: false,
+                playback_arg: 0,
+                pose_sequence: 7,
+            },
+        );
+        app.world_mut()
+            .resource_mut::<MrcSessionRuntime>()
+            .pending
+            .push(MrcSessionEvent::Remote { actor_id: 1, state });
+        app.update();
+        let entity = app
+            .world_mut()
+            .query_filtered::<Entity, With<MrcRemoteFighter>>()
+            .single(app.world())
+            .unwrap();
+
+        let mut linked = PoseRuntime::idle();
+        app.world().resource::<CharacterAssetsSet>().0["p0"].apply_pose(&mut linked, 422, true);
+        linked.frame += 2.0;
+        let frame = linked.frame;
+        let instance = linked.pose_instance_id;
+        app.world_mut()
+            .entity_mut(entity)
+            .insert((linked, EntryBlend::default()));
+        app.update();
+        assert_eq!(app.world().get::<PoseRuntime>(entity).unwrap().pose_id, 422);
+        state.state_words.pose_sequence = 8;
+        app.world_mut()
+            .resource_mut::<MrcSessionRuntime>()
+            .pending
+            .push(MrcSessionEvent::Remote { actor_id: 1, state });
+        app.update();
+        let pose = app.world().get::<PoseRuntime>(entity).unwrap();
+        assert_eq!(
+            (pose.pose_id, pose.frame, pose.pose_instance_id),
+            (422, frame, instance)
+        );
+        state.state_words.pose_id = 473;
+        state.state_words.pose_sequence = 9;
+        app.world_mut()
+            .resource_mut::<MrcSessionRuntime>()
+            .pending
+            .push(MrcSessionEvent::Remote { actor_id: 1, state });
+        app.update();
+        assert_eq!(app.world().get::<PoseRuntime>(entity).unwrap().pose_id, 473);
+        state.state_words.pose_id = 421;
+        state.state_words.pose_sequence = 1;
+        app.world_mut()
+            .resource_mut::<MrcSessionRuntime>()
+            .pending
+            .push(MrcSessionEvent::Remote { actor_id: 1, state });
+        app.update();
+        assert_eq!(app.world().get::<PoseRuntime>(entity).unwrap().pose_id, 473);
+    }
+
+    #[test]
+    fn production_mrc_roster_restores_original_ninja_and_late_hero_identity() {
+        use crate::components::fighter::{CharacterVariantChanged, Fighter};
+        let mut app = App::new();
+        app.init_resource::<MrcPlayback>();
+        app.init_resource::<MrcSessionRuntime>();
+        app.add_systems(
+            Update,
+            (apply_mrc_session_events, apply_mrc_identities).chain(),
+        );
+        let mut doc = empty_mrc_document();
+        doc.state[4..8].copy_from_slice(&2u32.to_le_bytes());
+        {
+            let mut playback = app.world_mut().resource_mut::<MrcPlayback>();
+            playback.active = true;
+            playback.doc = Some(doc);
+        }
+        let mut local_fighter = test_fighter();
+        local_fighter.character_id = 7;
+        let local = app.world_mut().spawn((LocalFighter, local_fighter)).id();
+
+        let roster = [
+            2, 2, 1, 2, 1, 1, 56, 1, 1, 1, 1, 1, 1, 1, 1, 9, 0xb8, 0xc4, 0xc3, 0xfb, 0xce, 0xe9,
+            0xd4, 0xb2, 1, 1,
+        ];
+        let state = meteor_network::role_state::role_state_from_runtime(
+            meteor_network::role_state::RoleStateRuntime {
+                position: meteor_network::role_state::RoleVec3::ZERO,
+                forward: meteor_network::role_state::forward_from_yaw(0.0),
+                velocity: meteor_network::role_state::RoleVec3::ZERO,
+                pose_id: 474,
+                grounded: true,
+                guard_route: false,
+                playback_arg: 0,
+                pose_sequence: 3,
+            },
+        );
+        {
+            let mut runtime = app.world_mut().resource_mut::<MrcSessionRuntime>();
+            route_mrc_session_entry(
+                &meteor_asset::mrc::MrcQueueAEntry {
+                    id: 4,
+                    time: 0.59926,
+                    blob: roster.to_vec(),
+                },
+                &mut runtime,
+            );
+            runtime
+                .pending
+                .push(MrcSessionEvent::Remote { actor_id: 1, state });
+        }
+        app.update();
+        let entity = app
+            .world_mut()
+            .query_filtered::<Entity, With<MrcRemoteFighter>>()
+            .single(app.world())
+            .unwrap();
+        let fighter = app.world().get::<Fighter>(entity).unwrap();
+        assert_eq!(
+            (fighter.character_id, fighter.weapon, fighter.weapon_variant),
+            (0, 12, 0)
+        );
+        assert_eq!(
+            app.world()
+                .resource::<MrcSessionRuntime>()
+                .unhandled_counts
+                .get(&4),
+            None
+        );
+
+        {
+            let mut runtime = app.world_mut().resource_mut::<MrcSessionRuntime>();
+            for (actor_id, hero) in [(1, 4), (2, 0)] {
+                let event = meteor_network::stock_protocol::StockRoleEnteredEvent {
+                    actor_id,
+                    hero,
+                    hero_checksum: 0,
+                    camp: 0,
+                };
+                route_mrc_session_entry(
+                    &meteor_asset::mrc::MrcQueueAEntry {
+                        id: 9,
+                        time: 1.0,
+                        blob: event.encode().to_vec(),
+                    },
+                    &mut runtime,
+                );
+            }
+        }
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<CharacterVariantChanged>(entity)
+                .unwrap()
+                .requested_character_id,
+            4
+        );
+        assert_eq!(
+            app.world()
+                .get::<CharacterVariantChanged>(local)
+                .unwrap()
+                .requested_character_id,
+            0
+        );
+
+        assert_eq!(app.world().get::<Fighter>(entity).unwrap().character_id, 0);
+    }
+
+    #[test]
     fn production_queue_a_projects_vitals_equipment_and_remote_actor() {
         let mut app = App::new();
         app.init_resource::<MrcPlayback>();
@@ -2407,4 +4634,34 @@ mod export_tests {
         let doc2 = meteor_asset::mrc::decode_mrc(&export_mrc(&stray, &keymap)).unwrap();
         assert!(doc2.queue_b.is_empty());
     }
+}
+
+#[cfg(test)]
+pub(crate) fn install_mrc_motion_audit(
+    app: &mut App,
+    mut doc: meteor_asset::mrc::MrcDocument,
+    start: f32,
+    centered_graph: meteor_scene::stage_loader::WaypointGraph,
+    position_corrections: bool,
+) {
+    if !position_corrections {
+        doc.queue_d.clear();
+    }
+    app.insert_resource(MrcPlayback {
+        active: true,
+        elapsed: start,
+        doc: Some(doc),
+        ..default()
+    })
+    .insert_resource(centered_graph)
+    .init_resource::<ReplaySeekRequest>()
+    .init_resource::<MrcFrameOverride>()
+    .init_resource::<MrcSessionRuntime>()
+    .add_systems(
+        Update,
+        tick_mrc_playback
+            .in_set(crate::plugins::FighterFrameSet::Movement)
+            .before(crate::plugins::input_plugin::capture_local_command_input)
+            .run_if(crate::plugins::simulation_frame),
+    );
 }

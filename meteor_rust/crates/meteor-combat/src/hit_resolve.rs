@@ -8,6 +8,7 @@ pub fn guard_anger_gain(raw_atk: i32) -> i32 {
 
 #[derive(Debug, Clone)]
 pub struct HitResult {
+    pub rebalance_effect: u8,
     pub guarded: bool,
     pub damage: i32,
     pub raw: i32,
@@ -36,6 +37,9 @@ pub enum HitOutcome {
 }
 
 pub trait CombatStats {
+    fn try_spend_anger(&mut self, cost: f32) -> bool {
+        cost == 0.0
+    }
     fn hp(&self) -> f32;
     fn alive(&self) -> bool;
     fn invincible(&self) -> bool;
@@ -88,7 +92,8 @@ pub fn team_mask(team: i32) -> u32 {
     if team <= 0 {
         return 0;
     }
-    1u32 << (team - 1)
+
+    1u32.checked_shl((team - 1) as u32).unwrap_or(0)
 }
 
 pub fn team_damage_scale(attacker_team: i32, defender_team: i32) -> f32 {
@@ -170,6 +175,18 @@ pub struct HitOptions<'a> {
 }
 
 pub fn resolve_hit<S: CombatStats>(defender_stats: &mut S, opts: &HitOptions) -> HitResult {
+    resolve_hit_with_rules(
+        defender_stats,
+        opts,
+        crate::battle_rules::BattleRules::ORIGINAL,
+    )
+}
+
+pub fn resolve_hit_with_rules<S: CombatStats>(
+    defender_stats: &mut S,
+    opts: &HitOptions,
+    rules: crate::battle_rules::BattleRules,
+) -> HitResult {
     let packed = opts.dword1.map(unpack_hit_dword1);
 
     let force_hit_flags = packed
@@ -196,6 +213,8 @@ pub fn resolve_hit<S: CombatStats>(defender_stats: &mut S, opts: &HitOptions) ->
     let equipped_def = opts.defender_weapon_def.unwrap_or(0);
     let def = (defender_stats.def() as i32) + equipped_def;
     let raw = (atk - def).max(0);
+    let scale = team_damage_scale(opts.attacker_team, opts.defender_team);
+    let damage = rules.damage(opts.pose_id, ((raw as f32) * scale).trunc().max(0.0) as i32);
 
     if can_guard {
         let same_team = (team_mask(opts.attacker_team) & team_mask(opts.defender_team)) != 0;
@@ -209,15 +228,23 @@ pub fn resolve_hit<S: CombatStats>(defender_stats: &mut S, opts: &HitOptions) ->
             .attack
             .map(|a| (a.defense_value, a.defense_move))
             .unwrap_or((0.0, 0.0));
+        let defense_value = rules.guard_stun_seconds(opts.pose_id, defense_value);
+        let chip = rules.guard_damage(opts.pose_id, damage);
+        let applied = if chip > 0 {
+            defender_stats.take_damage(chip)
+        } else {
+            0
+        };
         return HitResult {
+            rebalance_effect: 0,
             guarded: true,
-            damage: 0,
+            damage: applied,
             raw,
             scale: 1.0,
             atk,
             def,
             anger_gain,
-            killed: false,
+            killed: chip > 0 && !defender_stats.alive(),
             outcome: HitOutcome::Guard,
             hit_key,
             force_hit_flags,
@@ -229,8 +256,6 @@ pub fn resolve_hit<S: CombatStats>(defender_stats: &mut S, opts: &HitOptions) ->
         };
     }
 
-    let scale = team_damage_scale(opts.attacker_team, opts.defender_team);
-    let damage = ((raw as f32) * scale).trunc().max(0.0) as i32;
     let applied = defender_stats.take_damage(damage);
     let anger_gain = defender_stats.gain_anger_from_damage(applied);
     let killed = !defender_stats.alive();
@@ -239,7 +264,9 @@ pub fn resolve_hit<S: CombatStats>(defender_stats: &mut S, opts: &HitOptions) ->
         .attack
         .map(|a| (a.target_value, a.target_move))
         .unwrap_or((0.0, 0.0));
+    let target_value = rules.hit_stun_seconds(opts.pose_id, target_value);
     HitResult {
+        rebalance_effect: 0,
         guarded: false,
         damage: applied,
         raw,
@@ -375,6 +402,10 @@ mod tests {
         assert_eq!(team_mask(1), 1);
         assert_eq!(team_mask(2), 2);
         assert_eq!(team_mask(3), 4);
+        assert_eq!(team_mask(32), 1 << 31);
+        assert_eq!(team_mask(33), 0);
+        assert_eq!(team_mask(i32::MAX), 0);
+        assert_eq!(team_mask(i32::MIN), 0);
 
         assert_eq!(team_damage_scale(1, 1), 0.2);
         assert_eq!(team_damage_scale(1, 2), 1.0);
@@ -408,6 +439,115 @@ mod tests {
         let result = resolve_hit(&mut stats, &opts);
         assert!(!result.guarded);
         assert_eq!(result.outcome, HitOutcome::BeHit);
+    }
+
+    #[test]
+    fn pose_chip_allowlist_never_changes_guard_break_admission() {
+        use crate::battle_rules::BattleRules;
+        let mut opts = base_opts();
+        opts.attack_power = Some(100);
+        opts.pose_attack_percent = &|_| Some(100.0);
+        opts.defender_in_guard = true;
+        for (list, chip) in [(r#""all""#, 10), ("[262]", 10), ("[263]", 0), ("[]", 0)] {
+            let json = format!(
+                r#"{{"schemaVersion":2,"rebalance":{{"guardChipPercent":10,"guardChipPoses":{list},"poseOverrides":[]}}}}"#
+            );
+            let rules = BattleRules::from_json(&json).unwrap();
+            opts.dword1 = None;
+            opts.force_hit_flags = None;
+            opts.attack_type = 0;
+            let guard = resolve_hit_with_rules(&mut StubStats::new(), &opts, rules.clone());
+            assert!(guard.guarded);
+            assert_eq!(guard.damage, chip);
+            for packed in [false, true] {
+                opts.force_hit_flags = Some(1);
+                opts.dword1 = packed.then(|| pack_hit_dword1(262, 1, 0));
+                let hit = resolve_hit_with_rules(&mut StubStats::new(), &opts, rules.clone());
+                assert!(!hit.guarded);
+                assert_eq!(hit.damage, 100, "guard break must use full ordinary damage");
+            }
+            opts.dword1 = None;
+            opts.force_hit_flags = None;
+            opts.attack_type = 1;
+            let original_break = resolve_hit_with_rules(&mut StubStats::new(), &opts, rules);
+            assert!(!original_break.guarded);
+            assert_eq!(original_break.damage, 100);
+        }
+    }
+
+    #[test]
+    fn pose_stun_overrides_apply_at_shared_resolution() {
+        let rules = crate::battle_rules::BattleRules::from_json(r#"{"schemaVersion":2,"rebalance":{"guardChipPercent":10,"guardChipPoses":"all","poseOverrides":[{"poseId":262,"hitStunMs":400,"guardStunMs":250}]}}"#).unwrap();
+        let mut opts = base_opts();
+        let hit = resolve_hit_with_rules(&mut StubStats::new(), &opts, rules.clone());
+        assert_eq!(hit.target_value, 0.4);
+        opts.defender_in_guard = true;
+        let guard = resolve_hit_with_rules(&mut StubStats::new(), &opts, rules);
+        assert_eq!(guard.defense_value, 0.25);
+    }
+
+    #[test]
+    fn balance_chip_keeps_guard_anger_and_can_kill() {
+        const BALANCED: crate::battle_rules::BattleRules =
+            crate::battle_rules::BattleRules::BALANCED;
+        let mut opts = base_opts();
+        opts.pose_attack_percent = &|_| Some(100.0);
+        opts.attack_power = Some(100);
+        opts.defender_in_guard = true;
+        let mut stats = StubStats::new();
+        stats.hp = 7.0;
+        let result = resolve_hit_with_rules(&mut stats, &opts, BALANCED);
+        assert_eq!(result.damage, 7);
+        assert!(result.guarded && result.killed);
+        assert_eq!(result.outcome, HitOutcome::Guard);
+        assert_eq!(result.anger_gain, 2);
+        assert_eq!(stats.hp, 0.0);
+    }
+
+    #[test]
+    fn balance_dagger_applies_after_defense_to_both_poses_only() {
+        const BALANCED: crate::battle_rules::BattleRules =
+            crate::battle_rules::BattleRules::BALANCED;
+        let mut opts = base_opts();
+        opts.pose_attack_percent = &|_| Some(100.0);
+        opts.attack_power = Some(100);
+        opts.defender_weapon_def = Some(15);
+        opts.weapon_id = 5;
+        for (pose, damage) in [(257, 51), (258, 51), (256, 85)] {
+            opts.pose_id = pose;
+            let result = resolve_hit_with_rules(&mut StubStats::new(), &opts, BALANCED);
+            assert_eq!(result.damage, damage);
+        }
+        opts.pose_id = 258;
+        opts.defender_in_guard = true;
+        assert_eq!(
+            resolve_hit_with_rules(&mut StubStats::new(), &opts, BALANCED).damage,
+            6
+        );
+        opts.force_hit_flags = Some(1);
+        let result = resolve_hit_with_rules(&mut StubStats::new(), &opts, BALANCED);
+        assert!(!result.guarded);
+        assert_eq!(result.damage, 51);
+    }
+
+    #[test]
+    fn balance_chip_rounds_up_minimum_one_and_respects_invincibility() {
+        const BALANCED: crate::battle_rules::BattleRules =
+            crate::battle_rules::BattleRules::BALANCED;
+        let mut opts = base_opts();
+        opts.pose_attack_percent = &|_| Some(100.0);
+        opts.attack_power = Some(9);
+        opts.defender_in_guard = true;
+        let result = resolve_hit_with_rules(&mut StubStats::new(), &opts, BALANCED);
+        assert_eq!(result.damage, 1);
+        assert!(!result.killed);
+        opts.attack_power = Some(100);
+        let mut stats = StubStats::new();
+        stats.invincible = true;
+        assert_eq!(
+            resolve_hit_with_rules(&mut stats, &opts, BALANCED).damage,
+            0
+        );
     }
 
     #[test]

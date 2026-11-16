@@ -80,13 +80,14 @@ fn load_escort_from_reader(reader: &StageAssetReader) -> Result<Arc<EscortDefini
     let des = read(&format!("{stage_id}/{stage_id}.des")).ok_or("地图缺少 DES")?;
     let desc = meteor_asset::des::parse_stage_description(&crate::text_codec::decode_text(&des));
 
-    for name in ["safeA", "safeB"] {
+    for team in ["safeA", "safeB"] {
         if !desc.scene_objects.iter().any(|o| {
             o.name_attr
                 .as_deref()
-                .is_some_and(|n| n.eq_ignore_ascii_case(name))
+                .is_some_and(|n| n.eq_ignore_ascii_case("safe") || n.eq_ignore_ascii_case(team))
+                && o.admits_ticket(1 << 2)
         }) {
-            return Err(format!("地图缺少 {name} 安全区"));
+            return Err(format!("地图缺少公共 safe 或 {team} 安全区"));
         }
     }
     let registry = read("Meteor.res").ok_or("地图缺少资源定义 Meteor.res")?;
@@ -250,6 +251,25 @@ mod tests {
             "gameplay must never reopen/rehash APK packs for optional-file misses"
         );
         eprintln!("sn06: {models} prop models loaded; {misses} optional misses; {fallback_reads} APK fallback reads");
+    }
+
+    #[test]
+    fn escort_official_capabilities_admit_qin_and_yixiantian_from_resource_data() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        for (stage, _, _) in meteor_scene::stage_registry::OFFICIAL_STAGES {
+            let reader = StageAssetReader {
+                stage_id: (*stage).into(),
+                roots: vec![root.clone()],
+                pack: None,
+                authoring_fallback: false,
+            };
+            let definition = load_escort_from_reader(&reader);
+            assert_eq!(
+                definition.is_ok(),
+                matches!(*stage, "sn02" | "sn03"),
+                "{stage}: {definition:?}"
+            );
+        }
     }
 
     #[test]

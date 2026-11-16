@@ -1,12 +1,15 @@
+#[path = "server_projectiles.rs"]
+mod server_projectiles;
+
 use crate::combat_authority::{
     decode_packed_obb, obb_center_near, AttackCatalog, AttackCatalogError, AttackRecord,
     ATTACK_SOURCE_EFFECT, ATTACK_SOURCE_PRECISE, MAX_ATTACK_OBB_HALF_SIZE, MAX_HURT_OBB_HALF_SIZE,
 };
-use crate::escort::{character_capsule_intersects_flag, escort_stage, position_inside_safe_zone};
+use crate::escort::{character_capsule_intersects_flag, escort_stage};
 use crate::host_authority::{clamp_frame_dt, InputAuthority, InputReject, InputStamp};
 use crate::modes::{
     can_respawn, is_escort_stage, is_siege_stage, is_team_mode, mode_rule_id,
-    round_time_limit_seconds, RESPAWN_DELAY_SECONDS,
+    original_stage_supports_mode, round_time_limit_seconds, RESPAWN_DELAY_SECONDS,
 };
 use crate::protocol::{
     CombatReactionWire, ItemEffectWire, ItemWeaponSlotWire, Message, RoomMemberWire, RoomRulesWire,
@@ -23,9 +26,7 @@ use crate::wire_v4::{
     SnapshotPlayer, Vec3, WeaponSlot as V4WeaponSlot,
 };
 use meteor_combat::attack_window::TargetHitClock;
-use meteor_combat::hit_resolve::{
-    guard_anger_gain, resolve_hit, weapon_base_atk, CombatStats, HitOptions,
-};
+use meteor_combat::hit_resolve::{guard_anger_gain, weapon_base_atk, CombatStats, HitOptions};
 use meteor_combat::hitbox::{obbs_intersect, Obb};
 use meteor_combat::ranged_weapons::{
     ranged_attack_profile, ranged_target_box, segment_hits_box_distance, Point3 as RangedPoint3,
@@ -101,6 +102,7 @@ struct RoundState {
     number: u32,
     phase: RoundPhase,
     ends_at: f32,
+    started_at: f32,
     next_round_at: Option<f32>,
 }
 
@@ -239,7 +241,7 @@ const HP_50: [ItemSegment; 1] = [ItemSegment {
     property: 2,
     operation: 0,
     value: 50,
-    periodic: false,
+    periodic: true,
 }];
 const ANGER_100: [ItemSegment; 1] = [ItemSegment {
     property: 6,
@@ -257,7 +259,7 @@ const ANGER_1: [ItemSegment; 1] = [ItemSegment {
     property: 6,
     operation: 0,
     value: 1,
-    periodic: false,
+    periodic: true,
 }];
 const DEF_20: [ItemSegment; 1] = [ItemSegment {
     property: 4,
@@ -484,16 +486,16 @@ fn item_definition(model: &str) -> Option<ItemDefinition> {
         },
         "item15" => ItemDefinition {
             id: 32,
-            duration: 0.0,
-            tick_every: 0.0,
+            duration: 9999.9,
+            tick_every: 0.2,
             worn_duration: Some(9999.9),
             segments: &HP_50,
             refine_variant: None,
         },
         "item16" => ItemDefinition {
             id: 33,
-            duration: 0.0,
-            tick_every: 0.0,
+            duration: 9999.9,
+            tick_every: 0.2,
             worn_duration: Some(9999.9),
             segments: &ANGER_1,
             refine_variant: None,
@@ -584,16 +586,13 @@ fn base_weapon_slot(catalog: Option<&AttackCatalog>, weapon_id: u8) -> WeaponSlo
         })
 }
 
-fn room_allows_item(rules: &RoomRulesWire, category: u32, id: u32) -> bool {
-    match category {
-        1 => rules.hide_item.unwrap_or(true),
-        2 => match id {
-            1 | 9 | 16..=18 | 23..=27 => rules.health_item.unwrap_or(true),
-            2..=5 | 28..=33 | 39 => rules.update_item.unwrap_or(true),
-            6..=8 => rules.special_item.unwrap_or(true),
-            _ => false,
-        },
-        _ => false,
+fn room_allows_item(rules: &RoomRulesWire, room_group: Option<i32>) -> bool {
+    match room_group {
+        Some(0) => rules.health_item.unwrap_or(true),
+        Some(1) => rules.update_item.unwrap_or(true),
+        Some(2) => rules.special_item.unwrap_or(true),
+        Some(3) => rules.hide_item.unwrap_or(true),
+        _ => true,
     }
 }
 
@@ -698,6 +697,8 @@ fn spawn_dynamic_weapon_drop(
 
 #[derive(Debug, Clone)]
 struct Combatant {
+    defensive_effects: meteor_combat::rebalance_effects::DefensiveEffects,
+    balance_pose_sequence: u32,
     hit_status_effects: meteor_combat::status_effects::HitStatusEffects,
 
     team: Option<i32>,
@@ -741,6 +742,8 @@ impl Combatant {
     fn new(max_health: f32, team: Option<i32>, base_weapon: WeaponSlotState) -> Self {
         Self {
             team,
+            defensive_effects: Default::default(),
+            balance_pose_sequence: 0,
             base_max_health: max_health,
             max_health,
             health: max_health,
@@ -781,7 +784,7 @@ impl Combatant {
     }
 
     fn advance(&mut self, dt: f32, elapsed: f32) {
-        self.target_hit_clock.advance(dt);
+        self.target_hit_clock.advance_spawn(dt);
 
         if elapsed - self.world_position_updated_at > COLLISION_SNAPSHOT_MAX_AGE {
             self.world_position = None;
@@ -799,6 +802,7 @@ impl Combatant {
     }
 
     fn revive(&mut self) {
+        self.defensive_effects = Default::default();
         self.item_effects.clear();
         self.hit_status_effects.active.clear();
         self.worn_item_effects.clear();
@@ -944,15 +948,23 @@ impl Combatant {
             }
         }
         if !persistent.is_empty() {
-            self.item_effects
-                .retain(|effect| effect.model != normalized);
-            self.item_effects.push(ActiveItemEffect {
-                model: normalized,
-                expires_at: elapsed + definition.duration.max(0.0),
-                tick_every: definition.tick_every.max(0.0),
-                next_tick_at: elapsed + definition.tick_every.max(0.0),
-                segments: persistent,
-            });
+            if let Some(effect) = self
+                .item_effects
+                .iter_mut()
+                .find(|effect| effect.model == normalized && effect.expires_at > elapsed)
+            {
+                effect.expires_at = elapsed + definition.duration.max(0.0);
+            } else {
+                self.item_effects
+                    .retain(|effect| effect.model != normalized);
+                self.item_effects.push(ActiveItemEffect {
+                    model: normalized,
+                    expires_at: elapsed + definition.duration.max(0.0),
+                    tick_every: definition.tick_every.max(0.0),
+                    next_tick_at: elapsed + definition.tick_every.max(0.0),
+                    segments: persistent,
+                });
+            }
             self.refresh_item_stats();
         }
     }
@@ -1023,6 +1035,14 @@ impl Combatant {
 }
 
 impl CombatStats for Combatant {
+    fn try_spend_anger(&mut self, cost: f32) -> bool {
+        if cost.is_finite() && cost >= 0.0 && self.anger >= cost {
+            self.anger -= cost;
+            true
+        } else {
+            false
+        }
+    }
     fn hp(&self) -> f32 {
         self.health
     }
@@ -1117,6 +1137,8 @@ pub struct Room {
 
     elapsed: f32,
 
+    hit_elapsed: f64,
+
     round: Option<RoundState>,
 
     team_wins: [u32; 2],
@@ -1126,8 +1148,11 @@ pub struct Room {
     pending_round_end: Option<PendingRoundEnd>,
 
     escort_flag: Option<EscortFlag>,
+    escort_definition: Option<std::sync::Arc<crate::escort_definition::EscortDefinition>>,
 
     scene_state: Vec<SceneOp>,
+    projectiles: crate::runtime_sync::ProjectileTracker,
+    projectile_subscribers: HashSet<String>,
     pending_transfers: HashMap<String, scene_transfer::PendingTransfer>,
 
     claimed_scene_items: HashMap<String, ClaimedSceneItem>,
@@ -1153,6 +1178,7 @@ pub enum WireFormat {
 
 #[derive(Debug, Clone, Default)]
 pub struct Session {
+    pub balance_revision: u32,
     pub player_id: Option<String>,
     pub room_id: Option<String>,
     pub name: String,
@@ -1173,6 +1199,13 @@ pub struct RoomServer {
 
     combat_catalog: Option<AttackCatalog>,
     origin_res: Option<std::path::PathBuf>,
+}
+
+fn room_escort_stage(room: &Room) -> Option<crate::escort::EscortStage> {
+    room.escort_definition
+        .as_ref()
+        .map(|definition| definition.stage.clone())
+        .or_else(|| escort_stage(&room.stage).cloned())
 }
 
 #[derive(Debug, Default)]
@@ -1271,6 +1304,8 @@ impl RoomServer {
             removed = room.members.remove(player_id).is_some();
             if removed {
                 room.order.retain(|id| id != player_id);
+                room.projectile_subscribers.remove(player_id);
+                room.projectiles.forget_owner(player_id);
                 room.input_authorities.remove(player_id);
                 room.role_states.remove(player_id);
                 room.pending_transfers.remove(player_id);
@@ -1357,6 +1392,7 @@ impl RoomServer {
             .rooms
             .values()
             .map(|room| RoomSummary {
+                battle_rules: Some(room.rules.battle_rules.clone().unwrap_or_default()),
                 room_id: room.id.clone(),
                 name: room.name.clone(),
                 mode: room.configured.then(|| room.mode.clone()),
@@ -1397,10 +1433,31 @@ impl RoomServer {
         resume_token: Option<&str>,
         _character_id: u8,
         _weapon: u8,
+        balance_revision: u32,
     ) -> Dispatch {
         let mut dispatch = Dispatch::default();
         let wire_format = self.wire_format(conn_id);
         let resume_token = resume_token.filter(|token| !token.is_empty() && token.len() <= 128);
+        if let Some(old) =
+            resume_token.and_then(|token| self.sessions.values().find(|s| s.session_token == token))
+        {
+            if old
+                .room_id
+                .as_ref()
+                .and_then(|id| self.rooms.get(id))
+                .is_some_and(|r| {
+                    r.rules.battle_rules.clone().unwrap_or_default()
+                        != meteor_combat::battle_rules::BattleRules::ORIGINAL
+                })
+                && balance_revision != meteor_combat::battle_rules::RULES_CAPABILITY
+            {
+                dispatch.to_sender.push(Message::Error {
+                    code: "rules_mismatch".into(),
+                    text: "此房间需要支持再平衡 JSON 规则的客户端".into(),
+                });
+                return dispatch;
+            }
+        }
         let active_conn = resume_token.and_then(|token| {
             self.sessions.iter().find_map(|(other_conn, session)| {
                 (*other_conn != conn_id && session.session_token == token).then_some(*other_conn)
@@ -1426,6 +1483,7 @@ impl RoomServer {
             self.next_player_id += 1;
             let identity = format!("p{}", self.next_player_id);
             Session {
+                balance_revision,
                 player_id: Some(identity.clone()),
                 room_id: None,
                 name: name.clone(),
@@ -1434,6 +1492,7 @@ impl RoomServer {
                 wire_format,
             }
         };
+        session.balance_revision = balance_revision;
         session.name = name;
         session.wire_format = wire_format;
         let player_id = session.player_id.clone().unwrap_or_default();
@@ -1442,6 +1501,7 @@ impl RoomServer {
         let session_token = session.session_token.clone();
         self.sessions.insert(conn_id, session);
         dispatch.to_sender.push(Message::Welcome {
+            balance_revision: meteor_combat::battle_rules::RULES_CAPABILITY,
             player_id,
             room_id,
             members: Vec::new(),
@@ -1517,6 +1577,13 @@ impl RoomServer {
             dispatch.to_sender.push(state.clone());
             dispatch.to_others.push(state);
         }
+        dispatch.to_sender.extend(server_projectiles::bootstrap(
+            &self.rooms[&room_id],
+            &self.sessions[&conn_id]
+                .player_id
+                .clone()
+                .unwrap_or_default(),
+        ));
         if started && !pending_join {
             dispatch.to_sender.push(Message::MatchStart {
                 room_id: room_id.clone(),
@@ -1646,6 +1713,7 @@ impl RoomServer {
             return dispatch;
         }
         if let Message::Hello {
+            balance_revision,
             name,
             resume_token,
             character_id,
@@ -1658,6 +1726,7 @@ impl RoomServer {
                 resume_token.as_deref(),
                 *character_id,
                 *weapon,
+                *balance_revision,
             );
         }
         let previous_room_others = self.room_connections(conn_id);
@@ -1778,12 +1847,21 @@ impl RoomServer {
                 if !name.trim().is_empty() {
                     session.name = name;
                 }
+                if rules.battle_rules.clone().unwrap_or_default()
+                    != meteor_combat::battle_rules::BattleRules::ORIGINAL
+                    && session.balance_revision != meteor_combat::battle_rules::RULES_CAPABILITY
+                {
+                    dispatch.to_sender.push(Message::Error {
+                        code: "rules_mismatch".into(),
+                        text: "此房间需要支持再平衡 JSON 规则的客户端".into(),
+                    });
+                    return dispatch;
+                }
                 let configured = !mode.is_empty() && !stage.is_empty();
                 if configured
                     && (!is_web_mode(&mode)
                         || !is_web_stage(&stage)
-                        || (mode == "escort" && !is_escort_stage(&stage))
-                        || (mode == "siege" && !is_siege_stage(&stage)))
+                        || !original_stage_supports_mode(&stage, &mode))
                 {
                     dispatch.to_sender.push(Message::Error {
                         code: "bad_room_settings".into(),
@@ -1864,12 +1942,16 @@ impl RoomServer {
                     role_rate_sample_accumulator: 0.0,
                     role_rate_feedback_accumulator: 0,
                     elapsed: 0.0,
+                    hit_elapsed: 0.0,
                     round: None,
                     team_wins: [0, 0],
                     lobby_return_at: None,
                     pending_round_end: None,
                     escort_flag: None,
+                    escort_definition: None,
                     scene_state: Vec::new(),
+                    projectiles: Default::default(),
+                    projectile_subscribers: Default::default(),
                     pending_transfers: HashMap::new(),
                     claimed_scene_items: HashMap::new(),
                     dynamic_weapon_drops: HashMap::new(),
@@ -1916,8 +1998,7 @@ impl RoomServer {
                             let stage = stage.unwrap_or_else(|| "sn01".to_string());
                             if !is_web_mode(&mode)
                                 || !is_web_stage(&stage)
-                                || (mode == "escort" && !is_escort_stage(&stage))
-                                || (mode == "siege" && !is_siege_stage(&stage))
+                                || !original_stage_supports_mode(&stage, &mode)
                             {
                                 dispatch.to_sender.push(Message::Error {
                                     code: "bad_room_settings".into(),
@@ -1952,12 +2033,16 @@ impl RoomServer {
                                 role_rate_sample_accumulator: 0.0,
                                 role_rate_feedback_accumulator: 0,
                                 elapsed: 0.0,
+                                hit_elapsed: 0.0,
                                 round: None,
                                 team_wins: [0, 0],
                                 lobby_return_at: None,
                                 pending_round_end: None,
                                 escort_flag: None,
+                                escort_definition: None,
                                 scene_state: Vec::new(),
+                                projectiles: Default::default(),
+                                projectile_subscribers: Default::default(),
                                 pending_transfers: HashMap::new(),
                                 claimed_scene_items: HashMap::new(),
                                 dynamic_weapon_drops: HashMap::new(),
@@ -1972,6 +2057,18 @@ impl RoomServer {
                     }
                 }
 
+                if let Some(room) = self.rooms.get(&room_id) {
+                    let actual = room.rules.battle_rules.clone().unwrap_or_default();
+                    if actual.enabled()
+                        && session.balance_revision != meteor_combat::battle_rules::RULES_CAPABILITY
+                    {
+                        dispatch.to_sender.push(Message::Error {
+                            code: "rules_mismatch".into(),
+                            text: "客户端不支持房主的再平衡配置，请更新客户端".into(),
+                        });
+                        return dispatch;
+                    }
+                }
                 if session.room_id.as_deref() != Some(room_id.as_str()) {
                     if let Some(previous_room_id) = session.room_id.take() {
                         let (removed, state) = Self::remove_room_member(
@@ -2012,6 +2109,16 @@ impl RoomServer {
                         }
                         .into(),
                         text: "room password does not match".into(),
+                    });
+                    return dispatch;
+                }
+                if room.rules.battle_rules.clone().unwrap_or_default()
+                    != meteor_combat::battle_rules::BattleRules::ORIGINAL
+                    && session.balance_revision != meteor_combat::battle_rules::RULES_CAPABILITY
+                {
+                    dispatch.to_sender.push(Message::Error {
+                        code: "rules_mismatch".into(),
+                        text: "此房间需要支持再平衡 JSON 规则的客户端".into(),
                     });
                     return dispatch;
                 }
@@ -2271,12 +2378,20 @@ impl RoomServer {
                 }
                 if !is_web_mode(&mode)
                     || !is_web_stage(&stage_id)
-                    || (mode == "escort" && !is_escort_stage(&stage_id))
-                    || (mode == "siege" && !is_siege_stage(&stage_id))
+                    || !original_stage_supports_mode(&stage_id, &mode)
                 {
                     dispatch.to_sender.push(Message::Error {
                         code: "bad_room_settings".into(),
                         text: "mode or stage is not supported".into(),
+                    });
+                    return dispatch;
+                }
+                if rules.battle_rules.clone().is_some_and(|value| {
+                    value != room.rules.battle_rules.clone().unwrap_or_default()
+                }) {
+                    dispatch.to_sender.push(Message::Error {
+                        code: "rules_locked".into(),
+                        text: "平衡规则只能在创建房间时选择".into(),
                     });
                     return dispatch;
                 }
@@ -2344,7 +2459,8 @@ impl RoomServer {
                 if room.mode == "escort" && !is_escort_stage(&room.stage) {
                     dispatch.to_sender.push(Message::Error {
                         code: "ESCORT_STAGE_UNSUPPORTED".into(),
-                        text: "escort requires the authored sn03 flag and safe zones".into(),
+                        text: "escort requires an authored objective and common/team safe zones"
+                            .into(),
                     });
                     return dispatch;
                 }
@@ -2387,6 +2503,30 @@ impl RoomServer {
                         return dispatch;
                     }
                 }
+                let escort_definition = if room.mode == "escort" {
+                    if let Some(root) = self.origin_res.as_deref() {
+                        match environment::load_escort(root, &room.stage) {
+                            Ok(definition) => Some(std::sync::Arc::new(definition)),
+                            Err(error) => {
+                                dispatch.to_sender.push(Message::Error {
+                                    code: "ASSET_LOAD_FAILED".into(),
+                                    text: error,
+                                });
+                                return dispatch;
+                            }
+                        }
+                    } else if room.stage == "sn03" {
+                        None
+                    } else {
+                        dispatch.to_sender.push(Message::Error {
+                            code: "ASSET_LOAD_FAILED".into(),
+                            text: "escort stage resources are unavailable".into(),
+                        });
+                        return dispatch;
+                    }
+                } else {
+                    None
+                };
                 let mut players = room
                     .order
                     .iter()
@@ -2396,8 +2536,12 @@ impl RoomServer {
                 let slots = room.order.clone();
                 let catalog = self.combat_catalog.as_ref();
                 if let Some(room) = self.rooms.get_mut(&room_id) {
-                    room.hazards =
-                        environment::load_hazards(self.origin_res.as_deref(), &room.stage);
+                    room.hazards = environment::load_hazards(
+                        self.origin_res.as_deref(),
+                        &room.stage,
+                        &room.mode,
+                    );
+                    room.escort_definition = escort_definition;
                     room.started = true;
                     room.match_epoch = room.match_epoch.wrapping_add(1).max(1);
                     room.round_epoch = 0;
@@ -2423,7 +2567,9 @@ impl RoomServer {
                     room.role_rate_sample_accumulator = 0.0;
                     room.role_rate_feedback_accumulator = 0;
                     room.elapsed = 0.0;
+                    room.hit_elapsed = 0.0;
                     room.scene_state.clear();
+                    room.projectiles.clear();
                     room.claimed_scene_items.clear();
                     room.dynamic_weapon_drops.clear();
                     room.next_dynamic_drop_id = 1;
@@ -2774,6 +2920,67 @@ impl RoomServer {
                     position,
                 });
             }
+            Message::ProjectileSubscribe { room_id } => {
+                let (Some(session_room), Some(player)) =
+                    (session.room_id.as_ref(), session.player_id.as_ref())
+                else {
+                    return dispatch;
+                };
+                if session_room != &room_id {
+                    return dispatch;
+                }
+                let Some(room) = self.rooms.get_mut(&room_id) else {
+                    return dispatch;
+                };
+                room.projectile_subscribers.insert(player.clone());
+                dispatch.to_sender.push(Message::ProjectileSubscribe {
+                    room_id: room_id.clone(),
+                });
+                dispatch
+                    .to_sender
+                    .extend(server_projectiles::bootstrap(room, player));
+            }
+            Message::ProjectileState {
+                room_id,
+                match_epoch,
+                round_epoch,
+                state,
+            } => {
+                let (Some(session_room), Some(player)) =
+                    (session.room_id.clone(), session.player_id.clone())
+                else {
+                    return dispatch;
+                };
+                if session_room != room_id {
+                    return dispatch;
+                }
+                let Some(room) = self.rooms.get_mut(&room_id) else {
+                    return dispatch;
+                };
+                if room.match_epoch != match_epoch
+                    || room.round_epoch != round_epoch
+                    || !room
+                        .round
+                        .as_ref()
+                        .is_some_and(|r| r.phase == RoundPhase::Active)
+                    || room.pending_joiners.contains(&player)
+                {
+                    return dispatch;
+                }
+                if let Some(message) =
+                    server_projectiles::submit(room, &player, self.combat_catalog.as_ref(), state)
+                {
+                    for (connection, target) in &self.sessions {
+                        if target.room_id.as_deref() == Some(&room_id)
+                            && target.player_id.as_ref().is_some_and(|id| {
+                                id != &player && room.projectile_subscribers.contains(id)
+                            })
+                        {
+                            dispatch.to_conn.push((*connection, message.clone()));
+                        }
+                    }
+                }
+            }
             Message::ScenePropHit {
                 room_id,
                 match_epoch,
@@ -2941,7 +3148,7 @@ impl RoomServer {
                     && room.order.first() == Some(&scene_host_id)
                     && dynamic_drop_claimable
                     && (dynamic_drop.is_some()
-                        || room_allows_item(&room.rules, metadata.category, metadata.id))
+                        || room_allows_item(&room.rules, metadata.room_group))
                     && !room.claimed_scene_items.contains_key(&reference);
                 let Some(collector) = room.combatants.get_mut(&collector_id) else {
                     dispatch.to_sender.push(Message::Error {
@@ -3044,8 +3251,7 @@ impl RoomServer {
                     _ => unreachable!("scene_item_metadata only returns category 1/2"),
                 };
                 let respawn_seconds = effective_renewable
-                    .then_some(metadata.respawn_seconds)
-                    .flatten()
+                    .then_some(metadata.respawn_seconds.unwrap_or(5))
                     .filter(|seconds| *seconds > 0)
                     .map(|seconds| seconds as f32);
                 if dynamic_drop.is_some() {
@@ -3150,8 +3356,13 @@ impl RoomServer {
         dispatch
     }
 
-    pub fn advance_authority(&mut self, clock_dt: f32, server_time: f64) -> AuthorityDispatch {
-        let dt = clamp_frame_dt(clock_dt);
+    pub fn advance_authority(&mut self, clock_dt: f64, server_time: f64) -> AuthorityDispatch {
+        let dt = clamp_frame_dt(clock_dt as f32);
+        let hit_dt = if clock_dt.is_finite() {
+            clock_dt.max(0.0)
+        } else {
+            0.0
+        };
         let mut due_role_rooms = Vec::new();
         let mut due_reconciliation_rooms = Vec::new();
         let mut changed_rates = Vec::new();
@@ -3174,6 +3385,7 @@ impl RoomServer {
             if !room.started {
                 continue;
             }
+            room.hit_elapsed += hit_dt;
             room.authority_tick = room.authority_tick.wrapping_add(1);
             room.elapsed += dt;
             room.dynamic_weapon_drops
@@ -3181,8 +3393,10 @@ impl RoomServer {
             for combatant in room.combatants.values_mut() {
                 combatant.advance(dt, room.elapsed);
             }
+            let mut environment_events = environment::update_hazards(room, dt);
+            environment_events.extend(server_projectiles::update(room));
             lifecycle_events.extend(
-                environment::update_hazards(room, dt)
+                environment_events
                     .into_iter()
                     .map(|message| (room.id.clone(), message)),
             );
@@ -3254,6 +3468,19 @@ impl RoomServer {
         }
         for (room_id, message) in lifecycle_events {
             for conn_id in self.room_connections_by_id(&room_id) {
+                if matches!(&message, Message::ProjectileState { .. })
+                    && !self
+                        .sessions
+                        .get(&conn_id)
+                        .and_then(|session| session.player_id.as_ref())
+                        .is_some_and(|player| {
+                            self.rooms
+                                .get(&room_id)
+                                .is_some_and(|room| room.projectile_subscribers.contains(player))
+                        })
+                {
+                    continue;
+                }
                 dispatch.events.push((conn_id, message.clone()));
             }
         }
@@ -3458,7 +3685,7 @@ impl RoomServer {
         {
             return Vec::new();
         }
-        let Some(stage) = escort_stage(&room.stage) else {
+        let Some(stage) = room_escort_stage(room) else {
             return Vec::new();
         };
         let Some(flag) = room.escort_flag.as_ref().cloned() else {
@@ -3474,7 +3701,14 @@ impl RoomServer {
             if let Some(flag) = room.escort_flag.as_mut() {
                 flag.position = position;
             }
-            if position_inside_safe_zone(position, team, stage) {
+            if let Some(zone) = crate::escort::safe_zone_at(position, team, &stage) {
+                if room
+                    .round
+                    .as_ref()
+                    .is_some_and(|round| room.elapsed - round.started_at < 3.0)
+                {
+                    return Vec::new();
+                }
                 room.pending_round_end.get_or_insert(PendingRoundEnd {
                     winner_team: Some(team),
                     reason: "escort",
@@ -3482,7 +3716,12 @@ impl RoomServer {
                 return vec![Message::EscortDelivered {
                     player_id: carrier_id,
                     team,
-                    safe_zone: if team == 1 { "safeA" } else { "safeB" }.to_string(),
+                    safe_zone: match zone.team {
+                        1 => "safeA",
+                        2 => "safeB",
+                        _ => "safe",
+                    }
+                    .to_string(),
                 }];
             }
             return Vec::new();
@@ -3498,7 +3737,17 @@ impl RoomServer {
         let pickup = room.order.iter().find_map(|player_id| {
             room.combatants.get(player_id).and_then(|combatant| {
                 (combatant.alive()
-                    && character_capsule_intersects_flag(combatant.foot_position(), flag.position))
+                    && room.escort_definition.as_ref().map_or_else(
+                        || {
+                            character_capsule_intersects_flag(
+                                combatant.foot_position(),
+                                flag.position,
+                            )
+                        },
+                        |definition| {
+                            definition.intersects(combatant.foot_position(), flag.position)
+                        },
+                    ))
                 .then_some((
                     player_id.clone(),
                     combatant.team.unwrap_or_default(),
@@ -3528,7 +3777,7 @@ impl RoomServer {
             .map(Combatant::foot_position)
             .or_else(|| room.escort_flag.as_ref().map(|flag| flag.position))?;
         let (return_seconds, flag) = {
-            let stage = escort_stage(&room.stage)?;
+            let stage = room_escort_stage(room)?;
             (stage.return_seconds, room.escort_flag.as_mut()?)
         };
         flag.carrier_id = None;
@@ -3578,6 +3827,7 @@ impl RoomServer {
         room.hazards
             .build_from_stage(room.hazards.volumes.clone(), Vec::new());
         room.round_epoch = room.round_epoch.wrapping_add(1).max(1);
+        room.projectiles.clear();
         room.pending_transfers.clear();
         if room.stage == "sn22" {
             room.role_states.clear();
@@ -3591,7 +3841,7 @@ impl RoomServer {
             Self::assign_assassination_targets(room);
         }
         room.escort_flag = (mode_rule_id(&room.mode) == Some(2))
-            .then(|| escort_stage(&room.stage))
+            .then(|| room_escort_stage(room))
             .flatten()
             .map(|stage| EscortFlag {
                 home: stage.flag_home,
@@ -3605,6 +3855,7 @@ impl RoomServer {
             number,
             phase: RoundPhase::Active,
             ends_at: room.elapsed + round_time_limit_seconds(Some(round_time)) as f32,
+            started_at: room.elapsed,
             next_round_at: None,
         });
         Message::RoundStart {
@@ -4020,10 +4271,14 @@ impl RoomServer {
             })
             .collect();
         let flag = room.escort_flag.as_ref().map(|flag| {
-            let stage = escort_stage(&room.stage)
+            let stage = room_escort_stage(room)
                 .expect("escort flag can only exist on an authored escort stage");
-            let safe_zone = |index: usize| {
-                let zone = stage.safe_zones[index];
+            let safe_zone = |team: i32| {
+                let zone = stage
+                    .safe_zones
+                    .iter()
+                    .find(|zone| zone.team == 0 || zone.team == team)
+                    .expect("validated delivery zone for each team");
                 json!({
                     "min": { "x": zone.min_x, "y": zone.min_y, "z": zone.min_z },
                     "max": { "x": zone.max_x, "y": zone.max_y, "z": zone.max_z },
@@ -4046,7 +4301,7 @@ impl RoomServer {
                 "carrierId": flag.carrier_id,
                 "state": state,
                 "returnIn": return_in,
-                "safeZones": { "1": safe_zone(0), "2": safe_zone(1) },
+                "safeZones": { "1": safe_zone(1), "2": safe_zone(2) },
             });
             crate::protocol::dynamic_object_from_json(value.as_object().expect("flag JSON object"))
         });
@@ -4184,6 +4439,7 @@ impl RoomServer {
                 combatant.yaw = yaw_from_forward(state.forward);
                 combatant.guard = state.state_words.guard_route;
                 combatant.pose_id = state.state_words.pose_id;
+                combatant.balance_pose_sequence = u32::from(state.state_words.pose_sequence);
             }
         }
         if admission.input_advanced {
@@ -4192,11 +4448,46 @@ impl RoomServer {
                     combatant.guard = input.guard;
                     if let Some(visual) = input.visual.as_ref() {
                         if visual.pose_id <= 2048 {
+                            if combatant.pose_id != visual.pose_id as u16
+                                || visual.cursor < combatant.pose_cursor
+                            {
+                                combatant.balance_pose_sequence =
+                                    combatant.balance_pose_sequence.wrapping_add(1);
+                            }
                             combatant.pose_id = visual.pose_id as u16;
                         }
                     }
                 }
                 update_combatant_visual(combatant, input.visual.as_ref(), room.elapsed);
+            }
+        }
+        if admission.role_state_advanced || admission.input_advanced {
+            let rules = room.rules.battle_rules.clone().unwrap_or_default();
+            if let Some(actor) = room.combatants.get_mut(&player_id) {
+                if actor.defensive_effects.enter_pose(
+                    rules,
+                    actor.pose_id,
+                    actor.balance_pose_sequence,
+                    &mut actor.anger,
+                    PLAYER_ANGER_MAX,
+                    actor.health > 0.0,
+                ) {
+                    dispatch.to_room.push(Message::CombatHit {
+                        target: player_id.clone(),
+                        damage: 0.0,
+                        attacker_id: None,
+                        guarded: Some(false),
+                        health: Some(actor.health),
+                        anger: Some(actor.anger),
+                        motion_scale: Some(0.0),
+                        reaction: Some(CombatReactionWire {
+                            rebalance_effect: meteor_combat::rebalance_effects::ARMOR_START,
+                            target_pose: Some(actor.pose_id),
+                            ..Default::default()
+                        }),
+                        tick: Some(room.authority_tick),
+                    });
+                }
             }
         }
 
@@ -4378,6 +4669,11 @@ impl RoomServer {
                 .and_then(|room| room.input_authorities.get(&player_id))
                 .map(|authority| authority.last_input_sequence)
                 .unwrap_or_default();
+            let projectile_messages = self
+                .rooms
+                .get(room_id)
+                .map(|room| server_projectiles::bootstrap(room, &player_id))
+                .unwrap_or_default();
             dispatch.to_conn.push((
                 conn_id,
                 Message::RoomJoined {
@@ -4398,6 +4694,11 @@ impl RoomServer {
                     scene_state: scene_state.clone(),
                 },
             ));
+            dispatch.to_conn.extend(
+                projectile_messages
+                    .into_iter()
+                    .map(|message| (conn_id, message)),
+            );
         }
     }
 }
@@ -4772,7 +5073,7 @@ fn accept_combat_judge(
         let Some(target) = room.combatants.get(&target_id) else {
             continue;
         };
-        if !can_attack_combatant(target) {
+        if !can_attack_combatant(target, room.hit_elapsed) {
             continue;
         }
         let hits_target = match (&attack_boxes, judge.kind.as_str()) {
@@ -4846,9 +5147,9 @@ fn valid_combat_judge_shape(judge: &V4CombatJudge) -> bool {
         && (0.0..=100_000.0).contains(&judge.cursor)
 }
 
-fn can_attack_combatant(target: &Combatant) -> bool {
+fn can_attack_combatant(target: &Combatant, now_seconds: f64) -> bool {
     target.alive()
-        && target.target_hit_clock.accepts_target_hit()
+        && target.target_hit_clock.accepts_target_hit(now_seconds)
         && !target.target_hit_clock.spawn_protected()
 }
 
@@ -5049,18 +5350,25 @@ fn resolve_confirmed_hit(
     ) {
         return Vec::new();
     }
+    let attacker_instance = room
+        .combatants
+        .get(attacker_id)
+        .map_or(0, |a| a.balance_pose_sequence);
     let Some(target) = room.combatants.get_mut(target_id) else {
         return Vec::new();
     };
-    if !can_attack_combatant(target) {
+    if !can_attack_combatant(target, room.hit_elapsed) {
         return Vec::new();
     }
 
-    target.target_hit_clock.reset_target_hit_clock();
+    target
+        .target_hit_clock
+        .reset_target_hit_clock(room.hit_elapsed);
     if target.target_hit_clock.spawn_protected() {
         return Vec::new();
     }
-    let result = resolve_hit(
+    let mut defensive_effects = std::mem::take(&mut target.defensive_effects);
+    let result = meteor_combat::rebalance_effects::resolve_hit(
         target,
         &HitOptions {
             attacker_team: attacker_team.unwrap_or(0),
@@ -5078,8 +5386,18 @@ fn resolve_confirmed_hit(
             attack: Some(&record.attack),
             pose_attack_percent: &pose_attack_percent,
         },
+        room.rules.battle_rules.clone().unwrap_or_default(),
+        &mut defensive_effects,
+        meteor_combat::rebalance_effects::HitContext {
+            attacker: attacker_id,
+            instance: attacker_instance,
+            now_seconds: f64::from(room.elapsed),
+        },
     );
-    let status_effect = (!result.guarded && !result.killed)
+    target.defensive_effects = defensive_effects;
+    let status_effect = (!result.guarded
+        && !result.killed
+        && result.rebalance_effect != meteor_combat::rebalance_effects::INVALID_HIT)
         .then(|| catalog.pose_status_effect(pose_id))
         .flatten();
     if let Some(effect) = status_effect {
@@ -5140,10 +5458,21 @@ fn resolve_confirmed_hit(
             result.target_move
         }),
         reaction: Some(CombatReactionWire {
+            rebalance_effect: result.rebalance_effect,
             defense_move: record.attack.defense_move,
             target_move: record.attack.target_move,
-            defense_value: record.attack.defense_value,
-            target_value: record.attack.target_value,
+            defense_value: room
+                .rules
+                .battle_rules
+                .clone()
+                .unwrap_or_default()
+                .guard_stun_seconds(pose_id, record.attack.defense_value),
+            target_value: room
+                .rules
+                .battle_rules
+                .clone()
+                .unwrap_or_default()
+                .hit_stun_seconds(pose_id, record.attack.target_value),
             target_pose: record.attack.target_pose,
             target_pose_front: record.attack.target_pose_front,
             target_pose_back: record.attack.target_pose_back,
@@ -5343,6 +5672,7 @@ fn is_web_stage(stage_id: &str) -> bool {
 #[cfg(feature = "original-assets")]
 #[cfg(test)]
 mod tests {
+    include!("server/hit_clock_tests.rs");
     use super::*;
     use crate::protocol::FighterSnapshot;
     use crate::role_state::{encode_request1_state, role_state_from_runtime, RoleStateRuntime};
@@ -5606,6 +5936,7 @@ mod tests {
         let resumed = server.handle(
             4,
             Message::Hello {
+                balance_revision: meteor_combat::battle_rules::RULES_CAPABILITY,
                 name: "back".into(),
                 resume_token: Some(token),
                 character_id: 0,
@@ -5659,6 +5990,7 @@ mod tests {
 
     fn hello() -> Message {
         Message::Hello {
+            balance_revision: meteor_combat::battle_rules::RULES_CAPABILITY,
             name: "tester".into(),
             resume_token: None,
             character_id: 0,
@@ -6030,7 +6362,7 @@ mod tests {
             .get_mut("p2")
             .unwrap()
             .target_hit_clock
-            .advance(3.0);
+            .advance_spawn(3.0);
         let attack = catalog.attack_record(0, 210, 0).unwrap();
         let events = resolve_confirmed_hit(room, &catalog, "p1", &member, "p2", 210, &attack);
         assert!(events.iter().any(|event| matches!(event, Message::ItemEffect { item_effects, .. } if item_effects.iter().any(|effect| effect.model == "status:11"))));
@@ -6055,6 +6387,131 @@ mod tests {
         server.set_wire_format(1, WireFormat::V4);
         assert_eq!(server.wire_format(1), WireFormat::V4);
         assert_eq!(server.wire_format(404), WireFormat::Json);
+    }
+
+    #[test]
+    fn json_rules_summary_and_join_adopts_host_configuration() {
+        use meteor_combat::battle_rules::BattleRules;
+        let overrides: Vec<_> = (0..1024)
+            .map(|pose_id| {
+                let mut value = serde_json::json!({"poseId": pose_id, "damagePercent": 45});
+                if pose_id == 407 || pose_id == 412 {
+                    value["invalidAttack"] = serde_json::json!({
+                        "groupId": 1, "armOnHit": true, "qiCostPercent": 0, "windowMs": 800,
+                    });
+                }
+                value
+            })
+            .collect();
+        let json = serde_json::json!({"schemaVersion": 2, "rebalance": {
+            "guardChipPercent": 15, "guardChipPoses": "all", "poseOverrides": overrides,
+        }})
+        .to_string();
+        let rules = BattleRules::from_json(&json).unwrap();
+        let mut server = RoomServer::new();
+        for id in 1..=2 {
+            server.connect(id);
+            server.handle(id, hello());
+        }
+        let mut create = create_room("deathmatch", "sn01");
+        if let Message::RoomCreate { rules: wire, .. } = &mut create {
+            wire.battle_rules = Some(rules.clone());
+        }
+
+        let create = Message::from_v4_binary(&create.to_v4_binary().unwrap()).unwrap();
+        server.handle(1, create);
+        assert_eq!(server.room_summaries()[0].battle_rules, Some(rules.clone()));
+        assert_eq!(
+            rules.invalid_attack_key(407).unwrap().1,
+            rules.invalid_attack_key(412).unwrap().1
+        );
+
+        let accepted = server.handle(2, join_room("room1"));
+        assert!(accepted.to_sender.iter().any(|m| matches!(m, Message::RoomState { rules: received, .. } if received.battle_rules == Some(rules.clone()))));
+        assert!(accepted
+            .to_sender
+            .iter()
+            .any(|m| matches!(m, Message::RoomState { members, .. } if members.len() == 2)));
+    }
+
+    #[test]
+    fn balance_room_requires_capability_and_freezes_rules() {
+        const BALANCED: meteor_combat::battle_rules::BattleRules =
+            meteor_combat::battle_rules::BattleRules::BALANCED;
+        let mut server = RoomServer::new();
+        for id in 1..=3 {
+            server.connect(id);
+            server.handle(id, hello());
+        }
+        let mut legacy = hello();
+        if let Message::Hello {
+            balance_revision, ..
+        } = &mut legacy
+        {
+            *balance_revision = 4;
+        }
+        server.handle(3, legacy);
+        let mut create = create_room("deathmatch", "sn01");
+        if let Message::RoomCreate { rules, .. } = &mut create {
+            rules.battle_rules = Some(BALANCED);
+        }
+        server.handle(1, create);
+        let rejected = server.handle(3, join_room("room1"));
+        assert!(rejected
+            .to_sender
+            .iter()
+            .any(|m| matches!(m, Message::Error { code, .. } if code == "rules_mismatch")));
+        assert_eq!(server.rooms["room1"].members.len(), 1);
+        let accepted = server.handle(2, join_room("room1"));
+        assert!(accepted.to_sender.iter().any(|m| matches!(m, Message::RoomState { rules, members, .. } if rules.battle_rules == Some(BALANCED) && members.len() == 2)));
+        let update = server.handle(
+            1,
+            Message::RoomSettings {
+                mode: "deathmatch".into(),
+                stage_id: "sn01".into(),
+                rules: RoomRulesWire {
+                    battle_rules: Some(Default::default()),
+                    ..Default::default()
+                },
+            },
+        );
+        assert!(update
+            .to_sender
+            .iter()
+            .any(|m| matches!(m, Message::Error { code, .. } if code == "rules_locked")));
+        assert_eq!(server.rooms["room1"].rules.battle_rules, Some(BALANCED));
+    }
+
+    #[test]
+    fn balance_ws_guard_chip_commits_death_and_health() {
+        let rules = meteor_combat::battle_rules::BattleRules::from_json(r#"{"schemaVersion":2,"rebalance":{"guardChipPercent":10,"guardChipPoses":"all","poseOverrides":[{"poseId":262,"hitStunMs":400,"guardStunMs":250}]}}"#).unwrap();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        let catalog = AttackCatalog::from_origin_res(&root).unwrap();
+        let mut server = RoomServer::new();
+        for id in 1..=2 {
+            server.connect(id);
+            server.handle(id, hello());
+        }
+        let mut create = create_room("leader", "sn01");
+        if let Message::RoomCreate { rules: wire, .. } = &mut create {
+            wire.battle_rules = Some(rules);
+        }
+        server.handle(1, create);
+        server.handle(2, join_room("room1"));
+        server.handle(1, Message::RoomStart);
+        let room = server.rooms.get_mut("room1").unwrap();
+        let member = room.members["p1"].clone();
+        room.elapsed = 3.0;
+        let target = room.combatants.get_mut("p2").unwrap();
+        target.target_hit_clock.advance_spawn(3.0);
+        target.guard = true;
+        target.health = 1.0;
+        let attack = catalog.attack_record(0, 262, 0).unwrap();
+        let events = resolve_confirmed_hit(room, &catalog, "p1", &member, "p2", 262, &attack);
+        assert!(events.iter().any(|event| matches!(event, Message::CombatHit { reaction: Some(reaction), .. } if reaction.defense_value == 0.25 && reaction.target_value == 0.4)));
+        assert_eq!(room.combatants["p2"].health, 0.0);
+        assert_eq!(room.combatants["p1"].kills, 1);
+        assert!(events.iter().any(|m| matches!(m, Message::CombatHit { guarded: Some(true), health: Some(hp), .. } if *hp == 0.0)));
     }
 
     #[test]
@@ -6539,11 +6996,11 @@ mod tests {
             } if reference == "D_It15"
                 && player_id == "p1"
                 && kind == "item"
-                && *health == 450.0
+                && *health == 400.0
                 && *respawn_seconds == Some(10.0))
         }));
         assert_eq!(server.rooms["room1"].claimed_scene_items.len(), 1);
-        assert_eq!(server.rooms["room1"].combatants["p1"].health, 450.0);
+        assert_eq!(server.rooms["room1"].combatants["p1"].health, 400.0);
 
         let duplicate = server.handle(
             1,
@@ -6561,18 +7018,75 @@ mod tests {
         ));
 
         let mut early_events = Vec::new();
-        for _ in 0..39 {
-            early_events.extend(server.advance_authority(0.25, 0.0).events);
+        for _ in 0..79 {
+            early_events.extend(server.advance_authority(0.125, 0.0).events);
         }
         assert!(!early_events.iter().any(|(_, message)| {
             matches!(message, Message::ItemRespawned { reference, .. } if reference == "D_It15")
         }));
-        let due = server.advance_authority(0.25, 0.0);
+        let due = server.advance_authority(0.125, 0.0);
         assert!(due.events.iter().any(|(_, message)| {
             matches!(message, Message::ItemRespawned { reference, model }
                 if reference == "D_It15" && model == "item15")
         }));
         assert!(server.rooms["room1"].claimed_scene_items.is_empty());
+    }
+
+    #[test]
+    fn zero_interval_timed_items_tick_at_five_hz_refresh_and_stop_on_death() {
+        let mut server = RoomServer::new();
+        server.connect(1);
+        server.handle(1, hello());
+        server.handle(1, create_room("leader", "sn01"));
+        server.handle(1, Message::RoomStart);
+        let room = server.rooms.get_mut("room1").unwrap();
+        let player = room.combatants.get_mut("p1").unwrap();
+        player.health = 400.0;
+        player.anger = 95.0;
+        player.apply_item("item15", item_definition("item15").unwrap(), 0.0);
+        player.apply_item("item16", item_definition("item16").unwrap(), 0.0);
+        assert_eq!(
+            (player.health, player.anger),
+            (400.0, 95.0),
+            "timed records have no immediate pulse"
+        );
+        room.elapsed = 0.19;
+        RoomServer::update_item_effects(room);
+        assert_eq!(
+            (room.combatants["p1"].health, room.combatants["p1"].anger),
+            (400.0, 95.0)
+        );
+        room.elapsed = 0.2;
+        let events = RoomServer::update_item_effects(room);
+        assert!(events.iter().any(
+            |event| matches!(event, Message::ItemEffect { health, anger, .. }
+            if *health == 450.0 && *anger == 96.0)
+        ));
+
+        let player = room.combatants.get_mut("p1").unwrap();
+        player.apply_item("item15", item_definition("item15").unwrap(), 0.3);
+        assert_eq!(player.item_effects.len(), 2);
+        room.elapsed = 0.4;
+        RoomServer::update_item_effects(room);
+        assert_eq!(
+            (room.combatants["p1"].health, room.combatants["p1"].anger),
+            (500.0, 97.0)
+        );
+        room.elapsed = 10.0;
+        RoomServer::update_item_effects(room);
+        let player = room.combatants.get_mut("p1").unwrap();
+        assert_eq!(
+            (player.health, player.anger),
+            (player.max_health, PLAYER_ANGER_MAX)
+        );
+        player.clear_item_effects();
+        player.health = 0.0;
+        room.elapsed = 11.0;
+        RoomServer::update_item_effects(room);
+        assert_eq!(
+            room.combatants["p1"].health, 0.0,
+            "a timed item cannot revive a dead actor"
+        );
     }
 
     #[test]
@@ -7025,6 +7539,70 @@ mod tests {
     }
 
     #[test]
+    fn escort_qin_common_safe_scores_for_either_team_using_installed_geometry() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        for (player, team) in [("p1", 1), ("p2", 2)] {
+            let mut server = RoomServer::new();
+            server.origin_res = Some(root.clone());
+            server.connect(1);
+            server.connect(2);
+            server.handle(1, hello());
+            server.handle(2, hello());
+            let created = server.handle(1, create_room("escort", "sn02"));
+            assert!(!created
+                .to_sender
+                .iter()
+                .any(|m| matches!(m, Message::Error { .. })));
+            server.handle(2, join_room("room1"));
+            server.handle(2, Message::RoomReady { ready: true });
+            let started = server.handle(1, Message::RoomStart);
+            assert!(
+                !started
+                    .to_sender
+                    .iter()
+                    .any(|m| matches!(m, Message::Error { .. })),
+                "{started:?}"
+            );
+            let definition = server.rooms["room1"].escort_definition.clone().unwrap();
+            assert_eq!(definition.item_id, 1);
+            let room = server.rooms.get_mut("room1").unwrap();
+            room.combatants.get_mut(player).unwrap().position = definition.stage.flag_home;
+            let taken = server.advance_authority(1.0 / 60.0, 0.0);
+            assert!(taken.events.iter().any(
+                |(_, m)| matches!(m, Message::EscortTaken { player_id, .. } if player_id == player)
+            ));
+            let safe = definition.stage.safe_zones[0];
+            server
+                .rooms
+                .get_mut("room1")
+                .unwrap()
+                .combatants
+                .get_mut(player)
+                .unwrap()
+                .position = RoleVec3 {
+                x: safe.center_x,
+                y: safe.center_y,
+                z: safe.center_z,
+            };
+            server.rooms.get_mut("room1").unwrap().elapsed = 3.0;
+            let delivered = server.advance_authority(1.0 / 60.0, 0.0);
+            assert!(delivered.events.iter().any(
+                |(_, m)| matches!(m, Message::EscortDelivered { player_id, team: winner, safe_zone }
+                if player_id == player && *winner == team && safe_zone == "safe")
+            ));
+            assert!(delivered.events.iter().any(
+                |(_, m)| matches!(m, Message::RoundEnd { winner_team, reason, .. }
+                if *winner_team == Some(team) && reason == "escort")
+            ));
+            assert!(
+                RoomServer::v4_snapshot_for(&server.rooms["room1"], player, 1, 0.0)
+                    .flag
+                    .is_some()
+            );
+        }
+    }
+
+    #[test]
     fn escort_uses_sn03_flag_hull_safe_zone_drop_and_return_authority() {
         let mut server = RoomServer::new();
         server.connect(1);
@@ -7060,9 +7638,15 @@ mod tests {
         let carrier = room.combatants.get_mut("p1").unwrap();
         carrier.position = RoleVec3 {
             x: 171.0,
-            y: 99.0,
+            y: 1.0,
             z: 140.0,
         };
+        let early = server.advance_authority(1.0 / 60.0, 0.0);
+        assert!(!early
+            .events
+            .iter()
+            .any(|(_, event)| matches!(event, Message::EscortDelivered { .. })));
+        server.rooms.get_mut("room1").unwrap().elapsed = 3.0;
         let delivered = server.advance_authority(1.0 / 60.0, 0.0);
         assert!(delivered.events.iter().any(|(_, message)| {
             matches!(message, Message::EscortDelivered { player_id, team, safe_zone }
@@ -7105,13 +7689,96 @@ mod tests {
                 if player_id == "p1" && *return_seconds == 5.0)
         }));
         let mut return_events = Vec::new();
-        for _ in 0..20 {
-            return_events.extend(returned_server.advance_authority(0.25, 0.0).events);
+        for _ in 0..40 {
+            return_events.extend(returned_server.advance_authority(0.125, 0.0).events);
         }
         assert!(return_events.iter().any(|(_, message)| {
             matches!(message, Message::EscortReturned { reason, position }
                 if reason == "timeout" && *position == [home.x, home.y, home.z])
         }));
+    }
+
+    #[test]
+    fn sn02_escort_loads_real_objective_and_both_teams_share_the_delivery_volume() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        for team in [1, 2] {
+            let mut server = RoomServer::from_origin_res(&root).unwrap();
+            server.connect(1);
+            server.handle(1, hello());
+            let created = server.handle(1, create_room("escort", "sn02"));
+            assert!(!created
+                .to_sender
+                .iter()
+                .any(|event| matches!(event, Message::Error { .. })));
+            let started = server.handle(1, Message::RoomStart);
+            assert!(started
+                .to_room
+                .iter()
+                .any(|event| matches!(event, Message::RoundStart { .. })));
+            let room = server.rooms.get_mut("room1").unwrap();
+            let definition = room.escort_definition.clone().unwrap();
+            assert_eq!(definition.item_id, 1);
+            let player = room.combatants.get_mut("p1").unwrap();
+            player.team = Some(team);
+            player.position = definition.stage.flag_home;
+            assert!(RoomServer::update_escort(room)
+                .iter()
+                .any(|event| matches!(event, Message::EscortTaken { .. })));
+            let safe = definition.stage.safe_zones[0];
+            room.elapsed = 3.0;
+            room.combatants.get_mut("p1").unwrap().position = RoleVec3 {
+                x: safe.center_x,
+                y: safe.max_y + 1.0,
+                z: safe.center_z,
+            };
+            assert!(
+                RoomServer::update_escort(room).is_empty(),
+                "height must remain inside the volume"
+            );
+            room.combatants.get_mut("p1").unwrap().position.y = safe.center_y;
+            assert!(RoomServer::update_escort(room)
+                .iter()
+                .any(|event| matches!(event,
+                Message::EscortDelivered { team: winner, .. } if *winner == team)));
+        }
+    }
+
+    #[test]
+    fn room_rules_use_resource_groups_and_reject_unavailable_rule_map_pairs() {
+        let rules = RoomRulesWire {
+            hide_item: Some(false),
+            health_item: Some(true),
+            update_item: Some(true),
+            special_item: Some(true),
+            ..Default::default()
+        };
+        assert!(
+            room_allows_item(&rules, Some(0)),
+            "W0 is governed by healthitem"
+        );
+        assert!(room_allows_item(&rules, Some(8)), "W8 has no switch");
+        assert!(room_allows_item(&rules, None));
+        assert!(!room_allows_item(&rules, Some(3)), "only W3 uses hideitem");
+        for (mode, stage) in [
+            ("leader", "sn09"),
+            ("leader", "sn11"),
+            ("assassin", "sn11"),
+            ("assassin", "sn22"),
+            ("deathmatch", "sn11"),
+        ] {
+            let mut server = RoomServer::new();
+            server.connect(1);
+            server.handle(1, hello());
+            let dispatch = server.handle(1, create_room(mode, stage));
+            assert!(
+                dispatch
+                    .to_sender
+                    .iter()
+                    .any(|message| matches!(message, Message::Error { .. })),
+                "{mode}@{stage}"
+            );
+            assert!(server.rooms.is_empty());
+        }
     }
 
     #[test]
@@ -7213,11 +7880,11 @@ mod tests {
         assert!(server.rooms.get("room1").is_some_and(|room| !room.started));
         assert_eq!(server.room_summaries()[0].state, "ended");
 
-        for _ in 0..40 {
-            server.advance_authority(0.25, 0.0);
+        for _ in 0..80 {
+            server.advance_authority(0.125, 0.0);
         }
         assert!(server.rooms["room1"].lobby_return_at.is_some());
-        let reset = server.advance_authority(0.25, 0.0);
+        let reset = server.advance_authority(0.125, 0.0);
         assert!(reset
             .events
             .iter()
@@ -7510,6 +8177,52 @@ mod tests {
     }
 
     #[test]
+    fn ws_sn21_scene_boundary_death_uses_the_original_root_bounds() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        let mut server = RoomServer::from_origin_res(&root).unwrap();
+        server.connect(1);
+        server.handle(1, hello());
+        server.set_wire_format(1, WireFormat::V4);
+        server.handle(1, create_room("leader", "sn21"));
+        server.handle(1, Message::RoomStart);
+        let room = &server.rooms["room1"];
+        assert!(room.hazards.volumes.is_empty());
+        let bounds = room.hazards.world_bounds.expect("sn21 root bounds");
+        let outside = RoleVec3 {
+            x: (bounds.min[0] + bounds.max[0]) * 0.5,
+            y: bounds.min[1] - 1.0,
+            z: (bounds.min[2] + bounds.max[2]) * 0.5,
+        };
+        let mut state = decode_request1_state(&[0; 20]).unwrap();
+        state.position = outside;
+        server.handle_v4_input(1, v4_input(1, encode_request1_state(state).to_vec(), None));
+        assert!(server.rooms["room1"].combatants["p1"].position.y < bounds.min[1]);
+        server.advance_authority(1.0 / 60.0, 0.0);
+        assert!(server.rooms["room1"].combatants["p1"].alive());
+        server
+            .rooms
+            .get_mut("room1")
+            .unwrap()
+            .combatants
+            .get_mut("p1")
+            .unwrap()
+            .target_hit_clock
+            .advance_spawn(10.0);
+        let mut deaths = 0;
+        for _ in 0..20 {
+            let dispatch = server.advance_authority(1.0 / 60.0, 0.0);
+            deaths += dispatch.events.iter().filter(|(_, event)| matches!(event,
+                Message::CombatDeath { attacker_id: None, target_id, .. } if target_id == "p1"
+            )).count();
+        }
+        assert_eq!(deaths, 1);
+        let actor = &server.rooms["room1"].combatants["p1"];
+        assert_eq!(actor.health, 0.0);
+        assert_eq!(actor.kills, 0);
+        assert_eq!(actor.deaths, 1);
+    }
+
+    #[test]
     fn ws_sn06_hell_death_is_authoritative_and_respawns_only_after_three_seconds() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
         let mut server = RoomServer::from_origin_res(&root).unwrap();
@@ -7544,7 +8257,7 @@ mod tests {
             .get_mut("p1")
             .unwrap()
             .target_hit_clock
-            .advance(10.0);
+            .advance_spawn(10.0);
         let mut deaths = 0;
         for _ in 0..20 {
             let dispatch = server.advance_authority(1.0 / 60.0, 0.0);
@@ -7595,7 +8308,7 @@ mod tests {
             actor.position = corpse;
             actor.team = Some(1);
             actor.is_leader = true;
-            actor.target_hit_clock.advance(10.0);
+            actor.target_hit_clock.advance_spawn(10.0);
             let events = environment::update_hazards(&mut room, 0.2);
             assert!(events.iter().any(|event| matches!(
                 event,
@@ -8348,6 +9061,7 @@ mod tests {
         let resumed = server.handle(
             3,
             Message::Hello {
+                balance_revision: meteor_combat::battle_rules::RULES_CAPABILITY,
                 name: "reconnected".into(),
                 resume_token: Some(token),
                 character_id: 0,
@@ -8398,6 +9112,7 @@ mod tests {
         let takeover = server.handle(
             2,
             Message::Hello {
+                balance_revision: meteor_combat::battle_rules::RULES_CAPABILITY,
                 name: "new endpoint".into(),
                 resume_token: Some(token),
                 character_id: 0,
@@ -8552,6 +9267,9 @@ mod tests {
                 if mode == "deathmatch" && stage == "sn05")
         ));
     }
+    include!("server/rebalance_tests.rs");
+
+    include!("server_projectile_tests.rs");
 }
 
 #[path = "server_environment.rs"]

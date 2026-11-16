@@ -1,6 +1,7 @@
+#[cfg(test)]
 use crate::app_state::AppState;
 use crate::components::fighter::{
-    Fighter, FighterHitReaction, Health, MotionState, PoseRuntime, SmState,
+    Fighter, FighterHitReaction, Health, MotionState, PoseRuntime, SmState, WeaponSwitchActive,
 };
 use crate::plugins::movement_plugin::{FighterAir, COLLIDER_HEIGHT, COLLIDER_RADIUS};
 use crate::plugins::network_plugin::{NetworkFrameApply, RemoteContactSegment, RemoteFighter};
@@ -74,13 +75,71 @@ impl CharacterView for ContactView {
 
 #[derive(Resource, Default)]
 pub(crate) struct CharacterContactFrame {
+    #[cfg(test)]
+    audit_bypass_actors: std::collections::HashSet<Entity>,
+    #[cfg(test)]
+    audit_moves: HashMap<Entity, Vec<serde_json::Value>>,
     system: CharacterContactSystem,
     views: Vec<ContactView>,
     indices: HashMap<Entity, usize>,
+
+    last_mover_scene_contacts: HashMap<Entity, bool>,
     authored_repulsion: HashMap<Entity, Vec3>,
+
+    candidate_distances: HashMap<Entity, Vec<(Entity, f32)>>,
+    entry_states: HashMap<Entity, FighterState>,
+    root_repulsion: HashMap<Entity, bool>,
+
+    stock_repulsion_owners: std::collections::HashSet<Entity>,
 }
 
 impl CharacterContactFrame {
+    pub(crate) fn last_mover_scene_contact(&self, entity: Entity) -> bool {
+        self.last_mover_scene_contacts
+            .get(&entity)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    pub(super) fn cached_candidate_contains(&self, owner: Entity, target: Entity) -> Option<bool> {
+        self.candidate_distances
+            .get(&owner)
+            .map(|candidates| candidates.iter().any(|(entity, _)| *entity == target))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn audit_record_moves(&mut self, entity: Entity) {
+        self.audit_moves.insert(entity, Vec::new());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn audit_moves(&self, entity: Entity) -> &[serde_json::Value] {
+        self.audit_moves.get(&entity).map_or(&[], Vec::as_slice)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn audit_bypass_primary_contact(&mut self, entity: Entity) {
+        self.audit_bypass_actors.insert(entity);
+    }
+
+    pub(super) fn cache_candidates(
+        &mut self,
+        entity: Entity,
+        origin: Vec3,
+        positions: impl Iterator<Item = (Entity, Vec3)>,
+    ) {
+        self.candidate_distances.entry(entity).or_insert_with(|| {
+            positions
+                .filter_map(|(other, position)| {
+                    let distance = origin.distance(position);
+
+                    (other != entity && distance <= 100.0 * meteor_core::MODEL_SCALE)
+                        .then_some((other, distance))
+                })
+                .collect()
+        });
+    }
+
     fn commit_position(&mut self, entity: Entity, position: Vec3) {
         if let Some(index) = self.indices.get(&entity).copied() {
             self.views[index].position = (position.x, position.y, position.z);
@@ -90,10 +149,9 @@ impl CharacterContactFrame {
 
 fn locally_pushable(
     remote: Option<&RemoteFighter>,
-    npc_performance: Option<&NpcPerformance>,
+    _npc_performance: Option<&NpcPerformance>,
 ) -> bool {
     remote.is_none()
-        && !npc_performance.is_some_and(|performance| performance.pause_remaining == f32::INFINITY)
 }
 
 pub struct CharacterContactPlugin;
@@ -107,12 +165,37 @@ impl Plugin for CharacterContactPlugin {
         let serial = super::fighter_frame::installed(app);
         app.add_systems(
             actor_schedule,
+            remember_repulsion_entry
+                .in_set(crate::plugins::FighterFrameSet::Movement)
+                .before(crate::plugins::ai_plugin::drive_npc_ai)
+                .run_if(crate::plugins::simulation_frame)
+                .run_if(super::ui_plugin::gameplay_hud_visibility::scene_session_active),
+        );
+        app.add_systems(
+            actor_schedule,
+            prepare_root_repulsion
+                .after(crate::plugins::FighterFrameSet::HitJudge)
+                .before(crate::plugins::FighterFrameSet::RootMotion)
+                .run_if(crate::plugins::simulation_frame)
+                .run_if(super::ui_plugin::gameplay_hud_visibility::scene_session_active),
+        );
+        app.add_systems(
+            actor_schedule,
             (apply_authored_repulsion
                 .after(crate::plugins::FighterFrameSet::RootMotion)
                 .before(finish_character_contact_frame)
                 .before(crate::plugins::FighterFrameSet::AttackFacing),)
                 .run_if(crate::plugins::simulation_frame)
-                .run_if(in_state(AppState::Playing)),
+                .run_if(super::ui_plugin::gameplay_hud_visibility::scene_session_active),
+        );
+        app.add_systems(
+            actor_schedule,
+            apply_locomotion_repulsion
+                .after(crate::plugins::movement_plugin::move_local_fighter)
+                .after(crate::plugins::ai_plugin::move_npc_fighters)
+                .in_set(crate::plugins::FighterFrameSet::Locomotion)
+                .run_if(crate::plugins::simulation_frame)
+                .run_if(super::ui_plugin::gameplay_hud_visibility::scene_session_active),
         );
         let save_force = snapshot_authored_repulsion.after(finish_character_contact_frame);
         app.add_systems(
@@ -123,7 +206,7 @@ impl Plugin for CharacterContactPlugin {
                 save_force
             })
             .run_if(crate::plugins::simulation_frame)
-            .run_if(in_state(AppState::Playing)),
+            .run_if(super::ui_plugin::gameplay_hud_visibility::scene_session_active),
         );
         if serial {
             app.add_systems(
@@ -131,7 +214,7 @@ impl Plugin for CharacterContactPlugin {
                 sync_contact_views_at_actor_start
                     .in_set(crate::plugins::FighterFrameSet::Movement)
                     .before(crate::plugins::ai_plugin::drive_npc_ai)
-                    .run_if(in_state(AppState::Playing)),
+                    .run_if(super::ui_plugin::gameplay_hud_visibility::scene_session_active),
             );
             app.add_systems(
                 actor_schedule,
@@ -139,7 +222,7 @@ impl Plugin for CharacterContactPlugin {
                     .after(crate::plugins::FighterFrameSet::RootMotion)
                     .before(crate::plugins::FighterFrameSet::AttackFacing)
                     .run_if(crate::plugins::simulation_frame)
-                    .run_if(in_state(AppState::Playing)),
+                    .run_if(super::ui_plugin::gameplay_hud_visibility::scene_session_active),
             );
             app.add_systems(
                 Update,
@@ -147,7 +230,7 @@ impl Plugin for CharacterContactPlugin {
                     .in_set(CharacterContactFinishSet)
                     .in_set(crate::plugins::FighterFrameSet::PoseResolve)
                     .after(crate::plugins::combat_plugin::CombatPoseResolveSet)
-                    .run_if(in_state(AppState::Playing)),
+                    .run_if(super::ui_plugin::gameplay_hud_visibility::scene_session_active),
             );
         }
         app.init_resource::<CharacterContactFrame>()
@@ -157,7 +240,7 @@ impl Plugin for CharacterContactPlugin {
                     .after(NetworkFrameApply)
                     .before(crate::plugins::FighterFrameSet::Movement)
                     .run_if(crate::plugins::simulation_frame)
-                    .run_if(in_state(AppState::Playing)),
+                    .run_if(super::ui_plugin::gameplay_hud_visibility::scene_session_active),
             )
             .add_systems(
                 Update,
@@ -167,7 +250,7 @@ impl Plugin for CharacterContactPlugin {
                     .in_set(CharacterContactFinishSet)
                     .after(crate::plugins::combat_plugin::CombatPoseResolveSet)
                     .run_if(crate::plugins::simulation_frame)
-                    .run_if(in_state(AppState::Playing)),
+                    .run_if(super::ui_plugin::gameplay_hud_visibility::scene_session_active),
             )
             .add_systems(
                 actor_schedule,
@@ -176,7 +259,7 @@ impl Plugin for CharacterContactPlugin {
                     .before(crate::plugins::ai_plugin::move_npc_fighters)
                     .in_set(crate::plugins::FighterFrameSet::Locomotion)
                     .run_if(crate::plugins::simulation_frame)
-                    .run_if(in_state(AppState::Playing)),
+                    .run_if(super::ui_plugin::gameplay_hud_visibility::scene_session_active),
             )
             .add_systems(
                 actor_schedule,
@@ -184,7 +267,7 @@ impl Plugin for CharacterContactPlugin {
                     .before(crate::plugins::movement_plugin::attack_root_motion)
                     .in_set(crate::plugins::FighterFrameSet::RootMotion)
                     .run_if(crate::plugins::simulation_frame)
-                    .run_if(in_state(AppState::Playing)),
+                    .run_if(super::ui_plugin::gameplay_hud_visibility::scene_session_active),
             );
     }
 }
@@ -221,42 +304,194 @@ fn snapshot_authored_repulsion(
         if !locally_pushable(remote, performance) {
             continue;
         }
+        frame.cache_candidates(
+            entity,
+            transform.translation,
+            fighters
+                .iter()
+                .map(|(other, position, ..)| (other, position.translation)),
+        );
         let mut force = Vec3::ZERO;
-        for (other, other_transform, ..) in &fighters {
-            if entity == other {
+        for &(other, candidate_distance) in &frame.candidate_distances[&entity] {
+            let Ok((_, other_transform, ..)) = fighters.get(other) else {
                 continue;
-            }
+            };
             let delta = transform.translation - other_transform.translation;
             let (x, z) = meteor_physics::character_contact::authored_repulsion_force(
                 (delta.x, delta.y, delta.z),
-                delta.length(),
+                candidate_distance,
             );
             force += Vec3::new(x, 0.0, z);
+        }
+        #[cfg(test)]
+        if frame.audit_moves.contains_key(&entity) {
+            let candidates: Vec<_> = frame.candidate_distances[&entity].iter()
+                .filter_map(|(other, distance)| fighters.get(*other).ok().map(|(_, position, ..)|
+                    serde_json::json!({"position":position.translation.to_array(),"distance":distance})))
+                .collect();
+            frame
+                .audit_moves
+                .get_mut(&entity)
+                .unwrap()
+                .push(serde_json::json!({
+                "kind":"repulsion-save", "position":transform.translation.to_array(),
+                "candidates":candidates,"force":force.to_array()}));
         }
         frame.authored_repulsion.insert(entity, force);
     }
 }
 
-#[allow(clippy::type_complexity)]
-pub(super) fn apply_authored_repulsion(
-    active: Option<Res<super::fighter_frame::ActiveFighter>>,
-    time: Res<Time>,
-    clock: Option<Res<crate::plugins::FrameClock>>,
-    collider: Option<Res<StageCollider>>,
-    mut frame: ResMut<CharacterContactFrame>,
-    #[cfg(not(target_arch = "wasm32"))] mut trace: Option<ResMut<super::combat_trace::CombatTrace>>,
-    mut fighters: Query<
+#[derive(bevy::ecs::system::SystemParam)]
+pub(super) struct RepulsionParams<'w, 's> {
+    active: Option<Res<'w, super::fighter_frame::ActiveFighter>>,
+    time: Res<'w, Time>,
+    clock: Option<Res<'w, crate::plugins::FrameClock>>,
+    collider: Option<Res<'w, StageCollider>>,
+    frame: ResMut<'w, CharacterContactFrame>,
+    #[cfg(not(target_arch = "wasm32"))]
+    trace: Option<ResMut<'w, super::combat_trace::CombatTrace>>,
+    fighters: Query<
+        'w,
+        's,
         (
             Entity,
-            &mut Transform,
-            &mut MotionState,
-            &SmState,
-            Option<&FighterHitReaction>,
-            &Health,
+            &'static mut Transform,
+            &'static MotionState,
+            &'static SmState,
+            Option<&'static FighterHitReaction>,
+            &'static Health,
+            Option<&'static PoseRuntime>,
+            Option<&'static WeaponSwitchActive>,
+            Option<&'static mut FighterAir>,
         ),
         (With<Fighter>, Without<RemoteFighter>),
     >,
+}
+
+fn uses_mode1_repulsion(state: FighterState, mode: meteor_core::MovementMode) -> bool {
+    matches!(
+        state,
+        FighterState::Name
+            | FighterState::Think
+            | FighterState::View
+            | FighterState::Look
+            | FighterState::GetItem
+            | FighterState::Spawn
+    ) && matches!(
+        mode,
+        meteor_core::MovementMode::Idle
+            | meteor_core::MovementMode::Walk
+            | meteor_core::MovementMode::Run
+            | meteor_core::MovementMode::Crouch
+    )
+}
+
+fn remember_repulsion_entry(
+    active: Option<Res<super::fighter_frame::ActiveFighter>>,
+    actors: Query<(Entity, &SmState), (With<Fighter>, Without<RemoteFighter>)>,
+    mut frame: ResMut<CharacterContactFrame>,
 ) {
+    for (entity, state) in &actors {
+        if super::fighter_frame::accepts(active.as_deref(), entity) {
+            frame.entry_states.insert(entity, state.current);
+        }
+    }
+}
+
+fn root_repulsion_allowed(
+    entry: Option<FighterState>,
+    state: FighterState,
+    mode: meteor_core::MovementMode,
+    reaction: Option<meteor_combat::hit_reaction::HitReactKind>,
+    pose: Option<&PoseRuntime>,
+    switching: bool,
+) -> bool {
+    use meteor_combat::hit_reaction::HitReactKind;
+
+    if matches!(entry, Some(FighterState::Down | FighterState::Fake))
+        && (matches!(reaction, Some(HitReactKind::GetUp | HitReactKind::Roll))
+            || matches!(state, FighterState::Dodge | FighterState::Burst))
+    {
+        return false;
+    }
+    if mode == meteor_core::MovementMode::WallRun || state == FighterState::Cure {
+        return false;
+    }
+    if switching || state == FighterState::Dead {
+        return pose.is_some_and(|pose| !pose.finished());
+    }
+    match state {
+        FighterState::Dodge | FighterState::Burst => {
+            pose.is_some_and(|pose| !crate::plugins::movement_plugin::dodge_pose_finished(pose))
+        }
+        FighterState::Attack1
+        | FighterState::Attack2
+        | FighterState::Attack3
+        | FighterState::BeHit
+        | FighterState::Guard
+        | FighterState::Down
+        | FighterState::Fake => true,
+        FighterState::Jump => true,
+        FighterState::Name
+        | FighterState::Think
+        | FighterState::View
+        | FighterState::Look
+        | FighterState::GetItem
+        | FighterState::Spawn => mode == meteor_core::MovementMode::Airborne,
+        _ => false,
+    }
+}
+
+fn prepare_root_repulsion(
+    active: Option<Res<super::fighter_frame::ActiveFighter>>,
+    actors: Query<
+        (
+            Entity,
+            &SmState,
+            &MotionState,
+            &PoseRuntime,
+            Option<&FighterHitReaction>,
+            Option<&WeaponSwitchActive>,
+        ),
+        (With<Fighter>, Without<RemoteFighter>),
+    >,
+    mut frame: ResMut<CharacterContactFrame>,
+) {
+    for (entity, state, motion, pose, reaction, switching) in &actors {
+        if !super::fighter_frame::accepts(active.as_deref(), entity) {
+            continue;
+        }
+        let allowed = root_repulsion_allowed(
+            frame.entry_states.get(&entity).copied(),
+            state.current,
+            motion.movement_mode,
+            reaction.and_then(|r| r.current.as_ref()).map(|r| r.kind),
+            Some(pose),
+            switching.is_some(),
+        );
+        frame.root_repulsion.insert(entity, allowed);
+    }
+}
+
+fn apply_locomotion_repulsion(params: RepulsionParams) {
+    apply_cached_repulsion(params, false);
+}
+
+pub(super) fn apply_authored_repulsion(params: RepulsionParams) {
+    apply_cached_repulsion(params, true);
+}
+
+fn apply_cached_repulsion(params: RepulsionParams, authored_phase: bool) {
+    let RepulsionParams {
+        active,
+        time,
+        clock,
+        collider,
+        mut frame,
+        #[cfg(not(target_arch = "wasm32"))]
+        mut trace,
+        mut fighters,
+    } = params;
     let dt = crate::plugins::simulation_dt(clock.as_deref(), time.delta_secs());
     if !dt.is_finite() || dt <= 0.0 {
         return;
@@ -265,25 +500,45 @@ pub(super) fn apply_authored_repulsion(
     if let Some(mesh) = collider.as_deref().and_then(|c| c.mesh.as_ref()) {
         stage.set_mesh_collider(mesh);
     }
-    for (entity, mut transform, mut motion, sm, reaction, health) in &mut fighters {
-        if !super::fighter_frame::accepts(active.as_deref(), entity) || health.current <= 0.0 {
+    for (entity, mut transform, motion, sm, reaction, health, pose, switching, air) in &mut fighters
+    {
+        if !super::fighter_frame::accepts(active.as_deref(), entity)
+            || (health.current <= 0.0 && sm.current != FighterState::Dead)
+        {
             continue;
         }
-        let authored = matches!(
-            sm.current,
-            FighterState::Attack1 | FighterState::Attack2 | FighterState::Attack3
-        ) || reaction
-            .and_then(|r| r.current.as_ref())
-            .is_some_and(|r| r.kind != meteor_combat::hit_reaction::HitReactKind::Down);
-        if !authored {
+        if authored_phase {
+            let allowed = frame
+                .root_repulsion
+                .get(&entity)
+                .copied()
+                .unwrap_or_else(|| {
+                    root_repulsion_allowed(
+                        frame.entry_states.get(&entity).copied(),
+                        sm.current,
+                        motion.movement_mode,
+                        reaction.and_then(|r| r.current.as_ref()).map(|r| r.kind),
+                        pose,
+                        switching.is_some(),
+                    )
+                });
+            if !allowed {
+                continue;
+            }
+        } else if switching.is_some() || !uses_mode1_repulsion(sm.current, motion.movement_mode) {
             continue;
         }
+        frame.stock_repulsion_owners.insert(entity);
         let Some(force) = frame.authored_repulsion.remove(&entity) else {
             continue;
         };
 
         if force.length() <= 5.0 * meteor_core::MODEL_SCALE {
             continue;
+        }
+
+        if let Some(mut air) = air {
+            air.ground_external_velocity = Vec3::ZERO;
         }
         let delta = force * dt * dt;
         let (dx, _, dz, _) = meteor_physics::carry_velocity::clamp_composed_delta_3d(
@@ -294,11 +549,25 @@ pub(super) fn apply_authored_repulsion(
             meteor_physics::carry_velocity::CARRY_MAX_SPEED,
         );
         let before = transform.translation;
-        let (x, z, y) = stage.resolve_xz(Point3::new(before.x, before.y, before.z), dx, dz, false);
+        let (x, z, y, _, blocked_axes) = stage.resolve_xz_with_contacts(
+            Point3::new(before.x, before.y, before.z),
+            dx,
+            dz,
+            false,
+        );
+        frame
+            .last_mover_scene_contacts
+            .insert(entity, blocked_axes.into_iter().any(|blocked| blocked));
         let accepted = Vec3::new(x, y, z);
         transform.translation += accepted;
-        motion.velocity += accepted / dt;
+
         frame.commit_position(entity, transform.translation);
+        #[cfg(test)]
+        if let Some(moves) = frame.audit_moves.get_mut(&entity) {
+            moves.push(serde_json::json!({
+            "kind":"repulsion", "before":before.to_array(), "force":force.to_array(),
+            "requested":[dx,0.0,dz], "accepted":accepted.to_array()}));
+        }
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(trace) = trace.as_deref_mut() {
             trace.event(serde_json::json!({"kind":"authored-repulsion", "entity":entity.to_bits(),
@@ -308,7 +577,7 @@ pub(super) fn apply_authored_repulsion(
     }
 }
 
-fn begin_character_contact_frame(
+pub(crate) fn begin_character_contact_frame(
     collider: Option<Res<StageCollider>>,
     fighters: ContactSnapshotQuery<'_, '_>,
     mut remote_segments: Query<(Entity, &mut RemoteContactSegment), With<RemoteFighter>>,
@@ -323,6 +592,14 @@ fn begin_character_contact_frame(
     }
 
     let previous_entities: Vec<_> = frame.views.iter().map(|view| view.entity).collect();
+    #[cfg(test)]
+    for moves in frame.audit_moves.values_mut() {
+        moves.clear();
+    }
+    frame.stock_repulsion_owners.clear();
+    frame.candidate_distances.clear();
+    frame.entry_states.clear();
+    frame.root_repulsion.clear();
     frame.views.clear();
     frame.indices.clear();
     for (
@@ -339,6 +616,9 @@ fn begin_character_contact_frame(
         visibility,
     ) in &fighters
     {
+        if locally_pushable(remote, npc_performance) {
+            frame.stock_repulsion_owners.insert(entity);
+        }
         let position = transform.translation;
         let ground_y = stage
             .sample_ground_hit(position.x, position.z, position.y)
@@ -357,13 +637,19 @@ fn begin_character_contact_frame(
             ground_y,
             pushable: locally_pushable(remote, npc_performance),
             explicit_ignore: motion.movement_mode == meteor_core::MovementMode::Dodge
-                || matches!(sm.current, FighterState::Dodge | FighterState::Burst),
+                || matches!(
+                    sm.current,
+                    FighterState::Dodge | FighterState::Burst | FighterState::Down
+                ),
             authored_motion: uses_authored_mover(sm.current),
         });
     }
     let live_entities: std::collections::HashSet<_> = frame.indices.keys().copied().collect();
     frame
         .authored_repulsion
+        .retain(|entity, _| live_entities.contains(entity));
+    frame
+        .last_mover_scene_contacts
         .retain(|entity, _| live_entities.contains(entity));
     let active = frame
         .views
@@ -421,15 +707,56 @@ pub(crate) fn resolve_fighter_xz_with_surface<M: MeshCollider>(
     dz: f32,
     no_probe: bool,
 ) -> (f32, f32, f32, Option<meteor_physics::collision::FootHit>) {
-    let stage_resolved = stage.resolve_xz_with_surface(pos, dx, dz, no_probe);
+    let (x, z, y, surface, _, _) =
+        resolve_fighter_xz_with_contacts(frame, entity, stage, pos, dx, dz, no_probe);
+    (x, z, y, surface)
+}
+
+pub(crate) fn resolve_fighter_xz_with_contacts<M: MeshCollider>(
+    frame: Option<&mut CharacterContactFrame>,
+    entity: Entity,
+    stage: &CollisionSystem<M>,
+    pos: Point3,
+    dx: f32,
+    dz: f32,
+    no_probe: bool,
+) -> (
+    f32,
+    f32,
+    f32,
+    Option<meteor_physics::collision::FootHit>,
+    [bool; 2],
+    bool,
+) {
+    let stage_resolved = stage.resolve_xz_with_contacts(pos, dx, dz, no_probe);
     let Some(frame) = frame else {
-        return stage_resolved;
+        return (
+            stage_resolved.0,
+            stage_resolved.1,
+            stage_resolved.2,
+            stage_resolved.3,
+            stage_resolved.4,
+            false,
+        );
     };
+    frame
+        .last_mover_scene_contacts
+        .insert(entity, stage_resolved.4.into_iter().any(|blocked| blocked));
     let Some(index) = frame.indices.get(&entity).copied() else {
-        return stage_resolved;
+        return (
+            stage_resolved.0,
+            stage_resolved.1,
+            stage_resolved.2,
+            stage_resolved.3,
+            stage_resolved.4,
+            false,
+        );
     };
 
-    let (cx, cz) = if frame.views[index].authored_motion {
+    let authored_motion = frame.views[index].authored_motion;
+    #[cfg(test)]
+    let authored_motion = authored_motion || frame.audit_bypass_actors.contains(&entity);
+    let (cx, cz) = if authored_motion {
         (stage_resolved.0, stage_resolved.1)
     } else {
         let (x, z, _) = frame.system.resolve_xz(
@@ -440,19 +767,41 @@ pub(crate) fn resolve_fighter_xz_with_surface<M: MeshCollider>(
         );
         (x, z)
     };
-    let resolved = if (cx - stage_resolved.0).abs() <= 1e-6 && (cz - stage_resolved.1).abs() <= 1e-6
-    {
-        stage_resolved
+    let character_changed =
+        (cx - stage_resolved.0).abs() > 1e-6 || (cz - stage_resolved.1).abs() > 1e-6;
+    let resolved = if character_changed {
+        stage.resolve_xz_with_contacts(pos, cx, cz, no_probe)
     } else {
-        stage.resolve_xz_with_surface(pos, cx, cz, no_probe)
+        stage_resolved
     };
+    #[cfg(test)]
+    if let Some(moves) = frame.audit_moves.get_mut(&entity) {
+        moves.push(serde_json::json!({
+        "kind":"primary", "before":[pos.x,pos.y,pos.z], "requested":[dx,0.0,dz],
+        "stage":[stage_resolved.0,stage_resolved.2,stage_resolved.1],
+        "accepted":[resolved.0,resolved.2,resolved.1], "authored":authored_motion}));
+    }
     let endpoint = Point3::new(pos.x + resolved.0, pos.y + resolved.2, pos.z + resolved.1);
     let view = &mut frame.views[index];
     view.position = (endpoint.x, endpoint.y, endpoint.z);
     view.ground_y = stage
         .sample_ground_hit(endpoint.x, endpoint.z, endpoint.y)
         .map_or(f32::NEG_INFINITY, |hit| hit.y);
-    resolved
+    let blocked_axes = [
+        stage_resolved.4[0] || resolved.4[0],
+        stage_resolved.4[1] || resolved.4[1],
+    ];
+    frame
+        .last_mover_scene_contacts
+        .insert(entity, blocked_axes.into_iter().any(|blocked| blocked));
+    (
+        resolved.0,
+        resolved.1,
+        resolved.2,
+        resolved.3,
+        blocked_axes,
+        character_changed,
+    )
 }
 
 pub(crate) fn resolve_fighter_wall_motion<M: MeshCollider>(
@@ -468,6 +817,9 @@ pub(crate) fn resolve_fighter_wall_motion<M: MeshCollider>(
     let Some(frame) = frame else {
         return result;
     };
+    frame
+        .last_mover_scene_contacts
+        .insert(entity, result.flags & 5 != 0);
     let Some(index) = frame.indices.get(&entity).copied() else {
         return result;
     };
@@ -528,7 +880,10 @@ pub(crate) fn sync_fighter_contact_state(
     view.guard = state == FighterState::Guard;
     view.airborne = airborne;
     view.explicit_ignore = movement_mode == meteor_core::MovementMode::Dodge
-        || matches!(state, FighterState::Dodge | FighterState::Burst);
+        || matches!(
+            state,
+            FighterState::Dodge | FighterState::Burst | FighterState::Down
+        );
     view.authored_motion = uses_authored_mover(state);
 }
 
@@ -658,6 +1013,17 @@ pub(super) fn finish_character_contact_frame(
             continue;
         };
         let entity = view.entity;
+
+        if frame.stock_repulsion_owners.contains(&entity) {
+            let ordinary = fighters.p0().get(entity).ok().is_some_and(
+                |(_, _, _, state, motion, _, _, _, _)| {
+                    uses_mode1_repulsion(state.current, motion.movement_mode)
+                },
+            );
+            if !ordinary {
+                continue;
+            }
+        }
         let mut writable = fighters.p1();
         let Ok((mut transform, mut motion, health, visibility)) = writable.get_mut(entity) else {
             continue;
@@ -697,6 +1063,101 @@ pub(super) fn finish_character_contact_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
+    include!("character_contact_plugin/repulsion_tests.rs");
+    include!("character_contact_plugin/scene_contact_tests.rs");
+
+    #[test]
+    fn ordinary_and_crouched_actors_consume_previous_force_once() {
+        for serial in [false, true] {
+            for fps in [30.0, 60.0, 120.0] {
+                for mode in [
+                    meteor_core::MovementMode::Idle,
+                    meteor_core::MovementMode::Crouch,
+                ] {
+                    let mut app = App::new();
+                    crate::plugins::configure_fighter_frame_sets(&mut app);
+                    if serial {
+                        crate::plugins::fighter_frame::install(&mut app);
+                    }
+                    app.insert_resource(State::new(AppState::Playing))
+                        .init_resource::<Time>()
+                        .insert_resource(crate::plugins::FrameClock {
+                            sim_dt: 1.0 / fps,
+                            ..default()
+                        })
+                        .add_plugins(CharacterContactPlugin);
+                    let mut spawn = |slot, x| {
+                        app.world_mut()
+                            .spawn((
+                                fighter(slot),
+                                Transform::from_xyz(x, 0.0, 0.0),
+                                PoseRuntime {
+                                    pose_id: if mode == meteor_core::MovementMode::Crouch {
+                                        10
+                                    } else {
+                                        0
+                                    },
+                                    ..PoseRuntime::idle()
+                                },
+                                SmState::default(),
+                                Health::default(),
+                                MotionState {
+                                    movement_mode: mode,
+                                    velocity: Vec3::ZERO,
+                                    facing: 0.0,
+                                },
+                            ))
+                            .id()
+                    };
+                    let local = spawn(0, 0.0);
+                    let remote = spawn(1, 1.44);
+                    app.world_mut().entity_mut(remote).insert(RemoteFighter {
+                        player_id: "ordinary-repulsion-target".into(),
+                    });
+                    app.world_mut().run_schedule(Update);
+                    assert_eq!(
+                        app.world().get::<Transform>(local).unwrap().translation,
+                        Vec3::ZERO
+                    );
+                    app.world_mut().run_schedule(Update);
+
+                    let expected = -108.0 / (fps * fps);
+                    let position = app.world().get::<Transform>(local).unwrap().translation;
+                    assert!(
+                        (position.x - expected).abs() < 1e-5,
+                        "serial={serial} fps={fps} mode={mode:?}: {position:?}"
+                    );
+                    assert!(
+                        app.world()
+                            .get::<MotionState>(local)
+                            .unwrap()
+                            .velocity
+                            .x
+                            .abs()
+                            < 1e-4,
+                        "the second mover must not pollute the drive velocity"
+                    );
+                    assert_eq!(
+                        app.world().get::<Transform>(remote).unwrap().translation.x,
+                        1.44
+                    );
+                    app.world_mut()
+                        .get_mut::<Transform>(remote)
+                        .unwrap()
+                        .translation
+                        .x = 20.0;
+                    app.world_mut().run_schedule(Update);
+                    let last = app.world().get::<Transform>(local).unwrap().translation;
+                    assert!(last.x < position.x);
+                    app.world_mut().run_schedule(Update);
+                    assert_eq!(
+                        app.world().get::<Transform>(local).unwrap().translation,
+                        last
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn authored_repulsion_moves_airborne_100_once_and_never_integrates_remote_owner() {
@@ -778,7 +1239,11 @@ mod tests {
                     "serial={serial} fps={fps}: {p:?}"
                 );
                 let velocity = app.world().get::<MotionState>(local).unwrap().velocity;
-                assert!((velocity.x - expected / dt).abs() < 1e-4);
+                assert_eq!(
+                    velocity,
+                    Vec3::ZERO,
+                    "second mover must preserve primary velocity"
+                );
                 assert_eq!(
                     app.world().get::<Transform>(remote).unwrap().translation.x,
                     1.44
@@ -849,11 +1314,11 @@ mod tests {
             .run_system_once(apply_authored_repulsion)
             .unwrap();
         assert!((app.world().get::<Transform>(mover).unwrap().translation.x - 1.9892).abs() < 1e-5);
-        assert!((app.world().get::<MotionState>(mover).unwrap().velocity.x - 1.92).abs() < 1e-4);
+        assert!((app.world().get::<MotionState>(mover).unwrap().velocity.x - 3.0).abs() < 1e-4);
     }
 
     #[test]
-    fn serial_contact_commits_before_later_actor_and_defers_an_already_updated_target() {
+    fn serial_mode1_consumes_previous_force_before_later_actor_hit_judge() {
         use super::super::fighter_frame::{ActiveFighter, FighterUpdate};
         #[derive(Component)]
         struct ForwardStep;
@@ -940,17 +1405,17 @@ mod tests {
                     .resource_mut::<Time>()
                     .advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
                 app.world_mut().run_schedule(Update);
-                let expected = radius + (tick + u32::from(source_first)) as f32 * 2.4 / 60.0;
+
                 let actual = app.world().get::<Transform>(target).unwrap().translation.x;
                 assert!(
-                    (actual - expected).abs() < 1e-5,
+                    actual >= radius,
                     "push consumed out of order: {source_first}, {tick}, {actual}"
                 );
                 let seen = &app.world().resource::<Seen>().0;
                 let last_view = &seen.iter().find(|(e, _)| *e == observer).unwrap().1;
                 let seen_target = last_view.iter().find(|(e, _)| *e == target).unwrap().1;
                 assert!(
-                    (seen_target - expected).abs() < 1e-5,
+                    (seen_target - actual).abs() < 1e-5,
                     "later hit judge saw stale contact position"
                 );
             }
@@ -1223,13 +1688,13 @@ mod tests {
     }
 
     #[test]
-    fn queued_push_uses_final_guard_air_and_passing_state() {
+    fn queued_fixed_carry_reaches_ordinary_modes_but_not_other_states() {
         use bevy::ecs::system::RunSystemOnce;
-        for state in [
-            FighterState::Name,
-            FighterState::Guard,
-            FighterState::Dodge,
-            FighterState::BeHit,
+        for (state, carried) in [
+            (FighterState::Name, true),
+            (FighterState::Guard, false),
+            (FighterState::Dodge, false),
+            (FighterState::BeHit, false),
         ] {
             let mut app = App::new();
             app.init_resource::<CharacterContactFrame>()
@@ -1289,24 +1754,27 @@ mod tests {
                 .unwrap()
                 .translation
                 .x;
-            if state == FighterState::Name {
+            if carried {
                 assert!(
-                    (x - 4.08).abs() < 1e-5,
-                    "eligible target still receives 2.4 world/s"
+                    x > 4.0,
+                    "ordinary mode1 must keep the accepted contact carry"
                 );
             } else {
-                assert_eq!(x, 4.0, "stale queued push must not move {state:?}");
+                assert_eq!(
+                    x, 4.0,
+                    "{state:?}: the stock controller owns push eligibility"
+                );
             }
         }
     }
 
     #[test]
-    fn fixed_debug_dummy_is_not_a_push_target() {
+    fn passive_dummy_keeps_physics_ownership_but_remote_observer_does_not() {
         let remote = RemoteFighter {
             player_id: "peer".into(),
         };
         assert!(!locally_pushable(Some(&remote), None));
-        assert!(!locally_pushable(
+        assert!(locally_pushable(
             None,
             Some(&NpcPerformance {
                 pause_remaining: f32::INFINITY,
@@ -1422,7 +1890,11 @@ mod tests {
             "second mover entered stage: {after:?}"
         );
         let velocity = app.world().get::<MotionState>(actor).unwrap().velocity;
-        assert!((velocity - (after - p) / dt).length() < 1e-4);
+        assert_eq!(
+            velocity,
+            Vec3::ZERO,
+            "stage-resolved repulsion is not primary velocity"
+        );
     }
 
     #[test]

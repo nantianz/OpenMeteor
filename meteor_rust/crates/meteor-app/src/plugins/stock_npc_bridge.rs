@@ -8,9 +8,9 @@ pub(super) struct NpcRole {
     pub entity: Entity,
     pub hero: u32,
     pub weapon: u8,
+    pub weapon_variant: u8,
     pub camp: u32,
 
-    #[allow(dead_code)]
     pub name: String,
     pub state: RoleState,
 }
@@ -19,6 +19,7 @@ pub(super) struct NpcRole {
 pub(super) struct Bridge {
     clients: HashMap<Entity, StockGameClient>,
     anger_revisions: HashMap<Entity, u64>,
+    equipped_items: HashMap<Entity, u32>,
 }
 
 impl Bridge {
@@ -36,6 +37,8 @@ impl Bridge {
                 false
             }
         });
+        self.equipped_items
+            .retain(|entity, _| self.clients.contains_key(entity));
         let mut address = server.transport().local_addr()?;
         address.set_ip(if address.is_ipv4() {
             std::net::Ipv4Addr::LOCALHOST.into()
@@ -46,6 +49,8 @@ impl Bridge {
             if let std::collections::hash_map::Entry::Vacant(entry) =
                 self.clients.entry(role.entity)
             {
+                let mut record = meteor_network::stock_udp::StockConnectRecord::for_open_room();
+                record.player_name.clone_from(&role.name);
                 let transport = StockClientTransport::bind(
                     if address.is_ipv4() {
                         "127.0.0.1:0"
@@ -53,8 +58,11 @@ impl Bridge {
                         "[::1]:0"
                     },
                     address,
-                    meteor_network::stock_udp::StockConnectRecord::for_open_room(),
+                    record,
                 )?;
+                if let Some(item) = stock_weapon_item_id(role.weapon, 0) {
+                    self.equipped_items.insert(role.entity, item);
+                }
                 entry.insert(super::stock_asset_client(
                     transport,
                     role.hero,
@@ -67,6 +75,12 @@ impl Bridge {
                 .get_mut(&role.entity)
                 .expect("inserted NPC client");
             if client.actor_id().is_some() {
+                if let Some(item) = stock_weapon_item_id(role.weapon, role.weapon_variant) {
+                    if self.equipped_items.get(&role.entity) != Some(&item) {
+                        client.send_weapon_switch(item, now_ms)?;
+                        self.equipped_items.insert(role.entity, item);
+                    }
+                }
                 let state = server
                     .scene_frame()
                     .map_or(role.state, |frame| frame.to_stock(role.state));
@@ -74,6 +88,39 @@ impl Bridge {
             }
         }
         Ok(())
+    }
+
+    pub(super) fn send_weapon_drop(
+        &mut self,
+        entity: Entity,
+        command: StockWeaponDropCommand,
+        now_ms: u64,
+    ) -> Result<Option<StockGameEvent>, StockGameError> {
+        self.clients
+            .get_mut(&entity)
+            .ok_or(StockGameError::RoleNotEntered)?
+            .send_weapon_drop(command, now_ms)
+    }
+
+    pub(super) fn confirm_weapon_rest(
+        &mut self,
+        entity: Entity,
+        id: u32,
+        position: [f32; 3],
+        now_ms: u64,
+    ) -> Result<bool, StockGameError> {
+        self.clients
+            .get_mut(&entity)
+            .ok_or(StockGameError::RoleNotEntered)?
+            .confirm_weapon_drop_collision(
+                id,
+                RoleVec3 {
+                    x: position[0],
+                    y: position[1],
+                    z: position[2],
+                },
+                now_ms,
+            )
     }
 
     pub(super) fn send_self_effect(
@@ -107,6 +154,10 @@ impl Bridge {
     ) -> Result<(), StockGameError> {
         for (&entity, client) in &mut self.clients {
             for event in client.tick(now_ms)? {
+                if matches!(event, StockGameEvent::WeaponSettled { .. }) {
+                    let _ = to_app.send(NetInbound::StockNpcWeaponEvent(entity, event));
+                    continue;
+                }
                 if let StockGameEvent::Vitals(vitals) = event {
                     let _ = to_app.send(NetInbound::StockVitals {
                         actor: Some(entity),
@@ -122,6 +173,7 @@ impl Bridge {
                         | StockGameEvent::Vitals(_)
                         | StockGameEvent::LocalDeath
                         | StockGameEvent::LocalRespawn
+                        | StockGameEvent::SpawnPad(_)
                         | StockGameEvent::PeerDisconnected { .. }
                 ) || matches!(&event, StockGameEvent::RoleEntered(role) if Some(role.actor_id) == client.actor_id())
                     || matches!(&event, StockGameEvent::PropertyEffect(event) if Some(event.actor_id) == client.actor_id())
@@ -158,7 +210,11 @@ pub(super) fn apply_event(net: &mut NetState, entity: Entity, event: StockGameEv
         }
         StockGameEvent::RoleEntered(role) => {
             net.stock_npc_actors.insert(entity, role.actor_id);
-            net.stock_npc_ready.insert(entity);
+            if net.stock_npc_ready.insert(entity) {
+                let actor = format!("stock-{}", role.actor_id);
+                net.pending_spawn_relocations.insert(actor.clone());
+                net.pending_respawns.push(actor);
+            }
         }
         StockGameEvent::Vitals(vitals) => {
             net.pending_npc_vitals.push((
@@ -169,6 +225,13 @@ pub(super) fn apply_event(net: &mut NetState, entity: Entity, event: StockGameEv
                     f32::from(vitals.anger),
                 ],
             ));
+        }
+        StockGameEvent::SpawnPad(pad) => {
+            if let Some(actor) = net.stock_npc_actors.get(&entity) {
+                let actor = format!("stock-{actor}");
+                net.pending_spawn_pads.insert(actor.clone(), pad);
+                net.pending_respawns.push(actor);
+            }
         }
         StockGameEvent::LocalRespawn => {
             if let Some(actor) = net.stock_npc_actors.get(&entity) {
@@ -209,6 +272,15 @@ pub(super) fn apply_event(net: &mut NetState, entity: Entity, event: StockGameEv
                 }
             } else {
                 CombatReactionWire {
+                    rebalance_effect: if net.battle_rules.enabled() {
+                        event
+                            .context
+                            .checked_sub(meteor_combat::rebalance_effects::STOCK_EFFECT_CONTEXT)
+                            .filter(|v| (1..=3).contains(v))
+                            .unwrap_or(0) as u8
+                    } else {
+                        0
+                    },
                     target_move: event.motion_scale(),
                     target_value: event.minimum_seconds(),
                     target_pose: Some(event.pose_id as u16),
@@ -282,6 +354,7 @@ pub(super) fn sync_npc_roles(
                     entity,
                     hero: u32::from(fighter.character_id),
                     weapon: fighter.weapon,
+                    weapon_variant: fighter.weapon_variant,
                     camp: u32::from(mission.team),
                     name: mission.name.clone(),
                     state: role_state_from_runtime(local_request1_runtime(
@@ -308,14 +381,17 @@ pub(super) fn sync_npc_roles(
 #[cfg(test)]
 mod tests {
     use super::*;
+    include!("network_plugin/npc_spawn_pad_tests.rs");
+    include!("network_plugin/npc_weapon_switch_tests.rs");
 
     fn role(entity: Entity) -> NpcRole {
         NpcRole {
             entity,
             hero: 1,
             weapon: 6,
+            weapon_variant: 0,
             camp: 0,
-            name: "DebugNPC_1".into(),
+            name: "冷燕".into(),
             state: role_state_from_runtime(RoleStateRuntime {
                 position: RoleVec3 {
                     x: 0.0,
@@ -396,7 +472,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let mut bridge = Bridge::default();
         bridge.sync(&server, vec![role(npc)], 0).unwrap();
-        pump(
+        let entry_events = pump(
             &mut server,
             &mut [&mut host, &mut observer],
             &mut bridge,
@@ -406,6 +482,36 @@ mod tests {
         );
         assert_eq!(server.ready_peer_count(), 3);
         let npc_id = bridge.clients[&npc].actor_id().unwrap();
+        for events in &entry_events {
+            let name_index = events.iter().position(|event| matches!(event,
+                StockGameEvent::PlayerName { actor_id, name } if *actor_id == npc_id && name == &role(npc).name)).unwrap();
+            let entry_index = events
+                .iter()
+                .position(|event| {
+                    matches!(event,
+                StockGameEvent::RoleEntered(entered) if entered.actor_id == npc_id)
+                })
+                .unwrap();
+
+            let mut notice_net = NetState::default();
+            for event in &events[..=name_index.max(entry_index)] {
+                if matches!(event, StockGameEvent::PlayerName { actor_id, .. } if *actor_id == npc_id)
+                    || matches!(event, StockGameEvent::RoleEntered(role) if role.actor_id == npc_id)
+                {
+                    handle_stock_game_event(
+                        &mut notice_net,
+                        &mut LaunchRequest::default(),
+                        &mut MatchEnd::default(),
+                        &mut NetTx::default(),
+                        &mut NextState::default(),
+                        AppState::Playing,
+                        event.clone(),
+                    );
+                }
+            }
+            assert_eq!(notice_net.pending_system_notices, vec!["冷燕 进入战场"]);
+            assert!(notice_net.pending_stock_entry_notices.is_empty());
+        }
         let host_id = host.actor_id().unwrap();
         assert_ne!(npc_id, host_id);
         let mut net = NetState::default();
@@ -439,7 +545,7 @@ mod tests {
             values_word: 50,
         };
         bridge.send_hit(npc, hit, 2_200).unwrap();
-        bridge.send_hit(npc, hit, 2_200).unwrap();
+
         let events = pump(
             &mut server,
             &mut [&mut host, &mut observer],
@@ -782,6 +888,7 @@ mod tests {
         })
         .init_resource::<LockOnController>()
         .init_resource::<crate::plugins::camera_plugin::CameraBasis>()
+        .init_resource::<crate::plugins::item_plugin::ItemBuffs>()
         .add_message::<crate::plugins::impact_fx_plugin::CombatImpactEvent>();
         let player = spawn_actor(app.world_mut(), true);
         let npc = spawn_actor(app.world_mut(), false);
@@ -792,10 +899,6 @@ mod tests {
             .get_mut::<Transform>(npc)
             .unwrap()
             .translation = corpse;
-        app.world_mut()
-            .get_mut::<DeathRespawn>(npc)
-            .unwrap()
-            .spawn_pos = spawn;
 
         let transport =
             StockServerTransport::bind("127.0.0.1:0", "serverlist", "NPC revival regression")
@@ -826,6 +929,15 @@ mod tests {
             .unwrap();
         pump(&mut server, &mut [&mut host], &mut bridge, &tx, 0, 150);
         receive(&mut app, &rx);
+
+        let scale = meteor_core::constants::MODEL_SCALE;
+        let des = format!("SceneObjects 0 DummeyObjects 1\nObject D_User01\n{{\nPosition: {} {} {}\nCustom:\n{{\nname=\"user01\"\n}}\n}}\n",
+            spawn.x / scale, -spawn.z / scale, spawn.y / scale);
+        app.insert_resource(crate::app_state::LoadedStageAssets {
+            des: Some(des.into_bytes()),
+            ..Default::default()
+        })
+        .insert_resource(crate::app_state::LoadedStageInfo::default());
         let npc_id = bridge.clients[&npc].actor_id().unwrap();
         let host_id = host.actor_id().unwrap();
         app.world_mut().resource_mut::<NetState>().player_id = format!("stock-{host_id}");
@@ -840,6 +952,15 @@ mod tests {
         pump(&mut server, &mut [&mut host], &mut bridge, &tx, 200, 100);
         receive(&mut app, &rx);
 
+        let untouched_instances: Vec<_> = [player, other_npc]
+            .into_iter()
+            .map(|entity| {
+                app.world()
+                    .get::<PoseRuntime>(entity)
+                    .unwrap()
+                    .pose_instance_id
+            })
+            .collect();
         let hit = StockHitRequest {
             target_actor_id: npc_id,
             hit_word: 250,
@@ -909,7 +1030,7 @@ mod tests {
             app.world().get::<Transform>(npc).unwrap().translation,
             spawn
         );
-        for untouched in [player, other_npc] {
+        for (untouched, instance) in [player, other_npc].into_iter().zip(untouched_instances) {
             assert!(!app.world().get::<DeathRespawn>(untouched).unwrap().active);
             assert_eq!(
                 app.world().get::<Transform>(untouched).unwrap().translation,
@@ -920,7 +1041,7 @@ mod tests {
                     .get::<PoseRuntime>(untouched)
                     .unwrap()
                     .pose_instance_id,
-                0
+                instance
             );
         }
 
@@ -978,6 +1099,7 @@ mod tests {
         .init_resource::<NetState>()
         .init_resource::<LockOnController>()
         .init_resource::<crate::plugins::camera_plugin::CameraBasis>()
+        .init_resource::<crate::plugins::item_plugin::ItemBuffs>()
         .add_message::<crate::plugins::impact_fx_plugin::CombatImpactEvent>();
         let player = spawn_actor(app.world_mut(), true);
         let npc = spawn_actor(app.world_mut(), false);

@@ -15,6 +15,10 @@ fn main() {
     };
     let address = env::var("METEOR_WS").unwrap_or_else(|_| default.to_owned());
     let address = address.trim();
+    if address.is_empty() {
+        println!("cargo:rustc-env=METEOR_BUILD_WS=");
+        return;
+    }
     if address != "/ws" {
         let authority = address
             .strip_prefix("wss://")

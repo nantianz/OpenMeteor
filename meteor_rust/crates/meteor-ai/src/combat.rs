@@ -150,6 +150,52 @@ pub fn decision_interval(think: f32, callback_delay: f32) -> f32 {
     callback_delay / (think * 0.01).max(0.1)
 }
 
+pub fn wants_weapon_switch(
+    current: u8,
+    spare: u8,
+    distance: f32,
+    height: f32,
+    elapsed_since_switch: f64,
+    mut roll: impl FnMut() -> u32,
+) -> bool {
+    if current == 0 || spare == 0 || !distance.is_finite() || !height.is_finite() {
+        return false;
+    }
+    let current = weapon_tactics(current);
+    let alternate = weapon_tactics(spare);
+    let in_range =
+        |t: &WeaponTactics| distance < t.attack_range && (t.ranged || height.abs() < 80.0);
+    if !in_range(current) {
+        return elapsed_since_switch > 20.0 && in_range(alternate);
+    }
+    if distance < current.minimum_range {
+        return distance >= alternate.minimum_range && in_range(alternate);
+    }
+
+    current.ranged && weapon_to_strategy(spare) > 0 && roll() % 20 == 0
+}
+
+#[cfg(test)]
+mod weapon_switch_tests {
+    use super::*;
+    #[test]
+    fn stock_distance_switch_boundaries_and_random_sword_exception() {
+        let wants = |current, spare, distance, height, elapsed, roll| {
+            wants_weapon_switch(current, spare, distance, height, elapsed, || roll)
+        };
+        assert!(wants(3, 6, 59.9, 0.0, 0.0, 1));
+        assert!(!wants(3, 6, 60.0, 0.0, 100.0, 0));
+        assert!(!wants(3, 0, 10.0, 0.0, 100.0, 0));
+        assert!(!wants(6, 3, 120.0, 0.0, 20.0, 1));
+        assert!(wants(6, 3, 120.0, 0.0, 20.001, 1));
+        assert!(!wants(3, 6, 150.0, 0.0, 100.0, 0));
+        assert!(wants(3, 5, 150.0, 0.0, 0.0, 0));
+        assert!(!wants(3, 5, 150.0, 0.0, 0.0, 1));
+        assert!(!wants(3, 2, 50.0, 0.0, 100.0, 0));
+        assert!(!wants(3, 6, f32::NAN, 0.0, 100.0, 0));
+    }
+}
+
 pub fn attack_or_guard(guard: f32, attacks: [f32; 3], roll: u32) -> Option<bool> {
     let roll = (roll % 100) as f32;
     if roll < guard {
@@ -228,6 +274,7 @@ pub fn ranged_aim(
     weapon: u8,
     from: [f32; 3],
     target: [f32; 3],
+    facing: f32,
     aim: f32,
     rolls: [u32; 2],
 ) -> [f32; 3] {
@@ -244,16 +291,45 @@ pub fn ranged_aim(
             (spread / 2) as f32 - (rolls[1] % spread) as f32,
         ]
     };
-    let yaw = x.atan2(z) + (errors[0] * 0.1).to_radians();
+    let yaw = facing + (errors[0] * 0.1).to_radians();
     let pitch = y.atan2(x.hypot(z)) + (errors[1] * 0.125).to_radians();
     let raw = [yaw.sin(), pitch.tan(), yaw.cos()];
     let length = (raw[0] * raw[0] + raw[1] * raw[1] + raw[2] * raw[2]).sqrt();
     raw.map(|v| v / length)
 }
 
+pub fn in_attack_range(weapon: u8, delta: [f32; 3], ground_controllable: bool) -> bool {
+    let tactics = weapon_tactics(weapon);
+    let range = tactics.attack_range * meteor_core::MODEL_SCALE;
+    let [x, y, z] = delta;
+    if tactics.ranged || ground_controllable {
+        (tactics.ranged || y.abs() <= 80.0 * meteor_core::MODEL_SCALE)
+            && x * x + y * y + z * z < range * range
+    } else {
+        x * x + z * z < 3.0 * range * range
+    }
+}
+
+pub fn point_aim(weapon: u8, from: [f32; 3], mut target: [f32; 3], facing: f32) -> [f32; 3] {
+    target[1] -= 20.0 * meteor_core::MODEL_SCALE;
+    ranged_aim(weapon, from, target, facing, 100.0, [0, 0])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attack_range_obeys_pose_height_and_strict_boundaries() {
+        let s = meteor_core::MODEL_SCALE;
+        assert!(!in_attack_range(6, [60.0 * s, 0.0, 0.0], true));
+        assert!(in_attack_range(6, [59.0 * s, 0.0, 0.0], true));
+        assert!(!in_attack_range(6, [0.0, 61.0 * s, 0.0], true));
+        assert!(in_attack_range(6, [100.0 * s, 500.0 * s, 0.0], false));
+        assert!(!in_attack_range(6, [104.0 * s, 0.0, 0.0], false));
+        assert!(!in_attack_range(3, [0.0, 2001.0 * s, 0.0], false));
+        assert!(in_attack_range(3, [0.0, 1999.0 * s, 0.0], false));
+    }
 
     #[test]
     fn original_think_and_qi_thresholds() {
@@ -313,11 +389,24 @@ mod tests {
     }
 
     #[test]
+    fn ranged_aim_uses_actor_yaw_even_at_perfect_accuracy() {
+        for weapon in [1, 2, 3] {
+            for facing in [0.0, 0.7, -2.4] {
+                let direction =
+                    ranged_aim(weapon, [0.0; 3], [10.0, 5.0, -10.0], facing, 100.0, [0; 2]);
+                let yaw = direction[0].atan2(direction[2]);
+                assert!((yaw - facing).abs() < 1e-6);
+                assert!(direction[1] > 0.0, "target still determines pitch");
+            }
+        }
+    }
+
+    #[test]
     fn ranged_aim_uses_original_heights_and_authored_accuracy() {
-        let direction = ranged_aim(3, [0.0; 3], [0.0, 1.2, 10.0], 100.0, [0; 2]);
+        let direction = ranged_aim(3, [0.0; 3], [0.0, 1.2, 10.0], 0.0, 100.0, [0; 2]);
         assert!(direction[0].abs() < 1e-6 && direction[1].abs() < 1e-6 && direction[2] > 0.9999);
-        assert!(ranged_aim(3, [0.0; 3], [0.0, 5.0, 10.0], 100.0, [0; 2])[1] > 0.0);
-        let scattered = ranged_aim(3, [0.0; 3], [0.0, 1.2, 10.0], 0.0, [0; 2]);
+        assert!(ranged_aim(3, [0.0; 3], [0.0, 5.0, 10.0], 0.0, 100.0, [0; 2])[1] > 0.0);
+        let scattered = ranged_aim(3, [0.0; 3], [0.0, 1.2, 10.0], 0.0, 0.0, [0; 2]);
         assert!(scattered[0] > 0.08 && scattered[1] > 0.10);
     }
 }

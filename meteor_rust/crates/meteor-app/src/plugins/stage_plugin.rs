@@ -2,6 +2,13 @@
 #[path = "stage_plugin/scene_sync_tests.rs"]
 mod scene_sync_tests;
 
+#[cfg(test)]
+#[path = "stage_plugin/pause_tests.rs"]
+mod pause_tests;
+
+#[path = "stage_plugin/mission_targets.rs"]
+mod mission_targets;
+
 use crate::app_state::{AppState, LaunchRequest, LoadedStageAssets, LoadedStageInfo};
 use crate::components::fighter::{CombatState, Fighter, Health, MotionState, Qi};
 use bevy::asset::RenderAssetUsages;
@@ -37,11 +44,43 @@ impl StageScriptRuntime {
     }
 }
 
+pub(crate) fn scene_item_props_from_dummy(
+    dummy: &meteor_asset::des::StageObject,
+) -> std::collections::HashMap<String, PstValue> {
+    [
+        ("active".to_string(), PstValue::Num(1.0)),
+        (
+            "visible".to_string(),
+            PstValue::Num(f64::from(dummy.visible)),
+        ),
+        (
+            "collision".to_string(),
+            PstValue::Num(crate::plugins::render_plugin::is_solid_prop(dummy) as i32 as f64),
+        ),
+        (
+            "damagevalue".to_string(),
+            PstValue::Num(f64::from(dummy.damage_name)),
+        ),
+        ("interactive".to_string(), PstValue::Num(1.0)),
+        ("pose".to_string(), PstValue::Num(0.0)),
+        ("pose_loop".to_string(), PstValue::Num(0.0)),
+        ("frame".to_string(), PstValue::Num(-1.0)),
+        ("state".to_string(), PstValue::Num(3.0)),
+    ]
+    .into_iter()
+    .collect()
+}
+
+pub(crate) fn script_item_is_rendered(active: bool, visible: bool) -> bool {
+    active && visible
+}
+
 #[derive(Resource, Default)]
-struct SceneTouchState {
+pub(crate) struct SceneTouchState {
     now: f32,
     next_scan: f32,
     cooldowns: std::collections::HashMap<(String, i64), f32>,
+    stock_actors: Vec<Option<(String, u32, i64)>>,
 }
 
 const SCENE_SNOW_AREA_XZ: f32 = 90.0;
@@ -152,11 +191,22 @@ type SceneScriptFighters<'w, 's> = Query<
     'w,
     's,
     (
+        Entity,
         &'static mut Transform,
         Option<&'static MissionNpc>,
         Option<&'static LocalFighter>,
+        Option<&'static crate::plugins::network_plugin::RemoteFighter>,
+        Option<&'static Health>,
+        Option<&'static mut MotionState>,
+        Option<&'static mut crate::plugins::movement_plugin::FighterAir>,
+        Option<&'static mut crate::plugins::network_plugin::RemoteTransformTarget>,
+        Option<&'static mut crate::plugins::network_plugin::RemoteContactSegment>,
     ),
-    Or<(With<MissionNpc>, With<LocalFighter>)>,
+    Or<(
+        With<MissionNpc>,
+        With<LocalFighter>,
+        With<crate::plugins::network_plugin::RemoteFighter>,
+    )>,
 >;
 
 #[derive(Component, Debug, Clone)]
@@ -226,9 +276,27 @@ pub(crate) struct PerformanceClock {
     elapsed: f32,
     pause_ticks: Option<u32>,
     guard_ticks: Option<u32>,
+    suspended: std::collections::VecDeque<(Option<u32>, Option<u32>)>,
 }
 
 impl PerformanceClock {
+    pub(crate) fn install(
+        &mut self,
+        queue: &mut std::collections::VecDeque<NpcPerformCommand>,
+        command: NpcPerformCommand,
+    ) {
+        self.suspended
+            .resize(queue.len().saturating_sub(1), (None, None));
+        if !queue.is_empty() {
+            self.suspended
+                .push_front((self.pause_ticks.take(), self.guard_ticks.take()));
+        } else {
+            self.pause_ticks = None;
+            self.guard_ticks = None;
+        }
+        queue.push_front(command);
+    }
+
     pub(crate) fn next(
         &mut self,
         queue: &mut std::collections::VecDeque<NpcPerformCommand>,
@@ -241,12 +309,27 @@ impl PerformanceClock {
         self.guard_ticks.is_some()
     }
 
+    pub(crate) fn pulse_due(&self, dt: f32) -> bool {
+        self.elapsed + dt.clamp(0.0, 0.1) > 0.33
+    }
+
     pub(crate) fn next_eligible(
         &mut self,
         queue: &mut std::collections::VecDeque<NpcPerformCommand>,
         dt: f32,
         action_ready: bool,
         guard_ready: bool,
+    ) -> Option<NpcPerformCommand> {
+        self.next_npc(queue, dt, action_ready, guard_ready, guard_ready)
+    }
+
+    pub(crate) fn next_npc(
+        &mut self,
+        queue: &mut std::collections::VecDeque<NpcPerformCommand>,
+        dt: f32,
+        action_ready: bool,
+        guard_ready: bool,
+        say_ready: bool,
     ) -> Option<NpcPerformCommand> {
         self.elapsed += dt.clamp(0.0, 0.1);
         if self.elapsed <= 0.33 {
@@ -255,7 +338,11 @@ impl PerformanceClock {
         self.elapsed = 0.0;
         let command = queue.front()?;
         if (command.action == "guard" && !guard_ready)
-            || (command.action == "aggress" && !action_ready)
+            || (command.action == "say" && !say_ready)
+            || (matches!(
+                command.action.as_str(),
+                "aggress" | "attack" | "jump" | "crouch" | "pause" | "faceto"
+            ) && !action_ready)
         {
             return None;
         }
@@ -281,7 +368,9 @@ impl PerformanceClock {
             }
         }
         self.pause_ticks = None;
-        queue.pop_front()
+        let command = queue.pop_front();
+        (self.pause_ticks, self.guard_ticks) = self.suspended.pop_front().unwrap_or_default();
+        command
     }
 }
 
@@ -293,6 +382,8 @@ pub(crate) struct NpcPerformance {
     pub guard_remaining: f32,
     pub crouching: bool,
     pub jump_requested: bool,
+
+    pub ai_jump: Option<bool>,
     pub use_items: Vec<u32>,
 }
 
@@ -315,7 +406,13 @@ pub(crate) struct PlayerPerformance {
 
 #[derive(Resource, Default)]
 struct PendingMissionNpcCommands {
-    behaviors: Vec<(i64, String, Vec<meteor_scene::pst_runtime::PstValue>)>,
+    behaviors: Vec<(
+        i64,
+        String,
+        Vec<meteor_scene::pst_runtime::PstValue>,
+        Option<[f64; 3]>,
+        bool,
+    )>,
     performs: Vec<(i64, String, Vec<meteor_scene::pst_runtime::PstValue>)>,
 }
 
@@ -344,7 +441,7 @@ pub struct EscortCarrying;
 
 #[derive(Component, Default)]
 pub(crate) struct LocalEscortState {
-    carrier: Option<Entity>,
+    pub(crate) carrier: Option<Entity>,
     return_remaining: Option<f32>,
 }
 
@@ -364,7 +461,7 @@ pub(crate) struct NetworkEscortFlag;
 
 #[derive(Component, Debug, Clone, Copy)]
 struct NetworkEscortSafeZone {
-    team: u8,
+    index: usize,
 }
 
 type ModeObjectiveVisualQuery<'w, 's> = Query<
@@ -387,11 +484,30 @@ impl StageMissionRuntime {
         Self(Some(script))
     }
 
+    pub(crate) fn peace(&self) -> i32 {
+        self.script()
+            .and_then(|script| script.values().get("Peace"))
+            .map_or(0, |value| value.as_f64() as i64 as i32)
+    }
+
     pub(crate) fn rule(&self) -> i32 {
         self.script()
             .and_then(|script| script.values().get("Rule"))
             .map(|value| value.as_f64() as i32)
             .unwrap_or(meteor_network::modes::DEFAULT_LEVEL_RULE)
+    }
+
+    pub(crate) fn vip_team_for_actor(&self, local: bool, npc: Option<&MissionNpc>) -> Option<u8> {
+        if self.rule() != 4 {
+            return None;
+        }
+        let (id, team) = if local {
+            (0, 1)
+        } else {
+            let npc = npc.filter(|npc| npc.in_scene_roster)?;
+            (npc.id, npc.team)
+        };
+        (self.script()?.host().vip(team) == Some(id)).then_some(team)
     }
 
     pub fn script(&self) -> Option<&MissionScriptRuntime> {
@@ -417,7 +533,7 @@ impl Plugin for StagePlugin {
             .init_resource::<LoadedStageAssets>()
             .init_resource::<super::escort_assets::LoadedEscort>()
             .add_systems(OnEnter(AppState::Menu), discover_custom_stages)
-            .add_systems(OnEnter(AppState::Loading), reset_player_performance)
+            .add_systems(OnEnter(AppState::Loading), reset_mission_performance)
             .add_systems(
                 OnEnter(AppState::Playing),
                 spawn_local_fighter.run_if(crate::plugins::starts_fresh_playing_session),
@@ -434,8 +550,11 @@ impl Plugin for StagePlugin {
             )
             .add_systems(
                 OnEnter(AppState::Playing),
-                (start_mission_script, consume_mission_npc_requests)
+                (sync_mission_spatial, mission_targets::sync_mission_scene_targets,
+                    start_mission_script, consume_mission_npc_requests)
                     .chain()
+                    .after(start_stage_script)
+                    .after(spawn_local_fighter)
                     .run_if(|script: Res<StageMissionRuntime>| script.0.is_some())
                     .run_if(|request: Res<LaunchRequest>| should_load_mission_script(&request))
                     .run_if(crate::plugins::starts_fresh_playing_session),
@@ -453,13 +572,24 @@ impl Plugin for StagePlugin {
             .add_systems(
                 Update,
                 (
-                    tick_stage_script.after(crate::plugins::render_plugin::sync_fmc_with_script),
-                    scene_script_touch_and_transfer.after(tick_stage_script),
+                    apply_network_escort_pickups.before(tick_stage_script),
+                    tick_stage_script
+                        .after(crate::plugins::render_plugin::sync_fmc_with_script)
+                        .run_if(|state: Res<State<AppState>>,
+                                 net: Res<crate::plugins::network_plugin::NetState>| {
+                            !net.is_stock_udp() || *state.get() == AppState::Playing
+                        }),
+                    scene_script_touch_and_transfer
+                        .after(tick_stage_script)
+                        .after(crate::plugins::network_plugin::NetworkFrameApply)
+                        .after(crate::plugins::FighterFrameSet::RootMotion)
+                        .before(crate::plugins::FighterFrameSet::PoseResolve),
                     sync_scene_snow
                         .after(scene_script_touch_and_transfer)
                         .run_if(in_state(AppState::Playing)),
                     (
                         sync_mission_spatial,
+                        mission_targets::sync_mission_scene_targets,
                         sync_mission_fighters,
                         escort_cargo_pickup,
                         mode_objective_tick,
@@ -470,6 +600,7 @@ impl Plugin for StagePlugin {
                         assign_assassin_vip,
                     )
                         .chain()
+                        .after(tick_stage_script)
                         .after(crate::plugins::FighterFrameSet::RootMotion)
                         .before(crate::plugins::FighterFrameSet::PoseResolve),
                 )
@@ -656,8 +787,12 @@ fn cancel_stage_load(mut commands: Commands) {
     commands.remove_resource::<PendingStageLoad>();
 }
 
-fn reset_player_performance(mut performance: ResMut<PlayerPerformance>) {
+fn reset_mission_performance(
+    mut performance: ResMut<PlayerPerformance>,
+    mut pending: ResMut<PendingMissionNpcCommands>,
+) {
     *performance = PlayerPerformance::default();
+    *pending = PendingMissionNpcCommands::default();
 }
 
 pub(crate) fn drive_player_performance(
@@ -702,11 +837,8 @@ fn advance_player_performance(performance: &mut PlayerPerformance, dt: f32) -> O
                 spoken = Some(text);
             }
             "block" => {
-                performance.input_blocked = command
-                    .args
-                    .first()
-                    .map(|value| value.as_f64() == 0.0)
-                    .unwrap_or(true);
+                performance.input_blocked =
+                    command.args.first().map(PstValue::truthy).unwrap_or(true);
             }
             "crouch" => {
                 performance.crouch_requested =
@@ -787,6 +919,58 @@ impl StageAssetSource for StageSource {
     }
 }
 
+fn scene_ticket_mask(
+    request: &LaunchRequest,
+    net: &crate::plugins::network_plugin::NetState,
+) -> Option<u32> {
+    if should_load_mission_script(request) {
+        Some(1 << 6)
+    } else if request.mode == "replay" {
+        None
+    } else {
+        let mode = if net.status == crate::plugins::network_plugin::NetStatus::InRoom {
+            net.mode.as_str()
+        } else {
+            request.mode.as_str()
+        };
+        meteor_network::modes::mode_rule_id(mode).map(|rule| 1u32.wrapping_shl(rule as u32))
+    }
+}
+
+#[cfg(feature = "original-assets")]
+#[test]
+fn ticket_uses_room_rule_and_solo_ticket_six() {
+    use crate::plugins::network_plugin::{NetState, NetStatus};
+    let mut request = LaunchRequest::default();
+    request.mode = "leader".into();
+    let mut net = NetState::default();
+    assert_eq!(scene_ticket_mask(&request, &net), Some(2));
+    net.status = NetStatus::InRoom;
+    net.mode = "siege".into();
+    assert_eq!(scene_ticket_mask(&request, &net), Some(8));
+    request.mode = "single".into();
+    request.spawn_room_npcs = false;
+    assert_eq!(scene_ticket_mask(&request, &net), Some(64));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res/sn03/sn03.des");
+    let desc = meteor_asset::des::parse_stage_description(&crate::text_codec::decode_text(
+        &std::fs::read(root).expect("original sn03 DES"),
+    ));
+    let admitted = |name: &str| {
+        desc.dummies
+            .iter()
+            .find(|dummy| dummy.name == name)
+            .expect("authored sn03 dummy")
+            .admits_ticket(64)
+    };
+    assert!(!admitted("D_BBox01"));
+    assert!(!admitted("D_APdoor01"));
+    assert!(admitted("D_BPd02Box01"));
+    assert!(admitted("D_BBox26"));
+    assert!(admitted("D_BDoor01"));
+    request.mode = "replay".into();
+    assert_eq!(scene_ticket_mask(&request, &net), None);
+}
+
 fn capture_loaded_stage_assets(source: &StageSource, stage_id: &str) -> LoadedStageAssets {
     let paths = meteor_scene::stage_loader::stage_asset_paths(stage_id);
     LoadedStageAssets {
@@ -794,7 +978,152 @@ fn capture_loaded_stage_assets(source: &StageSource, stage_id: &str) -> LoadedSt
         des: source.read_with_path(&paths.des).0,
         cob: source.read_with_path(&paths.cob).0,
         from_pack: matches!(source, StageSource::Mpk { .. }),
+        ticket_mask: None,
     }
+}
+
+fn expand_scene_pst_includes(
+    root_path: &str,
+    root_text: &str,
+    read: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
+) -> (String, Vec<String>, Vec<String>) {
+    fn include_path(parent: &str, include: &str) -> Option<String> {
+        let mut parts = parent
+            .rsplit_once('/')
+            .map(|(dir, _)| dir.split('/').map(str::to_owned).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let normalized = include.replace('\\', "/");
+        for segment in normalized.split('/') {
+            match segment {
+                "" | "." => {}
+                ".." => {
+                    parts.pop()?;
+                }
+                value => parts.push(value.to_owned()),
+            }
+        }
+        (!parts.is_empty()).then(|| parts.join("/"))
+    }
+
+    fn expand(
+        path: &str,
+        source: &str,
+        read: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
+        seen: &mut std::collections::HashSet<String>,
+        loaded: &mut Vec<String>,
+        missing: &mut Vec<String>,
+    ) -> String {
+        if !seen.insert(path.to_ascii_lowercase()) {
+            return String::new();
+        }
+        loaded.push(path.to_owned());
+        let mut merged = String::new();
+        for line in source.lines() {
+            let directive = line.trim().strip_prefix("#include").map(str::trim);
+            if let Some(include) = directive
+                .and_then(|value| value.strip_prefix('"'))
+                .and_then(|value| value.split_once('"').map(|(name, _)| name))
+            {
+                if let Some(path) = include_path(path, include) {
+                    if seen.contains(&path.to_ascii_lowercase()) {
+                        continue;
+                    }
+                    if let Some(bytes) = read(&path) {
+                        merged.push_str(&expand(
+                            &path,
+                            &crate::text_codec::decode_text(&bytes),
+                            read,
+                            seen,
+                            loaded,
+                            missing,
+                        ));
+                    } else {
+                        missing.push(path);
+                    }
+                } else {
+                    missing.push(include.to_owned());
+                }
+            } else {
+                merged.push_str(line);
+                merged.push('\n');
+            }
+        }
+        merged
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    let mut loaded = Vec::new();
+    let mut missing = Vec::new();
+    let merged = expand(
+        root_path,
+        root_text,
+        read,
+        &mut seen,
+        &mut loaded,
+        &mut missing,
+    );
+    (merged, loaded, missing)
+}
+
+#[cfg(test)]
+#[path = "stage_plugin/christmas_scene_tests.rs"]
+mod christmas_scene_tests;
+
+#[cfg(feature = "original-assets")]
+#[test]
+fn official_scene_pst_uses_authored_includes_and_sn21_snowman_callback() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+    let mut sn21_source = None;
+    for index in 1..=22 {
+        let stage = format!("sn{index:02}");
+        let path = format!("{stage}/{stage}.pst");
+        let text = crate::text_codec::decode_text(&std::fs::read(root.join(&path)).unwrap());
+        let (merged, includes, missing) = expand_scene_pst_includes(&path, &text, &mut |include| {
+            std::fs::read(root.join(include)).ok()
+        });
+        assert!(missing.is_empty(), "{stage}: missing {missing:?}");
+        assert_eq!(includes.first(), Some(&path));
+        assert!(
+            SceneScriptRuntime::load(&merged, Vec::new(), 250_000).is_ok(),
+            "{stage}"
+        );
+        if stage == "sn09" {
+            assert_eq!(includes, [path, "PScriptLib/Def.h".to_string()]);
+        }
+        if stage == "sn21" {
+            assert!(includes.contains(&"sn21/sn21box.pst".to_string()));
+            assert!(!includes.contains(&"PScriptLib/box.pst".to_string()));
+            sn21_source = Some(merged);
+        }
+    }
+
+    let desc = meteor_asset::des::parse_stage_description(&crate::text_codec::decode_text(
+        &std::fs::read(root.join("sn21/sn21.des")).unwrap(),
+    ));
+    let instances = desc
+        .dummies
+        .iter()
+        .enumerate()
+        .map(|(index, dummy)| SceneItemInstance {
+            name: dummy.name.clone(),
+            index,
+            props: scene_item_props_from_dummy(dummy),
+        })
+        .collect();
+    let mut scene = SceneScriptRuntime::load(&sn21_source.unwrap(), instances, 250_000).unwrap();
+    scene.start().unwrap();
+    scene
+        .call_item(
+            "D_BBox01",
+            "OnAttack",
+            &[PstValue::Num(0.0), PstValue::Num(1000.0)],
+        )
+        .unwrap();
+    assert!(scene
+        .host_mut()
+        .take_effects()
+        .iter()
+        .any(|effect| matches!(effect, SceneNetOp::Effect { effect, .. } if effect == "XSnowMan")));
 }
 
 pub(crate) fn discover_custom_stages(mut custom: ResMut<CustomStages>) {
@@ -892,6 +1221,7 @@ fn load_selected_stage(
     };
     let paths = meteor_scene::stage_loader::stage_asset_paths(&request.stage_id);
     *loaded_assets = capture_loaded_stage_assets(&source, &request.stage_id);
+    loaded_assets.ticket_mask = scene_ticket_mask(&request, &net);
     for path in [&paths.gmb, &paths.des, &paths.cob, &paths.pst] {
         let (bytes, hit) = source.read_with_path(path);
         info!(
@@ -912,10 +1242,31 @@ fn load_selected_stage(
     let waypoint_text = wp_bytes.as_deref().map(crate::text_codec::decode_text);
     let center = get_stage_center(&request.stage_id, waypoint_text.as_deref());
 
-    let waypoint_graph = waypoint_text
+    let mut waypoint_graph = waypoint_text
         .as_deref()
         .map(|text| meteor_scene::stage_loader::parse_waypoint_graph(text, center))
         .unwrap_or_default();
+
+    waypoint_graph.navigation_bounds = loaded_assets
+        .gmb
+        .as_deref()
+        .and_then(|bytes| meteor_asset::gmdl::decode_gmdl(bytes).ok())
+        .and_then(|model| {
+            let mut bounds = [[f32::INFINITY; 3], [f32::NEG_INFINITY; 3]];
+            for p in model
+                .objects
+                .iter()
+                .flat_map(|object| object.positions.chunks_exact(3))
+            {
+                if p.iter().all(|v| v.is_finite()) {
+                    for axis in 0..3 {
+                        bounds[0][axis] = bounds[0][axis].min(p[axis]);
+                        bounds[1][axis] = bounds[1][axis].max(p[axis]);
+                    }
+                }
+            }
+            bounds[0][0].is_finite().then_some(bounds)
+        });
     commands.insert_resource(waypoint_graph);
     info!(
         "stage center: {} waypoint={} center={:?}",
@@ -931,15 +1282,14 @@ fn load_selected_stage(
     let (pst_bytes, _) = source.read_with_path(&paths.pst);
     match pst_bytes.as_deref().map(crate::text_codec::decode_text) {
         Some(stage_text) => {
-            let mut parts = Vec::new();
-            for include in ["Def.h", "box.pst", "desk.pst", "chair.pst", "jug.pst"] {
-                let (bytes, _) = source.read_with_path(&format!("PScriptLib/{include}"));
-                if let Some(bytes) = bytes {
-                    parts.push(crate::text_codec::decode_text(&bytes));
-                }
+            let (merged, includes, missing) =
+                expand_scene_pst_includes(&paths.pst, &stage_text, &mut |path| {
+                    source.read_with_path(path).0
+                });
+            for path in &missing {
+                warn!("stage PST include unavailable: {path}");
             }
-            parts.push(stage_text);
-            let merged = parts.join("\n");
+            info!("stage PST includes: {}", includes.join(", "));
 
             let des_path = format!("{}/{}.des", request.stage_id, request.stage_id);
             let instances = source
@@ -955,36 +1305,27 @@ fn load_selected_stage(
                             name: dummy.name.clone(),
                             index,
 
-                            props: [
-                                (
-                                    "active".to_string(),
-                                    PstValue::Num(dummy.visible as i32 as f64),
-                                ),
-                                (
-                                    "collision".to_string(),
-                                    PstValue::Num(crate::plugins::render_plugin::is_solid_prop(
-                                        dummy,
-                                    ) as i32
-                                        as f64),
-                                ),
-                                (
-                                    "damagevalue".to_string(),
-                                    PstValue::Num(f64::from(dummy.damage_name)),
-                                ),
-                                ("interactive".to_string(), PstValue::Num(1.0)),
-                                ("pose".to_string(), PstValue::Num(0.0)),
-                                ("pose_loop".to_string(), PstValue::Num(0.0)),
-                                ("frame".to_string(), PstValue::Num(-1.0)),
-                                ("state".to_string(), PstValue::Num(3.0)),
-                            ]
-                            .into_iter()
-                            .collect(),
+                            props: scene_item_props_from_dummy(dummy),
                         })
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
             match SceneScriptRuntime::load(&merged, instances, 250_000) {
-                Ok(runtime) => {
+                Ok(mut runtime) => {
+                    if let Some(mask) = loaded_assets.ticket_mask {
+                        if let Some(bytes) = loaded_assets.des.as_deref() {
+                            let desc = meteor_asset::des::parse_stage_description(
+                                &crate::text_codec::decode_text(bytes),
+                            );
+                            runtime.host_mut().exclude_instances(
+                                desc.dummies
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(_, d)| !d.admits_ticket(mask))
+                                    .map(|(i, _)| i),
+                            );
+                        }
+                    }
                     info!(
                         "stage scene script runtime ready ({} instances)",
                         runtime.host().instances().len()
@@ -1136,15 +1477,41 @@ fn spawn_local_fighter(
         .map(crate::text_codec::decode_text)
         .map(|text| meteor_asset::des::parse_stage_description(&text));
     let (pad_prefix, pad_index) = network_spawn_pad(net.as_deref());
-    let (position, facing) = resolve_player_spawn(
+    let original_pads = net.as_deref().is_none_or(|net| {
+        net.status != crate::plugins::network_plugin::NetStatus::InRoom || net.is_stock_udp()
+    });
+    let (mut position, mut facing) = resolve_player_spawn(
         waypoints.as_deref(),
         mission.script(),
         stage_desc.as_ref(),
         loaded.center,
         request.mode == "single",
-        pad_prefix,
-        pad_index,
+        (pad_prefix, pad_index),
+        original_pads,
     );
+    if let Some(net) = net.as_deref().filter(|net| net.is_stock_udp()) {
+        let camp = net
+            .members
+            .iter()
+            .find(|m| m.player_id == net.player_id)
+            .and_then(|m| m.team)
+            .unwrap_or(0);
+        let pads = stage_desc
+            .as_ref()
+            .map(|desc| stock_spawn_pads(desc, camp, loaded.center))
+            .unwrap_or_default();
+        (position, facing) = meteor_network::spawn::random_index(pads.len())
+            .map_or((Vec3::new(0.0, 0.9, 0.0), 0.0), |index| pads[index]);
+    }
+    if request.mode == "replay" {
+        if let (Some(playback), Some(desc)) = (mrc.as_deref(), stage_desc.as_ref()) {
+            if playback.active {
+                if let Some(spawn) = recorded_mrc_spawn_pad(playback, desc, loaded.center) {
+                    (position, facing) = spawn;
+                }
+            }
+        }
+    }
     let mut loadout = resolve_player_spawn_loadout(&request, mission.script());
     if request.mode == "replay" {
         if let Some((weapon, variant)) = mrc
@@ -1247,36 +1614,93 @@ fn stage_spawn_pads(
     desc: &meteor_asset::des::StageDescription,
     prefix: &str,
     center: [f32; 3],
+    original_pads: bool,
 ) -> Vec<(Vec3, f32)> {
     let prefix = prefix.to_ascii_lowercase();
     let face_stage_center = prefix == "teama" || prefix == "teamb";
-    let mut pads = desc
-        .scene_objects
+    let scene_objects = if original_pads {
+        &[]
+    } else {
+        desc.scene_objects.as_slice()
+    };
+    let mut pads = scene_objects
         .iter()
         .chain(&desc.dummies)
         .filter_map(|object| {
             let name = object.name_attr.as_deref()?.to_ascii_lowercase();
-            let index = name.strip_prefix(&prefix)?.parse::<usize>().ok()?;
+            let index = name.strip_prefix(&prefix)?.parse::<usize>().ok();
+            if !original_pads && index.is_none() {
+                return None;
+            }
             let p = object.position;
             let q = object.quaternion;
-            let rotation = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)
-                * Quat::from_xyzw(q.x, q.y, q.z, q.w);
             let position = Vec3::new(
                 (p.x - center[0]) * meteor_core::constants::MODEL_SCALE,
                 (p.z - center[2]) * meteor_core::constants::MODEL_SCALE,
                 -(p.y - center[1]) * meteor_core::constants::MODEL_SCALE,
             );
-            let facing = if face_stage_center {
+            let facing = if original_pads {
+                let right_x = 1.0 - 2.0 * (q.y * q.y + q.z * q.z);
+                let right_y = 2.0 * (q.x * q.y + q.z * q.w);
+                right_y.atan2(right_x)
+            } else if face_stage_center {
                 (-position.x).atan2(-position.z)
             } else {
+                let rotation = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)
+                    * Quat::from_xyzw(q.x, q.y, q.z, q.w);
                 rotation.to_euler(EulerRot::YXZ).0
             };
             Some((index, position, facing))
         })
         .collect::<Vec<_>>();
-    pads.sort_unstable_by_key(|(index, _, _)| *index);
+    if !original_pads {
+        pads.sort_unstable_by_key(|(index, _, _)| *index);
+    }
     pads.into_iter()
         .map(|(_, position, facing)| (position, facing))
+        .collect()
+}
+
+fn recorded_mrc_spawn_pad(
+    playback: &crate::plugins::replay_plugin::MrcPlayback,
+    desc: &meteor_asset::des::StageDescription,
+    center: [f32; 3],
+) -> Option<(Vec3, f32)> {
+    let position = playback.first_stock_local_position(center)?;
+    ["user", "teama", "teamb"]
+        .into_iter()
+        .flat_map(|prefix| stage_spawn_pads(desc, prefix, center, true))
+        .find(|(pad, _)| pad.distance_squared(position) <= 0.01_f32.powi(2))
+}
+
+fn spawn_pad_transform(
+    object: &meteor_asset::des::StageObject,
+    center: [f32; 3],
+    face_stage_center: bool,
+) -> (Vec3, f32) {
+    let p = object.position;
+    let q = object.quaternion;
+    let position = Vec3::new(
+        (p.x - center[0]) * meteor_core::constants::MODEL_SCALE,
+        (p.z - center[2]) * meteor_core::constants::MODEL_SCALE,
+        -(p.y - center[1]) * meteor_core::constants::MODEL_SCALE,
+    );
+    let facing = if face_stage_center {
+        (-position.x).atan2(-position.z)
+    } else {
+        let right = Quat::from_xyzw(q.x, q.y, q.z, q.w).normalize() * Vec3::X;
+        right.y.atan2(right.x)
+    };
+    (position, facing)
+}
+
+fn stock_spawn_pads(
+    desc: &meteor_asset::des::StageDescription,
+    camp: u32,
+    center: [f32; 3],
+) -> Vec<(Vec3, f32)> {
+    meteor_network::spawn::pads(desc, camp)
+        .map(|object| spawn_pad_transform(object, center, false))
         .collect()
 }
 
@@ -1289,12 +1713,65 @@ pub(super) struct RespawnStage<'w> {
 }
 
 impl RespawnStage<'_> {
+    pub(super) fn ready(&self) -> bool {
+        self.assets
+            .as_ref()
+            .is_some_and(|assets| assets.des.is_some())
+            && self.info.is_some()
+    }
+
+    pub(super) fn resolve_stock(
+        &self,
+        camp: u32,
+        index: Option<usize>,
+        fallback: Vec3,
+        facing: f32,
+    ) -> (Vec3, f32) {
+        let pads = self
+            .assets
+            .as_ref()
+            .and_then(|assets| assets.des.as_deref())
+            .map(|bytes| {
+                let desc = meteor_asset::des::parse_stage_description(
+                    &crate::text_codec::decode_text(bytes),
+                );
+                stock_spawn_pads(
+                    &desc,
+                    camp,
+                    self.info.as_ref().map_or([0.0; 3], |info| info.center),
+                )
+            })
+            .unwrap_or_default();
+
+        let selected = index
+            .filter(|index| *index < pads.len())
+            .or_else(|| meteor_network::spawn::random_index(pads.len()));
+        let Some(index) = selected else {
+            return (fallback, facing);
+        };
+        let (mut position, facing) = pads[index];
+        if let Some(mesh) = self
+            .collider
+            .as_ref()
+            .and_then(|collider| collider.mesh.as_ref())
+        {
+            use meteor_physics::collision::MeshCollider;
+            if let Some(hit) =
+                mesh.sample_ground_hit(position.x, position.z, position.y, position.y)
+            {
+                position.y = hit.y;
+            }
+        }
+        (position, facing)
+    }
+
     pub(super) fn resolve(
         &self,
         team: Option<u32>,
         pad_index: Option<usize>,
         fallback: Vec3,
         facing: f32,
+        original_pads: bool,
     ) -> (Vec3, f32) {
         let prefix = match team {
             Some(1) => "teama",
@@ -1310,9 +1787,9 @@ impl RespawnStage<'_> {
                     &crate::text_codec::decode_text(bytes),
                 );
                 let center = self.info.as_ref().map_or([0.0; 3], |info| info.center);
-                if pad_index.is_some() && prefix == "user" {
-                    let a = stage_spawn_pads(&desc, "teama", center);
-                    let b = stage_spawn_pads(&desc, "teamb", center);
+                if !original_pads && pad_index.is_some() && prefix == "user" {
+                    let a = stage_spawn_pads(&desc, "teama", center, false);
+                    let b = stage_spawn_pads(&desc, "teamb", center, false);
                     (0..a.len().max(b.len()))
                         .flat_map(|index| {
                             [a.get(index).copied(), b.get(index).copied()]
@@ -1321,7 +1798,7 @@ impl RespawnStage<'_> {
                         })
                         .collect()
                 } else {
-                    stage_spawn_pads(&desc, prefix, center)
+                    stage_spawn_pads(&desc, prefix, center, original_pads)
                 }
             })
             .unwrap_or_default();
@@ -1369,18 +1846,19 @@ fn resolve_player_spawn(
     stage_desc: Option<&meteor_asset::des::StageDescription>,
     center: [f32; 3],
     allow_mission_spawn: bool,
-    pad_prefix: &str,
-    pad_index: Option<usize>,
+    pad: (&str, Option<usize>),
+    original_pads: bool,
 ) -> (Vec3, f32) {
+    let (pad_prefix, pad_index) = pad;
     let fallback = (Vec3::new(0.0, 0.9, 0.0), 0.0);
-    let mission_facing = mission
-        .and_then(|m| m.values().get("PlayerSpawnDir"))
-        .and_then(|v| match v {
-            meteor_scene::pst_runtime::PstValue::Num(n) => Some(*n as f32),
-            _ => None,
-        })
-        .map(|deg| deg.to_radians())
-        .unwrap_or(0.0);
+    let mission_facing = mission.map_or(0.0, |mission| {
+        let degrees = match mission.values().get("PlayerSpawnDir") {
+            Some(meteor_scene::pst_runtime::PstValue::Num(value)) if value.is_finite() => *value,
+            _ => 0.0,
+        };
+
+        (degrees.rem_euclid(360.0) as f32 - 180.0).to_radians()
+    });
 
     if let Some(graph) = waypoints {
         if let Some(idx) = allow_mission_spawn
@@ -1403,7 +1881,7 @@ fn resolve_player_spawn(
     }
 
     if let Some(desc) = stage_desc {
-        let pads = stage_spawn_pads(desc, pad_prefix, center);
+        let pads = stage_spawn_pads(desc, pad_prefix, center, original_pads);
         if !pads.is_empty() {
             let index = pad_index.unwrap_or_else(|| {
                 (std::time::SystemTime::now()
@@ -1677,10 +2155,14 @@ fn update_scene_snow_mesh(mesh: &mut Mesh, positions: &[Vec3], size: f32, right:
 }
 
 pub(crate) fn start_stage_script(
+    touch: Option<ResMut<SceneTouchState>>,
     mut script: ResMut<StageScriptRuntime>,
     mut net: ResMut<crate::plugins::network_plugin::NetState>,
 ) {
     net.pending_objective_end = None;
+    if let Some(mut touch) = touch {
+        *touch = SceneTouchState::default();
+    }
     if let Some(runtime) = script.script_mut() {
         runtime
             .host_mut()
@@ -1710,6 +2192,7 @@ pub(crate) fn tick_stage_script(
         &mut Visibility,
         Option<&crate::plugins::render_plugin::PropColliderOwner>,
         &GlobalTransform,
+        Option<&crate::plugins::item_plugin::StockSceneItemView>,
     )>,
 ) {
     #[cfg(not(target_arch = "wasm32"))]
@@ -1724,7 +2207,17 @@ pub(crate) fn tick_stage_script(
         runtime.host_mut().set_game_mode(scene_game_mode(&net));
 
         if network_room {
+            if net.is_stock_host() && net.stage == "sn03" && net.mode == "escort" {
+                reconcile_sn03_button_transaction(runtime, &pending_ops);
+            }
             for op in &pending_ops {
+                if net.is_stock_host()
+                    && net.mode == "siege"
+                    && stock_siege_objective_op(runtime, &net.stage, op)
+                {
+                    debug!(target: "meteor_app::scene_sync", "scene defer objective to host replay operation={:?}", op);
+                    continue;
+                }
                 apply_network_scene_op(runtime, op);
             }
         }
@@ -1743,6 +2236,8 @@ pub(crate) fn tick_stage_script(
             let batches = runtime.host_mut().take_net_batches();
             for batch in batches {
                 let ops = batch.iter().map(scene_op_from_runtime).collect::<Vec<_>>();
+                debug!(target: "meteor_app::scene_sync",
+                    "scene commit player={} stage={} operations={:?}", net.player_id, net.stage, ops);
                 if let Some(net_tx) = net_tx.as_ref() {
                     net_tx.send_control(meteor_network::protocol::Message::SceneOps {
                         room_id: net.room_id.clone(),
@@ -1769,7 +2264,7 @@ pub(crate) fn tick_stage_script(
             })
             .collect::<Vec<_>>();
 
-        let states: std::collections::HashMap<String, (bool, bool, bool, u32, u32)> = runtime
+        let states: std::collections::HashMap<String, (bool, bool, bool, bool, u32, u32)> = runtime
             .host()
             .instances()
             .iter()
@@ -1778,6 +2273,7 @@ pub(crate) fn tick_stage_script(
                     instance.name.to_ascii_lowercase(),
                     (
                         instance.get("active").as_f64() != 0.0,
+                        instance.get("visible").as_f64() != 0.0,
                         instance.get("interactive").as_f64() != 0.0,
                         instance.collision_enabled(),
                         instance.get("pose").as_f64().max(0.0) as u32,
@@ -1787,21 +2283,25 @@ pub(crate) fn tick_stage_script(
             })
             .collect();
         let mut prop_positions = std::collections::HashMap::new();
-        for (mut prop, mut visibility, owner, transform) in &mut props {
+        for (mut prop, mut visibility, owner, transform, stock_item) in &mut props {
             let prop_name = prop.name.to_ascii_lowercase();
             prop_positions.insert(prop_name.clone(), transform.translation());
-            let Some(&(active, interactive, collision_enabled, pose, state)) =
+            let Some(&(active, visible, interactive, collision_enabled, pose, state)) =
                 states.get(&prop_name)
             else {
                 continue;
             };
-            prop.interactive = interactive;
+            let available = !net.is_stock_udp() || stock_item.is_none_or(|item| item.available);
+            prop.interactive = interactive && available;
             prop.collision_enabled = collision_enabled;
 
             prop.broken = script_prop_is_terminally_broken(prop.breakable, active, pose, state);
 
+            if !network_room && active && interactive {
+                prop.respawn_timer = 0.0;
+            }
             if prop.respawn_timer <= 0.0 {
-                *visibility = if active {
+                *visibility = if available && script_item_is_rendered(active, visible) {
                     Visibility::Visible
                 } else {
                     Visibility::Hidden
@@ -1825,11 +2325,13 @@ pub(crate) fn tick_stage_script(
 
 #[allow(clippy::too_many_arguments)]
 fn scene_script_touch_and_transfer(
+    mut commands: Commands,
     time: Res<Time>,
     frame_clock: Option<Res<crate::plugins::FrameClock>>,
     mut touch: ResMut<SceneTouchState>,
     mut script: ResMut<StageScriptRuntime>,
     net: Res<crate::plugins::network_plugin::NetState>,
+    net_tx: Option<Res<crate::plugins::network_plugin::NetTx>>,
     collider: Res<crate::plugins::stage_collider::StageCollider>,
     props: Query<(
         &crate::plugins::item_plugin::StageProp,
@@ -1838,6 +2340,9 @@ fn scene_script_touch_and_transfer(
     )>,
     mut fighters: SceneScriptFighters,
 ) {
+    #[cfg(target_arch = "wasm32")]
+    let _ = &net_tx;
+
     if net.status == crate::plugins::network_plugin::NetStatus::InRoom
         && !net.is_stock_udp()
         && net.stage == "sn22"
@@ -1845,7 +2350,10 @@ fn scene_script_touch_and_transfer(
         return;
     }
 
-    if net.status == crate::plugins::network_plugin::NetStatus::InRoom && !net.is_scene_authority()
+    if net.status == crate::plugins::network_plugin::NetStatus::InRoom
+        && (!net.round_active
+            || (net.is_stock_udp() && !net.is_stock_host())
+            || (!net.is_stock_udp() && !net.is_scene_authority()))
     {
         return;
     }
@@ -1871,9 +2379,11 @@ fn scene_script_touch_and_transfer(
             continue;
         }
         let name = prop.name.to_ascii_lowercase();
+
+        let forward = transform.to_scale_rotation_translation().1 * Vec3::NEG_Y;
         positions
             .entry(name.clone())
-            .or_insert(transform.translation());
+            .or_insert((transform.translation(), forward.x.atan2(forward.z)));
         if !runtime.has_item_callback(&prop.name, "OnTouch")
             || targets.iter().any(|(known, _, _, _)| known == &name)
         {
@@ -1887,17 +2397,49 @@ fn scene_script_touch_and_transfer(
         ));
     }
 
-    let contacts = fighters
-        .iter_mut()
-        .filter_map(|(transform, npc, local)| {
-            local
+    let stock_room = net.is_stock_host()
+        && net.status == crate::plugins::network_plugin::NetStatus::InRoom
+        && net.stage == "sn22";
+    let mut observations = Vec::new();
+    let mut contacts = Vec::new();
+    for (entity, transform, npc, local, remote, health, _, _, _, _) in &mut fighters {
+        if stock_room {
+            let player = if local.is_some() {
+                Some(net.player_id.clone())
+            } else if let Some(remote) = remote {
+                Some(remote.player_id.clone())
+            } else {
+                net.stock_npc_actors
+                    .get(&entity)
+                    .map(|id| format!("stock-{id}"))
+            };
+            if let Some(player) = player {
+                observations.push((
+                    player,
+                    transform.translation,
+                    health.is_none_or(|health| health.current > 0.0),
+                ));
+            }
+        } else if health.is_none_or(|health| health.current > 0.0) {
+            if let Some(id) = local
                 .is_some()
-                .then_some((0, transform.translation))
-                .or_else(|| npc.map(|npc| (npc.id, transform.translation)))
-        })
-        .collect::<Vec<_>>();
+                .then_some(0)
+                .or_else(|| npc.map(|npc| npc.id))
+            {
+                contacts.push((id, transform.translation));
+            }
+        }
+    }
+    if stock_room {
+        contacts = stock_scene_touch_contacts(&mut touch, runtime, &net, &observations);
+    }
+    let mut transfers = Vec::new();
+    let mut transferred = std::collections::HashSet::new();
     for (name, callback_name, center, half_extents) in &targets {
         for &(character_id, position) in &contacts {
+            if transferred.contains(&character_id) {
+                continue;
+            }
             if !scene_touch_contains(position, *center, *half_extents) {
                 continue;
             }
@@ -1913,10 +2455,14 @@ fn scene_script_touch_and_transfer(
             ) {
                 warn!("script callItem OnTouch failed: {error}");
             }
+
+            let requests = runtime.host_mut().take_transfer_requests();
+            transferred.extend(requests.iter().map(|request| request.character_id));
+            transfers.extend(requests);
         }
     }
 
-    let transfers = runtime.host_mut().take_transfer_requests();
+    transfers.extend(runtime.host_mut().take_transfer_requests());
     let resolved = transfers
         .into_iter()
         .filter_map(|request| {
@@ -1929,20 +2475,163 @@ fn scene_script_touch_and_transfer(
             positions
                 .get(&destination)
                 .copied()
-                .map(|position| (request, position))
+                .map(|(position, yaw)| (request, position, yaw))
         })
-        .collect::<Vec<(SceneTransferRequest, Vec3)>>();
-    for (request, position) in resolved {
+        .collect::<Vec<(SceneTransferRequest, Vec3, f32)>>();
+    for (request, position, yaw) in resolved {
         let position = snap_scene_transfer_position(&collider, position);
-        for (mut transform, npc, local) in &mut fighters {
-            let matches = local.is_some_and(|_| request.character_id == 0)
-                || npc.is_some_and(|npc| npc.id == request.character_id);
+        let stock_player = stock_room
+            .then(|| {
+                touch
+                    .stock_actors
+                    .get(request.character_id as usize)
+                    .and_then(Option::as_ref)
+                    .map(|actor| actor.0.clone())
+            })
+            .flatten();
+        #[cfg(not(target_arch = "wasm32"))]
+        if let (Some(player), Some(tx)) = (&stock_player, &net_tx) {
+            if let Some(actor) = player.strip_prefix("stock-").and_then(|id| id.parse().ok()) {
+                tx.send_stock_scene_transfer(actor, position, yaw);
+            }
+        }
+        for (entity, mut transform, npc, local, remote, _, mut motion, mut air, target, segment) in
+            &mut fighters
+        {
+            let matches = if let Some(player) = &stock_player {
+                (local.is_some() && player == &net.player_id)
+                    || remote.is_some_and(|remote| &remote.player_id == player)
+                    || net
+                        .stock_npc_actors
+                        .get(&entity)
+                        .is_some_and(|id| player == &format!("stock-{id}"))
+            } else {
+                local.is_some_and(|_| request.character_id == 0)
+                    || npc.is_some_and(|npc| npc.id == request.character_id)
+            };
             if matches {
-                transform.translation = position;
+                apply_scene_transfer_transform(
+                    &mut transform,
+                    motion.as_deref_mut(),
+                    air.as_deref_mut(),
+                    position,
+                    yaw,
+                );
+                commands
+                    .entity(entity)
+                    .insert(super::camera_plugin::CameraFollowReset);
+                if let Some(mut target) = target {
+                    target.translation = position;
+                    target.yaw = yaw;
+                }
+                if let Some(mut segment) = segment {
+                    segment.from = position;
+                    segment.to = position;
+                    segment.valid = false;
+                    segment.state_age = 0.0;
+                }
                 break;
             }
         }
     }
+}
+
+pub(super) fn apply_scene_transfer_transform(
+    transform: &mut Transform,
+    motion: Option<&mut MotionState>,
+    air: Option<&mut super::movement_plugin::FighterAir>,
+    position: Vec3,
+    yaw: f32,
+) {
+    transform.translation = position;
+    transform.rotation = Quat::from_rotation_y(yaw);
+    if let Some(motion) = motion {
+        motion.facing = yaw;
+        motion.velocity = Vec3::ZERO;
+    }
+    if let Some(air) = air {
+        air.air.vertical_speed = 0.0;
+        air.air.planar_x = 0.0;
+        air.air.planar_z = 0.0;
+        air.ground_external_velocity = Vec3::ZERO;
+        air.landed_planar = Vec2::ZERO;
+        air.ground_y = position.y;
+    }
+}
+
+fn stock_scene_touch_contacts(
+    touch: &mut SceneTouchState,
+    runtime: &mut SceneScriptRuntime,
+    net: &crate::plugins::network_plugin::NetState,
+    observations: &[(String, Vec3, bool)],
+) -> Vec<(i64, Vec3)> {
+    if touch.stock_actors.is_empty() {
+        touch.stock_actors.resize(16, None);
+    }
+    for (slot, entry) in touch.stock_actors.iter_mut().enumerate() {
+        let Some((id, deaths, team)) = entry.as_mut() else {
+            continue;
+        };
+        let present = net.members.iter().any(|member| &member.player_id == id);
+        let current_deaths = net.stock_deaths.get(id).copied().unwrap_or(*deaths);
+        if !present || current_deaths != *deaths {
+            runtime.host_mut().set_character_team(slot as i64, *team);
+            let event = if present { 202.0 } else { 201.0 };
+            if let Err(error) = runtime.call(
+                "Scene_OnCharacterEvent",
+                &[PstValue::Num(slot as f64), PstValue::Num(event)],
+            ) {
+                warn!("stock scene character event failed: {error}");
+            }
+            *deaths = current_deaths;
+            if !present {
+                *entry = None;
+                touch.cooldowns.retain(|(_, id), _| *id != slot as i64);
+            }
+        }
+    }
+
+    let ids = std::iter::once(&net.player_id).chain(
+        net.members
+            .iter()
+            .map(|member| &member.player_id)
+            .filter(|id| *id != &net.player_id),
+    );
+    for id in ids {
+        if touch
+            .stock_actors
+            .iter()
+            .flatten()
+            .any(|actor| &actor.0 == id)
+        {
+            continue;
+        }
+        let slot = if id == &net.player_id {
+            Some(0)
+        } else {
+            (1..16).find(|slot| touch.stock_actors[*slot].is_none())
+        };
+        if let Some(slot) = slot {
+            let team = i64::from(net.player_team(id).unwrap_or(0));
+            touch.stock_actors[slot] = Some((
+                id.clone(),
+                net.stock_deaths.get(id).copied().unwrap_or(0),
+                team,
+            ));
+        }
+    }
+    let mut contacts = Vec::new();
+    for (slot, entry) in touch.stock_actors.iter_mut().enumerate() {
+        let Some((id, _, team)) = entry else {
+            continue;
+        };
+        *team = i64::from(net.player_team(id).unwrap_or(0));
+        runtime.host_mut().set_character_team(slot as i64, *team);
+        if let Some((_, position, true)) = observations.iter().find(|(player, _, _)| player == id) {
+            contacts.push((slot as i64, *position));
+        }
+    }
+    contacts
 }
 
 fn snap_scene_transfer_position(
@@ -1965,8 +2654,8 @@ fn scene_touch_contains(position: Vec3, center: Vec3, half_extents: Vec3) -> boo
     let delta = position - center;
     delta.x.abs() <= half_extents.x + 0.5
         && delta.z.abs() <= half_extents.z + 0.5
-        && delta.y >= -half_extents.y - 0.5
-        && delta.y <= half_extents.y + 1.8
+        && delta.y >= -half_extents.y - meteor_core::constants::CHARACTER_CONTACT_HEIGHT - 0.5
+        && delta.y <= half_extents.y + 0.5
 }
 
 fn world_half_extents(transform: &GlobalTransform, local_half: Vec3) -> Vec3 {
@@ -2022,11 +2711,11 @@ pub(crate) fn apply_network_prop_hit(
     };
     if net.status != crate::plugins::network_plugin::NetStatus::InRoom
         || !net.round_active
-        || net.is_stock_udp()
         || !net.is_scene_authority()
+        || net.is_stock_udp() && !net.is_stock_host()
         || room_id != net.room_id
-        || net.match_epoch != Some(match_epoch)
-        || net.round_epoch != Some(round_epoch)
+        || net.match_epoch.unwrap_or(0) != match_epoch
+        || net.round_epoch.unwrap_or(0) != round_epoch
         || damage <= 0
     {
         return;
@@ -2037,6 +2726,14 @@ pub(crate) fn apply_network_prop_hit(
         .position(|member| member.player_id == player_id)
     else {
         return;
+    };
+    let character = if net.is_stock_udp() {
+        player_id
+            .strip_prefix("stock-")
+            .and_then(|id| id.parse::<i64>().ok())
+            .unwrap_or(-1)
+    } else {
+        character as i64
     };
     if runtime.host().resolve_name(&reference).is_none()
         || !super::combat_plugin::script_allows_prop_hit(runtime, &reference)
@@ -2085,6 +2782,77 @@ fn scene_op_from_runtime(op: &SceneNetOp) -> meteor_network::protocol::SceneOp {
     }
 }
 
+fn reconcile_sn03_button_transaction(
+    runtime: &mut SceneScriptRuntime,
+    ops: &[meteor_network::protocol::SceneOp],
+) {
+    let opening_names = ops
+        .iter()
+        .filter_map(|op| {
+            if op.kind != "set"
+                || !op.field.eq_ignore_ascii_case("pose")
+                || op.args.first().and_then(JsonValue::as_f64) != Some(1.0)
+            {
+                return None;
+            }
+            let index = match &op.reference {
+                JsonValue::Number(n) => usize::try_from(n.as_u64()?).ok()?,
+                JsonValue::String(name) => runtime.host().resolve_name(name)?,
+                _ => return None,
+            };
+            Some(runtime.host().instance(index)?.name.clone())
+        })
+        .collect::<Vec<_>>();
+    for (door, buttons) in [
+        ("D_ADoor01", ["D_Abutton01", "D_Abutton02"]),
+        ("D_BDoor01", ["D_Bbutton01", "D_Bbutton02"]),
+    ] {
+        if !opening_names
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(door))
+        {
+            continue;
+        }
+        if let Some(button) = buttons.iter().find(|button| {
+            opening_names
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(button))
+        }) {
+            if let Err(error) = runtime.reconcile_item_callback(
+                button,
+                "OnAttack",
+                &[PstValue::Num(0.0), PstValue::Num(0.0)],
+            ) {
+                warn!("sn03 network button reconciliation failed: {error}");
+            }
+        }
+    }
+}
+
+fn stock_siege_objective_op(
+    runtime: &SceneScriptRuntime,
+    stage: &str,
+    op: &meteor_network::protocol::SceneOp,
+) -> bool {
+    let index = match &op.reference {
+        JsonValue::Number(n) => n.as_u64().and_then(|n| usize::try_from(n).ok()),
+        JsonValue::String(name) => runtime.host().resolve_name(name),
+        _ => None,
+    };
+    let Some(name) = index
+        .and_then(|index| runtime.host().instance(index))
+        .map(|instance| instance.name.to_ascii_lowercase())
+    else {
+        return false;
+    };
+    match stage {
+        "sn04" => matches!(name.as_str(), "d_apdoor" | "d_bpdoor"),
+        "sn11" => name.starts_with("d_apdoor") || name.starts_with("d_bpdoor"),
+        "sn12" => name.starts_with("d_astove") || name.starts_with("d_bstove"),
+        _ => false,
+    }
+}
+
 fn apply_network_scene_op(
     runtime: &mut SceneScriptRuntime,
     op: &meteor_network::protocol::SceneOp,
@@ -2097,6 +2865,8 @@ fn apply_network_scene_op(
     let Some(ref_index) = ref_index else {
         return;
     };
+    debug!(target: "meteor_app::scene_sync", "scene apply name={:?} operation={:?}",
+        runtime.host().instance(ref_index).map(|instance| instance.name.as_str()), op);
     match op.kind.as_str() {
         "set" => {
             let Some(args) = op
@@ -2192,6 +2962,7 @@ fn spawn_mode_objectives(
                     kind: ModeObjectiveKind::EscortCargo,
                 },
                 LocalEscortState::default(),
+                super::item_plugin::SceneRecordOrder(definition.scene_object_id as usize),
                 Transform::from_translation(position),
                 Visibility::Visible,
             ));
@@ -2238,6 +3009,7 @@ fn sync_network_escort_flag(
     mut commands: Commands,
     net: Res<crate::plugins::network_plugin::NetState>,
     request: Res<crate::app_state::LaunchRequest>,
+    escort: Option<Res<super::escort_assets::LoadedEscort>>,
     mut flags: Query<(Entity, &mut Transform, &mut Visibility), With<NetworkEscortFlag>>,
 ) {
     let is_network_escort =
@@ -2251,13 +3023,22 @@ fn sync_network_escort_flag(
         }
         return;
     };
+    let order = escort
+        .as_deref()
+        .and_then(|loaded| loaded.0.as_deref())
+        .map(|definition| {
+            super::item_plugin::SceneRecordOrder(definition.scene_object_id as usize)
+        });
     let position = Vec3::from_array(flag.position);
     let visibility = if network_escort_visible(&flag.state) {
         Visibility::Visible
     } else {
         Visibility::Hidden
     };
-    if let Some((_, mut transform, mut current_visibility)) = flags.iter_mut().next() {
+    if let Some((entity, mut transform, mut current_visibility)) = flags.iter_mut().next() {
+        if let Some(order) = order {
+            commands.entity(entity).insert(order);
+        }
         transform.translation = position;
         *current_visibility = visibility;
         return;
@@ -2265,18 +3046,61 @@ fn sync_network_escort_flag(
     if visibility == Visibility::Hidden {
         return;
     }
-    commands.spawn((
+    let mut flag_entity = commands.spawn((
         NetworkEscortFlag,
         Transform::from_translation(position),
         visibility,
     ));
+    if let Some(order) = order {
+        flag_entity.insert(order);
+    }
+}
+
+fn call_escort_pickup(
+    runtime: &mut SceneScriptRuntime,
+    definition: &meteor_network::escort_definition::EscortDefinition,
+    actor: i32,
+) {
+    if let Err(error) = runtime.call_item(
+        &definition.scene_name,
+        "OnPickUp",
+        &[PstValue::Num(actor as f64)],
+    ) {
+        warn!("escort OnPickUp failed: {error}");
+    }
+}
+
+fn apply_network_escort_pickups(
+    mut net: ResMut<crate::plugins::network_plugin::NetState>,
+    escort: Res<super::escort_assets::LoadedEscort>,
+    mut script: ResMut<StageScriptRuntime>,
+) {
+    let Some(runtime) = script.script_mut() else {
+        return;
+    };
+    let Some(definition) = escort.0.as_deref() else {
+        return;
+    };
+    let pickups = std::mem::take(&mut net.pending_escort_pickups);
+    if net.status != crate::plugins::network_plugin::NetStatus::InRoom || !net.is_scene_authority()
+    {
+        return;
+    }
+    for player_id in pickups {
+        let actor = net
+            .members
+            .iter()
+            .position(|m| m.player_id == player_id)
+            .map_or(-1, |i| i as i32);
+        call_escort_pickup(runtime, definition, actor);
+    }
 }
 
 fn escort_safe_zone_bounds(
-    team: u8,
+    index: usize,
     stage: &meteor_network::escort::EscortStage,
 ) -> Option<(Vec3, Vec3)> {
-    let zone = stage.safe_zones.get(team.checked_sub(1)? as usize)?;
+    let zone = stage.safe_zones.get(index)?;
     let min = Vec3::new(zone.min_x, zone.min_y, zone.min_z);
     let max = Vec3::new(zone.max_x, zone.max_y, zone.max_z);
     Some(((min + max) * 0.5, max - min))
@@ -2286,14 +3110,14 @@ fn spawn_escort_safe_zone(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
-    team: u8,
+    index: usize,
     stage: &meteor_network::escort::EscortStage,
 ) -> Option<Entity> {
-    let (center, size) = escort_safe_zone_bounds(team, stage)?;
-    let color = if team == 1 {
-        Color::srgb(0.31, 0.65, 0.56)
-    } else {
-        Color::srgb(0.72, 0.24, 0.26)
+    let (center, size) = escort_safe_zone_bounds(index, stage)?;
+    let color = match stage.safe_zones[index].team {
+        1 => Color::srgb(0.31, 0.65, 0.56),
+        2 => Color::srgb(0.72, 0.24, 0.26),
+        _ => Color::srgb(0.85, 0.70, 0.30),
     };
     let volume_material = materials.add(StandardMaterial {
         base_color: color.with_alpha(0.11),
@@ -2311,7 +3135,7 @@ fn spawn_escort_safe_zone(
     });
     let root = commands
         .spawn((
-            NetworkEscortSafeZone { team },
+            NetworkEscortSafeZone { index },
             Mesh3d(meshes.add(Cuboid::new(size.x, size.y, size.z))),
             MeshMaterial3d(volume_material),
             Transform::from_translation(center),
@@ -2363,15 +3187,22 @@ fn sync_network_escort_safe_zones(
         }
         return;
     }
-    for team in [1, 2] {
-        if zones.iter().any(|(_, zone)| zone.team == team) {
+    for index in 0..escort
+        .0
+        .as_ref()
+        .expect("active definition")
+        .stage
+        .safe_zones
+        .len()
+    {
+        if zones.iter().any(|(_, zone)| zone.index == index) {
             continue;
         }
         let _ = spawn_escort_safe_zone(
             &mut commands,
             &mut meshes,
             &mut materials,
-            team,
+            index,
             &escort.0.as_ref().expect("active definition").stage,
         );
     }
@@ -2413,6 +3244,8 @@ fn escort_cargo_pickup(
     mut commands: Commands,
     request: Res<crate::app_state::LaunchRequest>,
     net: Res<crate::plugins::network_plugin::NetState>,
+    room: Res<crate::app_state::RoomState>,
+    mut notices: ResMut<crate::plugins::system_notice::SystemNoticeFeed>,
     time: Res<Time>,
     frame_clock: Option<Res<crate::plugins::FrameClock>>,
     end: Res<crate::components::fighter::MatchEnd>,
@@ -2420,6 +3253,9 @@ fn escort_cargo_pickup(
     mut mission: ResMut<StageMissionRuntime>,
     fighters: LocalEscortFighters<'_, '_>,
     mut cargos: Query<(&mut LocalEscortState, &mut Transform, &mut Visibility), Without<Fighter>>,
+    mut last_carrier: Local<Option<Entity>>,
+    mut was_returning: Local<bool>,
+    mut script: Option<ResMut<StageScriptRuntime>>,
 ) {
     if !local_mode_objectives_enabled(net.status)
         || !local_escort_enabled(&request, &mission)
@@ -2434,6 +3270,7 @@ fn escort_cargo_pickup(
     let home = definition.stage.flag_home;
     let mut carrier_script_id = None;
     for (mut state, mut transform, mut visibility) in &mut cargos {
+        let previous_carrier = state.carrier;
         let mut can_pick_up = state.carrier.is_none();
         if let Some(carrier) = state.carrier {
             match fighters.get(carrier) {
@@ -2484,6 +3321,53 @@ fn escort_cargo_pickup(
         } else {
             Visibility::Visible
         };
+
+        if previous_carrier != state.carrier {
+            if let Some(carrier) = state.carrier {
+                if let Ok((_, _, _, local, npc, _)) = fighters.get(carrier) {
+                    let name = crate::plugins::system_notice::resolve_local_combatant_name(
+                        &request,
+                        &net,
+                        &room,
+                        local.is_some(),
+                        None,
+                        npc.map(|npc| npc.name.as_str()),
+                        npc.map_or(0, |npc| npc.id.min(255) as u8),
+                    );
+                    notices.push(crate::plugins::system_notice::format_flag_taken(&name));
+                }
+                if let Some(runtime) = script
+                    .as_deref_mut()
+                    .and_then(StageScriptRuntime::script_mut)
+                {
+                    let actor = fighters
+                        .get(carrier)
+                        .ok()
+                        .map_or(0, |(_, _, _, _, npc, _)| npc.map_or(0, |npc| npc.id));
+                    call_escort_pickup(runtime, definition, actor as i32);
+                }
+                *last_carrier = Some(carrier);
+                *was_returning = false;
+            } else if let Some(carrier) = previous_carrier.or(*last_carrier) {
+                if let Ok((_, _, _, local, npc, _)) = fighters.get(carrier) {
+                    let name = crate::plugins::system_notice::resolve_local_combatant_name(
+                        &request,
+                        &net,
+                        &room,
+                        local.is_some(),
+                        None,
+                        npc.map(|npc| npc.name.as_str()),
+                        npc.map_or(0, |npc| npc.id.min(255) as u8),
+                    );
+                    notices.push(crate::plugins::system_notice::format_flag_lost(&name));
+                }
+                *was_returning = state.return_remaining.is_some();
+            }
+        } else if *was_returning && state.return_remaining.is_none() && state.carrier.is_none() {
+            notices.push(crate::plugins::system_notice::format_flag_returned());
+            *was_returning = false;
+            *last_carrier = None;
+        }
         for (entity, _, _, _, npc, carrying) in &fighters {
             if Some(entity) == state.carrier {
                 carrier_script_id = Some(npc.map_or(0, |npc| npc.id));
@@ -2676,25 +3560,41 @@ fn consume_mission_npc_requests(
     }
     if let Some(runtime) = script.script_mut() {
         for (action, args) in runtime.host_mut().take_player_perform_requests() {
-            player_performance.queue.push_back(NpcPerformCommand {
-                action: action.trim().to_ascii_lowercase(),
-                args,
-            });
+            let PlayerPerformance { clock, queue, .. } = &mut *player_performance;
+            clock.install(
+                queue,
+                NpcPerformCommand {
+                    action: action.trim().to_ascii_lowercase(),
+                    args,
+                },
+            );
         }
     }
 
     let mut behaviors = std::mem::take(&mut pending.behaviors);
-    behaviors.extend({
+    let new_behaviors = {
         let Some(runtime) = script.script_mut() else {
             return;
         };
-        runtime.host_mut().take_behavior_requests()
-    });
-    for (id, behavior, args) in behaviors {
+        runtime.host_mut().take_behavior_requests_with_context()
+    };
+    for (id, behavior, _, _, _) in &new_behaviors {
+        if matches!(
+            behavior.as_str(),
+            "wait" | "idle" | "run" | "follow" | "patrol"
+        ) {
+            pending.performs.retain(|(target, _, _)| target != id);
+        }
+    }
+    behaviors.extend(new_behaviors);
+    for (id, behavior, args, target_point, callback_tail) in behaviors {
+        if behavior_from_name(&behavior).is_none() {
+            continue;
+        }
         let mut applied = false;
-        for (_entity, mut npc, mut intent, _performance, mut patrol, sm) in npcs.iter_mut() {
+        for (_entity, mut npc, mut intent, mut performance, mut patrol, sm) in npcs.iter_mut() {
             if npc.id == id {
-                patrol.reset_behavior_state();
+                patrol.prepare_behavior_change(Some(&npc), &intent, behavior_from_name(&behavior));
 
                 *intent = default();
                 npc.forced_behavior = behavior_from_name(&behavior);
@@ -2711,6 +3611,8 @@ fn consume_mission_npc_requests(
                     }
                 }
                 npc.behavior_args = args.clone();
+                patrol.attack_target_point = target_point
+                    .map(|point| Vec3::new(point[0] as f32, point[1] as f32, point[2] as f32));
                 if behavior.eq_ignore_ascii_case("patrol") {
                     patrol.route = args
                         .iter()
@@ -2740,13 +3642,28 @@ fn consume_mission_npc_requests(
                         .collect();
                     patrol.index = 0;
                 }
+                if matches!(
+                    behavior.as_str(),
+                    "wait" | "idle" | "run" | "follow" | "patrol"
+                ) {
+                    *performance = default();
+                    patrol.schedule_reset_think(npc.think, npc.id);
+                    if let Some(runtime) = script.script_mut() {
+                        runtime.acknowledge_npc_behavior(id, &behavior);
+                    }
+                }
+                if callback_tail {
+                    patrol.finish_callback_install();
+                }
                 debug!("mission ChangeBehavior({id}, \"{behavior}\", {args:?}) applied");
                 applied = true;
                 break;
             }
         }
         if !applied {
-            pending.behaviors.push((id, behavior, args));
+            pending
+                .behaviors
+                .push((id, behavior, args, target_point, callback_tail));
         }
     }
 
@@ -2763,10 +3680,14 @@ fn consume_mission_npc_requests(
             if npc.id != id {
                 continue;
             }
-            performance.queue.push_back(NpcPerformCommand {
-                action: action.trim().to_ascii_lowercase(),
-                args: args.clone(),
-            });
+            let NpcPerformance { clock, queue, .. } = &mut *performance;
+            clock.install(
+                queue,
+                NpcPerformCommand {
+                    action: action.trim().to_ascii_lowercase(),
+                    args: args.clone(),
+                },
+            );
             applied = true;
             break;
         }
@@ -2795,31 +3716,33 @@ fn consume_mission_attribute_updates(
             runtime.host_mut().defer_ai_update(id, values);
             continue;
         };
-        let value = |name: &str| values.get(name).map(PstValue::as_f64).unwrap_or(0.0) as f32;
-        npc.view = value("View").max(0.0);
-        npc.think = value("Think").clamp(0.0, 100.0);
+        if let Some(PstValue::Str(name)) = values.get("Name") {
+            npc.name.clone_from(name);
+            runtime.host_mut().sync_actor_name(id, name);
+        }
+        let value = |name: &str, previous: f32| {
+            values
+                .get(name)
+                .map_or(previous, |value| (value.as_f64() as i64 as i16) as f32)
+        };
+        npc.view = value("View", npc.view);
+        npc.think = value("Think", npc.think);
         *profile = NpcCombatProfile {
-            attack1: value("Attack1"),
-            attack2: value("Attack2"),
-            attack3: value("Attack3"),
-            guard: value("Guard"),
-            dodge: value("Dodge"),
-            jump: value("Jump"),
-            look: value("Look"),
-            burst: value("Burst"),
-            aim: value("Aim"),
-            get_item: value("GetItem"),
+            attack1: value("Attack1", profile.attack1),
+            attack2: value("Attack2", profile.attack2),
+            attack3: value("Attack3", profile.attack3),
+            guard: value("Guard", profile.guard),
+            dodge: value("Dodge", profile.dodge),
+            jump: value("Jump", profile.jump),
+            look: value("Look", profile.look),
+            burst: value("Burst", profile.burst),
+            aim: value("Aim", profile.aim),
+            get_item: value("GetItem", profile.get_item),
         };
     }
-    let mut changed = false;
     for (id, enabled) in runtime.host_mut().take_waypoint_updates() {
         if let Some(graph) = graph.as_deref_mut() {
-            changed |= graph.set_enabled(id, enabled);
-        }
-    }
-    if changed {
-        for (_, _, mut patrol) in &mut npcs {
-            patrol.invalidate_navigation();
+            graph.set_enabled(id, enabled);
         }
     }
 }
@@ -2881,17 +3804,15 @@ fn split_npc_requests(requests: Vec<NpcRequest>) -> (Vec<i64>, Vec<(String, i64)
 }
 
 fn behavior_from_name(name: &str) -> Option<meteor_ai::behavior::BehaviorMode> {
-    match name.to_ascii_lowercase().as_str() {
-        "idle" | "stop" => Some(meteor_ai::behavior::BehaviorMode::Idle),
+    match name {
+        "idle" => Some(meteor_ai::behavior::BehaviorMode::Idle),
         "wait" => Some(meteor_ai::behavior::BehaviorMode::Wait),
         "run" => Some(meteor_ai::behavior::BehaviorMode::Run),
         "patrol" => Some(meteor_ai::behavior::BehaviorMode::Patrol),
-        "follow" | "chase" => Some(meteor_ai::behavior::BehaviorMode::Follow),
-        "attack" | "fight" => Some(meteor_ai::behavior::BehaviorMode::Attack),
+        "follow" => Some(meteor_ai::behavior::BehaviorMode::Follow),
         "attacktarget" => Some(meteor_ai::behavior::BehaviorMode::AttackTarget),
         "kill" => Some(meteor_ai::behavior::BehaviorMode::Kill),
         "dodge" => Some(meteor_ai::behavior::BehaviorMode::Dodge),
-        "defend" | "escape" => Some(meteor_ai::behavior::BehaviorMode::Defend),
         _ => None,
     }
 }
@@ -2916,13 +3837,22 @@ fn spawn_mission_npc(
         return;
     };
     let text = crate::text_codec::decode_text(&bytes);
-    let definition = meteor_scene::mission_runtime::parse_npc_definition(&text, npc_script);
+    if let Some(runtime) = script.script_mut() {
+        if let Err(error) = runtime.activate_npc_script(id, &text) {
+            warn!("mission NPC {npc_script} initialization failed: {error}");
+        }
+    }
+    let definition = script
+        .script()
+        .and_then(|runtime| runtime.npc_definition(id, npc_script))
+        .unwrap_or_else(|| meteor_scene::mission_runtime::parse_npc_definition(&text, npc_script));
 
-    let initial_forced_behavior = Some(meteor_ai::behavior::BehaviorMode::Wait);
+    let initial_forced_behavior = None;
     let initial_behavior_args = Vec::new();
     let initial_attack_target_slot = None;
     let initial_attack_target_remaining = 0;
-    let initial_patrol = crate::plugins::ai_plugin::NpcPatrol::default();
+    let mut initial_patrol = crate::plugins::ai_plugin::NpcPatrol::default();
+    initial_patrol.schedule_initial_think(definition.think as f32, id);
     let character_id = definition.model.clamp(0, 19) as u8;
     let primary = crate::plugins::character_plugin::weapon_slot_from_item(definition.weapon)
         .unwrap_or((0, 0));
@@ -2952,8 +3882,8 @@ fn spawn_mission_npc(
                     name: definition.name.clone(),
                     team,
                     in_scene_roster: true,
-                    view: definition.view.max(0) as f32,
-                    think: definition.think.clamp(0, 100) as f32,
+                    view: definition.view as f32,
+                    think: definition.think as f32,
                     forced_behavior: initial_forced_behavior,
                     is_vip: false,
                     attack_target_slot: initial_attack_target_slot,
@@ -2961,16 +3891,16 @@ fn spawn_mission_npc(
                     attack_target_remaining: initial_attack_target_remaining,
                 },
                 NpcCombatProfile {
-                    attack1: definition.attack1.clamp(0, 100) as f32,
-                    attack2: definition.attack2.clamp(0, 100) as f32,
-                    attack3: definition.attack3.clamp(0, 100) as f32,
-                    guard: definition.guard.clamp(0, 100) as f32,
-                    dodge: definition.dodge.clamp(0, 100) as f32,
-                    jump: definition.jump.clamp(0, 100) as f32,
-                    look: definition.look.clamp(0, 100) as f32,
-                    burst: definition.burst.clamp(0, 100) as f32,
-                    aim: definition.aim.clamp(0, 100) as f32,
-                    get_item: definition.get_item.clamp(0, 100) as f32,
+                    attack1: definition.attack1 as f32,
+                    attack2: definition.attack2 as f32,
+                    attack3: definition.attack3 as f32,
+                    guard: definition.guard as f32,
+                    dodge: definition.dodge as f32,
+                    jump: definition.jump as f32,
+                    look: definition.look as f32,
+                    burst: definition.burst as f32,
+                    aim: definition.aim as f32,
+                    get_item: definition.get_item as f32,
                 },
                 NpcPerformance::default(),
             ),
@@ -3017,10 +3947,8 @@ fn spawn_mission_npc(
     if let Some(runtime) = script.script_mut() {
         let host = runtime.host_mut();
         host.register_char(&definition.name, id);
+        host.sync_actor_position(id, position.to_array());
         host.sync_fighter(id, definition.hp as f64, definition.hp as f64, team as f64);
-        if let Err(error) = runtime.activate_npc_script(id, &text) {
-            warn!("mission NPC {npc_script} startup failed: {error}");
-        }
     }
 }
 
@@ -3102,6 +4030,48 @@ fn sync_mission_fighters(
 #[cfg(test)]
 mod tests {
     use super::*;
+    include!("stage_plugin/campaign_regression_tests.rs");
+
+    #[test]
+    fn npc_perform_gates_actions_and_counts_only_eligible_pause_ticks() {
+        for action in ["attack", "jump", "crouch", "pause", "faceto", "aggress"] {
+            let mut clock = PerformanceClock::default();
+            let mut queue = std::collections::VecDeque::from([NpcPerformCommand {
+                action: action.into(),
+                args: vec![PstValue::Num(0.0)],
+            }]);
+            for _ in 0..40 {
+                assert!(clock
+                    .next_npc(&mut queue, 0.1, false, false, false)
+                    .is_none());
+            }
+            assert_eq!(queue.len(), 1, "{action} must wait through a locked action");
+            let mut completed = None;
+            for _ in 0..4 {
+                completed = completed.or_else(|| clock.next_npc(&mut queue, 0.1, true, true, true));
+            }
+            assert_eq!(completed.unwrap().action, action);
+        }
+        for action in ["say", "use"] {
+            let mut clock = PerformanceClock::default();
+            let mut queue = std::collections::VecDeque::from([NpcPerformCommand {
+                action: action.into(),
+                args: vec![],
+            }]);
+            for _ in 0..3 {
+                assert!(clock
+                    .next_npc(&mut queue, 0.1, false, false, true)
+                    .is_none());
+            }
+            assert_eq!(
+                clock
+                    .next_npc(&mut queue, 0.1, false, false, true)
+                    .unwrap()
+                    .action,
+                action
+            );
+        }
+    }
 
     #[test]
     fn story_guard_counts_eligible_pulses_and_keeps_following_command_queued() {
@@ -3146,7 +4116,7 @@ mod tests {
         assert_eq!(clock.next(&mut queue, 0.1).unwrap().action, "say");
     }
 
-    fn escort_test_app(network: bool) -> (App, Entity) {
+    pub(super) fn escort_test_app(network: bool) -> (App, Entity) {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
         let text =
             crate::text_codec::decode_text(&std::fs::read(root.join("Level/sn03_.pst")).unwrap());
@@ -3168,6 +4138,8 @@ mod tests {
             ..default()
         })
         .insert_resource(net)
+        .insert_resource(crate::app_state::RoomState::default())
+        .init_resource::<crate::plugins::system_notice::SystemNoticeFeed>()
         .insert_resource(StageMissionRuntime(Some(mission)))
         .insert_resource(crate::plugins::escort_assets::LoadedEscort(Some(
             crate::plugins::escort_assets::load_escort("sn03").unwrap(),
@@ -3206,7 +4178,7 @@ mod tests {
     #[test]
     fn sn04_reinforcement_order_replaces_old_combat_intent() {
         use crate::components::fighter::{AiIntent, SmState};
-        use crate::plugins::ai_plugin::drive_npc_ai;
+        use crate::plugins::ai_plugin::{drive_npc_ai, finish_npc_script_tick};
         use bevy::ecs::system::RunSystemOnce;
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res/Level");
         let read =
@@ -3234,10 +4206,20 @@ mod tests {
                 .init_resource::<PendingMissionNpcCommands>()
                 .init_resource::<PlayerPerformance>()
                 .init_resource::<Time>()
-                .insert_resource(meteor_scene::stage_loader::parse_waypoint_graph(
-                    &std::fs::read_to_string(root.join("sn04.wp")).unwrap(),
-                    meteor_scene::stage_loader::get_stage_center("sn04", None),
-                ));
+                .init_resource::<crate::plugins::character_contact_plugin::CharacterContactFrame>()
+                .insert_resource({
+                    let mut graph = meteor_scene::stage_loader::parse_waypoint_graph(
+                        &std::fs::read_to_string(root.join("sn04.wp")).unwrap(),
+                        meteor_scene::stage_loader::get_stage_center("sn04", None),
+                    );
+                    let gmdl = meteor_asset::gmdl::decode_gmdl(
+                        &std::fs::read(root.parent().unwrap().join("sn04/sn04.gmb")).unwrap(),
+                    )
+                    .unwrap();
+                    graph.navigation_bounds =
+                        crate::plugins::npc_navigation::source_bounds_for_test(&gmdl);
+                    graph
+                });
             app.world_mut()
                 .run_system_once(consume_mission_npc_requests)
                 .unwrap();
@@ -3267,6 +4249,19 @@ mod tests {
                 .map(|(entity, npc)| (npc.id, entity))
                 .collect();
             let messenger = actors.iter().find(|(id, _)| *id == messenger_id).unwrap().1;
+
+            for _ in 0..6 {
+                app.world_mut()
+                    .resource_mut::<Time>()
+                    .advance_by(std::time::Duration::from_millis(200));
+                app.world_mut().run_system_once(drive_npc_ai).unwrap();
+                app.world_mut()
+                    .run_system_once(finish_npc_script_tick)
+                    .unwrap();
+                app.world_mut()
+                    .run_system_once(consume_mission_npc_requests)
+                    .unwrap();
+            }
 
             for &(id, entity) in &actors {
                 *app.world_mut().get_mut::<NpcPerformance>(entity).unwrap() = default();
@@ -3302,6 +4297,10 @@ mod tests {
                     action_id: 0,
                 });
             }
+
+            app.world_mut()
+                .run_system_once(sync_mission_spatial)
+                .unwrap();
             {
                 let mut script = app.world_mut().resource_mut::<StageMissionRuntime>();
                 let rt = script.script_mut().unwrap();
@@ -3342,6 +4341,9 @@ mod tests {
                 "do not truncate the current authored animation"
             );
             app.world_mut().run_system_once(drive_npc_ai).unwrap();
+            app.world_mut()
+                .run_system_once(finish_npc_script_tick)
+                .unwrap();
             assert!(!app.world().get::<AiIntent>(messenger).unwrap().want_attack);
 
             app.world_mut()
@@ -3353,10 +4355,20 @@ mod tests {
                     .resource_mut::<Time>()
                     .advance_by(std::time::Duration::from_millis(100));
                 app.world_mut().run_system_once(drive_npc_ai).unwrap();
+                app.world_mut()
+                    .run_system_once(finish_npc_script_tick)
+                    .unwrap();
                 let intent = app.world().get::<AiIntent>(messenger).unwrap();
                 assert!(
-                    !intent.want_attack && intent.enemy_id.is_none(),
-                    "messenger reacquired nearby player"
+                    !intent.want_attack && intent.lock_target.is_none(),
+                    "messenger resumed combat instead of obeying the order"
+                );
+                assert_eq!(
+                    app.world()
+                        .get::<MissionNpc>(messenger)
+                        .unwrap()
+                        .forced_behavior,
+                    Some(meteor_ai::behavior::BehaviorMode::AttackTarget)
                 );
             }
             assert!(app.world().get::<AiIntent>(messenger).unwrap().move_dir.length()>0.9,"messenger {messenger_id} must depart: intent={:?} npc={:?} sm={:?} performance={:?}", app.world().get::<AiIntent>(messenger),app.world().get::<MissionNpc>(messenger),app.world().get::<SmState>(messenger),app.world().get::<NpcPerformance>(messenger));
@@ -3409,7 +4421,15 @@ mod tests {
                 app.world_mut()
                     .resource_mut::<Time>()
                     .advance_by(std::time::Duration::from_secs_f32(1. / 60.));
+                app.world_mut()
+                    .run_system_once(
+                        crate::plugins::character_contact_plugin::begin_character_contact_frame,
+                    )
+                    .unwrap();
                 app.world_mut().run_system_once(drive_npc_ai).unwrap();
+                app.world_mut()
+                    .run_system_once(finish_npc_script_tick)
+                    .unwrap();
                 let intent = app.world().get::<AiIntent>(messenger).unwrap();
                 assert!(!intent.want_attack && intent.enemy_id.is_none());
                 app.world_mut()
@@ -3443,7 +4463,7 @@ mod tests {
 
     #[test]
     fn pst_dynamic_attributes_and_waypoints_reach_production_ecs() {
-        let source = r#"OnStart(){ AddNPC("npc05_03"); Call(1,"Attack",0); DisableWaypoints(1); }"#;
+        let source = r#"OnStart(){ AddNPC("npc05_03"); DisableWaypoints(1); }"#;
         let mut runtime = MissionScriptRuntime::new(source, Default::default());
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res/Level");
         let npc_source =
@@ -3452,6 +4472,10 @@ mod tests {
             .register_npc_script("npc05_03", &npc_source)
             .unwrap();
         runtime.start().unwrap();
+        runtime.run_npc_init(1).unwrap();
+        runtime
+            .call_npc_script(1, "Attack", &[PstValue::Num(0.0)])
+            .unwrap();
         let mut app = App::new();
         app.insert_resource(StageMissionRuntime(Some(runtime)))
             .insert_resource(LaunchRequest::default())
@@ -3613,7 +4637,7 @@ mod tests {
         for point in &mut definition.vertices {
             point[0] *= 8.0;
         }
-        for zone in &mut definition.stage.safe_zones {
+        for zone in definition.stage.safe_zones.to_mut() {
             zone.min_x += 1000.0;
             zone.max_x += 1000.0;
             zone.center_x += 1000.0;
@@ -3998,22 +5022,6 @@ mod tests {
 
         let mut runtime = MissionScriptRuntime::new("", Default::default());
         runtime.host_mut().register_char("guard", 7);
-        runtime.host_mut().builtin(
-            "SetTarget",
-            &[
-                PstValue::Num(0.0),
-                PstValue::Str("char".into()),
-                PstValue::Num(0.0),
-            ],
-        );
-        runtime.host_mut().builtin(
-            "SetTarget",
-            &[
-                PstValue::Num(1.0),
-                PstValue::Str("char".into()),
-                PstValue::Num(7.0),
-            ],
-        );
         let mut app = App::new();
         app.insert_resource(StageMissionRuntime(Some(runtime)))
             .add_systems(Update, sync_mission_spatial);
@@ -4027,6 +5035,22 @@ mod tests {
         app.update();
 
         let mut runtime = app.world_mut().resource_mut::<StageMissionRuntime>();
+        runtime.script_mut().unwrap().host_mut().builtin(
+            "SetTarget",
+            &[
+                PstValue::Num(0.0),
+                PstValue::Str("char".into()),
+                PstValue::Num(0.0),
+            ],
+        );
+        runtime.script_mut().unwrap().host_mut().builtin(
+            "SetTarget",
+            &[
+                PstValue::Num(1.0),
+                PstValue::Str("char".into()),
+                PstValue::Num(7.0),
+            ],
+        );
         let distance = runtime
             .script_mut()
             .unwrap()
@@ -4114,6 +5138,31 @@ mod tests {
     }
 
     #[test]
+    fn new_mission_discards_pending_npc_commands_and_player_performance() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut app = App::new();
+        app.insert_resource(PendingMissionNpcCommands {
+            behaviors: vec![(1, "follow".into(), vec![PstValue::Num(0.0)], None, false)],
+            performs: vec![(1, "say".into(), vec![PstValue::Str("上一局".into())])],
+        })
+        .insert_resource(PlayerPerformance {
+            pause_remaining: 3.0,
+            input_blocked: true,
+            ..Default::default()
+        });
+        app.world_mut()
+            .run_system_once(reset_mission_performance)
+            .unwrap();
+        let pending = app.world().resource::<PendingMissionNpcCommands>();
+        assert!(pending.behaviors.is_empty());
+        assert!(pending.performs.is_empty());
+        let performance = app.world().resource::<PlayerPerformance>();
+        assert_eq!(performance.pause_remaining, 0.0);
+        assert!(!performance.input_blocked);
+    }
+
+    #[test]
     fn spawned_mission_npc_consumes_same_batch_perform_on_the_next_frame() {
         use meteor_scene::pst_runtime::{PstHost, PstValue};
 
@@ -4141,8 +5190,12 @@ mod tests {
         app.update();
         app.update();
 
-        let mut query = app.world_mut().query::<(&MissionNpc, &NpcPerformance)>();
-        let (npc, performance) = query.single(app.world()).expect("mission NPC queryable");
+        let mut query = app.world_mut().query::<(
+            &MissionNpc,
+            &NpcPerformance,
+            &crate::plugins::movement_plugin::FighterWall,
+        )>();
+        let (npc, performance, _wall) = query.single(app.world()).expect("mission NPC queryable");
         assert_eq!(npc.id, 1);
         assert_eq!(performance.queue.len(), 1);
         assert_eq!(performance.queue[0].action, "say");
@@ -4241,7 +5294,8 @@ mod tests {
                 name: dummy.name.clone(),
                 index,
                 props: std::collections::HashMap::from([
-                    ("active".into(), PstValue::Num(f64::from(dummy.visible))),
+                    ("active".into(), PstValue::Num(1.0)),
+                    ("visible".into(), PstValue::Num(f64::from(dummy.visible))),
                     ("interactive".into(), PstValue::Num(1.0)),
                     ("state".into(), PstValue::Num(3.0)),
                 ]),
@@ -4414,7 +5468,6 @@ mod tests {
     #[test]
     fn real_sn01_stone_pillar_break_clip_finishes_hidden_in_ecs() {
         use meteor_scene::pst_runtime::PstValue;
-        use std::collections::HashMap;
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
         if !root.join("sn01/sn01.pst").exists() {
@@ -4441,15 +5494,11 @@ mod tests {
                 |(index, dummy)| meteor_scene::scene_script_runtime::SceneItemInstance {
                     name: dummy.name.clone(),
                     index,
-                    props: HashMap::from([
-                        ("active".into(), PstValue::Num(dummy.visible as i32 as f64)),
-                        ("collision".into(), PstValue::Num(1.0)),
-                        ("interactive".into(), PstValue::Num(1.0)),
-                        ("pose".into(), PstValue::Num(0.0)),
-                        ("pose_loop".into(), PstValue::Num(0.0)),
-                        ("frame".into(), PstValue::Num(-1.0)),
-                        ("state".into(), PstValue::Num(3.0)),
-                    ]),
+                    props: {
+                        let mut props = scene_item_props_from_dummy(dummy);
+                        props.insert("collision".into(), PstValue::Num(1.0));
+                        props
+                    },
                 },
             )
             .collect();
@@ -4512,7 +5561,6 @@ mod tests {
                             anim_time: 0.0,
                             state: 3,
                             frame_set: None,
-                            multi: true,
                             base_translation: Vec3::ZERO,
                             base_rotation: Quat::IDENTITY,
                             collider_owner: None,
@@ -4616,6 +5664,44 @@ mod tests {
     }
 
     #[test]
+    fn original_mission_spawn_faces_along_negative_model_y() {
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res/Level");
+        if !root.is_dir() {
+            eprintln!("origin_res missing, skipping");
+            return;
+        }
+        for (stage, point, forward) in [("sn01", 9, Vec3::NEG_X), ("sn03", 53, Vec3::NEG_Z)] {
+            let source = crate::text_codec::decode_text(
+                &std::fs::read(root.join(format!("{stage}_.pst"))).unwrap(),
+            );
+            let definition = meteor_scene::mission_runtime::parse_mission_definition(&source);
+            let mission = MissionScriptRuntime::new(&source, definition.values);
+            let waypoints = std::fs::read_to_string(root.join(format!("{stage}.wp"))).unwrap();
+            let center = get_stage_center(stage, Some(&waypoints));
+            let graph = meteor_scene::stage_loader::parse_waypoint_graph(&waypoints, center);
+            let (position, facing) = resolve_player_spawn(
+                Some(&graph),
+                Some(&mission),
+                None,
+                center,
+                true,
+                ("user", None),
+                true,
+            );
+
+            assert_eq!(
+                position,
+                Vec3::from_array(graph.world_position(point).unwrap())
+            );
+            assert!(
+                (Quat::from_rotation_y(facing) * Vec3::Z).distance(forward) < 1e-5,
+                "{stage} spawn looks the wrong way: {facing}"
+            );
+        }
+    }
+
+    #[test]
     fn origin_sn22_uses_des_user_and_team_spawn_pads_instead_of_world_origin() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
         let path = root.join("sn22/sn22.des");
@@ -4627,16 +5713,24 @@ mod tests {
             &std::fs::read_to_string(path).expect("sn22.des"),
         );
         let center = meteor_scene::stage_loader::ARENA_CENTER;
-        let users = stage_spawn_pads(&desc, "user", center);
-        let team_a = stage_spawn_pads(&desc, "teama", center);
-        let team_b = stage_spawn_pads(&desc, "teamb", center);
+        let users = stage_spawn_pads(&desc, "user", center, false);
+        let team_a = stage_spawn_pads(&desc, "teama", center, false);
+        let team_b = stage_spawn_pads(&desc, "teamb", center, false);
         assert_eq!(users.len(), 16);
         assert_eq!(team_a.len(), 8);
         assert_eq!(team_b.len(), 8);
         assert!((team_a[0].1 - -0.995_013).abs() < 1e-5);
         assert!((team_b[0].1 - 1.126_34).abs() < 1e-5);
 
-        let resolved = resolve_player_spawn(None, None, Some(&desc), center, true, "user", Some(0));
+        let resolved = resolve_player_spawn(
+            None,
+            None,
+            Some(&desc),
+            center,
+            true,
+            ("user", Some(0)),
+            false,
+        );
         let expected = Vec3::new(
             (531.942 - center[0]) * meteor_core::constants::MODEL_SCALE,
             12.471 * meteor_core::constants::MODEL_SCALE,
@@ -4645,9 +5739,85 @@ mod tests {
         assert!((resolved.0 - expected).length() < 1e-3);
         assert!(resolved.0.distance(Vec3::new(0.0, 0.9, 0.0)) > 10.0);
         assert_eq!(
-            resolve_player_spawn(None, None, Some(&desc), center, false, "teama", Some(0)).0,
+            resolve_player_spawn(
+                None,
+                None,
+                Some(&desc),
+                center,
+                false,
+                ("teama", Some(0)),
+                false
+            )
+            .0,
             team_a[0].0
         );
+    }
+
+    #[test]
+    fn original_network_spawn_uses_authored_pad_order_and_heading() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        if !root.is_dir() {
+            eprintln!("origin_res missing, skipping");
+            return;
+        }
+        let pads = |stage: &str, prefix| {
+            let desc = meteor_asset::des::parse_stage_description(
+                &std::fs::read_to_string(root.join(format!("{stage}/{stage}.des"))).unwrap(),
+            );
+            let center = get_stage_center(stage, None);
+            stage_spawn_pads(&desc, prefix, center, true)
+        };
+
+        let center = get_stage_center("sn22", None);
+        let scale = meteor_core::constants::MODEL_SCALE;
+        let (position, facing) = pads("sn22", "teamb")[0];
+        let expected = Vec3::new(
+            (-1437.886 - center[0]) * scale,
+            (12.471 - center[2]) * scale,
+            -(727.556 - center[1]) * scale,
+        );
+        assert!(position.distance(expected) < 1e-4);
+        assert!(facing.abs() < 1e-5);
+        let facing = pads("sn07", "user")[1].1;
+        assert!((Quat::from_rotation_y(facing) * Vec3::Z).distance(Vec3::NEG_X) < 0.001);
+    }
+
+    #[test]
+    fn original_mrc_spawn_uses_recorded_sn06_pad_only_when_sample_matches() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let desc_path = root.join("origin_res/sn06/sn06.des");
+        let samples = root.join("mrcs/tests");
+        if !desc_path.exists() || !samples.exists() {
+            eprintln!("original MRC fixtures missing, skipping");
+            return;
+        }
+        let desc = meteor_asset::des::parse_stage_description(
+            &std::fs::read_to_string(desc_path).expect("sn06.des"),
+        );
+        let waypoint_text =
+            std::fs::read_to_string(root.join("origin_res/Level/sn06.wp")).expect("sn06.wp");
+        let center = get_stage_center("sn06", Some(&waypoint_text));
+        let mut checked = 0;
+        for entry in std::fs::read_dir(samples).expect("mrcs/tests") {
+            let path = entry.expect("MRC fixture entry").path();
+            if path.extension().is_none_or(|extension| extension != "mrc") {
+                continue;
+            }
+            let mut playback = crate::plugins::replay_plugin::MrcPlayback::default();
+            playback.load(&path).expect("original MRC");
+            let (spawn, _) = recorded_mrc_spawn_pad(&playback, &desc, center)
+                .unwrap_or_else(|| panic!("recorded spawn pad missing: {}", path.display()));
+            assert!(spawn.distance(playback.first_stock_local_position(center).unwrap()) < 0.01);
+            checked += 1;
+
+            let doc = playback.doc.as_mut().unwrap();
+            let first = &mut doc.queue_d[0];
+            first.a = (f32::from_bits(first.a) + 1.0).to_bits();
+            assert!(recorded_mrc_spawn_pad(&playback, &desc, center).is_none());
+            playback.doc.as_mut().unwrap().mark0 = 0;
+            assert!(recorded_mrc_spawn_pad(&playback, &desc, center).is_none());
+        }
+        assert_eq!(checked, 10);
     }
 
     #[test]
@@ -4700,8 +5870,159 @@ mod tests {
         );
     }
 
+    fn sn22_runtime_for_stock_touch(mode: i64) -> SceneScriptRuntime {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        let desc = meteor_asset::des::parse_stage_description(
+            &std::fs::read_to_string(root.join("sn22/sn22.des")).unwrap(),
+        );
+        let instances = desc
+            .dummies
+            .iter()
+            .enumerate()
+            .map(|(index, dummy)| SceneItemInstance {
+                name: dummy.name.clone(),
+                index,
+                props: scene_item_props_from_dummy(dummy),
+            })
+            .collect();
+        let mut parts = ["Def.h", "box.pst", "desk.pst", "chair.pst", "jug.pst"]
+            .map(|name| {
+                std::fs::read_to_string(root.join("PScriptLib").join(name)).unwrap_or_default()
+            })
+            .to_vec();
+        parts.push(std::fs::read_to_string(root.join("sn22/sn22.pst")).unwrap());
+        let mut runtime = SceneScriptRuntime::load(&parts.join("\n"), instances, 250_000).unwrap();
+        runtime.host_mut().set_game_mode(mode);
+        runtime.start().unwrap();
+        runtime
+    }
+
+    fn stock_touch_net(teams: &[Option<u32>]) -> crate::plugins::network_plugin::NetState {
+        let mut net = crate::plugins::network_plugin::NetState::default();
+        net.status = crate::plugins::network_plugin::NetStatus::InRoom;
+        net.player_id = "stock-1".into();
+        net.members = ["stock-1", "stock-42", "stock-88"]
+            .into_iter()
+            .zip(teams)
+            .map(|(id, team)| meteor_network::protocol::RoomMemberWire {
+                player_id: id.into(),
+                name: id.into(),
+                character_id: 0,
+                weapon: 6,
+                team: *team,
+                ready: true,
+                connected: true,
+            })
+            .collect();
+        net
+    }
+
+    #[test]
+    fn sn22_stock_touch_releases_death_and_exit_once_without_renumbering_guests() {
+        let mut runtime = sn22_runtime_for_stock_touch(1);
+        let mut touch = SceneTouchState::default();
+        let mut net = stock_touch_net(&[None; 3]);
+        let observations = net
+            .members
+            .iter()
+            .map(|member| (member.player_id.clone(), Vec3::ZERO, true))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            stock_scene_touch_contacts(&mut touch, &mut runtime, &net, &observations).len(),
+            3
+        );
+        for slot in 0..3 {
+            runtime
+                .call_item("D_tpEC01", "OnTouch", &[PstValue::Num(slot as f64)])
+                .unwrap();
+        }
+        let entered = runtime.host_mut().take_transfer_requests();
+        assert_eq!(
+            entered
+                .iter()
+                .map(|request| request.character_id)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        runtime
+            .call_item("D_tpEC17", "OnTouch", &[PstValue::Num(0.0)])
+            .unwrap();
+        assert!(
+            runtime.host_mut().take_transfer_requests().is_empty(),
+            "two occupants cannot return"
+        );
+        net.stock_deaths.insert("stock-42".into(), 1);
+        stock_scene_touch_contacts(&mut touch, &mut runtime, &net, &[]);
+        net.members.retain(|member| member.player_id != "stock-42");
+        stock_scene_touch_contacts(&mut touch, &mut runtime, &net, &[]);
+        assert_eq!(touch.stock_actors[2].as_ref().unwrap().0, "stock-88");
+        runtime
+            .call_item("D_tpEC17", "OnTouch", &[PstValue::Num(0.0)])
+            .unwrap();
+        let returned = runtime.host_mut().take_transfer_requests();
+        assert_eq!(
+            returned.len(),
+            1,
+            "death then exit must release exactly one occupant"
+        );
+        assert_eq!(returned[0].destination, "D_tpED17");
+        runtime
+            .call_item("D_tpEC01", "OnTouch", &[PstValue::Num(2.0)])
+            .unwrap();
+        assert_eq!(
+            runtime.host_mut().take_transfer_requests()[0].character_id,
+            2
+        );
+        let mut newcomer = net.members[0].clone();
+        newcomer.player_id = "stock-200".into();
+        net.members.push(newcomer);
+        stock_scene_touch_contacts(&mut touch, &mut runtime, &net, &[]);
+        assert_eq!(touch.stock_actors[1].as_ref().unwrap().0, "stock-200");
+        assert_eq!(touch.stock_actors[2].as_ref().unwrap().0, "stock-88");
+    }
+
+    #[test]
+    fn sn22_stock_touch_sets_guest_team_for_original_admission_rules() {
+        let mut runtime = sn22_runtime_for_stock_touch(5);
+        let mut touch = SceneTouchState::default();
+        let net = stock_touch_net(&[Some(1), Some(2), Some(1)]);
+        stock_scene_touch_contacts(&mut touch, &mut runtime, &net, &[]);
+        runtime
+            .call_item("D_tpAC01", "OnTouch", &[PstValue::Num(1.0)])
+            .unwrap();
+        assert!(
+            runtime.host_mut().take_transfer_requests().is_empty(),
+            "blue guest cannot enter red portal"
+        );
+        runtime
+            .call_item("D_tpAC01", "OnTouch", &[PstValue::Num(0.0)])
+            .unwrap();
+        runtime
+            .call_item("D_tpAC01", "OnTouch", &[PstValue::Num(2.0)])
+            .unwrap();
+        let red = runtime.host_mut().take_transfer_requests();
+        assert_eq!(red.len(), 1, "one red slot per arena");
+        assert_eq!(red[0].character_id, 0);
+        runtime
+            .call_item("D_tpBC01", "OnTouch", &[PstValue::Num(1.0)])
+            .unwrap();
+        assert_eq!(
+            runtime.host_mut().take_transfer_requests()[0].character_id,
+            1
+        );
+    }
+
     #[test]
     fn origin_sn22_render_empty_portal_triggers_ecs_transfer() {
+        check_sn22_ecs_transfer(false);
+    }
+
+    #[test]
+    fn origin_sn22_stock_guest_triggers_host_transfer_with_large_actor_id() {
+        check_sn22_ecs_transfer(true);
+    }
+
+    fn check_sn22_ecs_transfer(stock_guest: bool) {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
         if !root.join("sn22/sn22.pst").exists() {
             eprintln!("origin_res missing, skipping");
@@ -4717,17 +6038,11 @@ mod tests {
             .map(|(index, dummy)| SceneItemInstance {
                 name: dummy.name.clone(),
                 index,
-                props: [
-                    ("active".into(), PstValue::Num(dummy.visible as i32 as f64)),
-                    ("collision".into(), PstValue::Num(0.0)),
-                    ("interactive".into(), PstValue::Num(1.0)),
-                    ("pose".into(), PstValue::Num(0.0)),
-                    ("pose_loop".into(), PstValue::Num(0.0)),
-                    ("frame".into(), PstValue::Num(-1.0)),
-                    ("state".into(), PstValue::Num(3.0)),
-                ]
-                .into_iter()
-                .collect(),
+                props: {
+                    let mut props = scene_item_props_from_dummy(dummy);
+                    props.insert("collision".into(), PstValue::Num(0.0));
+                    props
+                },
             })
             .collect();
         let mut script_parts = ["Def.h", "box.pst", "desk.pst", "chair.pst", "jug.pst"]
@@ -4811,27 +6126,103 @@ mod tests {
             )
         };
         let ec = prop("D_tpEC01");
-        let ec_center = ec.2.translation() + ec.2.to_scale_rotation_translation().1 * local_center;
+        let ec_feet = snap_scene_transfer_position(&collider, ec.1.translation);
+        assert!(
+            ec_feet.y < ec.1.translation.y - 0.5,
+            "portal must be tested from its real floor"
+        );
         let ed = prop("D_tpED01");
         let expected = snap_scene_transfer_position(&collider, ed.1.translation);
 
+        let mut net = crate::plugins::network_plugin::NetState::default();
+        if stock_guest {
+            use meteor_network::protocol::RoomMemberWire;
+            net.status = crate::plugins::network_plugin::NetStatus::InRoom;
+            net.address = "udp-host://0.0.0.0:5230".into();
+            net.player_id = "stock-1".into();
+            net.room_id = "stock-udp".into();
+            net.stage = "sn22".into();
+            net.mode = "leader".into();
+            net.round_active = true;
+            net.members = ["stock-1", "stock-42"]
+                .into_iter()
+                .map(|id| RoomMemberWire {
+                    player_id: id.into(),
+                    name: id.into(),
+                    character_id: 0,
+                    weapon: 6,
+                    team: None,
+                    ready: true,
+                    connected: true,
+                })
+                .collect();
+        }
+        let (net_tx, captured_transfers) =
+            crate::plugins::network_plugin::NetTx::capture_scene_transfers_for_test();
         let mut app = App::new();
-        app.init_resource::<Time>()
+        crate::plugins::configure_fighter_frame_sets(&mut app);
+        app.insert_resource(net_tx)
+            .init_resource::<Time>()
             .insert_resource(crate::plugins::FrameClock {
                 sim_dt: 0.13,
                 ..default()
             })
             .insert_resource(SceneTouchState::default())
             .insert_resource(StageScriptRuntime(Some(runtime)))
-            .insert_resource(crate::plugins::network_plugin::NetState::default())
+            .insert_resource(net)
+            .init_resource::<crate::components::fighter::LockOnController>()
             .insert_resource(collider)
-            .add_systems(Update, scene_script_touch_and_transfer);
+            .add_systems(
+                Update,
+                scene_script_touch_and_transfer
+                    .after(crate::plugins::FighterFrameSet::RootMotion)
+                    .before(crate::plugins::FighterFrameSet::PoseResolve),
+            );
+        let camera = crate::plugins::camera_plugin::install_follow_camera_for_test(&mut app);
         app.world_mut().spawn(ec);
         app.world_mut().spawn(ed);
-        let fighter = app
-            .world_mut()
-            .spawn((LocalFighter, Transform::from_translation(ec_center)))
-            .id();
+        let fighter = if stock_guest {
+            app.world_mut()
+                .spawn((
+                    crate::plugins::network_plugin::RemoteFighter {
+                        player_id: "stock-42".into(),
+                    },
+                    Transform::from_translation(ec_feet),
+                    Health {
+                        current: 123.0,
+                        max: 1000.0,
+                    },
+                    MotionState {
+                        movement_mode: MovementMode::Idle,
+                        velocity: Vec3::ONE,
+                        facing: 0.0,
+                    },
+                    crate::plugins::network_plugin::RemoteTransformTarget {
+                        translation: ec_feet,
+                        yaw: 0.0,
+                    },
+                    crate::plugins::network_plugin::RemoteContactSegment {
+                        from: Vec3::ZERO,
+                        to: ec_feet,
+                        valid: true,
+                        ..default()
+                    },
+                ))
+                .id()
+        } else {
+            app.world_mut()
+                .spawn((
+                    LocalFighter,
+                    Transform::from_translation(ec_feet),
+                    MotionState {
+                        facing: 1.2,
+                        velocity: Vec3::ONE,
+                        movement_mode: MovementMode::Idle,
+                    },
+                    crate::plugins::movement_plugin::FighterAir::default(),
+                ))
+                .id()
+        };
         app.update();
         let actual = app
             .world()
@@ -4843,6 +6234,73 @@ mod tests {
             actual.distance(expected) < 1e-4,
             "EC01 must transfer the local fighter to snapped ED01: {actual:?} vs {expected:?}"
         );
+        if !stock_guest {
+            let motion = app.world().get::<MotionState>(fighter).unwrap();
+            assert!(
+                motion.facing.abs() < 1e-5,
+                "destination yaw must replace pre-transfer yaw"
+            );
+            assert_eq!(motion.velocity, Vec3::ZERO);
+            let eye = app.world().get::<Transform>(camera).unwrap();
+            let forward = eye.rotation * Vec3::NEG_Z;
+            assert!(forward.x.abs() < 1e-5 && forward.z > 0.0);
+            let cam = app
+                .world()
+                .get::<crate::plugins::camera_plugin::ThirdPersonState>(camera)
+                .unwrap();
+            assert!(
+                cam.follow_focus_for_test()
+                    .distance(expected + Vec3::Y * crate::plugins::camera_plugin::LOOK_HEIGHT)
+                    < 1e-4
+            );
+            assert!(app
+                .world()
+                .get::<crate::plugins::camera_plugin::CameraFollowReset>(fighter)
+                .is_none());
+        }
+        if stock_guest {
+            let requests = captured_transfers();
+            assert_eq!(
+                requests.len(),
+                1,
+                "guest contact must submit a hosted transfer"
+            );
+            assert_eq!(requests[0].0, 42);
+            assert_eq!(
+                Vec3::new(
+                    requests[0].1.position.x,
+                    requests[0].1.position.y,
+                    requests[0].1.position.z
+                ),
+                expected
+            );
+            let segment = app
+                .world()
+                .get::<crate::plugins::network_plugin::RemoteContactSegment>(fighter)
+                .unwrap();
+            assert!(!segment.valid);
+            assert_eq!(segment.from, expected);
+            assert_eq!(segment.to, expected);
+            assert_eq!(
+                app.world().get::<MotionState>(fighter).unwrap().velocity,
+                Vec3::ZERO
+            );
+            assert_eq!(app.world().get::<Health>(fighter).unwrap().current, 123.0);
+            assert_eq!(
+                app.world()
+                    .get::<crate::plugins::network_plugin::RemoteTransformTarget>(fighter)
+                    .unwrap()
+                    .translation,
+                expected
+            );
+            assert_eq!(
+                app.world().resource::<SceneTouchState>().stock_actors[1]
+                    .as_ref()
+                    .unwrap()
+                    .0,
+                "stock-42"
+            );
+        }
     }
 
     #[test]
@@ -4885,7 +6343,6 @@ mod tests {
             anim_time: 0.0,
             state: 3,
             frame_set: None,
-            multi: true,
             base_translation: Vec3::ZERO,
             base_rotation: Quat::IDENTITY,
             collider_owner: None,
@@ -5049,13 +6506,13 @@ mod tests {
     fn player_perform_keeps_block_say_pause_order_and_releases_input() {
         let mut performance = PlayerPerformance::default();
         for (action, value) in [
-            ("block", meteor_scene::pst_runtime::PstValue::Num(0.0)),
+            ("block", meteor_scene::pst_runtime::PstValue::Num(1.0)),
             (
                 "say",
                 meteor_scene::pst_runtime::PstValue::Str("开场".into()),
             ),
             ("pause", meteor_scene::pst_runtime::PstValue::Num(2.0)),
-            ("block", meteor_scene::pst_runtime::PstValue::Num(1.0)),
+            ("block", meteor_scene::pst_runtime::PstValue::Num(0.0)),
         ] {
             performance.queue.push_back(NpcPerformCommand {
                 action: action.into(),
@@ -5106,6 +6563,7 @@ mod tests {
             .host_mut()
             .take_player_perform_requests()
             .into_iter()
+            .rev()
             .map(|(action, args)| NpcPerformCommand { action, args })
             .collect();
         assert_eq!(queue.len(), 3);
@@ -5136,7 +6594,7 @@ mod tests {
         let mut state = PlayerPerformance::default();
         state.queue.push_back(NpcPerformCommand {
             action: "block".into(),
-            args: vec![PstValue::Num(0.0)],
+            args: vec![PstValue::Num(1.0)],
         });
         advance_player_performance(&mut state, 20.0);
         assert!(!state.input_blocked);
@@ -5168,6 +6626,8 @@ mod tests {
             MissionScriptRuntime::new("OnStart(){ AddNPC(\"a\"); }", Default::default());
         runtime.register_npc_script("a", source).unwrap();
         runtime.start().unwrap();
+        assert!(runtime.host_mut().take_behavior_requests().is_empty());
+        runtime.run_npc_init(1).unwrap();
         assert_eq!(
             runtime.host_mut().take_behavior_requests(),
             vec![(1, "follow".into(), vec![PstValue::Str("vip".into())])]
@@ -5195,7 +6655,7 @@ mod tests {
     }
 
     #[test]
-    fn behavior_names_preserve_all_eight_web_callbacks() {
+    fn behavior_names_accept_exactly_the_eight_original_commands() {
         use meteor_ai::behavior::BehaviorMode;
         assert_eq!(behavior_from_name("wait"), Some(BehaviorMode::Wait));
         assert_eq!(behavior_from_name("idle"), Some(BehaviorMode::Idle));
@@ -5208,6 +6668,11 @@ mod tests {
         );
         assert_eq!(behavior_from_name("kill"), Some(BehaviorMode::Kill));
         assert_eq!(behavior_from_name("dodge"), Some(BehaviorMode::Dodge));
+        for name in [
+            "Wait", "FOLLOW", "stop", "chase", "attack", "fight", "defend", "escape",
+        ] {
+            assert_eq!(behavior_from_name(name), None, "{name}");
+        }
     }
 
     #[test]
@@ -5378,8 +6843,9 @@ mod tests {
     #[test]
     fn escort_safe_zone_visuals_use_the_authored_sn03_bounds() {
         for team in [1, 2] {
-            let (center, size) = escort_safe_zone_bounds(team, &meteor_network::escort::SN03)
-                .expect("authored safe zone");
+            let (center, size) =
+                escort_safe_zone_bounds((team - 1) as usize, &meteor_network::escort::SN03)
+                    .expect("authored safe zone");
             let zone = meteor_network::escort::SN03.safe_zones[(team - 1) as usize];
             assert!(
                 (center - Vec3::new(zone.center_x, zone.center_y, zone.center_z)).length() < 1e-4
@@ -5505,23 +6971,28 @@ mod tests {
         let center = Vec3::ZERO;
         let half = Vec3::ONE;
         assert!(scene_touch_contains(
+            Vec3::new(0.0, -4.0, 0.0),
+            center,
+            half
+        ));
+        assert!(scene_touch_contains(
             Vec3::new(1.5, -1.5, 0.0),
             center,
             half
         ));
-        assert!(scene_touch_contains(Vec3::new(0.0, 2.8, 1.5), center, half));
+        assert!(scene_touch_contains(Vec3::new(0.0, 1.5, 1.5), center, half));
         assert!(!scene_touch_contains(
             Vec3::new(1.51, 0.0, 0.0),
             center,
             half
         ));
         assert!(!scene_touch_contains(
-            Vec3::new(0.0, -1.51, 0.0),
+            Vec3::new(0.0, -5.35, 0.0),
             center,
             half
         ));
         assert!(!scene_touch_contains(
-            Vec3::new(0.0, 2.81, 0.0),
+            Vec3::new(0.0, 1.51, 0.0),
             center,
             half
         ));
@@ -5650,5 +7121,86 @@ mod loading_worker_tests {
             app.world().resource::<NextState<AppState>>(),
             NextState::Unchanged
         ));
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "stage_plugin/spawn_pad_tests.rs"]
+mod spawn_pad_tests;
+
+#[cfg(test)]
+#[path = "stage_plugin/solo_identity_tests.rs"]
+pub(crate) mod solo_identity_tests;
+
+#[cfg(test)]
+#[path = "stage_plugin/npc_lifecycle_tests.rs"]
+mod npc_lifecycle_tests;
+
+#[cfg(test)]
+mod npc_attribute_update_parity_tests {
+    use super::*;
+
+    #[test]
+    fn partial_update_preserves_absent_fields_and_raw_think_look_words() {
+        let source = "OnStart(){ AddNPC(\"a\"); }";
+        let mut runtime = MissionScriptRuntime::new(source, std::collections::HashMap::new());
+        runtime.register_npc_script("a", "string Name=\"Renamed\"; int Think=10000; int Look=1000; int Attack1=65535; int self; OnInit(int id){ self=id; } OnStart(){ UpdateAIAttrib(self); }").unwrap();
+        runtime.start().unwrap();
+        runtime.run_npc_init(1).unwrap();
+
+        runtime.host_mut().register_char("Before", 1);
+        let mut app = App::new();
+        app.insert_resource(StageMissionRuntime::from_script(runtime))
+            .add_systems(Update, consume_mission_attribute_updates);
+        let npc = app
+            .world_mut()
+            .spawn((
+                MissionNpc {
+                    id: 1,
+                    name: "Before".into(),
+                    team: 2,
+                    in_scene_roster: true,
+                    view: 400.0,
+                    think: 100.0,
+                    forced_behavior: Some(meteor_ai::behavior::BehaviorMode::Wait),
+                    is_vip: false,
+                    attack_target_slot: None,
+                    behavior_args: Vec::new(),
+                    attack_target_remaining: 0,
+                },
+                NpcCombatProfile {
+                    attack2: 25.0,
+                    guard: 20.0,
+                    get_item: 50.0,
+                    ..default()
+                },
+                crate::plugins::ai_plugin::NpcPatrol::default(),
+            ))
+            .id();
+        app.update();
+        let host = app
+            .world()
+            .resource::<StageMissionRuntime>()
+            .script()
+            .unwrap()
+            .host();
+        assert_eq!(host.char_id("Before"), None);
+        assert_eq!(host.char_id("Renamed"), Some(1));
+        let actor = app.world().get::<MissionNpc>(npc).unwrap();
+        let profile = app.world().get::<NpcCombatProfile>(npc).unwrap();
+        assert_eq!(
+            (actor.name.as_str(), actor.team, actor.view, actor.think),
+            ("Renamed", 2, 400.0, 10000.0)
+        );
+        assert_eq!(
+            (
+                profile.look,
+                profile.attack1,
+                profile.attack2,
+                profile.guard,
+                profile.get_item
+            ),
+            (1000.0, -1.0, 25.0, 20.0, 50.0)
+        );
     }
 }

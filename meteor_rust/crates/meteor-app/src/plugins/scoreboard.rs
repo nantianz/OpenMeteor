@@ -1,10 +1,13 @@
 use super::{
-    battle_result::{score_rows, ScoreRow},
+    battle_result::{
+        local_player_id, offline_actor_id, offline_player_team, score_rows, OfflineScores, ScoreRow,
+    },
     launcher_ui::UiFont,
     network_plugin::{NetState, NetStatus},
+    stage_plugin::{LocalFighter, MissionNpc},
 };
 use crate::app_state::{AppState, LaunchRequest};
-use crate::components::fighter::KillScore;
+use crate::components::fighter::{Fighter, KillScore, MatchEnd};
 use bevy::prelude::*;
 
 #[derive(Default)]
@@ -85,7 +88,75 @@ struct PingHud;
 pub struct ScoreboardPlugin;
 impl Plugin for ScoreboardPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, update.after(super::fighter_frame::SerialFighterSet));
+        app.init_resource::<OfflineScores>()
+            .add_systems(
+                OnEnter(AppState::Loading),
+                |mut scores: ResMut<OfflineScores>| *scores = default(),
+            )
+            .add_systems(
+                Update,
+                (capture_offline_roster, update)
+                    .chain()
+                    .after(super::fighter_frame::SerialFighterSet),
+            );
+    }
+}
+
+fn scoreboard_mode<'a>(net: &'a NetState, request: &'a LaunchRequest) -> &'a str {
+    if net.mode.is_empty() {
+        request.mode.as_str()
+    } else {
+        net.mode.as_str()
+    }
+}
+
+fn auto_show_scoreboard(end: &MatchEnd, net: &NetState) -> bool {
+    end.settled && net.battle_result.is_none()
+}
+
+fn capture_offline_roster(
+    state: Res<State<AppState>>,
+    net: Res<NetState>,
+    request: Res<LaunchRequest>,
+    room: Option<Res<crate::app_state::RoomState>>,
+    mut scores: ResMut<OfflineScores>,
+    fighters: Query<(&Fighter, Option<&MissionNpc>, Option<&LocalFighter>)>,
+) {
+    if *state.get() != AppState::Playing || net.status == NetStatus::InRoom {
+        return;
+    }
+    for (fighter, npc, local) in &fighters {
+        if npc.is_some_and(|npc| !npc.in_scene_roster) {
+            continue;
+        }
+        let id = offline_actor_id(local.is_some(), npc.map(|npc| npc.id), fighter.player_slot);
+        let name = super::system_notice::resolve_local_combatant_name(
+            &request,
+            &net,
+            room.as_deref()
+                .unwrap_or(&crate::app_state::RoomState::default()),
+            local.is_some(),
+            None,
+            npc.map(|npc| npc.name.as_str()),
+            fighter.player_slot,
+        );
+        scores.roster.insert(
+            id.clone(),
+            ScoreRow {
+                id,
+                name,
+                team: npc.map_or(
+                    if local.is_some() {
+                        offline_player_team(&request)
+                    } else {
+                        0
+                    },
+                    |npc| npc.team as i32,
+                ),
+                kills: 0,
+                deaths: 0,
+            },
+        );
     }
 }
 
@@ -95,24 +166,32 @@ fn update(
     state: Res<State<AppState>>,
     keys: Res<ButtonInput<KeyCode>>,
     net: Res<NetState>,
+    end: Res<MatchEnd>,
     request: Res<LaunchRequest>,
     score: Res<KillScore>,
     font: Res<UiFont>,
+    offline: Option<Res<OfflineScores>>,
     boards: Query<Entity, With<Board>>,
     mut hud: Query<(Entity, &mut Text), With<PingHud>>,
     mut previous: Local<String>,
 ) {
-    let playing = *state.get() == AppState::Playing && net.status == NetStatus::InRoom;
-    let label = format!(
-        "{} Ping {}",
-        if net.is_stock_udp() {
-            "房主"
-        } else {
-            "服务器"
-        },
-        ping(&net, &net.player_id)
-    );
-    if !playing {
+    let playing = *state.get() == AppState::Playing;
+    let in_room = net.status == NetStatus::InRoom;
+    let auto = auto_show_scoreboard(&end, &net);
+    let label = if in_room {
+        format!(
+            "{} Ping {}",
+            if net.is_stock_udp() {
+                "房主"
+            } else {
+                "服务器"
+            },
+            ping(&net, &net.player_id)
+        )
+    } else {
+        "本地对局".into()
+    };
+    if !playing || !in_room {
         for (entity, _) in &hud {
             commands.entity(entity).despawn();
         }
@@ -139,19 +218,36 @@ fn update(
             },
         ));
     }
-    if !playing || !keys.pressed(KeyCode::Tab) {
+
+    let show = playing && (keys.pressed(KeyCode::Tab) || auto);
+    if !show {
         for entity in &boards {
             commands.entity(entity).despawn();
         }
         previous.clear();
         return;
     }
-    let groups = groups(&net.mode, score_rows(&net, &request, &score));
+    let groups = groups(
+        scoreboard_mode(&net, &request),
+        if in_room {
+            score_rows(&net, &request, &score)
+        } else {
+            offline
+                .as_deref()
+                .unwrap_or(&OfflineScores::default())
+                .rows(&request, &score)
+        },
+    );
     let pings: Vec<_> = groups
         .iter()
         .flat_map(|(_, rows)| rows.iter().map(|row| ping(&net, &row.id)))
         .collect();
-    let signature = format!("{label}{groups:?}{pings:?}");
+    let footer = if auto {
+        "战局已结束"
+    } else {
+        "TAB  松开收起"
+    };
+    let signature = format!("{label}{footer}{groups:?}{pings:?}");
     if *previous == signature && !boards.is_empty() {
         return;
     }
@@ -174,7 +270,7 @@ fn update(
             },
         ))
         .with_children(|root| {
-            spawn_panel(root, &font, &net, &label, groups);
+            spawn_panel(root, &font, &net, &label, footer, groups);
         });
 }
 
@@ -191,10 +287,12 @@ fn spawn_panel(
     font: &UiFont,
     net: &NetState,
     label: &str,
+    footer: &str,
     groups: Vec<(&str, Vec<ScoreRow>)>,
 ) {
     use super::ui_theme as theme;
     let solo = groups.len() == 1;
+    let local_id = local_player_id(net);
     root.spawn((
         super::launcher_ui::scrollable_y(Node {
             width: Val::Percent(90.0),
@@ -315,7 +413,7 @@ fn spawn_panel(
                                 ));
                             }
                             for (rank, row) in rows.into_iter().enumerate() {
-                                let local = row.id == net.player_id;
+                                let local = row.id == local_id;
                                 let name = if local {
                                     format!("{} · 你", row.name)
                                 } else {
@@ -341,7 +439,7 @@ fn spawn_panel(
                 }
             });
         panel.spawn((
-            Text::new("TAB  松开收起"),
+            Text::new(footer),
             label_font(font, 10.0),
             TextColor(theme::MUTED),
             Node {
@@ -433,6 +531,65 @@ fn spawn_table_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "original-assets")]
+    #[test]
+    fn real_sn13_scoreboard_uses_combat_team_instead_of_menu_camp() {
+        use bevy::ecs::system::RunSystemOnce;
+        for camp in [0, 2] {
+            let (_, actors) = crate::plugins::stage_plugin::solo_identity_tests::sn13();
+            let request = LaunchRequest {
+                stock_camp: camp,
+                ..default()
+            };
+            let mut app = App::new();
+            app.insert_resource(State::new(AppState::Playing))
+                .init_resource::<NetState>()
+                .insert_resource(request.clone())
+                .init_resource::<OfflineScores>();
+            let fighter = Fighter {
+                character_id: 0,
+                player_slot: 0,
+                weapon: 6,
+                weapon_slots: [6, 0],
+                weapon_slot: 0,
+                weapon_slot_variants: [0, 0],
+                weapon_variant: 0,
+            };
+            app.world_mut().spawn((fighter.clone(), LocalFighter));
+            for npc in actors {
+                app.world_mut().spawn((fighter.clone(), npc));
+            }
+            app.world_mut()
+                .run_system_once(capture_offline_roster)
+                .unwrap();
+            let rows = app
+                .world()
+                .resource::<OfflineScores>()
+                .rows(&request, &KillScore::default());
+            assert_eq!(rows.iter().find(|row| row.id == "local").unwrap().team, 1);
+            assert_eq!(rows.iter().find(|row| row.name == "冷燕").unwrap().team, 1);
+            assert_eq!(
+                rows.iter()
+                    .find(|row| row.name == "捕头﹒王强")
+                    .unwrap()
+                    .team,
+                2
+            );
+            assert!(groups("single", rows)
+                .iter()
+                .all(|(name, _)| *name != "无阵营"));
+            assert_eq!(
+                OfflineScores::default().rows(&request, &KillScore::default())[0].team,
+                1
+            );
+            assert_eq!(
+                score_rows(&NetState::default(), &request, &KillScore::default())[0].team,
+                1
+            );
+        }
+    }
+
     #[test]
     fn tab_overlay_releases_and_leaving_cleans_hud() {
         let mut app = App::new();
@@ -445,6 +602,7 @@ mod tests {
             })
             .init_resource::<LaunchRequest>()
             .init_resource::<KillScore>()
+            .init_resource::<MatchEnd>()
             .init_resource::<ButtonInput<KeyCode>>()
             .insert_resource(UiFont(Handle::default()))
             .add_systems(Update, update);
@@ -487,6 +645,77 @@ mod tests {
                 .count(),
             0
         );
+    }
+
+    #[test]
+    fn solo_tab_and_settlement_show_scoreboard_without_room() {
+        let mut app = App::new();
+        app.insert_resource(State::new(AppState::Playing))
+            .insert_resource(NetState::default())
+            .insert_resource(LaunchRequest {
+                player_name: "剑客".into(),
+                mode: "leader".into(),
+                ..default()
+            })
+            .insert_resource(KillScore {
+                player_kills: 3,
+                npc_kills: 1,
+            })
+            .init_resource::<MatchEnd>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .insert_resource(UiFont(Handle::default()))
+            .add_systems(Update, update);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Tab);
+        app.update();
+        assert_eq!(
+            app.world_mut()
+                .query_filtered::<Entity, With<Board>>()
+                .iter(app.world())
+                .count(),
+            1,
+            "solo play must honor Tab without InRoom"
+        );
+        assert_eq!(
+            app.world_mut()
+                .query_filtered::<Entity, With<PingHud>>()
+                .iter(app.world())
+                .count(),
+            0,
+            "offline play has no transport ping hud"
+        );
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release(KeyCode::Tab);
+        app.update();
+        assert_eq!(
+            app.world_mut()
+                .query_filtered::<Entity, With<Board>>()
+                .iter(app.world())
+                .count(),
+            0
+        );
+        app.world_mut().resource_mut::<MatchEnd>().settled = true;
+        app.update();
+        assert_eq!(
+            app.world_mut()
+                .query_filtered::<Entity, With<Board>>()
+                .iter(app.world())
+                .count(),
+            1,
+            "settlement must keep the Tab scoreboard visible"
+        );
+        assert!(app
+            .world_mut()
+            .query::<&Text>()
+            .iter(app.world())
+            .any(|text| text.0.contains("战局已结束")));
+        assert!(app
+            .world_mut()
+            .query::<&Text>()
+            .iter(app.world())
+            .any(|text| text.0.contains("剑客")));
     }
 
     #[test]

@@ -3,7 +3,7 @@ use crate::stock_udp::{
     StockDiscoveryInfo, StockPacketError, StockReliability, STOCK_FLAG_XOR_BODY,
     STOCK_MAX_DATAGRAM_BYTES, STOCK_PACKET_TYPE_APPLICATION, STOCK_PACKET_TYPE_CONNECT,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, ToSocketAddrs, UdpSocket};
 
@@ -13,6 +13,8 @@ pub const STOCK_PING_INTERVAL_MS: u64 = 1_000;
 pub const STOCK_LAN_DEFAULT_PORT: u16 = 5_230;
 pub const STOCK_DISCOVERY_INTERVAL_MS: u64 = 1_000;
 pub const STOCK_DISCOVERY_ROOM_TTL_MS: u64 = 3_500;
+
+pub const STOCK_DISCOVERY_MAX_RTT_MS: u32 = 3_000;
 
 pub const STOCK_IDLE_TIMEOUT_MS: u64 = 10_000;
 
@@ -65,6 +67,8 @@ pub struct StockDiscoveredRoom {
     pub endpoint: SocketAddr,
     pub info: StockDiscoveryInfo,
     pub last_seen_ms: u64,
+
+    pub round_trip_ms: u32,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -87,6 +91,7 @@ pub struct StockDiscoveryClient {
     query: String,
     reliability: StockReliability,
     last_query_ms: Option<u64>,
+    recent_queries: VecDeque<u32>,
     rooms: HashMap<SocketAddr, StockDiscoveredRoom>,
     metadata_queries: HashMap<SocketAddr, (u32, u8)>,
 }
@@ -118,6 +123,7 @@ impl StockDiscoveryClient {
             query: query.into(),
             reliability: StockReliability::default(),
             last_query_ms: None,
+            recent_queries: VecDeque::new(),
             rooms: HashMap::new(),
             metadata_queries: HashMap::new(),
         })
@@ -151,6 +157,7 @@ impl StockDiscoveryClient {
                 self.query.clone(),
                 format!("{}:meteor-v1", self.query),
                 format!("{}:meteor-v2", self.query),
+                format!("{}:meteor-v4", self.query),
             ] {
                 let packet = StockControlPacket::Discover {
                     sent_at: now_ms as u32,
@@ -161,7 +168,10 @@ impl StockDiscoveryClient {
                 self.socket.send_to(&packet, self.destination)?;
             }
             self.last_query_ms = Some(now_ms);
+            self.recent_queries.push_back(now_ms as u32);
         }
+        self.recent_queries
+            .retain(|sent_at| (now_ms as u32).wrapping_sub(*sent_at) <= STOCK_DISCOVERY_MAX_RTT_MS);
 
         let mut buffer = [0u8; STOCK_MAX_DATAGRAM_BYTES];
         loop {
@@ -178,10 +188,14 @@ impl StockDiscoveryClient {
             else {
                 continue;
             };
-            if self.last_query_ms.map(|time| time as u32) != Some(sent_at) {
+            let round_trip_ms = (now_ms as u32).wrapping_sub(sent_at);
+            if round_trip_ms > STOCK_DISCOVERY_MAX_RTT_MS || !self.recent_queries.contains(&sent_at)
+            {
                 continue;
             }
-            let version = if info.starts_with(b"MRD2") {
+            let version = if info.starts_with(b"MRD4") {
+                4
+            } else if info.starts_with(b"MRD2") {
                 2
             } else {
                 u8::from(info.starts_with(b"MRD1"))
@@ -189,25 +203,39 @@ impl StockDiscoveryClient {
             let Ok(mut info) = StockDiscoveryInfo::decode_room_summary(&info) else {
                 continue;
             };
-            let endpoint = SocketAddr::new(peer.ip(), info.port);
+            let endpoint = peer;
+            if self
+                .metadata_queries
+                .get(&endpoint)
+                .is_some_and(|&(time, _)| {
+                    time != sent_at && (now_ms as u32).wrapping_sub(time) < round_trip_ms
+                })
+            {
+                continue;
+            }
             if self
                 .metadata_queries
                 .get(&endpoint)
                 .is_some_and(|&(time, previous)| time == sent_at && previous > version)
             {
                 if let Some(room) = self.rooms.get(&endpoint) {
+                    info.rebalance_enabled = room.info.rebalance_enabled;
                     info.stage_id = room.info.stage_id.clone();
                     info.server_name = room.info.server_name.clone();
                 }
             } else {
                 self.metadata_queries.insert(endpoint, (sent_at, version));
             }
+            let round_trip_ms = self.rooms.get(&endpoint).map_or(round_trip_ms, |previous| {
+                (previous.round_trip_ms + round_trip_ms) / 2
+            });
             self.rooms.insert(
                 endpoint,
                 StockDiscoveredRoom {
                     endpoint,
                     info,
                     last_seen_ms: now_ms,
+                    round_trip_ms,
                 },
             );
         }
@@ -533,6 +561,8 @@ pub struct StockServerTransport {
     discovery_info: StockDiscoveryInfo,
 
     room_password: String,
+
+    max_players: i32,
     pending: HashMap<SocketAddr, PendingChallenge>,
     peers: HashMap<SocketAddr, StockServerPeer>,
     next_transport_id: u32,
@@ -567,6 +597,7 @@ impl StockServerTransport {
             discovery_query: discovery_query.into(),
             discovery_info,
             room_password: String::new(),
+            max_players: 16,
             pending: HashMap::new(),
             peers: HashMap::new(),
             next_transport_id: 1,
@@ -582,6 +613,16 @@ impl StockServerTransport {
         self.peers.len()
     }
 
+    pub fn set_max_players(&mut self, max_players: i32) {
+        self.max_players = max_players;
+
+        self.discovery_info.fields_0_to_6[4] = max_players.clamp(0, 254) as u8;
+    }
+
+    pub fn max_players(&self) -> i32 {
+        self.max_players
+    }
+
     pub fn set_discovery_stage(&mut self, stage: Option<String>) {
         self.discovery_info.fields_0_to_6[2] = stage
             .as_deref()
@@ -590,6 +631,10 @@ impl StockServerTransport {
             .filter(|number| (1..=254).contains(number))
             .unwrap_or(0);
         self.discovery_info.stage_id = stage;
+    }
+
+    pub fn set_discovery_rebalance_enabled(&mut self, enabled: bool) {
+        self.discovery_info.rebalance_enabled = Some(enabled);
     }
 
     pub fn set_discovery_rule(&mut self, rule: u8) {
@@ -771,6 +816,19 @@ impl StockServerTransport {
                         log::debug!("[stock-lan] connect ignored from {peer}: challenge mismatch");
                         continue;
                     }
+                    if !self.peers.contains_key(&peer)
+                        && (self.max_players <= 0 || self.peers.len() >= self.max_players as usize)
+                    {
+                        self.pending.remove(&peer);
+                        self.send_untracked_control(
+                            peer,
+                            &StockControlPacket::Disconnect {
+                                reason: STOCK_REJECT_FULL,
+                            },
+                            0,
+                        )?;
+                        continue;
+                    }
                     let (transport_id, inserted) = if let Some(record) = self.peers.get_mut(&peer) {
                         if !record.reliability.accept_datagram(&datagram) {
                             continue;
@@ -847,7 +905,8 @@ impl StockServerTransport {
                     if query.is_empty()
                         || query == self.discovery_query
                         || query == format!("{}:meteor-v1", self.discovery_query)
-                        || query == format!("{}:meteor-v2", self.discovery_query) =>
+                        || query == format!("{}:meteor-v2", self.discovery_query)
+                        || query == format!("{}:meteor-v4", self.discovery_query) =>
                 {
                     let extended = query == format!("{}:meteor-v1", self.discovery_query);
                     let mut info = self.discovery_info.clone();
@@ -860,7 +919,9 @@ impl StockServerTransport {
                         peer,
                         &StockControlPacket::DiscoverReply {
                             sent_at,
-                            info: if query == format!("{}:meteor-v2", self.discovery_query) {
+                            info: if query == format!("{}:meteor-v4", self.discovery_query) {
+                                info.encode_rules_room_summary()?
+                            } else if query == format!("{}:meteor-v2", self.discovery_query) {
                                 info.encode_unicode_room_summary()?
                             } else if extended {
                                 info.encode_room_summary()?
@@ -1114,6 +1175,237 @@ mod tests {
     }
 
     #[test]
+    fn host_capacity_counts_the_loopback_host_and_rejects_only_new_members() {
+        let mut server =
+            StockServerTransport::bind("127.0.0.1:0", "serverlist", "capacity").unwrap();
+        server.set_max_players(1);
+        assert_eq!(server.discovery_info.max_players(), Some(1));
+        let address = server.local_addr().unwrap();
+        let mut host =
+            StockClientTransport::bind("127.0.0.1:0", address, StockConnectRecord::for_open_room())
+                .unwrap();
+        for now in 0..100 {
+            std::thread::sleep(std::time::Duration::from_micros(50));
+            host.tick(now).unwrap();
+            server.tick(now).unwrap();
+        }
+        assert_eq!(host.state(), StockClientState::Connected);
+        assert_eq!(server.peer_count(), 1);
+
+        let retry = StockControlPacket::Connect {
+            cookie: host.cookie,
+            record: host.connect_record.clone(),
+        }
+        .encode(0)
+        .unwrap();
+        host.socket.send_to(&retry, address).unwrap();
+        server.tick(101).unwrap();
+        host.tick(102).unwrap();
+        assert_eq!(host.state(), StockClientState::Connected);
+        let mut guest =
+            StockClientTransport::bind("127.0.0.1:0", address, StockConnectRecord::for_open_room())
+                .unwrap();
+        let mut rejected = false;
+        for now in 103..200 {
+            std::thread::sleep(std::time::Duration::from_micros(50));
+            rejected |= guest.tick(now).unwrap().iter().any(|event| {
+                matches!(
+                    event,
+                    StockSessionEvent::Disconnected {
+                        reason: STOCK_REJECT_FULL,
+                        ..
+                    }
+                )
+            });
+            server.tick(now).unwrap();
+        }
+        assert!(rejected);
+        assert_eq!(server.peer_count(), 1);
+        host.disconnect(0).unwrap();
+        for _ in 0..100 {
+            std::thread::sleep(std::time::Duration::from_micros(50));
+            server.tick(201).unwrap();
+            if server.peer_count() == 0 {
+                break;
+            }
+        }
+        assert_eq!(server.peer_count(), 0);
+        let mut replacement =
+            StockClientTransport::bind("127.0.0.1:0", address, StockConnectRecord::for_open_room())
+                .unwrap();
+        for now in 202..300 {
+            std::thread::sleep(std::time::Duration::from_micros(50));
+            replacement.tick(now).unwrap();
+            server.tick(now).unwrap();
+        }
+        assert_eq!(replacement.state(), StockClientState::Connected);
+        assert_eq!(server.peer_count(), 1);
+        server.set_max_players(20);
+        assert_eq!(server.max_players(), 20);
+        assert_eq!(server.discovery_info.max_players(), Some(20));
+    }
+
+    #[test]
+    fn nonpositive_lan_capacity_rejects_the_first_member() {
+        for maximum in [0, -1] {
+            let mut server =
+                StockServerTransport::bind("127.0.0.1:0", "serverlist", "closed").unwrap();
+            server.set_max_players(maximum);
+            let mut client = StockClientTransport::bind(
+                "127.0.0.1:0",
+                server.local_addr().unwrap(),
+                StockConnectRecord::for_open_room(),
+            )
+            .unwrap();
+            let mut rejected = false;
+            for now in 0..100 {
+                std::thread::sleep(std::time::Duration::from_micros(50));
+                rejected |= client.tick(now).unwrap().iter().any(|event| {
+                    matches!(
+                        event,
+                        StockSessionEvent::Disconnected {
+                            reason: STOCK_REJECT_FULL,
+                            ..
+                        }
+                    )
+                });
+                server.tick(now).unwrap();
+            }
+            assert!(rejected);
+            assert_eq!(server.peer_count(), 0);
+        }
+    }
+
+    fn discover_until(
+        browser: &mut StockDiscoveryClient,
+        now_ms: u64,
+        matches: impl Fn(&[StockDiscoveredRoom]) -> bool,
+    ) -> Vec<StockDiscoveredRoom> {
+        for _ in 0..100 {
+            std::thread::sleep(std::time::Duration::from_micros(50));
+            let rooms = browser.tick(now_ms).unwrap();
+            if matches(&rooms) {
+                return rooms;
+            }
+        }
+        panic!("discovery reply was not received");
+    }
+
+    #[test]
+    fn discovery_accepts_slow_queries_uses_source_port_and_rejects_older_generations() {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let address = socket.local_addr().unwrap();
+        let mut browser =
+            StockDiscoveryClient::bind_with_destination("127.0.0.1:0", address, "serverlist")
+                .unwrap();
+        for now in [0, 1000, 2000] {
+            browser.tick(now).unwrap();
+        }
+        let reply = |sent_at, name| {
+            let info = StockDiscoveryInfo::default_room(5230, name, "127.0.0.1");
+            let bytes = StockControlPacket::DiscoverReply {
+                sent_at,
+                info: info.encode().unwrap(),
+            }
+            .encode(0)
+            .unwrap();
+            socket
+                .send_to(&bytes, browser.local_addr().unwrap())
+                .unwrap();
+        };
+        reply(0, "slow");
+        let rooms = discover_until(&mut browser, 2500, |rooms| !rooms.is_empty());
+        assert_eq!(rooms.len(), 1);
+        assert_eq!(rooms[0].endpoint, address);
+        assert_eq!(rooms[0].round_trip_ms, 2500);
+        let info = StockDiscoveryInfo::default_room(5230, "fresh", "127.0.0.1");
+        socket
+            .send_to(
+                &StockControlPacket::DiscoverReply {
+                    sent_at: 2000,
+                    info: info.encode().unwrap(),
+                }
+                .encode(0)
+                .unwrap(),
+                browser.local_addr().unwrap(),
+            )
+            .unwrap();
+        let rooms = discover_until(&mut browser, 2600, |rooms| {
+            rooms
+                .first()
+                .is_some_and(|room| room.info.server_name == "fresh")
+        });
+        assert_eq!(rooms[0].round_trip_ms, 1550);
+        assert_eq!(rooms[0].info.server_name, "fresh");
+        for sent_at in [1000, 999] {
+            socket
+                .send_to(
+                    &StockControlPacket::DiscoverReply {
+                        sent_at,
+                        info: info.encode().unwrap(),
+                    }
+                    .encode(0)
+                    .unwrap(),
+                    browser.local_addr().unwrap(),
+                )
+                .unwrap();
+        }
+        for _ in 0..10 {
+            std::thread::sleep(std::time::Duration::from_micros(50));
+            browser.tick(2700).unwrap();
+        }
+        let rooms = browser.rooms();
+        assert_eq!(
+            rooms[0].last_seen_ms, 2600,
+            "old/unrequested replies cannot refresh a room"
+        );
+        socket
+            .send_to(
+                &StockControlPacket::DiscoverReply {
+                    sent_at: 0,
+                    info: info.encode().unwrap(),
+                }
+                .encode(0)
+                .unwrap(),
+                browser.local_addr().unwrap(),
+            )
+            .unwrap();
+        assert_eq!(browser.tick(3001).unwrap()[0].last_seen_ms, 2600);
+    }
+
+    #[test]
+    fn discovery_rtt_window_includes_three_seconds_and_wraps_the_wire_clock() {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let address = socket.local_addr().unwrap();
+        let mut browser =
+            StockDiscoveryClient::bind_with_destination("127.0.0.1:0", address, "serverlist")
+                .unwrap();
+        let start = u64::from(u32::MAX) - 500;
+        browser.tick(start).unwrap();
+        let info = StockDiscoveryInfo::default_room(address.port(), "wrapped", "127.0.0.1");
+        let bytes = StockControlPacket::DiscoverReply {
+            sent_at: start as u32,
+            info: info.encode().unwrap(),
+        }
+        .encode(0)
+        .unwrap();
+        socket
+            .send_to(&bytes, browser.local_addr().unwrap())
+            .unwrap();
+        assert_eq!(
+            discover_until(&mut browser, start + 3000, |rooms| !rooms.is_empty())[0].round_trip_ms,
+            3000
+        );
+        socket
+            .send_to(&bytes, browser.local_addr().unwrap())
+            .unwrap();
+        assert_eq!(
+            browser.tick(start + 3001).unwrap()[0].last_seen_ms,
+            start + 3000
+        );
+    }
+
+    #[test]
     fn native_room_browser_discovers_deduplicates_and_expires_stock_rooms() {
         let mut server = StockServerTransport::bind("127.0.0.1:0", "serverlist", "原版房间3️⃣")
             .expect("server binds");
@@ -1128,15 +1420,13 @@ mod tests {
         let room = (1..500).find_map(|now_ms| {
             server.tick(now_ms).unwrap();
             let rooms = browser.tick(now_ms).unwrap();
-            if let Some(room) = rooms.into_iter().find(|room| {
-                room.info.server_name == "原版房间3️⃣"
-                    && room.info.stage_id.as_deref() == Some("sn03")
-            }) {
-                Some(room)
-            } else {
+            let room = rooms
+                .into_iter()
+                .find(|room| room.info.server_name == "原版房间3️⃣" && room.info.stage_id.as_deref() == Some("sn03"));
+            if room.is_none() {
                 std::thread::sleep(std::time::Duration::from_micros(50));
-                None
             }
+            room
         });
         let room = room.expect("stock room is discovered");
         assert_eq!(room.endpoint, server_addr);
@@ -1176,9 +1466,11 @@ mod tests {
             StockDiscoveryClient::bind_with_destination("127.0.0.1:0", address, "serverlist")
                 .unwrap();
         let mut info = StockDiscoveryInfo::default_room(address.port(), "房间3️⃣🦋", "127.0.0.1");
+        info.rebalance_enabled = Some(true);
         info.stage_id = Some("sn04".into());
         browser.tick(0).unwrap();
         for payload in [
+            info.encode_rules_room_summary().unwrap(),
             info.encode_unicode_room_summary().unwrap(),
             info.encode_room_summary().unwrap(),
             info.encode().unwrap(),
@@ -1201,6 +1493,10 @@ mod tests {
         }
         assert_eq!(browser.rooms()[0].info.stage_id.as_deref(), Some("sn04"));
         assert_eq!(browser.rooms()[0].info.server_name, "房间3️⃣🦋");
+        assert_eq!(
+            browser.rooms()[0].info.rebalance_enabled,
+            info.rebalance_enabled
+        );
         browser.refresh();
         browser.tick(1000).unwrap();
         for (sent_at, payload) in [
@@ -1218,11 +1514,18 @@ mod tests {
                 .unwrap();
         }
         for now in 1001..1500 {
-            if browser.tick(now).unwrap()[0].last_seen_ms > 1000 {
+            browser.tick(now).unwrap();
+
+            if browser
+                .metadata_queries
+                .get(&address)
+                .is_some_and(|&(sent_at, _)| sent_at == 1000)
+            {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_micros(50));
         }
+        assert_eq!(browser.rooms()[0].info.rebalance_enabled, None);
         assert_eq!(browser.rooms()[0].info.stage_id, None);
         assert_eq!(browser.rooms()[0].info.server_name, "房间3???");
     }

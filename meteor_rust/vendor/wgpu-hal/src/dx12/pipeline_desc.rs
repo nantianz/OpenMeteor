@@ -1,5 +1,3 @@
-
-
 use core::{ffi::c_void, mem::ManuallyDrop, ptr::NonNull};
 
 use alloc::vec::Vec;
@@ -77,7 +75,6 @@ pub(super) struct RenderPipelineStateStream<'a> {
 
 impl<'a> RenderPipelineStateStream<'a> {
     fn new() -> Self {
-
         let size_of_stream_desc = size_of::<RenderPipelineStateStreamDesc>();
         let members = 20;
         let capacity = size_of_stream_desc + members * 8;
@@ -93,8 +90,8 @@ impl<'a> RenderPipelineStateStream<'a> {
     }
 
     fn add_object<T: RenderPipelineStreamObject>(&mut self, object: T) {
-
-        self.align_to(8);
+        let object_alignment = align_of::<*const c_void>().max(align_of::<T>());
+        self.align_to(object_alignment);
 
         let tag: u32 = T::SUBOBJECT_TYPE.0 as u32;
         self.bytes.extend_from_slice(&tag.to_ne_bytes());
@@ -106,6 +103,8 @@ impl<'a> RenderPipelineStateStream<'a> {
         let data_size = size_of_val::<T>(&object);
         let slice = unsafe { core::slice::from_raw_parts::<u8>(data_u8_ptr, data_size) };
         self.bytes.extend_from_slice(slice);
+
+        self.align_to(object_alignment);
     }
 
     pub unsafe fn create_pipeline_state(
@@ -272,5 +271,90 @@ mod tests {
         assert_eq!(&stream.bytes[20..24], &[0, 0, 0, 0]);
 
         assert_eq!(&stream.bytes[24..32], &168u64.to_ne_bytes());
+    }
+
+    #[test]
+    fn sample_description_does_not_insert_a_phantom_root_signature() {
+        let mut stream = RenderPipelineStateStream::new();
+        stream.add_object(DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        });
+        stream.add_object(D3D12_PIPELINE_STATE_FLAG_NONE);
+
+        let flags_offset = if cfg!(target_pointer_width = "32") {
+            12
+        } else {
+            16
+        };
+        assert_eq!(
+            &stream.bytes[flags_offset..flags_offset + 4],
+            &D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_FLAGS.0.to_ne_bytes(),
+        );
+        assert_eq!(stream.bytes.len(), flags_offset + 8);
+    }
+
+    #[test]
+    fn graphics_stream_matches_native_subobject_abi() {
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        struct Tagged<T: Copy> {
+            tag: D3D12_PIPELINE_STATE_SUBOBJECT_TYPE,
+            payload: T,
+        }
+        #[repr(C)]
+        union NativeSubobject<T: Copy> {
+            tagged: Tagged<T>,
+            pointer_alignment: *const c_void,
+        }
+
+        let mut stream = RenderPipelineStateStream::new();
+        let mut cursor = 0;
+        macro_rules! append_and_check {
+            ($value:expr, $ty:ty) => {{
+                let value: $ty = $value;
+                stream.add_object(value);
+                assert_eq!(
+                    &stream.bytes[cursor..cursor + 4],
+                    &<$ty as RenderPipelineStreamObject>::SUBOBJECT_TYPE
+                        .0
+                        .to_ne_bytes(),
+                );
+                cursor += size_of::<NativeSubobject<$ty>>();
+                assert_eq!(stream.bytes.len(), cursor);
+            }};
+        }
+        append_and_check!(RootSignature(None), RootSignature);
+        append_and_check!(D3D12_BLEND_DESC::default(), D3D12_BLEND_DESC);
+        append_and_check!(SampleMask(u32::MAX), SampleMask);
+        append_and_check!(D3D12_RASTERIZER_DESC::default(), D3D12_RASTERIZER_DESC);
+        append_and_check!(
+            D3D12_DEPTH_STENCIL_DESC::default(),
+            D3D12_DEPTH_STENCIL_DESC
+        );
+        append_and_check!(
+            D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE,
+            D3D12_PRIMITIVE_TOPOLOGY_TYPE
+        );
+        append_and_check!(D3D12_RT_FORMAT_ARRAY::default(), D3D12_RT_FORMAT_ARRAY);
+        append_and_check!(
+            DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0
+            },
+            DXGI_SAMPLE_DESC
+        );
+        append_and_check!(D3D12_PIPELINE_STATE_FLAG_NONE, D3D12_PIPELINE_STATE_FLAGS);
+        append_and_check!(PixelShader(D3D12_SHADER_BYTECODE::default()), PixelShader);
+        append_and_check!(VertexShader(D3D12_SHADER_BYTECODE::default()), VertexShader);
+        append_and_check!(D3D12_INPUT_LAYOUT_DESC::default(), D3D12_INPUT_LAYOUT_DESC);
+        append_and_check!(
+            D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED,
+            D3D12_INDEX_BUFFER_STRIP_CUT_VALUE
+        );
+        append_and_check!(
+            D3D12_STREAM_OUTPUT_DESC::default(),
+            D3D12_STREAM_OUTPUT_DESC
+        );
     }
 }

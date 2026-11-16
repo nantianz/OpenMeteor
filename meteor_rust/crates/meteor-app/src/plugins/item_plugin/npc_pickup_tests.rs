@@ -97,6 +97,90 @@ fn tick(app: &mut App, seconds: f32) {
 }
 
 #[test]
+fn r3_npc_christmas_items_tick_and_refresh_without_immediate_pulse() {
+    let (mut app, _, npc) = setup();
+    prop(&mut app, "hat", "item15");
+    prop(&mut app, "phone", "item16");
+    pickup(&mut app);
+    assert_eq!(app.world().get::<Health>(npc).unwrap().current, 100.0);
+    assert_eq!(app.world().get::<Qi>(npc).unwrap().current, 0.0);
+    tick(&mut app, 0.19);
+    assert_eq!(app.world().get::<Health>(npc).unwrap().current, 100.0);
+    tick(&mut app, 0.011);
+    assert_eq!(app.world().get::<Health>(npc).unwrap().current, 150.0);
+    assert_eq!(app.world().get::<Qi>(npc).unwrap().current, 1.0);
+    tick(&mut app, 0.099);
+    prop(&mut app, "hat2", "item15");
+    prop(&mut app, "phone2", "item16");
+    pickup(&mut app);
+    assert_eq!(app.world().get::<Health>(npc).unwrap().current, 150.0);
+    tick(&mut app, 0.101);
+    assert_eq!(app.world().get::<Health>(npc).unwrap().current, 200.0);
+    assert_eq!(app.world().get::<Qi>(npc).unwrap().current, 2.0);
+    app.world_mut().get_mut::<Health>(npc).unwrap().current = 990.0;
+    app.world_mut().get_mut::<Qi>(npc).unwrap().current = 100.0;
+    tick(&mut app, 0.2);
+    assert_eq!(app.world().get::<Health>(npc).unwrap().current, 1000.0);
+    assert_eq!(app.world().get::<Qi>(npc).unwrap().current, 100.0);
+    app.world_mut().get_mut::<Health>(npc).unwrap().current = 0.0;
+    tick(&mut app, 0.2);
+    assert_eq!(app.world().get::<Health>(npc).unwrap().current, 0.0);
+    assert!(app
+        .world()
+        .get::<FighterStatusEffects>(npc)
+        .unwrap()
+        .effects
+        .active
+        .is_empty());
+}
+
+#[test]
+fn r3_local_christmas_periodic_items_clamp_and_clear_on_death() {
+    let (mut app, player, npc) = setup();
+    app.world_mut().despawn(npc);
+    app.world_mut()
+        .get_mut::<Transform>(player)
+        .unwrap()
+        .translation = Vec3::ZERO;
+    app.init_resource::<crate::plugins::network_plugin::NetState>()
+        .add_message::<crate::plugins::render_plugin::OfflineWeaponDeathDrop>();
+    app.world_mut().entity_mut(player).insert((
+        crate::components::fighter::MotionState {
+            movement_mode: meteor_core::MovementMode::Idle,
+            velocity: Vec3::ZERO,
+            facing: 0.0,
+        },
+        SmState::default(),
+        CombatState::default(),
+        PoseRuntime::default(),
+    ));
+    prop(&mut app, "hat", "item15");
+    prop(&mut app, "phone", "item16");
+    pickup(&mut app);
+    assert_eq!(app.world().get::<Health>(player).unwrap().current, 100.0);
+    app.world_mut()
+        .resource_mut::<crate::plugins::FrameClock>()
+        .sim_dt = 0.201;
+    app.world_mut().run_system_once(tick_item_buffs).unwrap();
+    assert_eq!(app.world().get::<Health>(player).unwrap().current, 150.0);
+    assert_eq!(app.world().get::<Qi>(player).unwrap().current, 1.0);
+    app.world_mut().get_mut::<Health>(player).unwrap().current = 990.0;
+    app.world_mut().get_mut::<Qi>(player).unwrap().current = 100.0;
+    app.world_mut().run_system_once(tick_item_buffs).unwrap();
+    assert_eq!(app.world().get::<Health>(player).unwrap().current, 1000.0);
+    assert_eq!(app.world().get::<Qi>(player).unwrap().current, 100.0);
+    app.world_mut().get_mut::<Health>(player).unwrap().current = 0.0;
+    app.world_mut().run_system_once(tick_item_buffs).unwrap();
+    assert_eq!(app.world().get::<Health>(player).unwrap().current, 0.0);
+    assert!(app
+        .world()
+        .resource::<ItemBuffs>()
+        .periodic_effects
+        .active
+        .is_empty());
+}
+
+#[test]
 fn npc_pickup_heals_without_a_local_player_and_consumes_all_material_batches_once() {
     let (mut app, player, npc) = setup();
     app.world_mut().despawn(player);
@@ -105,6 +189,12 @@ fn npc_pickup_heals_without_a_local_player_and_consumes_all_material_batches_onc
     pickup(&mut app);
     pickup(&mut app);
     assert_eq!(app.world().get::<Health>(npc).unwrap().current, 400.0);
+    let mut requests = app
+        .world_mut()
+        .query::<&crate::plugins::effect_plugin::PickupEffectRequest>();
+    let effect = requests.single(app.world()).unwrap();
+    assert_eq!(effect.collector, npc);
+    assert_eq!(effect.effect, "GetItem");
     for entity in [a, b] {
         let item = app.world().get::<StageProp>(entity).unwrap();
         assert_eq!(item.hit_count, 1);

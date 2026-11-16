@@ -1,0 +1,282 @@
+{
+  "boundary": "Execute original primary/secondary mover contact-slot updates.\n\nThe actor/model ABI and scene-face enumeration use the established primitive\nharness. Mover 4ceb50, axis query 4cf1e0 and triangle instructions are native.\nThis does not emulate complete actor creation, AI, inputs or networking.\n",
+  "exeSha256": "baebb6d59e6da61e03660c57c31f842f8a3ec157f07d1e2f9bf8d78373a58619",
+  "cases": [
+    {
+      "fps": 30,
+      "startSource": [
+        -30.4,
+        0,
+        104.22857
+      ],
+      "primary": {
+        "flags": 16,
+        "positionSource": [
+          -30.399999618530273,
+          0.0,
+          104.22856903076172
+        ],
+        "externalSource": [
+          79.16543579101562,
+          0.0,
+          0.0
+        ],
+        "mainVelocitySource": [
+          7.0,
+          11.0,
+          13.0
+        ],
+        "support": 0
+      },
+      "secondary": {
+        "flags": 3,
+        "positionSource": [
+          -30.399999618530273,
+          0.0,
+          104.22856903076172
+        ],
+        "externalSource": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "mainVelocitySource": [
+          7.0,
+          11.0,
+          13.0
+        ],
+        "support": 0
+      }
+    },
+    {
+      "fps": 30,
+      "startSource": [
+        -30.4,
+        0,
+        104.4
+      ],
+      "primary": {
+        "flags": 16,
+        "positionSource": [
+          -30.399999618530273,
+          0.0,
+          104.4000015258789
+        ],
+        "externalSource": [
+          79.16543579101562,
+          0.0,
+          0.0
+        ],
+        "mainVelocitySource": [
+          7.0,
+          11.0,
+          13.0
+        ],
+        "support": 0
+      },
+      "secondary": {
+        "flags": 3,
+        "positionSource": [
+          -30.399999618530273,
+          0.0,
+          104.4000015258789
+        ],
+        "externalSource": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "mainVelocitySource": [
+          7.0,
+          11.0,
+          13.0
+        ],
+        "support": 0
+      }
+    },
+    {
+      "fps": 60,
+      "startSource": [
+        -30.4,
+        0,
+        104.22857
+      ],
+      "primary": {
+        "flags": 16,
+        "positionSource": [
+          -30.399999618530273,
+          0.0,
+          104.22856903076172
+        ],
+        "externalSource": [
+          71.2627182006836,
+          0.0,
+          0.0
+        ],
+        "mainVelocitySource": [
+          7.0,
+          11.0,
+          13.0
+        ],
+        "support": 0
+      },
+      "secondary": {
+        "flags": 3,
+        "positionSource": [
+          -30.399999618530273,
+          0.0,
+          104.22856903076172
+        ],
+        "externalSource": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "mainVelocitySource": [
+          7.0,
+          11.0,
+          13.0
+        ],
+        "support": 0
+      }
+    },
+    {
+      "fps": 60,
+      "startSource": [
+        -30.4,
+        0,
+        104.4
+      ],
+      "primary": {
+        "flags": 16,
+        "positionSource": [
+          -30.399999618530273,
+          0.0,
+          104.4000015258789
+        ],
+        "externalSource": [
+          71.2627182006836,
+          0.0,
+          0.0
+        ],
+        "mainVelocitySource": [
+          7.0,
+          11.0,
+          13.0
+        ],
+        "support": 0
+      },
+      "secondary": {
+        "flags": 3,
+        "positionSource": [
+          -30.399999618530273,
+          0.0,
+          104.4000015258789
+        ],
+        "externalSource": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "mainVelocitySource": [
+          7.0,
+          11.0,
+          13.0
+        ],
+        "support": 0
+      }
+    },
+    {
+      "fps": 120,
+      "startSource": [
+        -30.4,
+        0,
+        104.22857
+      ],
+      "primary": {
+        "flags": 16,
+        "positionSource": [
+          -30.399999618530273,
+          0.0,
+          104.22856903076172
+        ],
+        "externalSource": [
+          67.31135559082031,
+          0.0,
+          0.0
+        ],
+        "mainVelocitySource": [
+          7.0,
+          11.0,
+          13.0
+        ],
+        "support": 0
+      },
+      "secondary": {
+        "flags": 3,
+        "positionSource": [
+          -30.399999618530273,
+          0.0,
+          104.22856903076172
+        ],
+        "externalSource": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "mainVelocitySource": [
+          7.0,
+          11.0,
+          13.0
+        ],
+        "support": 0
+      }
+    },
+    {
+      "fps": 120,
+      "startSource": [
+        -30.4,
+        0,
+        104.4
+      ],
+      "primary": {
+        "flags": 16,
+        "positionSource": [
+          -30.399999618530273,
+          0.0,
+          104.4000015258789
+        ],
+        "externalSource": [
+          67.31135559082031,
+          0.0,
+          0.0
+        ],
+        "mainVelocitySource": [
+          7.0,
+          11.0,
+          13.0
+        ],
+        "support": 0
+      },
+      "secondary": {
+        "flags": 3,
+        "positionSource": [
+          -30.399999618530273,
+          0.0,
+          104.4000015258789
+        ],
+        "externalSource": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "mainVelocitySource": [
+          7.0,
+          11.0,
+          13.0
+        ],
+        "support": 0
+      }
+    }
+  ]
+}

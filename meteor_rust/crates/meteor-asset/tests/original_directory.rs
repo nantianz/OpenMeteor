@@ -151,6 +151,24 @@ fn direct_source_preserves_bytes_aliases_masks_and_patch_overrides_without_packs
 }
 
 #[test]
+fn external_shared_font_is_read_from_the_selected_installation() {
+    let fixture = Fixture::complete();
+    let ui = [("ui/studio-logo.png", b"logo".as_slice())];
+    let source = OriginalDirectory::open(&fixture.0, &ui).unwrap();
+    assert!(source.read("fonts/ui.ttf").is_err());
+
+    fixture.write("Fonts/UI.TTF", b"external shared font");
+    let source = OriginalDirectory::open(&fixture.0, &ui).unwrap();
+    assert_eq!(
+        source.read("fonts/ui.ttf").unwrap(),
+        b"external shared font"
+    );
+    assert_eq!(source.read("ui/studio-logo.png").unwrap(), b"logo");
+    source.verify_all().unwrap();
+    assert!(!fixture.0.join("packs").exists());
+}
+
+#[test]
 fn missing_and_corrupt_resources_report_the_source_path() {
     let fixture = Fixture::new();
     let error = OriginalDirectory::open(&fixture.0, &[]).err().unwrap();

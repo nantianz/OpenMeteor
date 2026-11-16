@@ -16,7 +16,7 @@ use bevy::render::render_resource::{
     AsBindGroup, BlendState, PrimitiveTopology, RenderPipelineDescriptor, ShaderType,
     SpecializedMeshPipelineError,
 };
-use bevy::shader::{Shader, ShaderRef};
+use bevy::shader::{Shader, ShaderDefVal, ShaderRef};
 use bevy::transform::TransformSystems;
 use std::collections::HashMap;
 
@@ -73,12 +73,23 @@ impl Material for BladeRippleMaterial {
         true
     }
 
+    fn enable_shadows() -> bool {
+        false
+    }
+
     fn specialize(
         _pipeline: &MaterialPipeline,
         descriptor: &mut RenderPipelineDescriptor,
         _layout: &MeshVertexBufferLayoutRef,
         _key: MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
+        if descriptor
+            .vertex
+            .shader_defs
+            .contains(&ShaderDefVal::Bool("PREPASS_PIPELINE".into(), true))
+        {
+            return Ok(());
+        }
         descriptor.primitive.cull_mode = None;
         if let Some(fragment) = descriptor.fragment.as_mut() {
             for target in fragment.targets.iter_mut().flatten() {
@@ -476,11 +487,7 @@ fn update_weapon_trail(
                     health.current > 0.0
                         && !death.active
                         && reaction.current.is_none()
-                        && !crate::plugins::combat_plugin::entry_blend_is_active(
-                            blend.duration,
-                            blend.pose_id,
-                            pose.pose_id,
-                        )
+                        && !blend.is_active_for(pose.pose_id)
                 })
         {
             if let Some((index, _)) =

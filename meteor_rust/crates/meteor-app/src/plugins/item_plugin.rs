@@ -4,6 +4,7 @@ use crate::components::fighter::{
 };
 use bevy::prelude::*;
 use meteor_combat::death::RESPAWN_DELAY_SECONDS;
+use meteor_combat::status_effects::{HitStatusEffects, StatusDelta};
 use meteor_core::FighterState;
 use meteor_network::protocol::{ItemEffectWire, ItemWeaponSlotWire, Message};
 use std::{collections::HashMap, path::PathBuf};
@@ -31,6 +32,15 @@ pub struct StageProp {
     pub broken: bool,
 }
 
+#[derive(Component, Debug, Clone, Copy)]
+pub(crate) struct SceneRecordOrder(pub usize);
+
+#[derive(Component, Debug, Clone, Copy)]
+pub(crate) struct StockSceneItemView {
+    pub record_id: u32,
+    pub available: bool,
+}
+
 impl StageProp {
     pub(crate) fn world_center(&self, transform: &Transform) -> Vec3 {
         transform.translation + transform.rotation * self.center_offset
@@ -50,6 +60,10 @@ pub fn is_breakable_model(model: &str) -> bool {
 
 #[derive(Resource, Debug, Clone)]
 pub struct ItemBuffs {
+    stat_buffs: Vec<TimedItemBuff>,
+    periodic_effects: HitStatusEffects,
+    periodic_elapsed: f64,
+
     pub attack_bonus: i32,
 
     pub defense_bonus: i32,
@@ -62,20 +76,25 @@ pub struct ItemBuffs {
     pub speed_factor: f32,
     pub speed_remaining: f32,
 
-    pub poison_per_tick: i32,
-    pub poison_tick_every: f32,
     pub poison_total: f32,
-    pub poison_tick: f32,
+}
 
-    pub anger_per_tick: i32,
-    pub anger_tick_every: f32,
-    pub anger_total: f32,
-    pub anger_tick: f32,
+impl ItemBuffs {
+    fn clear_on_death(&mut self, health: &mut Health, online: bool) {
+        if !online {
+            health.max = (health.max - self.max_hp_bonus as f32).max(1.0);
+            health.current = health.current.min(health.max);
+        }
+        *self = Self::default();
+    }
 }
 
 impl Default for ItemBuffs {
     fn default() -> Self {
         Self {
+            stat_buffs: Vec::new(),
+            periodic_effects: HitStatusEffects::default(),
+            periodic_elapsed: 0.0,
             attack_bonus: 0,
             defense_bonus: 0,
             remaining: 0.0,
@@ -83,14 +102,130 @@ impl Default for ItemBuffs {
             max_hp_remaining: 0.0,
             speed_factor: 1.0,
             speed_remaining: 0.0,
-            poison_per_tick: 0,
-            poison_tick_every: 0.0,
             poison_total: 0.0,
-            poison_tick: 0.0,
-            anger_per_tick: 0,
-            anger_tick_every: 0.0,
-            anger_total: 0.0,
-            anger_tick: 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TimedItemBuff {
+    model: String,
+    attack: i32,
+    defense: i32,
+    max_hp: i32,
+    speed: f32,
+    remaining: f32,
+}
+
+impl ItemBuffs {
+    pub(crate) fn refresh_periodic(&mut self, model: &str) {
+        let normalized = model.to_ascii_lowercase();
+        let model = normalized.as_str();
+        let Some((_, effect)) = item_effect_for(model) else {
+            return;
+        };
+        let id = match model {
+            "item0103" => 14,
+            "item15" => 32,
+            "item16" => 33,
+            "hot" => 39,
+            _ => return,
+        };
+        self.periodic_effects.apply(
+            meteor_asset::res::HitStatusEffect {
+                id,
+                duration: effect.duration,
+                tick_every: effect.health_tick_every.max(effect.anger_tick_every),
+                defer_first_tick: true,
+                health: effect.health_per_tick,
+                anger: effect.anger_per_tick,
+                speed_percent: None,
+                attack_bonus: 0,
+                defense_bonus: 0,
+                max_health_bonus: 0,
+                concealed: false,
+                worn_effect: None,
+            },
+            self.periodic_elapsed,
+        );
+        self.project_periodic();
+    }
+
+    pub(crate) fn tick_periodic(&mut self, dt: f32) -> (StatusDelta, bool) {
+        self.periodic_elapsed += f64::from(dt.max(0.0));
+        let delta = self
+            .periodic_effects
+            .tick_with_damage(self.periodic_elapsed);
+        self.project_periodic();
+        delta
+    }
+
+    fn project_periodic(&mut self) {
+        self.poison_total = self
+            .periodic_effects
+            .active
+            .iter()
+            .filter(|effect| effect.definition.health < 0)
+            .map(|effect| (effect.expires_at - self.periodic_elapsed).max(0.0) as f32)
+            .fold(0.0, f32::max);
+    }
+
+    fn refresh_stats(&mut self, model: &str, effect: &ItemEffect, remaining: f32) -> i32 {
+        let previous_max_hp = self.max_hp_bonus;
+        self.stat_buffs
+            .retain(|buff| !buff.model.eq_ignore_ascii_case(model));
+        if remaining > 0.0
+            && (effect.attack != 0
+                || effect.defense != 0
+                || effect.max_hp != 0
+                || effect.speed != 1.0)
+        {
+            self.stat_buffs.push(TimedItemBuff {
+                model: model.to_ascii_lowercase(),
+                attack: effect.attack,
+                defense: effect.defense,
+                max_hp: effect.max_hp,
+                speed: effect.speed,
+                remaining,
+            });
+        }
+        self.project_stats();
+        self.max_hp_bonus - previous_max_hp
+    }
+
+    fn tick_stats(&mut self, dt: f32) -> i32 {
+        let previous_max_hp = self.max_hp_bonus;
+        for buff in &mut self.stat_buffs {
+            buff.remaining -= dt.max(0.0);
+        }
+        self.stat_buffs.retain(|buff| buff.remaining > 0.0);
+        self.project_stats();
+        self.max_hp_bonus - previous_max_hp
+    }
+
+    fn project_stats(&mut self) {
+        self.attack_bonus = 0;
+        self.defense_bonus = 0;
+        self.remaining = 0.0;
+        self.max_hp_bonus = 0;
+        self.max_hp_remaining = 0.0;
+        self.speed_factor = 1.0;
+        self.speed_remaining = 0.0;
+        for buff in &self.stat_buffs {
+            self.attack_bonus += buff.attack;
+            self.defense_bonus += buff.defense;
+            if buff.attack != 0 || buff.defense != 0 {
+                self.remaining = self.remaining.max(buff.remaining);
+            }
+            self.max_hp_bonus += buff.max_hp;
+            if buff.max_hp != 0 {
+                self.max_hp_remaining = self.max_hp_remaining.max(buff.remaining);
+            }
+
+            self.speed_factor += buff.speed - 1.0;
+            if buff.speed != 1.0 {
+                self.speed_remaining = self.speed_remaining.max(buff.remaining);
+            }
         }
     }
 }
@@ -211,7 +346,7 @@ type NetworkItemFighterQuery<'w, 's> = Query<
 const PICKUP_RANGE: f32 = 16.0 * 0.12;
 
 const STOCK_PROP_MATCH_MAX_DISTANCE: f32 = PICKUP_RANGE * 2.0;
-const PICKUP_CAPSULE_HEIGHT: f32 = 1.8;
+const PICKUP_CAPSULE_HEIGHT: f32 = meteor_core::constants::CHARACTER_CONTACT_HEIGHT;
 
 pub const PROP_HIT_INTERVAL: f32 = 0.2;
 
@@ -243,7 +378,7 @@ pub(crate) fn drop_spare_weapon(fighter: &mut Fighter) -> Option<(u8, u8)> {
     Some((spare_weapon, variant))
 }
 
-fn weapon_from_model(model: &str) -> Option<(u8, u8)> {
+pub(crate) fn weapon_from_model(model: &str) -> Option<(u8, u8)> {
     let model = model.trim().to_ascii_lowercase();
     let (resource_class, variant_with_suffix) = model.strip_prefix('w')?.split_once('_')?;
     let resource_class = resource_class.parse::<u8>().ok()?;
@@ -316,6 +451,10 @@ fn store_picked_weapon(fighter: &mut Fighter, weapon: u8, variant: u8) -> Option
     Some(slot)
 }
 
+pub(crate) fn npc_getitem_model(model: &str) -> bool {
+    item_effect_for(model).is_some() || weapon_from_model(model).is_some()
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ItemEffect {
     hp: i32,
@@ -329,8 +468,8 @@ struct ItemEffect {
 
     speed: f32,
 
-    poison_per_tick: i32,
-    poison_tick_every: f32,
+    health_per_tick: i32,
+    health_tick_every: f32,
 
     anger_per_tick: i32,
     anger_tick_every: f32,
@@ -361,8 +500,8 @@ fn item_effect_for(model: &str) -> Option<(f32, ItemEffect)> {
         duration,
         max_hp,
         speed,
-        poison_per_tick,
-        poison_tick_every,
+        health_per_tick: -poison_per_tick,
+        health_tick_every: poison_tick_every,
         anger_per_tick,
         anger_tick_every,
         weapon_variant,
@@ -379,41 +518,23 @@ fn item_effect_for(model: &str) -> Option<(f32, ItemEffect)> {
         "item0102" => (60.0, e(100, 0, 0, 0, 0.0)),
         "item15" => (
             10.0,
-            effect(
-                50,
-                0,
-                0,
-                0,
-                0.0,
-                0,
-                1.0,
-                0,
-                0.0,
-                0,
-                0.0,
-                -1,
-                Some(("Item15", 9999.9)),
-            ),
+            ItemEffect {
+                health_per_tick: 50,
+                health_tick_every: 0.2,
+                worn: Some(("Item15", 9999.9)),
+                ..e(0, 0, 0, 0, 9999.9)
+            },
         ),
         "item08" => (300.0, e(0, 100, 0, 0, 0.0)),
         "item11" => (99999.0, e(0, 25, 0, 0, 0.0)),
         "item16" => (
             10.0,
-            effect(
-                0,
-                1,
-                0,
-                0,
-                0.0,
-                0,
-                1.0,
-                0,
-                0.0,
-                0,
-                0.0,
-                -1,
-                Some(("Item16", 9999.9)),
-            ),
+            ItemEffect {
+                anger_per_tick: 1,
+                anger_tick_every: 0.2,
+                worn: Some(("Item16", 9999.9)),
+                ..e(0, 0, 0, 0, 9999.9)
+            },
         ),
         "item03" => (
             300.0,
@@ -543,6 +664,7 @@ fn item_effect_for(model: &str) -> Option<(f32, ItemEffect)> {
                 Some(("SpdUP", 60.0)),
             ),
         ),
+        "item06" => (0.0, e(0, 0, 0, 0, 0.0)),
         "item07" => (300.0, e(0, 0, 0, 0, 60.0)),
         "item14" => (
             10.0,
@@ -629,6 +751,10 @@ pub struct ItemPlugin;
 
 impl Plugin for ItemPlugin {
     fn build(&self, app: &mut App) {
+        app.add_systems(
+            PostUpdate,
+            clear_dead_item_effects.run_if(in_state(AppState::Playing)),
+        );
         app.init_resource::<ItemBuffs>()
             .init_resource::<PropHitGate>()
             .init_resource::<PendingSceneItemClaims>()
@@ -676,9 +802,20 @@ impl Plugin for ItemPlugin {
                 Update,
                 apply_stock_scene_item_pickups
                     .after(crate::plugins::network_plugin::NetworkFrameApply)
+                    .after(crate::plugins::stage_plugin::tick_stage_script)
                     .before(crate::plugins::FighterFrameSet::SkeletonSample)
                     .before(super::fighter_frame::SerialFighterSet)
                     .run_if(in_state(AppState::Playing))
+                    .run_if(stock_item_authority_enabled),
+            )
+            .add_systems(
+                Update,
+                tick_stock_remote_item_visuals
+                    .after(apply_stock_scene_item_pickups)
+                    .before(crate::plugins::FighterFrameSet::SkeletonSample)
+                    .before(super::fighter_frame::SerialFighterSet)
+                    .run_if(in_state(AppState::Playing))
+                    .run_if(crate::plugins::simulation_frame)
                     .run_if(stock_item_authority_enabled),
             );
         #[cfg(not(target_arch = "wasm32"))]
@@ -692,6 +829,7 @@ impl Plugin for ItemPlugin {
                 Update,
                 initialize_stock_scene_items
                     .after(crate::plugins::network_plugin::NetworkFrameApply)
+                    .before(crate::plugins::stage_plugin::tick_stage_script)
                     .before(apply_stock_scene_item_pickups)
                     .run_if(in_state(AppState::Playing))
                     .run_if(stock_item_authority_enabled),
@@ -729,6 +867,7 @@ type StockManifestProps<'w, 's> = Query<
     'w,
     's,
     (
+        Entity,
         &'static mut StageProp,
         &'static Transform,
         &'static mut Visibility,
@@ -741,6 +880,7 @@ type StockManifestProps<'w, 's> = Query<
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn initialize_stock_scene_items(
+    mut commands: Commands,
     net: Res<crate::plugins::network_plugin::NetState>,
     tx: Option<Res<crate::plugins::network_plugin::NetTx>>,
     mut state: ResMut<StockSceneManifestState>,
@@ -761,15 +901,15 @@ pub(crate) fn initialize_stock_scene_items(
         let mut seen = std::collections::HashSet::new();
         let items = props
             .iter()
-            .filter(|(prop, _, _)| seen.insert(prop.name.to_ascii_lowercase()))
-            .filter_map(|(prop, transform, visibility)| {
+            .filter(|(_, prop, _, _)| seen.insert(prop.name.to_ascii_lowercase()))
+            .filter_map(|(_, prop, transform, visibility)| {
                 stock_authored_scene_item(prop, transform, visibility, &catalog, script.script())
             })
             .collect::<Vec<_>>();
         tx.send_stock_scene_manifest(items);
     }
 
-    for (mut prop, _, mut visibility) in &mut props {
+    for (entity, mut prop, _, mut visibility) in &mut props {
         if prop.name.starts_with("D_wpStock")
             || !catalog.contains_key(&stock_item_model_key(&prop.model))
         {
@@ -778,6 +918,10 @@ pub(crate) fn initialize_stock_scene_items(
         prop.respawn_timer = 0.0;
         prop.interactive = false;
         *visibility = Visibility::Hidden;
+        commands.entity(entity).insert(StockSceneItemView {
+            record_id: 0,
+            available: false,
+        });
         if let Some(runtime) = script.script_mut() {
             for (key, value) in [("active", 0.0), ("interactive", 0.0)] {
                 runtime.set_item_property(
@@ -813,6 +957,12 @@ fn stock_authored_scene_item(
         scene_reference: script
             .and_then(|runtime| runtime.host().resolve_name(&prop.name))
             .and_then(|index| u32::try_from(index).ok()),
+        repeat_on_xstar: prop
+            .name
+            .to_ascii_lowercase()
+            .strip_prefix("d_item")
+            .and_then(|suffix| suffix.parse::<u32>().ok())
+            .is_some_and(|index| (5..=103).contains(&index)),
         active: !prop.broken && *visibility != Visibility::Hidden,
         interactive: prop.interactive,
     })
@@ -824,6 +974,9 @@ fn resource_roots(workdir: &std::path::Path) -> Vec<PathBuf> {
 
 pub(crate) fn pickup_effect_for_model(model: &str) -> Option<&'static str> {
     let model = model.trim().to_ascii_lowercase();
+    if model == "item06" {
+        return None;
+    }
     if let Some((_, effect)) = item_effect_for(&model) {
         return Some(if effect.weapon_variant >= 0 {
             "WeaponUP"
@@ -834,16 +987,14 @@ pub(crate) fn pickup_effect_for_model(model: &str) -> Option<&'static str> {
     weapon_from_model(&model).map(|_| "GetItem")
 }
 
-fn queue_pickup_effect(commands: &mut Commands, model: &str, position: Vec3) {
+fn queue_pickup_effect(commands: &mut Commands, model: &str, collector: Entity) {
     let Some(effect) = pickup_effect_for_model(model) else {
         return;
     };
-    commands.spawn(crate::plugins::effect_plugin::PickupEffectRequest(
-        crate::plugins::effect_plugin::SceneEffectEvent {
-            effect: effect.into(),
-            position,
-        },
-    ));
+    commands.spawn(crate::plugins::effect_plugin::PickupEffectRequest {
+        effect: effect.into(),
+        collector,
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -937,13 +1088,13 @@ pub(crate) fn item_pickup(
                     .entity(player_entity)
                     .insert(crate::components::fighter::WeaponVariantChanged);
                 info!("weapon pickup {} stored as weapon {}", prop.model, weapon);
-                queue_pickup_effect(&mut commands, &prop.model, transform.translation);
+                queue_pickup_effect(&mut commands, &prop.model, player_entity);
                 if dynamic_drop.is_some() {
                     commands.entity(prop_entity).despawn();
                     continue 'props;
                 }
                 prop.hit_count += 1;
-                prop.respawn_timer = weapon_respawn_seconds(&prop.model).unwrap_or(0.0);
+                prop.respawn_timer = weapon_respawn_seconds(&prop.model).unwrap_or(5.0);
                 prop.interactive = false;
                 *visibility = Visibility::Hidden;
                 consumed_props.insert(
@@ -984,35 +1135,12 @@ pub(crate) fn item_pickup(
                     health.current = (health.current + effect.hp as f32).min(health.max);
                 }
                 if effect.anger != 0 {
-                    qi.current = (qi.current + effect.anger as f32).max(0.0);
+                    qi.current = (qi.current + effect.anger as f32).clamp(0.0, qi.max);
                 }
-                if effect.attack != 0 || effect.defense != 0 {
-                    buffs.attack_bonus = effect.attack;
-                    buffs.defense_bonus = effect.defense;
-                    buffs.remaining = effect.duration;
-                }
-                if effect.max_hp != 0 {
-                    health.max += effect.max_hp as f32;
-                    health.current = health.current.min(health.max);
-                    buffs.max_hp_bonus = effect.max_hp;
-                    buffs.max_hp_remaining = effect.duration;
-                }
-                if effect.speed != 1.0 {
-                    buffs.speed_factor = effect.speed;
-                    buffs.speed_remaining = effect.duration;
-                }
-                if effect.poison_per_tick != 0 {
-                    buffs.poison_per_tick = effect.poison_per_tick;
-                    buffs.poison_tick_every = effect.poison_tick_every;
-                    buffs.poison_total = effect.duration;
-                    buffs.poison_tick = effect.poison_tick_every;
-                }
-                if effect.anger_per_tick != 0 {
-                    buffs.anger_per_tick = effect.anger_per_tick;
-                    buffs.anger_tick_every = effect.anger_tick_every;
-                    buffs.anger_total = effect.duration;
-                    buffs.anger_tick = effect.anger_tick_every;
-                }
+                let max_hp_delta = buffs.refresh_stats(&prop.model, &effect, effect.duration);
+                health.max = (health.max + max_hp_delta as f32).max(1.0);
+                health.current = health.current.min(health.max);
+                buffs.refresh_periodic(&prop.model);
                 if prop.model.eq_ignore_ascii_case("item07") {
                     concealment.remaining = effect.duration;
                 }
@@ -1032,7 +1160,7 @@ pub(crate) fn item_pickup(
                 info!("worn effect: {name} ({duration}s)");
             }
             info!(
-                "pickup {}: hp{} anger{} atk{} def{} maxhp{} speed{} poison{}/{}s anger{}/{}s",
+                "pickup {}: hp{} anger{} atk{} def{} maxhp{} speed{} periodic_hp{}/{}s anger{}/{}s",
                 prop.model,
                 effect.hp,
                 effect.anger,
@@ -1040,13 +1168,13 @@ pub(crate) fn item_pickup(
                 effect.defense,
                 effect.max_hp,
                 effect.speed,
-                effect.poison_per_tick,
-                effect.poison_tick_every,
+                effect.health_per_tick,
+                effect.health_tick_every,
                 effect.anger_per_tick,
                 effect.anger_tick_every
             );
 
-            queue_pickup_effect(&mut commands, &prop.model, transform.translation);
+            queue_pickup_effect(&mut commands, &prop.model, player_entity);
             prop.hit_count += 1;
             prop.respawn_timer = respawn;
             prop.interactive = false;
@@ -1085,6 +1213,61 @@ pub(crate) fn item_pickup(
             prop.interactive = false;
             *visibility = Visibility::Hidden;
         }
+    }
+}
+
+fn clear_dead_item_effects(
+    mut buffs: ResMut<ItemBuffs>,
+    net: Res<crate::plugins::network_plugin::NetState>,
+    mut fighters: Query<(
+        &mut Health,
+        Option<&crate::plugins::stage_plugin::LocalFighter>,
+        &mut crate::components::fighter::WornEffect,
+        &mut crate::components::fighter::Concealment,
+    )>,
+) {
+    for (mut health, local, mut worn, mut concealment) in &mut fighters {
+        if health.current > 0.0 {
+            continue;
+        }
+        worn.effects.clear();
+        concealment.remaining = 0.0;
+        if local.is_some() {
+            buffs.clear_on_death(
+                &mut health,
+                net.status == crate::plugins::network_plugin::NetStatus::InRoom,
+            );
+        }
+    }
+}
+
+fn tick_stock_remote_item_visuals(
+    time: Res<Time>,
+    clock: Option<Res<super::FrameClock>>,
+    mut remotes: Query<
+        (
+            &Health,
+            &mut crate::components::fighter::WornEffect,
+            &mut crate::components::fighter::Concealment,
+        ),
+        (
+            With<super::network_plugin::RemoteFighter>,
+            Without<super::stage_plugin::LocalFighter>,
+        ),
+    >,
+) {
+    let dt = super::simulation_dt(clock.as_deref(), time.delta_secs());
+    for (health, mut worn, mut concealment) in &mut remotes {
+        if health.current <= 0.0 {
+            worn.effects.clear();
+            concealment.remaining = 0.0;
+            continue;
+        }
+        for effect in &mut worn.effects {
+            effect.remaining -= dt;
+        }
+        worn.effects.retain(|effect| effect.remaining > 0.0);
+        concealment.remaining = (concealment.remaining - dt).max(0.0);
     }
 }
 
@@ -1207,28 +1390,66 @@ pub(crate) fn apply_stock_scene_item_pickups(
     mut props: StockSceneProps<'_, '_>,
     mut fighters: NetworkItemFighterQuery<'_, '_>,
     mut script: ResMut<crate::plugins::stage_plugin::StageScriptRuntime>,
-    actor_transforms: Query<&Transform, With<Fighter>>,
+    time: Option<Res<Time>>,
+    frame_clock: Option<Res<super::FrameClock>>,
+    remote_vitals: Query<&super::network_plugin::RemoteVitalsStatus>,
+    mut remote_buffs: Local<HashMap<Entity, ItemBuffs>>,
+    item_views: Query<(Entity, &StockSceneItemView)>,
 ) {
+    let dt = super::simulation_dt(
+        frame_clock.as_deref(),
+        time.as_deref().map_or(0.0, Time::delta_secs),
+    );
+    remote_buffs.retain(|entity, buffs| {
+        let Ok((_, _, _, mut health, _, _, _, _)) = fighters.get_mut(*entity) else {
+            return false;
+        };
+        let delta = if health.current <= 0.0 {
+            let delta = -buffs.max_hp_bonus;
+            *buffs = ItemBuffs::default();
+            delta
+        } else {
+            buffs.tick_stats(dt)
+        };
+        if !remote_vitals
+            .get(*entity)
+            .is_ok_and(|status| status.health_known)
+        {
+            health.max = (health.max + delta as f32).max(1.0);
+            health.current = health.current.min(health.max);
+        }
+        true
+    });
     let grounded = std::mem::take(&mut net.pending_stock_scene_grounded);
     let pickups = std::mem::take(&mut net.pending_stock_scene_items);
     if grounded.is_empty() && pickups.is_empty() {
         return;
     }
     let names = stock_scene_item_names();
+    let mut views: HashMap<_, _> = item_views
+        .iter()
+        .map(|(entity, view)| (entity, *view))
+        .collect();
 
     for record in grounded {
         let Some(model) = names.get(&(record.category, record.item_id)) else {
             continue;
         };
         if let Some(entity) = nearest_stock_prop(&mut props, model, record.position, true) {
-            if let Ok((_, mut prop, _, mut visibility)) = props.get_mut(entity) {
-                prop.respawn_timer = 0.0;
-                prop.interactive = true;
-                *visibility = Visibility::Visible;
+            if let Ok((_, prop, _, _)) = props.get_mut(entity) {
+                let name = prop.name.clone();
+                set_stock_prop_availability(
+                    &mut commands,
+                    &mut props,
+                    &mut views,
+                    &name,
+                    record.record_id,
+                    true,
+                );
                 if let Some(runtime) = script.script_mut() {
                     for (key, value) in [("active", 1.0), ("interactive", 1.0)] {
                         runtime.set_item_property(
-                            &prop.name,
+                            &name,
                             key,
                             meteor_scene::scene_script_runtime::PstValue::Num(value),
                         );
@@ -1258,7 +1479,6 @@ pub(crate) fn apply_stock_scene_item_pickups(
             continue;
         };
         let player_id = format!("stock-{}", pickup.actor_id);
-        let mut effect_position = pickup.position.map(Vec3::from_array);
         net.dynamic_weapon_drops
             .remove(&format!("D_wpStock{}", pickup.record_id));
         let script_character_id = net
@@ -1266,27 +1486,41 @@ pub(crate) fn apply_stock_scene_item_pickups(
             .iter()
             .position(|member| member.player_id == player_id)
             .map_or(-1.0, |index| index as f64);
-        let prop_entity = pickup
-            .position
-            .and_then(|position| nearest_stock_prop(&mut props, model, position, false));
+        let prop_entity = views
+            .iter()
+            .find_map(|(entity, view)| (view.record_id == pickup.record_id).then_some(*entity))
+            .or_else(|| {
+                pickup
+                    .position
+                    .and_then(|position| nearest_stock_prop(&mut props, model, position, false))
+            });
         if let Some(entity) = prop_entity {
-            if let Ok((_, mut prop, transform, mut visibility)) = props.get_mut(entity) {
-                effect_position = Some(transform.translation);
-                prop.hit_count = prop.hit_count.saturating_add(1);
-                prop.respawn_timer = 0.0;
-                prop.interactive = false;
-                *visibility = Visibility::Hidden;
-                if !prop.name.starts_with("D_wpStock") {
+            let current = views
+                .get(&entity)
+                .is_none_or(|view| view.record_id == pickup.record_id);
+            if let Ok((_, prop, _, _)) = props.get_mut(entity) {
+                let name = prop.name.clone();
+                if current {
+                    set_stock_prop_availability(
+                        &mut commands,
+                        &mut props,
+                        &mut views,
+                        &name,
+                        pickup.record_id,
+                        false,
+                    );
+                }
+                if current && !name.starts_with("D_wpStock") {
                     if let Some(runtime) = script.script_mut() {
                         for (key, value) in [("active", 0.0), ("interactive", 0.0)] {
                             runtime.set_item_property(
-                                &prop.name,
+                                &name,
                                 key,
                                 meteor_scene::scene_script_runtime::PstValue::Num(value),
                             );
                         }
                         if let Err(error) = runtime.call_item(
-                            &prop.name,
+                            &name,
                             "OnPickUp",
                             &[meteor_scene::scene_script_runtime::PstValue::Num(
                                 script_character_id,
@@ -1307,9 +1541,7 @@ pub(crate) fn apply_stock_scene_item_pickups(
             if !owns_pickup {
                 continue;
             }
-            if effect_position.is_none() {
-                effect_position = actor_transforms.get(entity).ok().map(|t| t.translation);
-            }
+            queue_pickup_effect(&mut commands, model, entity);
             if pickup.category == 1 {
                 if let Some((weapon, variant)) = weapon_from_model(model) {
                     if store_picked_weapon(&mut fighter, weapon, variant).is_some() {
@@ -1327,37 +1559,25 @@ pub(crate) fn apply_stock_scene_item_pickups(
                 health.current = (health.current + effect.hp as f32).min(health.max);
             }
             if effect.anger != 0 {
-                qi.current = (qi.current + effect.anger as f32).max(0.0);
-            }
-            if effect.max_hp != 0 {
-                health.max += effect.max_hp as f32;
-                health.current = health.current.min(health.max);
+                qi.current = (qi.current + effect.anger as f32).clamp(0.0, qi.max);
             }
             if local.is_some() {
-                if effect.attack != 0 || effect.defense != 0 {
-                    buffs.attack_bonus = effect.attack;
-                    buffs.defense_bonus = effect.defense;
-                    buffs.remaining = effect.duration;
-                }
-                if effect.max_hp != 0 {
-                    buffs.max_hp_bonus = effect.max_hp;
-                    buffs.max_hp_remaining = effect.duration;
-                }
-                if effect.speed != 1.0 {
-                    buffs.speed_factor = effect.speed;
-                    buffs.speed_remaining = effect.duration;
-                }
-                if effect.poison_per_tick != 0 {
-                    buffs.poison_per_tick = effect.poison_per_tick;
-                    buffs.poison_tick_every = effect.poison_tick_every;
-                    buffs.poison_total = effect.duration;
-                    buffs.poison_tick = effect.poison_tick_every;
-                }
-                if effect.anger_per_tick != 0 {
-                    buffs.anger_per_tick = effect.anger_per_tick;
-                    buffs.anger_tick_every = effect.anger_tick_every;
-                    buffs.anger_total = effect.duration;
-                    buffs.anger_tick = effect.anger_tick_every;
+                let max_hp_delta = buffs.refresh_stats(model, &effect, effect.duration);
+                health.max = (health.max + max_hp_delta as f32).max(1.0);
+                health.current = health.current.min(health.max);
+                buffs.refresh_periodic(model);
+            } else {
+                let delta = remote_buffs.entry(entity).or_default().refresh_stats(
+                    model,
+                    &effect,
+                    effect.duration,
+                );
+                if !remote_vitals
+                    .get(entity)
+                    .is_ok_and(|status| status.health_known)
+                {
+                    health.max = (health.max + delta as f32).max(1.0);
+                    health.current = health.current.min(health.max);
                 }
             }
             if model.eq_ignore_ascii_case("item07") {
@@ -1375,9 +1595,39 @@ pub(crate) fn apply_stock_scene_item_pickups(
                 worn.refresh(name, duration);
             }
         }
-        if let Some(position) = effect_position {
-            queue_pickup_effect(&mut commands, model, position);
+    }
+}
+
+fn set_stock_prop_availability(
+    commands: &mut Commands,
+    props: &mut StockSceneProps<'_, '_>,
+    views: &mut HashMap<Entity, StockSceneItemView>,
+    name: &str,
+    record_id: u32,
+    available: bool,
+) {
+    for (entity, mut prop, _, mut visibility) in props.iter_mut() {
+        if !prop.name.eq_ignore_ascii_case(name) {
+            continue;
         }
+        prop.respawn_timer = 0.0;
+        prop.interactive = available;
+        if !available {
+            prop.hit_count = prop.hit_count.saturating_add(1);
+        }
+        *visibility = if available {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+        let view = StockSceneItemView {
+            record_id,
+            available,
+        };
+        views.insert(entity, view);
+        commands
+            .entity(entity)
+            .insert((view, SceneRecordOrder(record_id as usize)));
     }
 }
 
@@ -1444,8 +1694,7 @@ fn stock_scene_item_catalog() -> HashMap<String, StockSceneItemMetadata> {
             let metadata = StockSceneItemMetadata {
                 category: record.category,
                 item_id: record.id,
-                respawn_ms: record
-                    .prop_seed_value(13)
+                respawn_ms: Some(record.prop_seed_value(13).unwrap_or(5))
                     .filter(|seconds| *seconds > 0)
                     .and_then(|seconds| u64::try_from(seconds).ok())
                     .map(|seconds| seconds.saturating_mul(1_000)),
@@ -1471,7 +1720,6 @@ fn apply_network_item_claims(
     mut props: StockSceneProps<'_, '_>,
     mut fighters: NetworkItemFighterQuery<'_, '_>,
     mut script: ResMut<crate::plugins::stage_plugin::StageScriptRuntime>,
-    actor_transforms: Query<&Transform, With<Fighter>>,
 ) {
     let claims = std::mem::take(&mut net.pending_item_claims);
     for message in claims {
@@ -1496,11 +1744,8 @@ fn apply_network_item_claims(
         net.pending_status_snapshots
             .insert(player_id.clone(), item_effects.clone());
         pending.expires_at.remove(&reference);
-        let mut effect_position = None;
-        for (_, mut prop, transform, mut visibility) in &mut props {
+        for (_, mut prop, _, mut visibility) in &mut props {
             if prop.name.eq_ignore_ascii_case(&reference) {
-                effect_position.get_or_insert(transform.translation);
-
                 prop.interactive = false;
                 prop.respawn_timer = 0.0;
                 *visibility = Visibility::Hidden;
@@ -1517,9 +1762,7 @@ fn apply_network_item_claims(
             if !owns_claim {
                 continue;
             }
-            if effect_position.is_none() {
-                effect_position = actor_transforms.get(entity).ok().map(|t| t.translation);
-            }
+            queue_pickup_effect(&mut commands, &model, entity);
             apply_authoritative_combatant_projection(
                 &mut commands,
                 entity,
@@ -1539,9 +1782,6 @@ fn apply_network_item_claims(
             } else {
                 sync_network_visual_effects(&mut worn, &mut concealment, &item_effects);
             }
-        }
-        if let Some(position) = effect_position {
-            queue_pickup_effect(&mut commands, &model, position);
         }
 
         if scene_host && !reference.starts_with("D_wpNet") {
@@ -1847,19 +2087,7 @@ fn sync_network_item_effects(
             continue;
         };
         let remaining = active.remaining.max(0.0);
-        if effect.attack != 0 || effect.defense != 0 {
-            buffs.attack_bonus += effect.attack;
-            buffs.defense_bonus += effect.defense;
-            buffs.remaining = buffs.remaining.max(remaining);
-        }
-        if effect.max_hp != 0 {
-            buffs.max_hp_bonus += effect.max_hp;
-            buffs.max_hp_remaining = buffs.max_hp_remaining.max(remaining);
-        }
-        if effect.speed != 1.0 {
-            buffs.speed_factor = buffs.speed_factor.max(effect.speed);
-            buffs.speed_remaining = buffs.speed_remaining.max(remaining);
-        }
+        buffs.refresh_stats(&active.model, &effect, remaining);
     }
 }
 
@@ -1893,6 +2121,8 @@ pub(crate) fn tick_item_buffs(
     mut players: BuffTickPlayerQuery<'_, '_>,
 ) {
     let dt = crate::plugins::simulation_dt(frame_clock.as_deref(), time.delta_secs());
+
+    let online = net.status == crate::plugins::network_plugin::NetStatus::InRoom;
     let Ok((
         fighter,
         transform,
@@ -1911,6 +2141,13 @@ pub(crate) fn tick_item_buffs(
         return;
     };
 
+    if death.active || health.current <= 0.0 {
+        worn.effects.clear();
+        concealment.remaining = 0.0;
+        buffs.clear_on_death(&mut health, online);
+        return;
+    }
+
     for effect in &mut worn.effects {
         effect.remaining -= dt;
     }
@@ -1925,62 +2162,27 @@ pub(crate) fn tick_item_buffs(
         concealment.remaining = (concealment.remaining - dt).max(0.0);
     }
 
-    if buffs.remaining > 0.0 {
-        buffs.remaining -= dt;
-        if buffs.remaining <= 0.0 {
-            buffs.attack_bonus = 0;
-            buffs.defense_bonus = 0;
+    let max_hp_delta = buffs.tick_stats(dt);
+    if max_hp_delta != 0 && !online {
+        health.max = (health.max + max_hp_delta as f32).max(1.0);
+        health.current = health.current.min(health.max);
+    }
+    if health.current > 0.0 && !death.active {
+        let (delta, damaging) = buffs.tick_periodic(dt);
+
+        if net.status != crate::plugins::network_plugin::NetStatus::InRoom || !net.is_stock_udp() {
+            health.current = (health.current + delta.health as f32).clamp(0.0, health.max);
+            qi.current = (qi.current + delta.anger as f32).clamp(0.0, qi.max);
         }
+        if let Some(mut status) = status {
+            status.pending_periodic_hit |= damaging && health.current > 0.0;
+        }
+    } else {
+        buffs.periodic_effects.active.clear();
+        buffs.project_periodic();
     }
 
-    if buffs.max_hp_remaining > 0.0 {
-        buffs.max_hp_remaining -= dt;
-        if buffs.max_hp_remaining <= 0.0 {
-            health.max = (health.max - buffs.max_hp_bonus as f32).max(1.0);
-            health.current = health.current.min(health.max);
-            buffs.max_hp_bonus = 0;
-        }
-    }
-
-    if buffs.speed_remaining > 0.0 {
-        buffs.speed_remaining -= dt;
-        if buffs.speed_remaining <= 0.0 {
-            buffs.speed_factor = 1.0;
-        }
-    }
-
-    if buffs.poison_total > 0.0 {
-        buffs.poison_total -= dt;
-        buffs.poison_tick -= dt;
-        if buffs.poison_tick <= 0.0 {
-            health.current = (health.current - buffs.poison_per_tick as f32).max(0.0);
-            if let Some(mut status) = status {
-                status.pending_periodic_hit |= buffs.poison_per_tick > 0 && health.current > 0.0;
-            }
-            buffs.poison_tick = buffs.poison_tick_every;
-        }
-        if buffs.poison_total <= 0.0 {
-            buffs.poison_per_tick = 0;
-            buffs.poison_tick_every = 0.0;
-            buffs.poison_total = 0.0;
-        }
-    }
-
-    if buffs.anger_total > 0.0 {
-        buffs.anger_total -= dt;
-        buffs.anger_tick -= dt;
-        if buffs.anger_tick <= 0.0 {
-            qi.current += buffs.anger_per_tick as f32;
-            buffs.anger_tick = buffs.anger_tick_every;
-        }
-        if buffs.anger_total <= 0.0 {
-            buffs.anger_per_tick = 0;
-            buffs.anger_tick_every = 0.0;
-            buffs.anger_total = 0.0;
-        }
-    }
-
-    if health.current <= 0.0 && !death.active {
+    if !online && health.current <= 0.0 && !death.active {
         health.current = 0.0;
         if net.status != crate::plugins::network_plugin::NetStatus::InRoom {
             if let Some(model) = crate::plugins::character_plugin::weapon_model_stem(
@@ -2011,9 +2213,147 @@ mod npc_pickup_tests;
 
 #[cfg(feature = "original-assets")]
 #[cfg(test)]
+#[path = "item_plugin/stock_scene_sync_tests.rs"]
+mod stock_scene_sync_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn r3_distinct_items_add_and_expire_independently() {
+        let mut buffs = ItemBuffs::default();
+        let attack = item_effect_for("item04").unwrap().1;
+        let defense = item_effect_for("item03").unwrap().1;
+        let strong_attack = item_effect_for("item13").unwrap().1;
+        buffs.refresh_stats("item04", &attack, attack.duration);
+        buffs.tick_stats(30.0);
+        buffs.refresh_stats("item03", &defense, defense.duration);
+        buffs.refresh_stats("item13", &strong_attack, strong_attack.duration);
+        assert_eq!((buffs.attack_bonus, buffs.defense_bonus), (150, 20));
+        buffs.tick_stats(30.0);
+        assert_eq!((buffs.attack_bonus, buffs.defense_bonus), (125, 20));
+        buffs.tick_stats(60.0);
+        assert_eq!((buffs.attack_bonus, buffs.defense_bonus), (125, 0));
+    }
+
+    #[test]
+    fn r3_same_item_refreshes_without_stacking_or_extending_other_items() {
+        let mut buffs = ItemBuffs::default();
+        let attack = item_effect_for("item04").unwrap().1;
+        let defense = item_effect_for("item03").unwrap().1;
+        buffs.refresh_stats("item04", &attack, attack.duration);
+        buffs.refresh_stats("item03", &defense, defense.duration);
+        buffs.tick_stats(50.0);
+        buffs.refresh_stats("ITEM04", &attack, attack.duration);
+        assert_eq!((buffs.attack_bonus, buffs.defense_bonus), (25, 20));
+        buffs.tick_stats(40.0);
+        assert_eq!((buffs.attack_bonus, buffs.defense_bonus), (25, 0));
+        buffs.tick_stats(20.0);
+        assert_eq!((buffs.attack_bonus, buffs.defense_bonus), (0, 0));
+    }
+
+    #[test]
+    fn r3_stat_item_refresh_preserves_max_hp_and_adds_speed_percent_deltas() {
+        let mut buffs = ItemBuffs::default();
+        let max_hp = item_effect_for("item02").unwrap().1;
+        let cake = item_effect_for("item10").unwrap().1;
+        assert_eq!(buffs.refresh_stats("item02", &max_hp, 600.0), 500);
+        assert_eq!(buffs.refresh_stats("item02", &max_hp, 600.0), 0);
+        assert_eq!(buffs.refresh_stats("item10", &cake, 60.0), 6999);
+        assert_eq!(buffs.tick_stats(60.0), -6999);
+        assert_eq!(buffs.max_hp_bonus, 500);
+        let speed = item_effect_for("item05").unwrap().1;
+        let boots = item_effect_for("item14").unwrap().1;
+        buffs.refresh_stats("item05", &speed, 60.0);
+        buffs.refresh_stats("item14", &boots, 100.0);
+        assert_eq!(buffs.speed_factor, 2.0);
+        buffs.tick_stats(60.0);
+        assert_eq!(buffs.speed_factor, 1.5);
+    }
+
+    #[test]
+    fn r3_network_snapshot_keeps_per_item_expiry() {
+        let effects = [
+            ItemEffectWire {
+                model: "item04".into(),
+                remaining: 5.0,
+            },
+            ItemEffectWire {
+                model: "item03".into(),
+                remaining: 20.0,
+            },
+        ];
+        let mut buffs = ItemBuffs::default();
+        sync_network_item_effects(
+            &mut buffs,
+            &mut Default::default(),
+            &mut Default::default(),
+            &effects,
+        );
+        buffs.tick_stats(5.0);
+        assert_eq!((buffs.attack_bonus, buffs.defense_bonus), (0, 20));
+    }
+
+    #[cfg(feature = "original-assets")]
+    #[test]
+    fn r3_stock_remote_max_hp_refresh_does_not_stack_and_expires() {
+        let mut app = App::new();
+        app.init_resource::<ItemBuffs>()
+            .init_resource::<super::super::FrameClock>()
+            .init_resource::<super::super::stage_plugin::StageScriptRuntime>()
+            .insert_resource(super::super::network_plugin::NetState {
+                status: super::super::network_plugin::NetStatus::InRoom,
+                address: "udp://127.0.0.1:5230".into(),
+                player_id: "stock-1".into(),
+                ..Default::default()
+            })
+            .add_systems(Update, apply_stock_scene_item_pickups);
+        let remote = app
+            .world_mut()
+            .spawn((
+                Fighter {
+                    character_id: 0,
+                    player_slot: 1,
+                    weapon: 6,
+                    weapon_slots: [6, 0],
+                    weapon_slot: 0,
+                    weapon_slot_variants: [0, 0],
+                    weapon_variant: 0,
+                },
+                Health {
+                    current: 500.0,
+                    max: 1000.0,
+                },
+                Qi::default(),
+                Transform::default(),
+                super::super::network_plugin::RemoteFighter {
+                    player_id: "stock-2".into(),
+                },
+            ))
+            .id();
+        for _ in 0..2 {
+            app.world_mut()
+                .resource_mut::<super::super::network_plugin::NetState>()
+                .pending_stock_scene_items
+                .push(super::super::network_plugin::StockSceneItemPickup {
+                    actor_id: 2,
+                    record_id: 44,
+                    category: 2,
+                    item_id: 2,
+                    position: None,
+                });
+            app.update();
+            assert_eq!(app.world().get::<Health>(remote).unwrap().max, 1500.0);
+        }
+        app.world_mut()
+            .resource_mut::<super::super::FrameClock>()
+            .sim_dt = 600.0;
+        app.update();
+        assert_eq!(app.world().get::<Health>(remote).unwrap().max, 1000.0);
+    }
+
+    #[cfg(feature = "original-assets")]
     #[test]
     fn pickup_effect_names_match_original_meteor_res_key14() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
@@ -2133,11 +2473,12 @@ mod tests {
         assert!(drain().is_empty(), "pending claim suppresses duplicates");
     }
 
+    #[cfg(feature = "original-assets")]
     #[test]
     fn network_successful_claims_queue_one_effect_per_item_not_per_render_batch() {
         use crate::plugins::effect_plugin::PickupEffectRequest;
         use bevy::ecs::system::RunSystemOnce;
-        for stock in [false, true] {
+        for (stock, local) in [(false, false), (false, true), (true, false), (true, true)] {
             for (model, item_id, expected) in
                 [("item01", 1, "GetItem"), ("item0901", 23, "WeaponUP")]
             {
@@ -2146,6 +2487,27 @@ mod tests {
                     .init_resource::<PendingSceneItemClaims>()
                     .init_resource::<crate::plugins::stage_plugin::StageScriptRuntime>()
                     .init_resource::<crate::plugins::network_plugin::NetState>();
+                let collector = app
+                    .world_mut()
+                    .spawn((
+                        fighter(5, [5, 0], 0),
+                        crate::plugins::network_plugin::RemoteFighter {
+                            player_id: if stock { "stock-1" } else { "remote" }.into(),
+                        },
+                        Health::default(),
+                        Qi::default(),
+                        Transform::from_xyz(6.0, 0.0, 8.0),
+                    ))
+                    .id();
+                if local {
+                    app.world_mut()
+                        .entity_mut(collector)
+                        .remove::<crate::plugins::network_plugin::RemoteFighter>()
+                        .insert(crate::plugins::stage_plugin::LocalFighter);
+                    app.world_mut()
+                        .resource_mut::<crate::plugins::network_plugin::NetState>()
+                        .player_id = if stock { "stock-1" } else { "remote" }.into();
+                }
                 for _ in 0..2 {
                     app.world_mut().spawn((
                         StageProp {
@@ -2214,12 +2576,21 @@ mod tests {
                     .iter(app.world())
                     .collect::<Vec<_>>();
                 assert_eq!(effects.len(), 1, "stock={stock}, model={model}");
-                assert_eq!(effects[0].0.effect, expected);
-                assert_eq!(effects[0].0.position, Vec3::new(5.0, 2.0, 7.0));
+                assert_eq!(effects[0].effect, expected);
+                assert_eq!(effects[0].collector, collector);
+                assert!(
+                    app.world_mut()
+                        .query::<(&StageProp, &Visibility)>()
+                        .iter(app.world())
+                        .all(|(prop, visibility)| !prop.interactive
+                            && *visibility == Visibility::Hidden),
+                    "all render batches must disappear on pickup, stock={stock}"
+                );
             }
         }
     }
 
+    #[cfg(feature = "original-assets")]
     #[test]
     fn stock_scene_item_ids_resolve_through_original_meteor_res() {
         let names = stock_scene_item_names();
@@ -2228,6 +2599,7 @@ mod tests {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(feature = "original-assets")]
     #[test]
     fn stock_host_manifest_uses_resource_id_respawn_and_stage_geometry() {
         let prop = StageProp {
@@ -2261,6 +2633,7 @@ mod tests {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(feature = "original-assets")]
     #[test]
     fn stock_host_manifest_keeps_hidden_box_contents_and_deduplicates_render_batches() {
         let (tx, drain) = crate::plugins::network_plugin::stock_scene_manifest_test_channel();
@@ -2329,6 +2702,7 @@ mod tests {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(feature = "original-assets")]
     #[test]
     fn stock_event29_snapshot_is_the_authoritative_authored_prop_set() {
         let mut app = App::new();
@@ -2383,13 +2757,22 @@ mod tests {
             *app.world().get::<Visibility>(enabled).unwrap(),
             Visibility::Visible
         );
+        assert!(app
+            .world()
+            .get::<StockSceneItemView>(enabled)
+            .is_some_and(|view| view.available && view.record_id == 1));
         assert!(!app.world().get::<StageProp>(absent).unwrap().interactive);
         assert_eq!(
             *app.world().get::<Visibility>(absent).unwrap(),
             Visibility::Hidden
         );
+        assert!(app
+            .world()
+            .get::<StockSceneItemView>(absent)
+            .is_some_and(|view| !view.available));
     }
 
+    #[cfg(feature = "original-assets")]
     #[test]
     fn stock_event32_hides_matching_prop_and_applies_local_item() {
         let mut app = App::new();
@@ -2465,8 +2848,75 @@ mod tests {
             .resource::<crate::plugins::network_plugin::NetState>()
             .pending_stock_scene_items
             .is_empty());
+
+        let mut net = app
+            .world_mut()
+            .resource_mut::<crate::plugins::network_plugin::NetState>();
+        net.pending_stock_scene_items
+            .extend([(45, 32), (46, 33)].map(|(record_id, item_id)| {
+                crate::plugins::network_plugin::StockSceneItemPickup {
+                    actor_id: 7,
+                    record_id,
+                    category: 2,
+                    item_id,
+                    position: None,
+                }
+            }));
+        app.update();
+        app.update();
+        assert_eq!(app.world().get::<Health>(player).unwrap().current, 1_300.0);
+        assert_eq!(app.world().get::<Qi>(player).unwrap().current, 0.0);
+        app.init_resource::<Time>()
+            .insert_resource(crate::plugins::FrameClock {
+                sim_dt: 0.201,
+                ..Default::default()
+            })
+            .add_message::<crate::plugins::render_plugin::OfflineWeaponDeathDrop>();
+        app.world_mut().entity_mut(player).insert((
+            crate::components::fighter::MotionState {
+                movement_mode: meteor_core::MovementMode::Idle,
+                velocity: Vec3::ZERO,
+                facing: 0.0,
+            },
+            SmState::default(),
+            CombatState::default(),
+            PoseRuntime::default(),
+            DeathRespawn::default(),
+        ));
+        use bevy::ecs::system::RunSystemOnce;
+        app.world_mut().run_system_once(tick_item_buffs).unwrap();
+        assert_eq!(app.world().get::<Health>(player).unwrap().current, 1_300.0);
+        assert_eq!(app.world().get::<Qi>(player).unwrap().current, 0.0);
+        app.world_mut()
+            .resource_mut::<crate::plugins::network_plugin::NetState>()
+            .pending_stock_vitals = Some([1_350.0, 2_000.0, 1.0]);
+        app.world_mut()
+            .run_system_once(crate::plugins::network_plugin::net_apply_stock_vitals)
+            .unwrap();
+        app.world_mut().run_system_once(tick_item_buffs).unwrap();
+        assert_eq!(app.world().get::<Health>(player).unwrap().current, 1_350.0);
+        assert_eq!(app.world().get::<Qi>(player).unwrap().current, 1.0);
+        app.world_mut()
+            .entity_mut(player)
+            .insert(crate::components::fighter::FighterStatusEffects::default());
+        app.world_mut()
+            .resource_mut::<ItemBuffs>()
+            .refresh_periodic("item0103");
+        app.world_mut()
+            .resource_mut::<crate::plugins::FrameClock>()
+            .sim_dt = 5.001;
+        app.world_mut().run_system_once(tick_item_buffs).unwrap();
+        assert_eq!(app.world().get::<Health>(player).unwrap().current, 1_350.0);
+        assert!(
+            app.world()
+                .get::<crate::components::fighter::FighterStatusEffects>(player)
+                .unwrap()
+                .pending_periodic_hit
+        );
+        assert!(app.world().resource::<ItemBuffs>().poison_total > 0.0);
     }
 
+    #[cfg(feature = "original-assets")]
     #[test]
     fn stock_runtime_event31_queues_dynamic_weapon_actor() {
         let mut app = App::new();
@@ -2523,10 +2973,12 @@ mod tests {
     fn item_effect_table_subset() {
         assert_eq!(item_effect_for("item01").unwrap().1.hp, 300);
         assert_eq!(item_effect_for("item0101").unwrap().1.hp, 500);
-        assert_eq!(item_effect_for("item15").unwrap().1.hp, 50);
+        assert_eq!(item_effect_for("item15").unwrap().1.hp, 0);
+        assert_eq!(item_effect_for("item15").unwrap().1.health_per_tick, 50);
 
         assert_eq!(item_effect_for("item08").unwrap().1.anger, 100);
-        assert_eq!(item_effect_for("item16").unwrap().1.anger, 1);
+        assert_eq!(item_effect_for("item16").unwrap().1.anger, 0);
+        assert_eq!(item_effect_for("item16").unwrap().1.anger_per_tick, 1);
 
         assert_eq!(item_effect_for("item04").unwrap().1.attack, 25);
         assert_eq!(item_effect_for("item03").unwrap().1.defense, 20);
@@ -2535,7 +2987,7 @@ mod tests {
         assert_eq!(item_effect_for("item10").unwrap().1.max_hp, 6999);
         assert_eq!(item_effect_for("item05").unwrap().1.speed, 1.5);
         assert_eq!(item_effect_for("item07").unwrap().1.duration, 60.0);
-        assert_eq!(item_effect_for("item0103").unwrap().1.poison_per_tick, 10);
+        assert_eq!(item_effect_for("item0103").unwrap().1.health_per_tick, -10);
         assert_eq!(item_effect_for("hot").unwrap().1.anger_per_tick, 1);
 
         assert_eq!(item_effect_for("item09").unwrap().1.weapon_variant, 0);
@@ -2644,6 +3096,13 @@ mod tests {
     }
 
     #[test]
+    fn npc_getitem_candidates_use_item_and_weapon_models() {
+        assert!(npc_getitem_model("item01"));
+        assert!(npc_getitem_model("w1_0"));
+        assert!(!npc_getitem_model("box01"));
+    }
+
+    #[test]
     fn authoritative_active_slot_switch_reuses_preheated_inventory() {
         let mut switched = fighter(6, [6, 5], 0);
         let old_slots = switched.weapon_slots;
@@ -2662,8 +3121,9 @@ mod tests {
     }
 
     #[test]
-    fn pickup_distance_uses_the_web_vertical_capsule() {
+    fn pickup_distance_reaches_head_height_without_expanding_horizontal_range() {
         let feet = Vec3::new(2.0, 1.0, -3.0);
+        assert!(within_pickup_range(feet + Vec3::Y * 4.0, feet));
         assert!(within_pickup_range(
             feet + Vec3::new(PICKUP_RANGE - 0.001, 0.9, 0.0),
             feet
@@ -2859,3 +3319,70 @@ mod tests {
         }));
     }
 }
+
+#[cfg(test)]
+mod concealment_death_tests {
+    use super::*;
+    #[test]
+    fn death_clears_concealment_without_local_item_timers() {
+        let mut app = App::new();
+        app.init_resource::<ItemBuffs>()
+            .init_resource::<crate::plugins::network_plugin::NetState>()
+            .add_systems(Update, clear_dead_item_effects);
+        let actor = app
+            .world_mut()
+            .spawn((
+                Health {
+                    current: 0.0,
+                    max: 100.0,
+                },
+                crate::plugins::stage_plugin::LocalFighter,
+                crate::components::fighter::WornEffect {
+                    effects: vec![crate::components::fighter::WornEffectInstance {
+                        name: "SpdUP".into(),
+                        remaining: 50.0,
+                    }],
+                },
+                crate::components::fighter::Concealment { remaining: 50.0 },
+            ))
+            .id();
+        app.world_mut().insert_resource(ItemBuffs {
+            speed_factor: 1.5,
+            speed_remaining: 50.0,
+            ..Default::default()
+        });
+        app.update();
+        assert!(app
+            .world()
+            .get::<crate::components::fighter::WornEffect>(actor)
+            .unwrap()
+            .effects
+            .is_empty());
+        assert_eq!(
+            app.world()
+                .get::<crate::components::fighter::Concealment>(actor)
+                .unwrap()
+                .remaining,
+            0.0
+        );
+        assert_eq!(app.world().resource::<ItemBuffs>().speed_factor, 1.0);
+        assert_eq!(app.world().resource::<ItemBuffs>().speed_remaining, 0.0);
+        app.world_mut().get_mut::<Health>(actor).unwrap().current = 100.0;
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<crate::components::fighter::Concealment>(actor)
+                .unwrap()
+                .remaining,
+            0.0
+        );
+    }
+}
+
+#[cfg(test)]
+#[path = "item_plugin/death_tests.rs"]
+mod death_tests;
+
+#[cfg(test)]
+#[path = "item_plugin/authority_tests.rs"]
+mod authority_tests;

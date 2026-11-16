@@ -76,6 +76,50 @@ pub fn parse_amb(data: &[u8]) -> Result<AmbAnimation, AmbError> {
 }
 
 impl AmbAnimation {
+    pub fn sample_local_motion_delta(&self, frame: usize, dummy: Option<usize>) -> [f32; 3] {
+        let frame = frame.min(self.num_frames.saturating_sub(1));
+        let dummy = dummy.filter(|index| *index < self.num_dummy);
+        let a = self.sample_position_at(frame as f32, dummy);
+        let b = self.sample_position_at(frame.saturating_add(1) as f32, dummy);
+        let delta = std::array::from_fn(|axis| b[axis] - a[axis]);
+        let Some(dummy) = dummy else {
+            return delta;
+        };
+        let block = frame * self.stride + 12 + self.num_bones * 16 + dummy * 33;
+        if block + 33 > self.data.len() {
+            return delta;
+        }
+        let read = |axis: usize| {
+            let offset = block + 17 + axis * 4;
+            f32::from_le_bytes(self.data[offset..offset + 4].try_into().unwrap())
+        };
+        let (w, x, y, z) = (read(0), read(1), read(2), read(3));
+        if x == 0.0 && y == 0.0 && z == 0.0 {
+            return delta;
+        }
+        let rotation = meteor_core::Mat4::from_quaternion(meteor_core::Quat { x, y, z, w });
+        let local = rotation
+            .invert()
+            .transform_point(meteor_core::Vec3::new(delta[0], delta[1], delta[2]));
+        [local.x, local.y, local.z]
+    }
+
+    pub fn sample_dummy_rotation(&self, frame: usize, dummy: usize) -> [f32; 4] {
+        if dummy >= self.num_dummy {
+            return [0.0, 0.0, 0.0, 1.0];
+        }
+        let frame = frame.min(self.num_frames.saturating_sub(1));
+        let block = frame * self.stride + 12 + self.num_bones * 16 + dummy * 33;
+        if block + 33 > self.data.len() {
+            return [0.0, 0.0, 0.0, 1.0];
+        }
+        let read = |axis: usize| {
+            let offset = block + 17 + axis * 4;
+            f32::from_le_bytes(self.data[offset..offset + 4].try_into().unwrap())
+        };
+        [read(1), read(2), read(3), read(0)]
+    }
+
     pub fn sample_position_at(&self, frame: f32, dummy: Option<usize>) -> [f32; 3] {
         let clamped = frame.clamp(0.0, self.num_frames.saturating_sub(1) as f32);
         let i0 = clamped.trunc() as usize;
@@ -320,6 +364,36 @@ mod tests {
     }
 
     #[test]
+    fn spear_pose_291_weapon_dummy_matches_original_node_sampler() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let amb = parse_amb(&std::fs::read(root.join("origin_res/Common/character.amb")).unwrap())
+            .unwrap();
+        let oracle: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(root.join("analysis/mrc-moves-20260928/spear-dummy-oracle.json"))
+                .unwrap(),
+        )
+        .unwrap();
+        for case in oracle["cases"].as_array().unwrap() {
+            let frame = case["frame"].as_u64().unwrap() as f32;
+            let fraction = case["fraction"].as_f64().unwrap() as f32;
+            let sampled = amb.sample_at(frame + fraction);
+            let [x, y, z, w] = sampled.dummy_quats[4];
+            let [px, py, pz] = sampled.dummy_pos[4];
+            let matrix = meteor_core::Mat4::from_trs(
+                meteor_core::Vec3::new(px, py, pz),
+                meteor_core::Quat { x, y, z, w },
+            );
+            for (index, observed) in matrix.m.iter().enumerate() {
+                let expected = case["localMatrixSource"][index].as_f64().unwrap() as f32;
+                assert!(
+                    (observed - expected).abs() < 2e-5,
+                    "frame={frame} fraction={fraction} matrix[{index}]: Rust={observed}, EXE={expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn position_sampling_matches_full_sampling_at_boundaries() {
         let amb = parse_amb(&make_banim()).unwrap();
         for frame in [-4.0, 0.0, 0.00001, 0.0001, 0.25, 1.5, 2.0, 999.0] {
@@ -346,13 +420,24 @@ mod tests {
                     assert_eq!(amb.sample_position_at(frame, None), full.root_pivot);
                     for (dummy, position) in full.dummy_pos.iter().enumerate() {
                         assert_eq!(amb.sample_position_at(frame, Some(dummy)), *position);
+                        if fraction == 0.0 {
+                            assert_eq!(
+                                amb.sample_dummy_rotation(i, dummy),
+                                full.dummy_quats[dummy]
+                            );
+                        }
                     }
                 }
             }
+            assert_eq!(
+                amb.sample_dummy_rotation(0, usize::MAX),
+                [0.0, 0.0, 0.0, 1.0]
+            );
 
             let last = amb.num_frames - 1;
             amb.data
                 .truncate(last * amb.stride + 12 + amb.num_bones * 16 + 5 + 12);
+            assert_eq!(amb.sample_dummy_rotation(last, 0), [0.0, 0.0, 0.0, 1.0]);
             for frame in [last as f32 - 0.5, last as f32, last as f32 + 10.0] {
                 let full = amb.sample_at(frame);
                 for (dummy, position) in full.dummy_pos.iter().enumerate() {

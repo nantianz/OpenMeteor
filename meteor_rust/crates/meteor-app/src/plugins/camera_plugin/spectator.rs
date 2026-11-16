@@ -6,7 +6,7 @@ use crate::plugins::network_plugin::{NetState, NetStatus, RemoteFighter};
 use crate::plugins::stage_plugin::{LocalFighter, MissionNpc};
 
 #[derive(Resource, Default)]
-pub(super) struct SpectatorState {
+pub(crate) struct SpectatorState {
     pub active: bool,
     pub target: Option<Entity>,
     name: String,

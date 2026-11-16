@@ -57,11 +57,13 @@ impl StageMeshCollider {
         collision_face_ids: Option<&BTreeSet<u32>>,
         center: [f32; 3],
     ) -> Self {
-        let mut meta: BTreeMap<&str, Vec<(&str, bool)>> = BTreeMap::new();
+        let mut meta: BTreeMap<&str, Vec<(&str, bool, bool)>> = BTreeMap::new();
         for obj in desc.scene_objects.iter().rev() {
-            meta.entry(obj.name.as_str())
-                .or_default()
-                .push((obj.custom.as_str(), obj.block_player));
+            meta.entry(obj.name.as_str()).or_default().push((
+                obj.custom.as_str(),
+                obj.block_player,
+                obj.ticket_admitted,
+            ));
         }
 
         let mut collider = StageMeshCollider::default();
@@ -69,11 +71,11 @@ impl StageMeshCollider {
         let mut face_base = 0u32;
 
         for obj in &gmdl.objects {
-            let (custom, blocking) = meta
+            let (custom, blocking, admitted) = meta
                 .get_mut(obj.name.as_str())
                 .and_then(Vec::pop)
-                .unwrap_or(("", true));
-            if is_non_solid_custom(custom) {
+                .unwrap_or(("", true, true));
+            if !admitted || is_non_solid_custom(custom) {
                 face_base += obj.num_faces as u32;
                 continue;
             }
@@ -276,6 +278,41 @@ impl StageMeshCollider {
         } else {
             self.disabled_owners.insert(owner);
         }
+    }
+
+    pub fn body_hits_damage_owners(&self, cx: f32, cy: f32, cz: f32, owners: &[i32]) -> bool {
+        if owners.is_empty() {
+            return false;
+        }
+        let hx = BODY_BOX_HALF_XY;
+        let hz = BODY_BOX_HALF_XY;
+        let (y_min, y_max) = (cy, cy + BODY_BOX_Z_HIGH);
+        let (x_min, x_max) = (cx - hx, cx + hx);
+        let (z_min, z_max) = (cz - hz, cz + hz);
+        let bounds = Bounds::between([x_min, y_min, z_min], [x_max, y_max, z_max]);
+        let mut found = Vec::new();
+        for &owner in owners {
+            if let Some(tree) = self.owner_trees.get(&owner) {
+                tree.query(bounds, 15, &mut found);
+            }
+        }
+        found.sort_unstable();
+        for (_, tri) in found {
+            let owner = self.tri_owner.get(tri as usize).copied().unwrap_or(-1);
+            if !owners.contains(&owner) {
+                continue;
+            }
+            let (a, b, c) = tri_verts(self, tri);
+            if b[1].min(a[1]).min(c[1]) > y_max + 1e-4 || a[1].max(b[1]).max(c[1]) < y_min - 1e-4 {
+                continue;
+            }
+            if box_tri_overlap(
+                a, b, c, cx, x_min, x_max, y_min, y_max, z_min, z_max, hx, hz,
+            ) {
+                return true;
+            }
+        }
+        false
     }
 
     fn body_box_contact(&self, cx: f32, cy: f32, cz: f32) -> Option<(i32, FootHit)> {

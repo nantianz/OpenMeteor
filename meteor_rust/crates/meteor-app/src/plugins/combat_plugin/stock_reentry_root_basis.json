@@ -1,0 +1,1356 @@
+{
+  "boundary": "Original Action entry 55d260 and blend tick 55d910, then model basis writeback.\nOnly frame record lookup, wall clock, and final model callback are supplied.\n Includes generic flags=1 entry into Link targets at a prescribed 50ms morph; not the natural-Link dispatcher.",
+  "exe_sha256": "baebb6d59e6da61e03660c57c31f842f8a3ec157f07d1e2f9bf8d78373a58619",
+  "samples": [
+    {
+      "pose": 104,
+      "source": 1975,
+      "target": 1968,
+      "fps": 30,
+      "tick": 0,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -77.40193447549649
+    },
+    {
+      "pose": 104,
+      "source": 1975,
+      "target": 1968,
+      "fps": 30,
+      "tick": 1,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -154.80386877098078
+    },
+    {
+      "pose": 104,
+      "source": 1975,
+      "target": 1968,
+      "fps": 30,
+      "tick": 2,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 127.79420030905374
+    },
+    {
+      "pose": 104,
+      "source": 1975,
+      "target": 1968,
+      "fps": 60,
+      "tick": 0,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -65.9162126450341
+    },
+    {
+      "pose": 104,
+      "source": 1975,
+      "target": 1968,
+      "fps": 60,
+      "tick": 1,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -131.83242479251408
+    },
+    {
+      "pose": 104,
+      "source": 1975,
+      "target": 1968,
+      "fps": 60,
+      "tick": 2,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 162.25136356309244
+    },
+    {
+      "pose": 104,
+      "source": 1975,
+      "target": 1968,
+      "fps": 120,
+      "tick": 0,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -48.20442687822483
+    },
+    {
+      "pose": 104,
+      "source": 1975,
+      "target": 1968,
+      "fps": 120,
+      "tick": 1,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -96.4088538342919
+    },
+    {
+      "pose": 104,
+      "source": 1975,
+      "target": 1968,
+      "fps": 120,
+      "tick": 2,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -144.61328235288198
+    },
+    {
+      "pose": 105,
+      "source": 1993,
+      "target": 1986,
+      "fps": 30,
+      "tick": 0,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -76.18620881224177
+    },
+    {
+      "pose": 105,
+      "source": 1993,
+      "target": 1986,
+      "fps": 30,
+      "tick": 1,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -152.37241798780408
+    },
+    {
+      "pose": 105,
+      "source": 1993,
+      "target": 1986,
+      "fps": 30,
+      "tick": 2,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 131.44137061906233
+    },
+    {
+      "pose": 105,
+      "source": 1993,
+      "target": 1986,
+      "fps": 60,
+      "tick": 0,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -63.813997225286656
+    },
+    {
+      "pose": 105,
+      "source": 1993,
+      "target": 1986,
+      "fps": 60,
+      "tick": 1,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -127.62799631633585
+    },
+    {
+      "pose": 105,
+      "source": 1993,
+      "target": 1986,
+      "fps": 60,
+      "tick": 2,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 168.55800575574224
+    },
+    {
+      "pose": 105,
+      "source": 1993,
+      "target": 1986,
+      "fps": 120,
+      "tick": 0,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -45.47617019538953
+    },
+    {
+      "pose": 105,
+      "source": 1993,
+      "target": 1986,
+      "fps": 120,
+      "tick": 1,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -90.95233910550644
+    },
+    {
+      "pose": 105,
+      "source": 1993,
+      "target": 1986,
+      "fps": 120,
+      "tick": 2,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -136.42850934068449
+    },
+    {
+      "pose": 109,
+      "source": 2080,
+      "target": 2057,
+      "fps": 30,
+      "tick": 0,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 0.0
+    },
+    {
+      "pose": 109,
+      "source": 2080,
+      "target": 2057,
+      "fps": 30,
+      "tick": 1,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 0.0
+    },
+    {
+      "pose": 109,
+      "source": 2080,
+      "target": 2057,
+      "fps": 30,
+      "tick": 2,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 0.0
+    },
+    {
+      "pose": 109,
+      "source": 2080,
+      "target": 2057,
+      "fps": 60,
+      "tick": 0,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 0.0
+    },
+    {
+      "pose": 109,
+      "source": 2080,
+      "target": 2057,
+      "fps": 60,
+      "tick": 1,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 0.0
+    },
+    {
+      "pose": 109,
+      "source": 2080,
+      "target": 2057,
+      "fps": 60,
+      "tick": 2,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 0.0
+    },
+    {
+      "pose": 109,
+      "source": 2080,
+      "target": 2057,
+      "fps": 120,
+      "tick": 0,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 0.0
+    },
+    {
+      "pose": 109,
+      "source": 2080,
+      "target": 2057,
+      "fps": 120,
+      "tick": 1,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 0.0
+    },
+    {
+      "pose": 109,
+      "source": 2080,
+      "target": 2057,
+      "fps": 120,
+      "tick": 2,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 0.0
+    },
+    {
+      "pose": 110,
+      "source": 2220,
+      "target": 2213,
+      "fps": 30,
+      "tick": 0,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 0.0
+    },
+    {
+      "pose": 110,
+      "source": 2220,
+      "target": 2213,
+      "fps": 30,
+      "tick": 1,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 0.0
+    },
+    {
+      "pose": 110,
+      "source": 2220,
+      "target": 2213,
+      "fps": 30,
+      "tick": 2,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 0.0
+    },
+    {
+      "pose": 110,
+      "source": 2220,
+      "target": 2213,
+      "fps": 60,
+      "tick": 0,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 0.0
+    },
+    {
+      "pose": 110,
+      "source": 2220,
+      "target": 2213,
+      "fps": 60,
+      "tick": 1,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 0.0
+    },
+    {
+      "pose": 110,
+      "source": 2220,
+      "target": 2213,
+      "fps": 60,
+      "tick": 2,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 0.0
+    },
+    {
+      "pose": 110,
+      "source": 2220,
+      "target": 2213,
+      "fps": 120,
+      "tick": 0,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 0.0
+    },
+    {
+      "pose": 110,
+      "source": 2220,
+      "target": 2213,
+      "fps": 120,
+      "tick": 1,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 0.0
+    },
+    {
+      "pose": 110,
+      "source": 2220,
+      "target": 2213,
+      "fps": 120,
+      "tick": 2,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 0.0
+    },
+    {
+      "pose": 121,
+      "source": 14710,
+      "target": 14689,
+      "fps": 30,
+      "tick": 0,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 0.0
+    },
+    {
+      "pose": 121,
+      "source": 14710,
+      "target": 14689,
+      "fps": 30,
+      "tick": 1,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 0.0
+    },
+    {
+      "pose": 121,
+      "source": 14710,
+      "target": 14689,
+      "fps": 30,
+      "tick": 2,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 0.0
+    },
+    {
+      "pose": 121,
+      "source": 14710,
+      "target": 14689,
+      "fps": 60,
+      "tick": 0,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 0.0
+    },
+    {
+      "pose": 121,
+      "source": 14710,
+      "target": 14689,
+      "fps": 60,
+      "tick": 1,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 0.0
+    },
+    {
+      "pose": 121,
+      "source": 14710,
+      "target": 14689,
+      "fps": 60,
+      "tick": 2,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 0.0
+    },
+    {
+      "pose": 121,
+      "source": 14710,
+      "target": 14689,
+      "fps": 120,
+      "tick": 0,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 0.0
+    },
+    {
+      "pose": 121,
+      "source": 14710,
+      "target": 14689,
+      "fps": 120,
+      "tick": 1,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 0.0
+    },
+    {
+      "pose": 121,
+      "source": 14710,
+      "target": 14689,
+      "fps": 120,
+      "tick": 2,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 0.0
+    },
+    {
+      "source_pose": 104,
+      "entry_flags": 1,
+      "pose": 113,
+      "source": 1980,
+      "target": 11615,
+      "fps": 30,
+      "tick": 0,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -90.00000683018916
+    },
+    {
+      "source_pose": 104,
+      "entry_flags": 1,
+      "pose": 113,
+      "source": 1980,
+      "target": 11615,
+      "fps": 30,
+      "tick": 1,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 179.99998633962167
+    },
+    {
+      "source_pose": 104,
+      "entry_flags": 1,
+      "pose": 113,
+      "source": 1980,
+      "target": 11615,
+      "fps": 30,
+      "tick": 2,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 89.99997950943086
+    },
+    {
+      "source_pose": 104,
+      "entry_flags": 1,
+      "pose": 113,
+      "source": 1980,
+      "target": 11615,
+      "fps": 60,
+      "tick": 0,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -90.00001366037834
+    },
+    {
+      "source_pose": 104,
+      "entry_flags": 1,
+      "pose": 113,
+      "source": 1980,
+      "target": 11615,
+      "fps": 60,
+      "tick": 1,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 179.9999726792433
+    },
+    {
+      "source_pose": 104,
+      "entry_flags": 1,
+      "pose": 113,
+      "source": 1980,
+      "target": 11615,
+      "fps": 60,
+      "tick": 2,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 89.99995901886172
+    },
+    {
+      "source_pose": 104,
+      "entry_flags": 1,
+      "pose": 113,
+      "source": 1980,
+      "target": 11615,
+      "fps": 120,
+      "tick": 0,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -90.00002732075669
+    },
+    {
+      "source_pose": 104,
+      "entry_flags": 1,
+      "pose": 113,
+      "source": 1980,
+      "target": 11615,
+      "fps": 120,
+      "tick": 1,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 179.99994535848663
+    },
+    {
+      "source_pose": 104,
+      "entry_flags": 1,
+      "pose": 113,
+      "source": 1980,
+      "target": 11615,
+      "fps": 120,
+      "tick": 2,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 89.99991803772345
+    },
+    {
+      "source_pose": 105,
+      "entry_flags": 1,
+      "pose": 112,
+      "source": 2004,
+      "target": 11600,
+      "fps": 30,
+      "tick": 0,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -89.99999658490542
+    },
+    {
+      "source_pose": 105,
+      "entry_flags": 1,
+      "pose": 112,
+      "source": 2004,
+      "target": 11600,
+      "fps": 30,
+      "tick": 1,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -179.99999316981084
+    },
+    {
+      "source_pose": 105,
+      "entry_flags": 1,
+      "pose": 112,
+      "source": 2004,
+      "target": 11600,
+      "fps": 30,
+      "tick": 2,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 90.00001024528376
+    },
+    {
+      "source_pose": 105,
+      "entry_flags": 1,
+      "pose": 112,
+      "source": 2004,
+      "target": 11600,
+      "fps": 60,
+      "tick": 0,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -89.99999316981084
+    },
+    {
+      "source_pose": 105,
+      "entry_flags": 1,
+      "pose": 112,
+      "source": 2004,
+      "target": 11600,
+      "fps": 60,
+      "tick": 1,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -179.99998633962167
+    },
+    {
+      "source_pose": 105,
+      "entry_flags": 1,
+      "pose": 112,
+      "source": 2004,
+      "target": 11600,
+      "fps": 60,
+      "tick": 2,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 90.00002049056751
+    },
+    {
+      "source_pose": 105,
+      "entry_flags": 1,
+      "pose": 112,
+      "source": 2004,
+      "target": 11600,
+      "fps": 120,
+      "tick": 0,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -89.99998633962166
+    },
+    {
+      "source_pose": 105,
+      "entry_flags": 1,
+      "pose": 112,
+      "source": 2004,
+      "target": 11600,
+      "fps": 120,
+      "tick": 1,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -179.9999726792433
+    },
+    {
+      "source_pose": 105,
+      "entry_flags": 1,
+      "pose": 112,
+      "source": 2004,
+      "target": 11600,
+      "fps": 120,
+      "tick": 2,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": 90.00004098113502
+    },
+    {
+      "source_pose": 100,
+      "entry_flags": 1,
+      "pose": 118,
+      "source": 1900,
+      "target": 1901,
+      "fps": 30,
+      "tick": 0,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -7.0336567336505825e-09
+    },
+    {
+      "source_pose": 100,
+      "entry_flags": 1,
+      "pose": 118,
+      "source": 1900,
+      "target": 1901,
+      "fps": 30,
+      "tick": 1,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -1.4067313467301165e-08
+    },
+    {
+      "source_pose": 100,
+      "entry_flags": 1,
+      "pose": 118,
+      "source": 1900,
+      "target": 1901,
+      "fps": 30,
+      "tick": 2,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -2.110097020095175e-08
+    },
+    {
+      "source_pose": 100,
+      "entry_flags": 1,
+      "pose": 118,
+      "source": 1900,
+      "target": 1901,
+      "fps": 60,
+      "tick": 0,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -3.5168283668252913e-09
+    },
+    {
+      "source_pose": 100,
+      "entry_flags": 1,
+      "pose": 118,
+      "source": 1900,
+      "target": 1901,
+      "fps": 60,
+      "tick": 1,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -7.0336567336505825e-09
+    },
+    {
+      "source_pose": 100,
+      "entry_flags": 1,
+      "pose": 118,
+      "source": 1900,
+      "target": 1901,
+      "fps": 60,
+      "tick": 2,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -1.0550485100475875e-08
+    },
+    {
+      "source_pose": 100,
+      "entry_flags": 1,
+      "pose": 118,
+      "source": 1900,
+      "target": 1901,
+      "fps": 120,
+      "tick": 0,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -1.7584141834126456e-09
+    },
+    {
+      "source_pose": 100,
+      "entry_flags": 1,
+      "pose": 118,
+      "source": 1900,
+      "target": 1901,
+      "fps": 120,
+      "tick": 1,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -3.5168283668252913e-09
+    },
+    {
+      "source_pose": 100,
+      "entry_flags": 1,
+      "pose": 118,
+      "source": 1900,
+      "target": 1901,
+      "fps": 120,
+      "tick": 2,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -5.275242550237937e-09
+    },
+    {
+      "source_pose": 97,
+      "entry_flags": 1,
+      "pose": 112,
+      "source": 1864,
+      "target": 11600,
+      "fps": 30,
+      "tick": 0,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -5.033706851284343e-06
+    },
+    {
+      "source_pose": 97,
+      "entry_flags": 1,
+      "pose": 112,
+      "source": 1864,
+      "target": 11600,
+      "fps": 30,
+      "tick": 1,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -1.0067413702568608e-05
+    },
+    {
+      "source_pose": 97,
+      "entry_flags": 1,
+      "pose": 112,
+      "source": 1864,
+      "target": 11600,
+      "fps": 30,
+      "tick": 2,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -1.5101121368074717e-05
+    },
+    {
+      "source_pose": 97,
+      "entry_flags": 1,
+      "pose": 112,
+      "source": 1864,
+      "target": 11600,
+      "fps": 60,
+      "tick": 0,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -2.5168534256421767e-06
+    },
+    {
+      "source_pose": 97,
+      "entry_flags": 1,
+      "pose": 112,
+      "source": 1864,
+      "target": 11600,
+      "fps": 60,
+      "tick": 1,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -5.033706851284343e-06
+    },
+    {
+      "source_pose": 97,
+      "entry_flags": 1,
+      "pose": 112,
+      "source": 1864,
+      "target": 11600,
+      "fps": 60,
+      "tick": 2,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -7.550560684037489e-06
+    },
+    {
+      "source_pose": 97,
+      "entry_flags": 1,
+      "pose": 112,
+      "source": 1864,
+      "target": 11600,
+      "fps": 120,
+      "tick": 0,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -1.2584267128210888e-06
+    },
+    {
+      "source_pose": 97,
+      "entry_flags": 1,
+      "pose": 112,
+      "source": 1864,
+      "target": 11600,
+      "fps": 120,
+      "tick": 1,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -2.5168534256421767e-06
+    },
+    {
+      "source_pose": 97,
+      "entry_flags": 1,
+      "pose": 112,
+      "source": 1864,
+      "target": 11600,
+      "fps": 120,
+      "tick": 2,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -3.7752803420187615e-06
+    },
+    {
+      "source_pose": 95,
+      "entry_flags": 1,
+      "pose": 113,
+      "source": 1799,
+      "target": 11615,
+      "fps": 30,
+      "tick": 0,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -6.98600357696899e-06
+    },
+    {
+      "source_pose": 95,
+      "entry_flags": 1,
+      "pose": 113,
+      "source": 1799,
+      "target": 11615,
+      "fps": 30,
+      "tick": 1,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -1.3972007153937774e-05
+    },
+    {
+      "source_pose": 95,
+      "entry_flags": 1,
+      "pose": 113,
+      "source": 1799,
+      "target": 11615,
+      "fps": 30,
+      "tick": 2,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -2.0958010730906142e-05
+    },
+    {
+      "source_pose": 95,
+      "entry_flags": 1,
+      "pose": 113,
+      "source": 1799,
+      "target": 11615,
+      "fps": 60,
+      "tick": 0,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -3.4930017884845083e-06
+    },
+    {
+      "source_pose": 95,
+      "entry_flags": 1,
+      "pose": 113,
+      "source": 1799,
+      "target": 11615,
+      "fps": 60,
+      "tick": 1,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -6.98600357696899e-06
+    },
+    {
+      "source_pose": 95,
+      "entry_flags": 1,
+      "pose": 113,
+      "source": 1799,
+      "target": 11615,
+      "fps": 60,
+      "tick": 2,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -1.0479005365453422e-05
+    },
+    {
+      "source_pose": 95,
+      "entry_flags": 1,
+      "pose": 113,
+      "source": 1799,
+      "target": 11615,
+      "fps": 120,
+      "tick": 0,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -1.746500894242256e-06
+    },
+    {
+      "source_pose": 95,
+      "entry_flags": 1,
+      "pose": 113,
+      "source": 1799,
+      "target": 11615,
+      "fps": 120,
+      "tick": 1,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -3.4930017884845083e-06
+    },
+    {
+      "source_pose": 95,
+      "entry_flags": 1,
+      "pose": 113,
+      "source": 1799,
+      "target": 11615,
+      "fps": 120,
+      "tick": 2,
+      "state": 3,
+      "delta": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "yaw_degrees": -5.239502682726755e-06
+    }
+  ]
+}

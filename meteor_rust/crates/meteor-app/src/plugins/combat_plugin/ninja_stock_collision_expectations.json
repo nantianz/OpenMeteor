@@ -1,0 +1,43 @@
+{
+  "evidence": "COMBAT-065: current-ninja/stock-oracle.json; current Rust ECS matrices, stock 558600/5739d0/557fa0/55d950; conditional geometry only",
+  "exe_sha256": "baebb6d59e6da61e03660c57c31f842f8a3ec157f07d1e2f9bf8d78373a58619",
+  "oracle_sha256": "ff5cf68622d2510ea269f8114bac442f6355a1d93f3a2085029f1226c8ceafc1",
+  "cases": [
+    {
+      "fps": 120,
+      "distance": 2.0,
+      "launcher_hit": true,
+      "samples": 11
+    },
+    {
+      "fps": 120,
+      "distance": 3.0,
+      "launcher_hit": true,
+      "samples": 11
+    },
+    {
+      "fps": 120,
+      "distance": 4.0,
+      "launcher_hit": true,
+      "samples": 11
+    },
+    {
+      "fps": 60,
+      "distance": 2.0,
+      "launcher_hit": true,
+      "samples": 5
+    },
+    {
+      "fps": 60,
+      "distance": 3.0,
+      "launcher_hit": true,
+      "samples": 5
+    },
+    {
+      "fps": 60,
+      "distance": 4.0,
+      "launcher_hit": true,
+      "samples": 5
+    }
+  ]
+}

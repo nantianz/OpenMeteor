@@ -4,10 +4,10 @@ use super::native_text_input::{NativeTextEdit, NativeTextLabel, TextField};
 use super::ui_theme as theme;
 use crate::app_state::{
     CustomStageGrid, Keymap, LauncherBrandPanel, LauncherNavButton, LauncherScreenMarker,
-    LauncherStyledButton, MenuAutoRecordButton, MenuBackButton, MenuMrcButton, MenuNavigateButton,
-    MenuNetStatusText, MenuRecordButton, MenuReplayButton, MenuRoot, MenuScreen, OfficialStageGrid,
-    SelectedStageCodeText, SelectedStageNameText, Settings, SettingsResetButton, StageButton,
-    StageListTab, StageTabCustomButton, StageTabOfficialButton, StartGameButton,
+    LauncherStyledButton, MenuBackButton, MenuMrcButton, MenuNavigateButton, MenuNetStatusText,
+    MenuRoot, MenuScreen, OfficialStageGrid, SelectedStageCodeText, SelectedStageNameText,
+    Settings, SettingsResetButton, StageButton, StageListTab, StageTabCustomButton,
+    StageTabOfficialButton, StartGameButton,
 };
 use crate::app_state::{LaunchRequest, MenuStockDiscoveryText, MenuStockRefreshButton};
 #[cfg(not(target_arch = "wasm32"))]
@@ -574,6 +574,13 @@ fn spawn_main_screen(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, act
                     spawn_hero_nav_button(
                         nav,
                         font,
+                        "MRC 回放",
+                        false,
+                        MenuNavigateButton(MenuScreen::Replay),
+                    );
+                    spawn_hero_nav_button(
+                        nav,
+                        font,
                         "设置",
                         false,
                         MenuNavigateButton(MenuScreen::Settings),
@@ -1119,16 +1126,18 @@ fn spawn_network_screen(
                                 ))
                                 .with_children(|settings| {
                                     #[cfg(not(target_arch = "wasm32"))]
-                                    settings.spawn(stock_form_section_bundle()).with_children(|section| {
-                                        spawn_stock_selectable_button(
-                                            section, font, "开启公网对战", request.public_battle,
-                                            UiSelectableKind::Checkbox, MenuPublicBattleButton,
-                                        );
-                                        section.spawn(launcher_text(
-                                            "开启：与桌面版、浏览器版联机\n关闭：创建原版兼容的局域网房间",
-                                            11.0, theme::MUTED, font,
-                                        ));
-                                    });
+                                    if !super::network_plugin::default_web_address().is_empty() {
+                                        settings.spawn(stock_form_section_bundle()).with_children(|section| {
+                                            spawn_stock_selectable_button(
+                                                section, font, "开启公网对战", request.public_battle,
+                                                UiSelectableKind::Checkbox, MenuPublicBattleButton,
+                                            );
+                                            section.spawn(launcher_text(
+                                                "开启：与桌面版、浏览器版联机\n关闭：创建原版兼容的局域网房间",
+                                                11.0, theme::MUTED, font,
+                                            ));
+                                        });
+                                    }
                                     settings.spawn(stock_form_section_bundle()).with_children(
                                         |section| {
                                             section.spawn(launcher_text(
@@ -1219,6 +1228,10 @@ fn spawn_network_screen(
                                         },
                                     );
 
+                                    settings.spawn(stock_form_section_bundle()).with_children(|section| {
+                                        spawn_stock_selectable_button(section, font, "再平衡", request.balance_rules, UiSelectableKind::Checkbox, crate::app_state::MenuBalanceRulesButton);
+                                        section.spawn(launcher_text("按房主配置调整磨血、指定 Pose 的伤害、速度与硬直", 12.0, theme::MUTED, font));
+                                    });
                                     settings.spawn(stock_form_section_bundle()).with_children(
                                         |section| {
                                             section.spawn(launcher_text(
@@ -1453,6 +1466,11 @@ fn spawn_stock_stage_choice(
 }
 
 fn stock_stage_visible_for_rule(rule: i32, stage_id: &str) -> bool {
+    if meteor_scene::stage_registry::is_official_stage_id(stage_id)
+        && !meteor_network::modes::original_stage_supports_rule(stage_id, rule)
+    {
+        return false;
+    }
     match rule {
         2 => {
             #[cfg(not(target_arch = "wasm32"))]
@@ -1462,7 +1480,7 @@ fn stock_stage_visible_for_rule(rule: i32, stage_id: &str) -> bool {
 
             #[cfg(target_arch = "wasm32")]
             {
-                stage_id.eq_ignore_ascii_case("sn03")
+                meteor_network::modes::is_escort_stage(stage_id)
             }
         }
         3 => matches!(
@@ -1998,7 +2016,9 @@ pub(crate) fn spawn_full_settings_page(
             ..default()
         })
         .with_children(|form| {
-            crate::plugins::settings_ui::spawn_web_settings_form(form, font, settings, keymap);
+            crate::plugins::settings_ui::spawn_web_settings_form(
+                form, font, settings, keymap, in_game,
+            );
         });
 
     parent
@@ -2269,50 +2289,33 @@ fn spawn_replay_screen(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, a
                         })
                         .with_children(|titles| {
                             titles.spawn(launcher_text("战况纪录", 9.0, RED_BRIGHT, font));
-                            titles.spawn(launcher_text("开始回放 · 拨放列表", 26.0, PAPER, font));
+                            titles.spawn(launcher_text("MRC 录像回放", 26.0, PAPER, font));
                         });
                 });
             screen.spawn(launcher_text(
-                "导入 .mrc / 回放最新 .rep / 切换自动录制",
+                "选择本机的 .mrc 录像文件开始回放",
                 13.0,
                 theme::MUTED,
                 font,
             ));
-            spawn_nav_button(
-                screen,
+            screen.spawn(launcher_text(
+                "键盘 ←/→ 快退/快进 5 秒，空格暂停/继续",
+                13.0,
+                theme::MUTED,
                 font,
-                "录",
-                "录制本局",
-                "写入 replays/rec_*.rep",
-                false,
-                MenuRecordButton,
-            );
-            spawn_nav_button(
-                screen,
-                font,
-                "放",
-                "回放最新录像",
-                "replays/ 目录最新文件",
-                false,
-                MenuReplayButton,
-            );
+            ));
+            screen.spawn((
+                launcher_text("", 13.0, theme::MUTED, font),
+                super::mrc_file_picker::MrcFileStatus,
+            ));
             spawn_nav_button(
                 screen,
                 font,
                 "M",
-                "播放 mrc 示例",
-                "origin_res/mrcfile 黄金 demo",
+                "选择 MRC 文件",
+                "选择录像文件并播放",
                 false,
                 MenuMrcButton,
-            );
-            spawn_nav_button(
-                screen,
-                font,
-                "自",
-                "自动录制",
-                "每局开始自动写入录像",
-                false,
-                MenuAutoRecordButton,
             );
         });
 }
@@ -3875,11 +3878,39 @@ mod font_tests {
                 .count(),
             0
         );
-        assert!(!app
+        assert!(app
             .world_mut()
             .query::<&MenuNavigateButton>()
             .iter(app.world())
             .any(|b| b.0 == MenuScreen::Replay));
+        assert_eq!(
+            app.world_mut()
+                .query::<&MenuMrcButton>()
+                .iter(app.world())
+                .count(),
+            1
+        );
+        assert_eq!(
+            app.world_mut()
+                .query::<&crate::app_state::MenuRecordButton>()
+                .iter(app.world())
+                .count(),
+            0
+        );
+        assert_eq!(
+            app.world_mut()
+                .query::<&crate::app_state::MenuAutoRecordButton>()
+                .iter(app.world())
+                .count(),
+            0
+        );
+        assert_eq!(
+            app.world_mut()
+                .query::<&crate::app_state::MenuReplayButton>()
+                .iter(app.world())
+                .count(),
+            0
+        );
         let arrows: Vec<Entity> = app
             .world_mut()
             .query_filtered::<Entity, With<LoadoutArrow>>()

@@ -109,7 +109,7 @@ fn start_authority_clock(state: ServerState, outbox: Outbox) {
             let authority = state
                 .lock()
                 .unwrap()
-                .advance_authority(1.0 / TICK_RATE as f32, server_time);
+                .advance_authority(1.0 / f64::from(TICK_RATE), server_time);
             for (conn_id, message) in authority.controls {
                 send_to(&outbox, &state, conn_id, &message);
             }

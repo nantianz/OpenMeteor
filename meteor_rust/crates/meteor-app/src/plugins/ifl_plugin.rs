@@ -1,4 +1,5 @@
 use crate::plugins::pak_textures::{punch_color_key, PakCache};
+use crate::plugins::stage_material::scene_textures::SceneTexturePack;
 use crate::plugins::stage_material::GmdlMaterial;
 use bevy::image::Image;
 use bevy::prelude::*;
@@ -49,6 +50,51 @@ pub fn load_ifl_frames(
     color_key: bool,
     texture_quality: u8,
 ) -> Option<Vec<Handle<Image>>> {
+    load_ifl_frames_inner(
+        pak_cache,
+        root,
+        images,
+        ifl_name,
+        current_scope,
+        color_key,
+        texture_quality,
+        None,
+    )
+}
+
+pub(crate) fn load_scene_ifl_frames(
+    pak_cache: &mut PakCache,
+    root: &std::path::Path,
+    images: &mut Assets<Image>,
+    ifl_name: &str,
+    current_scope: &str,
+    color_key: bool,
+    texture_quality: u8,
+    hd_pack: &SceneTexturePack,
+) -> Option<Vec<Handle<Image>>> {
+    load_ifl_frames_inner(
+        pak_cache,
+        root,
+        images,
+        ifl_name,
+        current_scope,
+        color_key,
+        texture_quality,
+        Some(hd_pack),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn load_ifl_frames_inner(
+    pak_cache: &mut PakCache,
+    root: &std::path::Path,
+    images: &mut Assets<Image>,
+    ifl_name: &str,
+    current_scope: &str,
+    color_key: bool,
+    texture_quality: u8,
+    hd_pack: Option<&SceneTexturePack>,
+) -> Option<Vec<Handle<Image>>> {
     let normalized = ifl_name.replace('\\', "/");
     let (scope, file) = if let Some((head, tail)) = normalized.split_once('/') {
         if head.len() == 4 && head.starts_with("sn") {
@@ -76,6 +122,23 @@ pub fn load_ifl_frames(
         let Some(bytes) = pak_cache.resolve(root, &scope, name) else {
             continue;
         };
+        if let Some(handle) = hd_pack
+            .and_then(|pack| pack.diffuse(&scope, name))
+            .and_then(|hd_bytes| {
+                crate::plugins::pak_textures::hd_image_handle_with_legacy_style_quality(
+                    images,
+                    hd_bytes,
+                    Some(&bytes),
+                    None,
+                    false,
+                    color_key,
+                    texture_quality,
+                )
+            })
+        {
+            frames.push(handle);
+            continue;
+        }
         let Ok(mut decoded) = decode_image(&bytes) else {
             continue;
         };
@@ -153,6 +216,70 @@ impl Plugin for IflPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "original-assets")]
+    #[test]
+    fn hd_scene_ifl_preserves_frame_order_count_and_authored_alpha() {
+        let origin = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        let hd_bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../asset-tools/generated/scene-textures/sn06/sn06mian5.jpg"),
+        )
+        .unwrap();
+        let pack = SceneTexturePack::load_with_reader("sn01", true, |path| {
+            if path.ends_with("manifest.json") {
+                Some(
+                    br#"{"version":1,"textures":{"s53f100.jpg":{"diffuse":"hd-fire.jpg"}}}"#
+                        .to_vec(),
+                )
+            } else {
+                Some(hd_bytes.clone())
+            }
+        });
+        let mut images = Assets::<Image>::default();
+        let mut cache = PakCache::default();
+        let old = load_ifl_frames(
+            &mut cache,
+            &origin,
+            &mut images,
+            "s53f.ifl",
+            "sn01",
+            true,
+            0,
+        )
+        .unwrap();
+        let hd = load_scene_ifl_frames(
+            &mut cache,
+            &origin,
+            &mut images,
+            "s53f.ifl",
+            "sn01",
+            true,
+            0,
+            &pack,
+        )
+        .unwrap();
+        assert_eq!(old.len(), hd.len());
+        assert_eq!(old.len(), 15);
+        for (old, hd) in old.iter().zip(&hd).skip(1) {
+            assert_eq!(images.get(old).unwrap().data, images.get(hd).unwrap().data);
+        }
+        let old = images.get(&old[0]).unwrap();
+        let hd = images.get(&hd[0]).unwrap();
+        let os = old.texture_descriptor.size;
+        let hs = hd.texture_descriptor.size;
+        assert!(hs.width > os.width);
+        for y in (0..hs.height).step_by(31) {
+            for x in (0..hs.width).step_by(31) {
+                let sy = y * os.height / hs.height;
+                let sx = x * os.width / hs.width;
+                assert_eq!(
+                    hd.data.as_ref().unwrap()[((y * hs.width + x) * 4 + 3) as usize],
+                    old.data.as_ref().unwrap()[((sy * os.width + sx) * 4 + 3) as usize]
+                );
+            }
+        }
+    }
 
     #[test]
     fn parses_ifl_lines() {

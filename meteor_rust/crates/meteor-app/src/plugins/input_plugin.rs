@@ -1,7 +1,5 @@
 use crate::app_state::{AppState, Keymap};
-use crate::components::fighter::{
-    DeathRespawn, FighterHitReaction, GunAimState, SmState, WeaponSwitchActive,
-};
+use crate::components::fighter::{DeathRespawn, GunAimState, SmState, WeaponSwitchActive};
 use crate::plugins::stage_plugin::LocalFighter;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -200,6 +198,24 @@ impl SyntheticInputStream {
                 repeat: false,
             },
             record_direction: false,
+            detect_dodge: false,
+            event_seconds,
+        });
+    }
+
+    pub(crate) fn push_mrc_direction(
+        &mut self,
+        binding: crate::app_state::InputBinding,
+        pressed: bool,
+        event_seconds: Option<f64>,
+    ) {
+        self.edges.push(SyntheticInputEdge::Binding {
+            edge: DirectionInputEdge {
+                binding,
+                pressed,
+                repeat: false,
+            },
+            record_direction: true,
             detect_dodge: false,
             event_seconds,
         });
@@ -460,7 +476,6 @@ struct CrouchInputFrame {
     physically_held: bool,
     input_blocked: bool,
     switching_weapon: bool,
-    stunned: bool,
     dead: bool,
     gun_aiming: bool,
 }
@@ -491,9 +506,6 @@ fn update_crouch_latch(crouch: &mut LocalCrouchInput, mut frame: CrouchInputFram
         return;
     }
 
-    if frame.stunned {
-        return;
-    }
     if frame.released {
         crouch.held = false;
     } else if frame.pressed && !frame.gun_aiming {
@@ -540,7 +552,6 @@ type LocalCrouchOwnerQuery<'w, 's> = Query<
     (
         &'static SmState,
         &'static GunAimState,
-        &'static FighterHitReaction,
         &'static DeathRespawn,
         Option<&'static WeaponSwitchActive>,
     ),
@@ -564,7 +575,7 @@ pub(crate) fn capture_local_hold_inputs(
         guard.held = false;
         return;
     }
-    let Ok((state, gun_aim, reaction, death, switching)) = owner.single() else {
+    let Ok((state, gun_aim, death, switching)) = owner.single() else {
         return;
     };
 
@@ -574,8 +585,6 @@ pub(crate) fn capture_local_hold_inputs(
     let input_blocked = performance
         .as_deref()
         .is_some_and(|performance| performance.input_blocked);
-    let stunned = reaction.current.is_some()
-        || matches!(state.current, FighterState::BeHit | FighterState::Down);
     update_crouch_latch(
         &mut crouch,
         CrouchInputFrame {
@@ -584,7 +593,6 @@ pub(crate) fn capture_local_hold_inputs(
             physically_held: keymap.crouch.pressed(&keys, &mouse),
             input_blocked,
             switching_weapon: switching.is_some(),
-            stunned,
             dead: death.active || state.current == FighterState::Dead,
             gun_aiming: gun_aim.aiming,
         },
@@ -1070,6 +1078,7 @@ pub(crate) struct LocalInputFrameState<'w> {
 pub(crate) fn capture_local_command_input(
     time: Res<Time<bevy::time::Real>>,
     dbg: Option<Res<crate::plugins::debug_plugin::DebugConsoleState>>,
+    mrc: Option<Res<crate::plugins::replay_plugin::MrcPlayback>>,
     mut input: DesktopDirectionInput<'_, '_>,
     performance: Option<Res<crate::plugins::stage_plugin::PlayerPerformance>>,
     mut state: LocalInputFrameState<'_>,
@@ -1099,6 +1108,7 @@ pub(crate) fn capture_local_command_input(
     let mut ordered_edges: Vec<SyntheticInputEdge> = input
         .window_events
         .read_with_id()
+        .filter(|_| !mrc.as_ref().is_some_and(|mrc| mrc.active))
         .filter(|(_, id)| id.id >= state.combat.window_event_floor)
         .filter_map(|(event, _)| match event {
             bevy::window::WindowEvent::KeyboardInput(event) => Some(
@@ -1511,6 +1521,45 @@ mod tests {
     }
 
     #[test]
+    fn mrc_capture_discards_live_window_edges_but_consumes_recorded_actions() {
+        use bevy::input::{mouse::MouseButtonInput, ButtonState};
+        use bevy::window::WindowEvent;
+        let mut app = App::new();
+        app.init_resource::<Time<bevy::time::Real>>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .init_resource::<Keymap>()
+            .init_resource::<LocalCommandInput>()
+            .init_resource::<LocalCrouchInput>()
+            .init_resource::<LocalGuardInput>()
+            .init_resource::<LocalCombatInput>()
+            .init_resource::<LocalJumpInput>()
+            .init_resource::<DesktopDodgeInput>()
+            .init_resource::<SyntheticInputStream>()
+            .insert_resource(crate::plugins::replay_plugin::MrcPlayback {
+                active: true,
+                ..default()
+            })
+            .add_message::<WindowEvent>()
+            .add_systems(Update, capture_local_command_input);
+        app.world_mut()
+            .write_message(WindowEvent::MouseButtonInput(MouseButtonInput {
+                button: MouseButton::Left,
+                state: ButtonState::Pressed,
+                window: Entity::PLACEHOLDER,
+            }));
+        let guard = app.world().resource::<Keymap>().guard;
+        app.world_mut()
+            .resource_mut::<SyntheticInputStream>()
+            .push_action(guard, SyntheticAction::Guard, true, Some(1.0));
+        app.update();
+        assert_eq!(
+            app.world().resource::<LocalCombatInput>().edges,
+            vec![LocalCombatInputEdge::GuardPress]
+        );
+    }
+
+    #[test]
     fn production_window_stream_preserves_keyboard_mouse_guard_order() {
         use bevy::input::keyboard::{Key, KeyboardInput};
         use bevy::input::mouse::MouseButtonInput;
@@ -1873,6 +1922,74 @@ mod tests {
     }
 
     #[test]
+    fn mrc_authored_direction_edges_reach_full_anger_fist_command() {
+        let keymap = Keymap::default();
+        let mut stream = SyntheticInputStream::default();
+
+        stream.push_mrc_direction(keymap.move_left, true, Some(14.678));
+        stream.push_mrc_direction(keymap.move_right, true, Some(14.802));
+        stream.push_mrc_direction(keymap.move_left, false, Some(14.855));
+        stream.push_mrc_direction(keymap.move_down, true, Some(14.878));
+        stream.push_action(keymap.attack, SyntheticAction::Attack, true, Some(14.939));
+        let mut combat = LocalCombatInput::default();
+        let mut jump = LocalJumpInput::default();
+        let mut dodge = DesktopDodgeInput::default();
+        collect_ordered_combat_edges(
+            &mut combat,
+            &mut dodge,
+            &mut jump,
+            &keymap,
+            stream.drain(),
+            14.95,
+            OrderedInputInitial::default(),
+        );
+        assert_eq!(
+            combat.edges,
+            vec![
+                LocalCombatInputEdge::DirectionPress(Dir::Left),
+                LocalCombatInputEdge::DirectionPress(Dir::Right),
+                LocalCombatInputEdge::DirectionRelease(Dir::Left),
+                LocalCombatInputEdge::DirectionPress(Dir::Down),
+                LocalCombatInputEdge::Attack,
+            ]
+        );
+        let mut parser = meteor_input::command_parser::CommandInput::default();
+        for edge in combat.edges {
+            match edge {
+                LocalCombatInputEdge::DirectionPress(direction) => {
+                    parser.push_direction(direction, 14_900.0)
+                }
+                LocalCombatInputEdge::DirectionRelease(direction) => {
+                    parser.release_direction(direction)
+                }
+                LocalCombatInputEdge::Attack => {
+                    assert_eq!(
+                        meteor_combat::combo_engine::resolve_affordable_weapon_command(
+                            11,
+                            &parser
+                                .take()
+                                .into_iter()
+                                .map(|dir| match dir {
+                                    Dir::Up => meteor_combat::combo_engine::Dir::Up,
+                                    Dir::Down => meteor_combat::combo_engine::Dir::Down,
+                                    Dir::Left => meteor_combat::combo_engine::Dir::Left,
+                                    Dir::Right => meteor_combat::combo_engine::Dir::Right,
+                                })
+                                .collect::<Vec<_>>(),
+                            false,
+                            0,
+                            |cost| cost <= 100,
+                        )
+                        .map(|command| (command.pose_id, command.anger_cost)),
+                        Some((421, 100)),
+                    );
+                }
+                _ => panic!("unexpected MRC edge: {edge:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn synthetic_drop_actions_survive_until_the_ordered_consumer_frame() {
         let keymap = Keymap::default();
         let mut synthetic = SyntheticInputStream::default();
@@ -2157,11 +2274,10 @@ mod tests {
             &mut crouch,
             CrouchInputFrame {
                 released: true,
-                stunned: true,
                 ..default()
             },
         );
-        assert!(crouch.held);
+        assert!(!crouch.held);
 
         update_crouch_latch(
             &mut crouch,
@@ -2294,11 +2410,10 @@ mod tests {
             LocalFighter,
             SmState::default(),
             GunAimState::default(),
-            FighterHitReaction::default(),
             DeathRespawn::default(),
         ));
 
-        for (action, value) in [("block", 0.0), ("crouch", 1.0), ("block", 1.0)] {
+        for (action, value) in [("block", 1.0), ("crouch", 1.0), ("block", 0.0)] {
             app.world_mut()
                 .resource_mut::<PlayerPerformance>()
                 .queue
@@ -2355,7 +2470,6 @@ mod tests {
                 LocalFighter,
                 SmState::default(),
                 GunAimState::default(),
-                FighterHitReaction::default(),
                 DeathRespawn::default(),
             ))
             .id();
@@ -2397,6 +2511,57 @@ mod tests {
             .aiming = false;
         app.update();
         assert!(!app.world().resource::<LocalCrouchInput>().held);
+    }
+
+    #[test]
+    fn production_crouch_release_during_hit_reaction_clears_the_latch() {
+        let mut app = App::new();
+        app.init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .init_resource::<Keymap>()
+            .init_resource::<LocalCrouchInput>()
+            .init_resource::<LocalGuardInput>()
+            .add_systems(Update, capture_local_hold_inputs);
+        let local = app
+            .world_mut()
+            .spawn((
+                LocalFighter,
+                SmState::default(),
+                GunAimState::default(),
+                DeathRespawn::default(),
+            ))
+            .id();
+
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyC);
+        app.update();
+        assert!(app.world().resource::<LocalCrouchInput>().held);
+
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .clear();
+        app.world_mut().get_mut::<SmState>(local).unwrap().current = FighterState::BeHit;
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release(KeyCode::KeyC);
+        app.update();
+        assert!(
+            !app.world().resource::<LocalCrouchInput>().held,
+            "releasing crouch during a hit reaction must clear the latch"
+        );
+
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .clear();
+        app.world_mut().get_mut::<SmState>(local).unwrap().current = FighterState::Name;
+        for _ in 0..4 {
+            app.update();
+            assert!(
+                !app.world().resource::<LocalCrouchInput>().held,
+                "crouch must not reappear after the hit pose ends"
+            );
+        }
     }
 
     #[test]

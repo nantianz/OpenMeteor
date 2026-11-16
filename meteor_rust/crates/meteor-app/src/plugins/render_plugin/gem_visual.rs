@@ -109,7 +109,7 @@ mod tests {
                 &mut PakCache::default(), &pak_root, &roots,
                 &crate::app_state::LoadedStageInfo { stage_id: "sn01".into(), ..default() },
                 Some("SceneObjects 0 DummeyObjects 2\nObject D_itGem1\n{\nPosition: 0 0 0\nQuaternion: 1 0 0 0\nCustom:\n{\nmodel=Item0902\n}\n}\nObject D_itGem2\n{\nPosition: 100 0 0\nQuaternion: 1 0 0 0\nCustom:\n{\nmodel=Item0902\n}\n}\n"),
-                0, &mut Vec::new(), &mut StageMeshCollider::default(), None, None);
+                0, &mut Vec::new(), &mut StageMeshCollider::default(), None, None, None);
         }).unwrap();
         let world = app.world_mut();
         let mut visuals =

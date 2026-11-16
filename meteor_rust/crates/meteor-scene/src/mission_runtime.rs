@@ -47,12 +47,21 @@ pub struct NpcDefinition {
 
 pub fn parse_npc_definition(source: &str, script_name: &str) -> NpcDefinition {
     let values = parse_globals(source);
+    npc_definition_from_values(&values, script_name)
+}
+
+fn npc_definition_from_values(
+    values: &std::collections::HashMap<String, PstValue>,
+    script_name: &str,
+) -> NpcDefinition {
     let number = |key: &str, fallback: i64| -> i64 {
         match values.get(key) {
             Some(PstValue::Num(n)) if n.is_finite() => *n as i64,
             _ => fallback,
         }
     };
+
+    let word = |key: &str, fallback: i64| i64::from(number(key, fallback) as i16);
     let name = match values.get("Name") {
         Some(PstValue::Str(s)) => s.clone(),
         Some(PstValue::Num(n)) => format!("{}", n.trunc() as i64),
@@ -67,18 +76,18 @@ pub fn parse_npc_definition(source: &str, script_name: &str) -> NpcDefinition {
         team: number("Team", 0),
         hp: number("HP", 1000),
         spawn: number("Spawn", 0),
-        view: number("View", 400),
-        think: number("Think", 50),
-        attack1: number("Attack1", 0),
-        attack2: number("Attack2", 0),
-        attack3: number("Attack3", 0),
-        guard: number("Guard", 0),
-        dodge: number("Dodge", 0),
-        jump: number("Jump", 0),
-        look: number("Look", 0),
-        burst: number("Burst", 0),
-        aim: number("Aim", 0),
-        get_item: number("GetItem", 0),
+        view: word("View", 400),
+        think: word("Think", 100),
+        attack1: word("Attack1", 25),
+        attack2: word("Attack2", 25),
+        attack3: word("Attack3", 25),
+        guard: word("Guard", 20),
+        dodge: word("Dodge", 10),
+        jump: word("Jump", 10),
+        look: word("Look", 50),
+        burst: word("Burst", 10),
+        aim: word("Aim", 80),
+        get_item: word("GetItem", 50),
     }
 }
 
@@ -87,6 +96,14 @@ pub struct MissionHost {
     vip_enabled: bool,
     vips: [Option<i64>; 2],
     flag_carrier: Option<i64>,
+
+    npc_last_update_ms: std::collections::HashMap<i64, u64>,
+
+    npc_init_pending: std::collections::HashSet<i64>,
+
+    npc_initial_hp: std::collections::HashMap<i64, i16>,
+
+    npc_first_script_tick: std::collections::HashSet<i64>,
     ai_updates: Vec<(i64, std::collections::HashMap<String, PstValue>)>,
     waypoint_updates: Vec<(usize, bool)>,
     npc_requests: Vec<NpcRequest>,
@@ -94,6 +111,13 @@ pub struct MissionHost {
     output: Vec<String>,
     elapsed: f64,
     targets: std::collections::HashMap<i64, (String, f64)>,
+    target_points: std::collections::HashMap<i64, [f64; 3]>,
+
+    scene_targets: std::collections::HashMap<(String, i64), (usize, [f64; 3])>,
+    behavior_target_points: Vec<Option<[f64; 3]>>,
+    behavior_callback_tails: Vec<bool>,
+
+    npc_callback_owner: Option<i64>,
 
     actor_positions: std::collections::HashMap<i64, [f64; 3]>,
 
@@ -149,17 +173,7 @@ impl MissionHost {
     }
 
     pub fn char_id_for_team(&self, name: &str, team: u8) -> Option<i64> {
-        let target = if name.eq_ignore_ascii_case("vip") {
-            self.vip(team)
-        } else if name.eq_ignore_ascii_case("enemyvip") {
-            self.vips
-                .iter()
-                .enumerate()
-                .find_map(|(index, id)| (index + 1 != team as usize).then_some(*id).flatten())
-        } else {
-            return self.get_char_id(name, false);
-        };
-        target.filter(|id| self.in_scene.get(id).copied().unwrap_or(false))
+        self.get_char_id_for_team(name, i64::from(team), false)
     }
     pub fn defer_ai_update(
         &mut self,
@@ -167,6 +181,9 @@ impl MissionHost {
         values: std::collections::HashMap<String, PstValue>,
     ) {
         if self.in_scene.get(&id).copied().unwrap_or(false) {
+            if let Some(PstValue::Str(name)) = values.get("Name") {
+                self.sync_actor_name(id, name);
+            }
             self.ai_updates.push((id, values));
         }
     }
@@ -197,8 +214,14 @@ impl MissionHost {
         self.elapsed
     }
 
+    pub fn sync_actor_name(&mut self, id: i64, name: &str) {
+        self.chars.retain(|_, actor| *actor != id);
+        self.chars.insert(name.to_string(), id);
+        self.display_names.insert(id, name.to_string());
+    }
+
     pub fn register_char(&mut self, name: &str, id: i64) {
-        self.chars.insert(name.to_lowercase(), id);
+        self.chars.insert(name.to_string(), id);
         self.display_names.insert(id, name.to_string());
         self.in_scene.insert(id, true);
         self.active.insert(id, true);
@@ -253,7 +276,31 @@ impl MissionHost {
     }
 
     pub fn take_behavior_requests(&mut self) -> Vec<(i64, String, Vec<PstValue>)> {
+        self.behavior_target_points.clear();
+        self.behavior_callback_tails.clear();
         std::mem::take(&mut self.behavior_requests)
+    }
+
+    pub fn take_behavior_requests_with_targets(
+        &mut self,
+    ) -> Vec<(i64, String, Vec<PstValue>, Option<[f64; 3]>)> {
+        self.take_behavior_requests_with_context()
+            .into_iter()
+            .map(|(id, mode, args, point, _)| (id, mode, args, point))
+            .collect()
+    }
+
+    pub fn take_behavior_requests_with_context(
+        &mut self,
+    ) -> Vec<(i64, String, Vec<PstValue>, Option<[f64; 3]>, bool)> {
+        let points = std::mem::take(&mut self.behavior_target_points);
+        let tails = std::mem::take(&mut self.behavior_callback_tails);
+        std::mem::take(&mut self.behavior_requests)
+            .into_iter()
+            .zip(points)
+            .zip(tails)
+            .map(|(((id, mode, args), point), tail)| (id, mode, args, point, tail))
+            .collect()
     }
 
     pub fn take_perform_requests(&mut self) -> Vec<(i64, String, Vec<PstValue>)> {
@@ -277,19 +324,23 @@ impl MissionHost {
     }
 
     fn get_char_id(&self, name: &str, include_dead: bool) -> Option<i64> {
-        if name.eq_ignore_ascii_case("vip") || name.eq_ignore_ascii_case("enemyvip") {
-            return self.char_id_for_team(name, 1);
-        }
-        if name.eq_ignore_ascii_case("flag") {
-            return self.flag_carrier.filter(|id| {
-                self.in_scene.get(id).copied().unwrap_or(false)
-                    && self.active.get(id).copied().unwrap_or(false)
-            });
-        }
-        if name.eq_ignore_ascii_case("player") {
-            return Some(0);
-        }
-        let id = self.chars.get(&name.to_lowercase()).copied()?;
+        self.get_char_id_for_team(name, 0, include_dead)
+    }
+
+    fn get_char_id_for_team(&self, name: &str, team: i64, include_dead: bool) -> Option<i64> {
+        let id = match name {
+            "vip" | "enemyvip" => self
+                .vips
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| ((index + 1) as i64 == team) == (name == "vip"))
+                .filter_map(|(_, id)| *id)
+                .filter(|id| self.in_scene.get(id).copied().unwrap_or(false))
+                .min(),
+            "flag" => self.flag_carrier,
+            "player" => Some(0),
+            _ => self.chars.get(name).copied(),
+        }?;
         if !self.in_scene.get(&id).copied().unwrap_or(false) {
             return None;
         }
@@ -324,17 +375,49 @@ impl MissionHost {
             .map(|(kind, value)| (kind.as_str(), *value))
     }
 
-    fn target_position(&self, slot: i64) -> Option<[f64; 3]> {
-        let (kind, value) = self.targets.get(&slot)?;
-        match kind.as_str() {
+    pub fn target_position(&self, slot: i64) -> Option<[f64; 3]> {
+        self.target_points.get(&slot).copied()
+    }
+
+    pub fn begin_scene_target_sync(&mut self) {
+        self.scene_targets.clear();
+    }
+
+    pub fn sync_scene_target(&mut self, kind: &str, team: i64, order: usize, center: [f32; 3]) {
+        if !matches!((kind, team), ("flag" | "door", 0) | ("safe", 1 | 2)) {
+            return;
+        }
+        let key = (kind.to_string(), team);
+        if self
+            .scene_targets
+            .get(&key)
+            .is_none_or(|(first, _)| order < *first)
+        {
+            self.scene_targets
+                .insert(key, (order, center.map(f64::from)));
+        }
+    }
+
+    fn resolve_target_position(&self, kind: &str, value: f64) -> Option<[f64; 3]> {
+        match kind {
             "char" => {
-                let id = *value as i64;
+                let id = value as i64;
                 if id != 0 && !self.in_scene.get(&id).copied().unwrap_or(false) {
                     return None;
                 }
-                self.actor_positions.get(&id).copied()
+                let mut point = self.actor_positions.get(&id).copied()?;
+
+                point[1] += f64::from(30.0 * meteor_core::MODEL_SCALE);
+                Some(point)
             }
-            "waypoint" => self.waypoint_positions.get(&(*value as i64)).copied(),
+            "waypoint" => self.waypoint_positions.get(&(value as i64)).copied(),
+            "flag" | "safe" | "door" => {
+                let team = if kind == "safe" { value as i64 } else { 0 };
+                let (_, mut point) = self.scene_targets.get(&(kind.to_string(), team)).copied()?;
+
+                point[1] += f64::from(20.0 * meteor_core::MODEL_SCALE);
+                Some(point)
+            }
             _ => None,
         }
     }
@@ -354,24 +437,14 @@ impl MissionHost {
 }
 
 impl PstHost for MissionHost {
-    fn builtin_for_actor(&mut self, actor: Option<i64>, name: &str, args: &[PstValue]) -> PstValue {
-        if matches!(name, "GetChar" | "GetAnyChar") {
-            if let Some(PstValue::Str(target)) = args.first() {
-                if target.eq_ignore_ascii_case("vip") || target.eq_ignore_ascii_case("enemyvip") {
-                    let team = actor
-                        .and_then(|id| self.fighters.get(&id))
-                        .map_or(1, |fighter| fighter.2 as u8);
-                    return PstValue::Num(self.char_id_for_team(target, team).unwrap_or(-1) as f64);
-                }
-            }
-        }
-        self.builtin(name, args)
-    }
     fn initialize_script_actor(
         &mut self,
         id: i64,
         globals: &std::collections::HashMap<String, PstValue>,
     ) {
+        self.npc_last_update_ms.remove(&id);
+        self.npc_init_pending.insert(id);
+        self.npc_first_script_tick.remove(&id);
         let name = globals
             .get("Name")
             .and_then(|value| {
@@ -393,6 +466,26 @@ impl PstHost for MissionHost {
         self.register_vip_candidate(id, team as u8);
     }
 
+    fn finish_script_actor_initialization(
+        &mut self,
+        id: i64,
+        globals: &std::collections::HashMap<String, PstValue>,
+    ) {
+        let definition = npc_definition_from_values(globals, "");
+        self.npc_initial_hp.insert(id, definition.hp as i16);
+        if globals.contains_key("Name") {
+            self.sync_actor_name(id, &definition.name);
+        }
+        let hp = definition.hp.max(1) as f64;
+        self.sync_fighter(id, hp, hp, definition.team as f64);
+        for vip in &mut self.vips {
+            if *vip == Some(id) {
+                *vip = None;
+            }
+        }
+        self.register_vip_candidate(id, definition.team as u8);
+    }
+
     fn script_actor_active(&self, id: i64) -> bool {
         self.in_scene.get(&id).copied().unwrap_or(false)
     }
@@ -402,7 +495,13 @@ impl PstHost for MissionHost {
         id: i64,
         globals: &std::collections::HashMap<String, PstValue>,
     ) -> bool {
-        self.ai_updates.push((id, globals.clone()));
+        if !self.in_scene.get(&id).copied().unwrap_or(false) {
+            return false;
+        }
+        if let Some(hp) = globals.get("HP") {
+            self.npc_initial_hp.insert(id, hp.as_f64() as i64 as i16);
+        }
+        self.defer_ai_update(id, globals.clone());
         true
     }
 
@@ -458,7 +557,11 @@ impl PstHost for MissionHost {
                     PstValue::Num(n) => format!("{}", n.trunc() as i64),
                     _ => String::new(),
                 };
-                PstValue::Num(self.get_char_id(&actor_name, include_dead).unwrap_or(-1) as f64)
+                let team = arg(1).as_f64() as i64;
+                PstValue::Num(
+                    self.get_char_id_for_team(&actor_name, team, include_dead)
+                        .unwrap_or(-1) as f64,
+                )
             }
             "GetSelf" => arg(0),
             "GetHP" => {
@@ -503,13 +606,24 @@ impl PstHost for MissionHost {
             }
             "SetTarget" => {
                 let kind = match &arg(1) {
-                    PstValue::Str(s) => s.to_ascii_lowercase(),
+                    PstValue::Str(s) => s.clone(),
                     _ => String::new(),
                 };
-                if !kind.is_empty() {
-                    self.targets
-                        .insert(arg(0).as_f64() as i64, (kind, arg(2).as_f64()));
+                let slot = arg(0).as_f64() as i64;
+                if !(0..10).contains(&slot) {
+                    return PstValue::Num(0.0);
                 }
+                let value = if matches!(kind.as_str(), "flag" | "safe" | "door") && args.len() != 3
+                {
+                    0.0
+                } else {
+                    arg(2).as_f64()
+                };
+                let Some(point) = self.resolve_target_position(&kind, value) else {
+                    return PstValue::Num(0.0);
+                };
+                self.targets.insert(slot, (kind, value));
+                self.target_points.insert(slot, point);
                 PstValue::Num(1.0)
             }
             "IsPerforming" => {
@@ -529,12 +643,59 @@ impl PstHost for MissionHost {
                     PstValue::Str(s) => s.clone(),
                     _ => String::new(),
                 };
+                if !matches!(
+                    behavior.as_str(),
+                    "wait"
+                        | "idle"
+                        | "run"
+                        | "follow"
+                        | "patrol"
+                        | "attacktarget"
+                        | "kill"
+                        | "dodge"
+                ) {
+                    return PstValue::Num(0.0);
+                }
                 let args = args.iter().skip(2).cloned().collect::<Vec<PstValue>>();
+                if matches!(behavior.as_str(), "follow" | "dodge" | "kill") {
+                    let valid = match args.first() {
+                        Some(PstValue::Str(_)) if behavior == "follow" => true,
+                        Some(PstValue::Num(target)) if target.is_finite() => {
+                            let target = *target as i64;
+                            self.in_scene.get(&target).copied().unwrap_or(false)
+                                || (target == 0 && self.actor_positions.contains_key(&0))
+                        }
+                        _ => false,
+                    };
+                    if !valid {
+                        return PstValue::Num(0.0);
+                    }
+                }
+                let point = if behavior == "attacktarget" {
+                    let slot = args.first().map(PstValue::as_f64).unwrap_or(-1.0) as i64;
+                    if !(0..10).contains(&slot) {
+                        return PstValue::Num(0.0);
+                    }
+
+                    Some(self.target_position(slot).unwrap_or([0.0; 3]))
+                } else {
+                    None
+                };
+                if matches!(
+                    behavior.as_str(),
+                    "wait" | "idle" | "run" | "follow" | "patrol"
+                ) {
+                    self.perform_requests.retain(|(target, _, _)| *target != id);
+                    self.performing.insert(id, false);
+                }
+                self.behavior_target_points.push(point);
+                self.behavior_callback_tails
+                    .push(self.npc_callback_owner == Some(id));
                 self.behavior_requests.push((id, behavior, args));
                 PstValue::Num(1.0)
             }
 
-            "Perform" | "Perofrm" => {
+            "Perform" => {
                 let id = arg(0).as_f64() as i64;
                 let action = match &arg(1) {
                     PstValue::Str(s) => s.clone(),
@@ -570,15 +731,24 @@ impl PstHost for MissionHost {
                 }
                 PstValue::Num(1.0)
             }
-            "Distance" | "Distanve" => {
-                let a = self.target_position(arg(0).as_f64() as i64);
-                let b = self.target_position(arg(1).as_f64() as i64);
+            "Distance" => {
+                let point = |index: i64| {
+                    (0..10)
+                        .contains(&index)
+                        .then(|| self.target_position(index).unwrap_or([0.0; 3]))
+                };
+                let a = point(arg(0).as_f64() as i64);
+                let b = point(arg(1).as_f64() as i64);
                 let distance = a.zip(b).map(|(a, b)| {
-                    let dx = a[0] - b[0];
-                    let dy = a[1] - b[1];
-                    let dz = a[2] - b[2];
-                    (dx * dx + dy * dy + dz * dz).sqrt()
-                        / meteor_core::constants::MODEL_SCALE as f64
+                    let source_delta = |axis: usize| {
+                        f64::from(
+                            ((a[axis] - b[axis]) / f64::from(meteor_core::MODEL_SCALE)) as f32,
+                        )
+                    };
+                    let dx = source_delta(0);
+                    let dy = source_delta(1);
+                    let dz = source_delta(2);
+                    (dx * dx + dy * dy + dz * dz).sqrt().trunc()
                 });
                 PstValue::Num(distance.unwrap_or(999_999.0))
             }
@@ -641,6 +811,7 @@ impl MissionScriptRuntime {
         let program = parse_program(source).expect("mission pst parses");
 
         let mut host = MissionHost::default();
+        host.register_char("player", 0);
         host.vip_enabled = values
             .get("Rule")
             .is_some_and(|value| value.as_f64() == 4.0);
@@ -679,6 +850,81 @@ impl MissionScriptRuntime {
         Ok(())
     }
 
+    pub fn npc_definition(&self, id: i64, script_name: &str) -> Option<NpcDefinition> {
+        self.runtime
+            .script_values(id)
+            .map(|values| npc_definition_from_values(values, script_name))
+    }
+
+    pub fn npc_init_pending(&self, id: i64) -> bool {
+        self.runtime.host().npc_init_pending.contains(&id)
+    }
+
+    pub fn npc_initial_hp(&self, id: i64) -> Option<f32> {
+        self.runtime
+            .host()
+            .npc_initial_hp
+            .get(&id)
+            .map(|hp| f32::from(*hp))
+    }
+
+    pub fn reset_npc_init(&mut self, id: i64) {
+        if self.runtime.script_initialized(id) {
+            self.runtime.host_mut().npc_init_pending.insert(id);
+            self.runtime.host_mut().npc_first_script_tick.insert(id);
+        }
+    }
+
+    pub fn acknowledge_npc_behavior(&mut self, id: i64, behavior: &str) {
+        if matches!(behavior, "wait" | "idle" | "run" | "follow" | "patrol") {
+            self.runtime.host_mut().npc_init_pending.remove(&id);
+        }
+    }
+
+    pub fn run_npc_init(&mut self, id: i64) -> Result<bool, String> {
+        if !self.npc_init_pending(id)
+            || (!self
+                .runtime
+                .host()
+                .active
+                .get(&id)
+                .copied()
+                .unwrap_or(false)
+                && !self.runtime.host().npc_first_script_tick.contains(&id))
+        {
+            return Ok(false);
+        }
+        let previous = self.runtime.host_mut().npc_callback_owner.replace(id);
+        let result = self.runtime.call_script(id, "OnStart", &[]);
+        self.runtime.host_mut().npc_callback_owner = previous;
+        result
+    }
+
+    pub fn update_npc_script(&mut self, id: i64) -> Result<(), String> {
+        let first_tick = self.runtime.host_mut().npc_first_script_tick.remove(&id);
+        if !first_tick
+            && !self
+                .runtime
+                .host()
+                .active
+                .get(&id)
+                .copied()
+                .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        let now_ms = (self.elapsed * 1000.0 + 1e-7).floor() as u64;
+        let last = self.runtime.host().npc_last_update_ms.get(&id).copied();
+        if last.is_none_or(|last| now_ms.saturating_sub(last) >= 333) {
+            self.runtime
+                .host_mut()
+                .npc_last_update_ms
+                .insert(id, now_ms);
+            self.runtime.call_script(id, "OnUpdate", &[])?;
+        }
+        Ok(())
+    }
+
     pub fn call_npc_script(
         &mut self,
         id: i64,
@@ -713,25 +959,13 @@ impl MissionScriptRuntime {
 
         self.runtime.host_mut().elapsed = self.elapsed;
 
-        if self.update_accumulator < 0.1 - 1e-9 {
-            return Ok(());
-        }
-        self.update_accumulator %= 0.1;
-        if self.runtime.has_function("OnUpdate") {
-            self.runtime.call("OnUpdate", &[])?;
-        }
-        for id in self.runtime.script_ids() {
-            if self
-                .runtime
-                .host()
-                .active
-                .get(&id)
-                .copied()
-                .unwrap_or(false)
-            {
-                self.runtime.call_script(id, "OnUpdate", &[])?;
+        if self.update_accumulator >= 0.1 - 1e-9 {
+            self.update_accumulator %= 0.1;
+            if self.runtime.has_function("OnUpdate") {
+                self.runtime.call("OnUpdate", &[])?;
             }
         }
+
         Ok(())
     }
 
@@ -950,7 +1184,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn story_vip_follows_spawn_order_and_query_actor_team() {
+    fn story_vip_follows_spawn_order_and_explicit_query_team() {
         let source =
             "int Rule=4; OnStart(){ AddNPC(\"friend\"); AddNPC(\"enemy\"); AddNPC(\"later\"); }";
         let mut runtime =
@@ -959,7 +1193,7 @@ mod tests {
         runtime
             .register_npc_script("friend", "string Name=\"Friend\"; int Team=1;")
             .unwrap();
-        runtime.register_npc_script("enemy", "string Name=\"Enemy\"; int Team=2; OnStart(){ Print(GetChar(\"vip\"), GetChar(\"enemyvip\")); }").unwrap();
+        runtime.register_npc_script("enemy", "string Name=\"Enemy\"; int Team=2; OnStart(){ Print(GetChar(\"vip\"), GetChar(\"enemyvip\"), GetChar(\"vip\",2), GetChar(\"enemyvip\",2), GetChar(\"vip\",1), GetChar(\"enemyvip\",1)); }").unwrap();
         runtime
             .register_npc_script("later", "string Name=\"Later\"; int Team=2;")
             .unwrap();
@@ -969,7 +1203,8 @@ mod tests {
         assert_eq!(runtime.host().char_id_for_team("vip", 1), Some(0));
         assert_eq!(runtime.host().char_id_for_team("vip", 2), Some(2));
         assert_eq!(runtime.host().char_id_for_team("enemyvip", 2), Some(0));
-        assert_eq!(runtime.host().output().last().unwrap(), "2 0");
+        runtime.run_npc_init(2).unwrap();
+        assert_eq!(runtime.host().output().last().unwrap(), "-1 0 2 0 0 2");
         runtime.host_mut().remove_fighter(2);
         assert_eq!(runtime.host().char_id_for_team("vip", 2), None);
         runtime.host_mut().register_vip_candidate(3, 2);
@@ -1172,7 +1407,7 @@ OnStart()
     assert_eq!(def.spawn, 53);
 
     assert_eq!(def.weapon2, 0);
-    assert_eq!(def.attack1, 0);
+    assert_eq!(def.attack1, 25);
 }
 
 #[test]
@@ -1215,6 +1450,7 @@ fn change_behavior_collects_requests() {
 }"#;
     let mut runtime = MissionScriptRuntime::new(source, Default::default());
     runtime.host_mut().register_char("守卫", 1);
+    runtime.host_mut().register_char("跟随目标", 5);
     runtime.start().expect("OnStart runs");
     let requests = runtime.host_mut().take_behavior_requests();
     assert_eq!(requests.len(), 2);
@@ -1398,15 +1634,15 @@ fn get_leader_includes_source_and_excludes_dead_roster_members() {
 }
 
 #[test]
-fn distance_and_typo_alias_resolve_live_char_and_waypoint_positions() {
+fn distance_resolves_live_char_and_waypoint_positions() {
     let source = r#"OnStart()
 {
-    SetTarget(0, "CHAR", 0);
+    SetTarget(0, "char", 0);
     SetTarget(1, "char", 7);
     SetTarget(2, "waypoint", 3);
     SetTarget(3, "char", 99);
     Print(Distance(0, 1));
-    Print(Distanve(1, 2));
+    Print(Distance(1, 2));
     Print(Distance(0, 3));
 }"#;
     let mut runtime = MissionScriptRuntime::new(source, Default::default());
@@ -1419,8 +1655,11 @@ fn distance_and_typo_alias_resolve_live_char_and_waypoint_positions() {
     runtime.start().expect("distance script");
     let output = runtime.host().output();
     assert!((output[0].parse::<f64>().unwrap() - 10.0).abs() < 1e-5);
-    assert!((output[1].parse::<f64>().unwrap() - 10.0).abs() < 1e-5);
-    assert_eq!(output[2], "999999");
+    assert_eq!(output[1], "31");
+    assert_eq!(
+        output[2], "30",
+        "an untouched valid target slot is zero initialized"
+    );
 }
 
 #[test]
@@ -1677,6 +1916,8 @@ mod pst_completion_tests {
         .unwrap();
         rt.start().unwrap();
         assert_eq!(rt.host().output(), &["1 4000", "1 1", "0"]);
+        assert!(rt.host_mut().take_behavior_requests().is_empty());
+        rt.run_npc_init(1).unwrap();
         assert_eq!(rt.host_mut().take_behavior_requests()[0].0, 1);
         assert_eq!(rt.host_mut().take_perform_requests()[0].0, 1);
         let updates = rt.host_mut().take_ai_updates();
@@ -1688,7 +1929,7 @@ mod pst_completion_tests {
     }
 
     #[test]
-    fn pst_npc_reactivation_resets_globals_and_runs_complete_startup() {
+    fn pst_npc_reactivation_reloads_oninit_and_defers_onstart() {
         let mut rt = runtime(
             r#"OnStart(){ AddNPC("a"); }
             OnUpdate(){ RemoveNPC(1); AddNPC("a"); }"#,
@@ -1703,8 +1944,12 @@ mod pst_completion_tests {
         )
         .unwrap();
         rt.start().unwrap();
+        assert!(rt.host().output().is_empty());
+        rt.run_npc_init(1).unwrap();
         rt.call_npc_script(1, "Mutate", &[]).unwrap();
         rt.update(0.1).unwrap();
+        assert_eq!(rt.host().output(), &["2"]);
+        rt.run_npc_init(1).unwrap();
         assert_eq!(rt.host().output(), &["2", "2"]);
         rt.host_mut().builtin("RemoveNPC", &[PstValue::Num(1.0)]);
         assert!(!rt.call_npc_script(1, "Mutate", &[]).unwrap());
@@ -1751,6 +1996,7 @@ mod pst_completion_tests {
         let source = crate::text::decode_cp936(&std::fs::read(root.join("npc05_03.pst")).unwrap());
         rt.register_npc_script("npc05_03", &source).unwrap();
         rt.start().unwrap();
+        rt.run_npc_init(1).unwrap();
         assert!(rt
             .call_npc_script(1, "Attack", &[PstValue::Num(0.0)])
             .unwrap());
@@ -1774,6 +2020,200 @@ mod pst_completion_tests {
         assert_eq!(
             rt.host_mut().take_waypoint_updates(),
             vec![(2, false), (4, false), (2, true)]
+        );
+    }
+}
+
+#[cfg(test)]
+#[path = "mission_tests/sn10.rs"]
+mod sn10_tests;
+
+#[cfg(test)]
+#[path = "mission_tests/target_contract.rs"]
+mod target_contract_tests;
+
+#[test]
+fn behavior_targets_preserve_each_command_and_settarget_position() {
+    let source = r#"OnStart() {
+        SetTarget(0, "char", 0);
+        ChangeBehavior(7, "attacktarget", 0, 3);
+        SetTarget(0, "waypoint", 3);
+        ChangeBehavior(8, "attacktarget", 0);
+        ChangeBehavior(9, "attacktarget", 10);
+    }"#;
+    let mut runtime = MissionScriptRuntime::new(source, Default::default());
+    runtime.host_mut().sync_actor_position(0, [1.0, 2.0, 3.0]);
+    runtime
+        .host_mut()
+        .sync_waypoint_position(3, [4.0, 5.0, 6.0]);
+    runtime.start().unwrap();
+    runtime.host_mut().sync_actor_position(0, [100.0; 3]);
+    let requests = runtime.host_mut().take_behavior_requests_with_targets();
+    assert_eq!(requests.len(), 2, "invalid slots cannot replace behavior");
+    assert_eq!(
+        requests[0].3,
+        Some([1.0, 2.0 + f64::from(30.0 * meteor_core::MODEL_SCALE), 3.0])
+    );
+    assert_eq!(requests[1].3, Some([4.0, 5.0, 6.0]));
+    assert_eq!(runtime.host().target_position(0), Some([4.0, 5.0, 6.0]));
+    assert!(runtime
+        .host_mut()
+        .take_behavior_requests_with_targets()
+        .is_empty());
+}
+
+#[cfg(test)]
+#[path = "mission_tests/npc_lifecycle.rs"]
+mod npc_lifecycle_tests;
+
+#[cfg(test)]
+mod character_query_contract_tests {
+    use super::*;
+
+    #[test]
+    fn get_char_names_and_special_keywords_are_case_sensitive() {
+        let source = r#"OnStart() {
+            Print(GetChar("Guard"), GetChar("guard"), GetChar("GUARD"));
+            Print(GetChar("player"), GetChar("Player"), GetChar("VIP"));
+        }"#;
+        let mut runtime = MissionScriptRuntime::new(source, Default::default());
+        runtime.host_mut().register_char("Guard", 1);
+        runtime.host_mut().register_char("guard", 2);
+        runtime.host_mut().register_char("VIP", 3);
+        runtime.start().unwrap();
+        assert_eq!(runtime.host().output(), &["1 2 -1", "0 -1 3"]);
+        runtime.host_mut().sync_actor_name(1, "GUARD");
+        assert_eq!(runtime.host().char_id("Guard"), None);
+        assert_eq!(runtime.host().char_id("GUARD"), Some(1));
+        assert_eq!(runtime.host().char_id("guard"), Some(2));
+    }
+
+    #[test]
+    fn get_char_and_get_any_char_apply_life_and_roster_gates_to_special_names() {
+        let source = r#"int Rule=4;
+        Query() {
+            Print(GetChar("player"), GetAnyChar("player"));
+            Print(GetChar("vip",1), GetAnyChar("vip",1));
+            Print(GetChar("enemyvip",1), GetAnyChar("enemyvip",1));
+            Print(GetChar("flag"), GetAnyChar("flag"));
+        }"#;
+        let mut runtime =
+            MissionScriptRuntime::new(source, parse_mission_definition(source).values);
+        runtime.host_mut().register_char("Enemy", 2);
+        runtime.host_mut().sync_fighter(0, 100.0, 100.0, 0.0);
+        runtime.host_mut().sync_fighter(2, 100.0, 100.0, 2.0);
+        runtime.host_mut().register_vip_candidate(2, 2);
+        runtime.host_mut().sync_flag_carrier(Some(2));
+        runtime.runtime.call("Query", &[]).unwrap();
+        assert_eq!(runtime.host().output(), &["0 0", "0 0", "2 2", "2 2"]);
+
+        runtime.host_mut().sync_fighter(0, 0.0, 100.0, 0.0);
+        runtime.host_mut().sync_fighter(2, 0.0, 100.0, 2.0);
+        runtime.runtime.call("Query", &[]).unwrap();
+        assert_eq!(
+            &runtime.host().output()[4..],
+            &["-1 0", "-1 0", "-1 2", "-1 2"]
+        );
+
+        runtime.host_mut().remove_fighter(2);
+        runtime.runtime.call("Query", &[]).unwrap();
+        assert_eq!(
+            &runtime.host().output()[8..],
+            &["-1 0", "-1 0", "-1 -1", "-1 -1"]
+        );
+    }
+
+    #[test]
+    fn query_team_zero_is_literal_and_enemy_vips_follow_roster_order() {
+        let mut host = MissionHost::default();
+        host.vip_enabled = true;
+        for (id, team) in [(8, 1), (3, 2)] {
+            host.register_char(&format!("vip{id}"), id);
+            host.sync_fighter(id, 100.0, 100.0, team as f64);
+            host.register_vip_candidate(id, team);
+        }
+        let query = |host: &mut MissionHost, name: &str, team: Option<f64>| {
+            let mut args = vec![PstValue::Str(name.into())];
+            if let Some(team) = team {
+                args.push(PstValue::Num(team));
+            }
+            host.builtin("GetChar", &args).as_f64()
+        };
+        assert_eq!(query(&mut host, "vip", None), -1.0);
+        assert_eq!(query(&mut host, "enemyvip", None), 3.0);
+        assert_eq!(query(&mut host, "vip", Some(2.0)), 3.0);
+        assert_eq!(query(&mut host, "enemyvip", Some(2.0)), 8.0);
+        assert_eq!(query(&mut host, "vip", Some(257.0)), -1.0);
+        assert_eq!(query(&mut host, "vip", Some(-1.0)), -1.0);
+        host.sync_fighter(3, 0.0, 100.0, 2.0);
+        assert_eq!(
+            query(&mut host, "enemyvip", None),
+            -1.0,
+            "GetChar checks HP after resolving the first matching roster entry"
+        );
+        host.remove_fighter(3);
+        assert_eq!(query(&mut host, "enemyvip", None), 8.0);
+    }
+
+    #[test]
+    fn misspelled_host_calls_do_not_measure_distance_or_enqueue_performance() {
+        let source = r#"OnStart() {
+            Print(Distanve(0,1));
+            Perofrm(7,"say","misspelled");
+            Perform(7,"say","registered");
+        }"#;
+        let mut runtime = MissionScriptRuntime::new(source, Default::default());
+        runtime.host_mut().register_char("Guard", 7);
+        runtime.start().unwrap();
+        assert_eq!(runtime.host().output(), &["0"]);
+        assert_eq!(
+            runtime.host_mut().take_perform_requests(),
+            vec![(7, "say".into(), vec![PstValue::Str("registered".into())])]
+        );
+    }
+}
+
+#[cfg(test)]
+mod npc_attrib_contract_tests {
+    use super::*;
+
+    #[test]
+    fn missing_ai_fields_use_exe_constructor_defaults_and_signed_words() {
+        let npc = parse_npc_definition("string Name=\"custom\";", "custom");
+        assert_eq!(
+            (
+                npc.view,
+                npc.think,
+                npc.guard,
+                npc.dodge,
+                npc.jump,
+                npc.look,
+                npc.burst,
+                npc.aim,
+                npc.get_item,
+                npc.attack1,
+                npc.attack2,
+                npc.attack3
+            ),
+            (400, 100, 20, 10, 10, 50, 10, 80, 50, 25, 25, 25)
+        );
+        let npc = parse_npc_definition(
+            "int Think=10000; int Look=1000; int Attack1=65535;",
+            "custom",
+        );
+        assert_eq!((npc.think, npc.look, npc.attack1), (10000, 1000, -1));
+    }
+
+    #[test]
+    fn update_ai_name_changes_script_lookup_immediately_without_changing_identity() {
+        let source = "OnStart(){ AddNPC(\"a\"); Print(Call(1,\"Rename\"), GetChar(\"Before\"), GetChar(\"After\")); }";
+        let mut runtime = MissionScriptRuntime::new(source, parse_globals(source));
+        runtime.register_npc_script("a", "string Name=\"Before\"; int self; OnInit(int id){ self=GetSelf(id); } Rename(){ Name=\"After\"; UpdateAIAttrib(self); }").unwrap();
+        runtime.start().unwrap();
+        assert_eq!(runtime.host().output(), &["1 -1 1"]);
+        assert_eq!(
+            runtime.host_mut().take_ai_updates()[0].1["Name"],
+            PstValue::Str("After".into())
         );
     }
 }
