@@ -114,7 +114,7 @@ behind `original-assets`. Enabling this feature requires providing the matching
 resources and fixtures locally; they are excluded from this source distribution.
 
 This update passed the workspace build and default tests on macOS with Rust
-1.97.1 (1132 passed, 2 ignored), plus a compilation check of the separate
+1.97.1 (1139 passed, 2 ignored), plus a compilation check of the separate
 WebAssembly crate:
 
 ```sh

@@ -486,6 +486,8 @@ pub struct EntryBlend {
 
     pub started_at_seconds: Option<f64>,
 
+    pub local_input_start: Option<(u32, f64)>,
+
     pub to_frame: f32,
 
     pub pose_id: u16,

@@ -470,6 +470,7 @@ fn apply_pose_transition(
 
     blend.preserve_sample_once = false;
     blend.retain_root_delta_once = false;
+    blend.local_input_start = None;
     let previous_id = pose.pose_id;
     let previous_motion_source = blend.frame_record_for(pose);
     blend.frame_record_source = None;
@@ -2545,10 +2546,10 @@ fn drive_fighter_animation(
         return;
     };
 
-    let now_seconds = mrc
-        .as_ref()
-        .filter(|mrc| mrc.active)
-        .map_or_else(|| time.elapsed_secs_f64(), |mrc| f64::from(mrc.elapsed));
+    let now_seconds = mrc.as_ref().filter(|mrc| mrc.active).map_or_else(
+        || super::simulation_now(frame_clock.as_deref(), time.elapsed_secs_f64()),
+        |mrc| f64::from(mrc.elapsed),
+    );
     let root_dt = super::simulation_dt(
         frame_clock.as_deref(),
         simulation_time

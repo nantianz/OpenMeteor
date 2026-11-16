@@ -719,6 +719,7 @@ fn tick_wall_cling<M: meteor_physics::collision::MeshCollider>(
     result
 }
 
+#[cfg(test)]
 fn dodge_pose_for_input(
     keys: &ButtonInput<KeyCode>,
     mouse: &ButtonInput<MouseButton>,
@@ -1444,6 +1445,7 @@ pub(crate) struct MovementAuxInput<'w> {
     mrc_playback: Option<Res<'w, crate::plugins::replay_plugin::MrcPlayback>>,
     mrc_frame: Option<Res<'w, crate::plugins::replay_plugin::MrcFrameOverride>>,
     crouch_input: Res<'w, LocalCrouchInput>,
+    combat_input: Option<Res<'w, crate::plugins::input_plugin::LocalCombatInput>>,
     jump_input: Option<ResMut<'w, LocalJumpInput>>,
     deferred_air_root_motion: Option<Res<'w, DeferredAirRootMotion>>,
     desktop_dodge: Option<ResMut<'w, DesktopDodgeInput>>,
@@ -1880,6 +1882,7 @@ fn local_ballistic_air_root_motion(
     mut contacts: Option<ResMut<CharacterContactFrame>>,
     player_performance: Option<Res<crate::plugins::stage_plugin::PlayerPerformance>>,
     crouch_input: Res<LocalCrouchInput>,
+    combat_input: Option<Res<crate::plugins::input_plugin::LocalCombatInput>>,
     buffs: Res<crate::plugins::item_plugin::ItemBuffs>,
     keymap: Res<crate::app_state::Keymap>,
     mut query: LocalBallisticAirQuery<'_, '_>,
@@ -1971,7 +1974,10 @@ fn local_ballistic_air_root_motion(
         let raw_input = if input_blocked {
             Vec3::ZERO
         } else {
-            directional_input(&keys, &mouse, &keymap)
+            let current = directional_input(&keys, &mouse, &keymap);
+            combat_input.as_deref().map_or(current, |input| {
+                input.direction_for_step(frame_clock.as_deref(), current)
+            })
         };
         let ordinary_locomotion =
             !input_blocked && ordinary_locomotion_allowed(&sm, weapon_switch.is_some());
@@ -1981,8 +1987,8 @@ fn local_ballistic_air_root_motion(
             Vec3::ZERO
         };
         let loco = compose_loco_axes(input.x, input.z, FORWARD_STRAFE_SCALE);
-        let crouching =
-            ordinary_locomotion_allowed(&sm, weapon_switch.is_some()) && crouch_input.held;
+        let crouching = ordinary_locomotion_allowed(&sm, weapon_switch.is_some())
+            && crouch_input.held_for_step(frame_clock.as_deref());
         let running = ordinary_locomotion && !crouching && loco.running;
         let facing = Vec3::new(motion.facing.sin(), 0.0, motion.facing.cos());
         let attacking = is_attacking_state(sm.current);
@@ -2888,7 +2894,7 @@ pub(crate) fn dodge_root_motion(
                 MovementMode::Idle
             };
             let guard_held = if local.is_some() {
-                guard_input.held
+                guard_input.held_for_step(frame_clock.as_deref())
             } else {
                 npc_performance.is_some_and(|performance| performance.guard_hold() > 0.0)
             };
@@ -3082,10 +3088,14 @@ pub(crate) fn move_local_fighter(
         .mrc_frame
         .as_ref()
         .is_some_and(|frame| frame.position_applied);
-    let crouch_held = aux_input.crouch_input.held;
+    let crouch_held = aux_input.crouch_input.held_for_step(frame_clock.as_deref());
     let deferred_air_root_motion = aux_input.deferred_air_root_motion.is_some();
     let (mut desktop_dodge_request, desktop_dodge_state_accepted, desktop_dodge_roll) =
-        if let Some(request) = aux_input.desktop_dodge.as_deref_mut() {
+        if let Some(request) = aux_input
+            .desktop_dodge
+            .as_deref_mut()
+            .filter(|_| crate::plugins::input_simulation_substep(frame_clock.as_deref()))
+        {
             let pending = request.pending.take();
             let state_accepted = pending.is_some() && request.pending_state_accepted;
             let roll = if pending.is_some() {
@@ -3135,7 +3145,10 @@ pub(crate) fn move_local_fighter(
         let raw_input = if input_blocked {
             Vec3::ZERO
         } else {
-            directional_input(&keys, &mouse, &keymap)
+            let current = directional_input(&keys, &mouse, &keymap);
+            aux_input.combat_input.as_deref().map_or(current, |input| {
+                input.direction_for_step(frame_clock.as_deref(), current)
+            })
         };
 
         if matches!(sm.current, FighterState::Fake | FighterState::Down)
@@ -3144,10 +3157,8 @@ pub(crate) fn move_local_fighter(
             && !air.air.airborne
             && !wheel_vetoes_dodge_action(ranged_gate.wheel_out, false)
         {
-            let dodge_pose = dodge_pose_for_input(
-                &keys,
-                &mouse,
-                &keymap,
+            let dodge_pose = dodge_pose_for_axes(
+                Vec2::new(raw_input.x, raw_input.z),
                 meteor_combat::weapon_strategy::weapon_to_strategy(fighter.weapon),
                 true,
             );
@@ -3239,15 +3250,21 @@ pub(crate) fn move_local_fighter(
                 )
             },
             |jump| {
+                let (held, hold_seconds) = jump.sample_for_step(frame_clock.as_deref());
                 (
                     jump.pressed,
-                    jump.held,
+                    held,
                     jump.released,
-                    Some(jump.hold_seconds),
+                    Some(hold_seconds),
                     jump.action_accepted,
                 )
             },
         );
+
+        let input_step = crate::plugins::input_simulation_substep(frame_clock.as_deref());
+        let jump_pressed_edge = jump_pressed_edge && input_step;
+        let jump_released_edge = jump_released_edge && input_step;
+        let jump_action_accepted = jump_action_accepted && input_step;
 
         let jump_mode_accepts_key_down = (!reaction_owns_motion
             || sm.current == FighterState::Down)
@@ -3283,7 +3300,7 @@ pub(crate) fn move_local_fighter(
             jump_request = JumpChargeRequest::HeldThreshold;
             jump_charge_active = false;
             if let Some(jump) = aux_input.jump_input.as_deref_mut() {
-                jump.consume_charge();
+                jump.consume_charge(frame_clock.as_deref());
             }
         }
         air.jump_hold = jump_hold;
@@ -3317,7 +3334,10 @@ pub(crate) fn move_local_fighter(
                 if state_accepted {
                     accepted_dodge_still_owns_state(sm.current, request.burst)
                 } else {
-                    can_start_dodge_action(
+                    crate::plugins::input_plugin::ordinary_direction_dodge_allowed(
+                        sm.current,
+                        motion.movement_mode,
+                    ) && can_start_dodge_action(
                         &sm,
                         air.air.airborne,
                         weapon_switch.is_some(),
@@ -3491,7 +3511,7 @@ pub(crate) fn move_local_fighter(
             air.jump_charge_active = false;
             if buffered_ground_jump {
                 if let Some(jump) = aux_input.jump_input.as_deref_mut() {
-                    jump.consume_charge();
+                    jump.consume_charge(frame_clock.as_deref());
                 }
             }
         }

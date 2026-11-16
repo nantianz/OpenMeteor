@@ -36,7 +36,7 @@ fn scene_contact_records_real_body_rejection_without_actor_snapshot() {
 }
 
 #[test]
-fn scene_contact_excludes_actor_only_shortening_and_overwrites_previous_wall_hit() {
+fn scene_contact_passes_actors_and_overwrites_previous_wall_hit() {
     let mut world = World::new();
     let actor = world.spawn_empty().id();
     let target = world.spawn_empty().id();
@@ -70,8 +70,8 @@ fn scene_contact_excludes_actor_only_shortening_and_overwrites_previous_wall_hit
         0.0,
         false,
     );
-    assert!(dx < 3.0);
-    assert!(character_changed);
+    assert_eq!(dx, 3.0);
+    assert!(!character_changed);
     assert_eq!(blocked, [false, false]);
     assert!(!frame.last_mover_scene_contact(actor));
 }

@@ -1580,6 +1580,19 @@ pub struct PendingRemoteHit {
     pub attack_forward: Vec3,
 }
 
+#[derive(Resource, Default)]
+struct PendingRemoteHitQueue(Vec<(Entity, PendingRemoteHit)>);
+
+pub(crate) fn queue_remote_hit(commands: &mut Commands, target: Entity, hit: PendingRemoteHit) {
+    commands.queue(move |world: &mut World| {
+        if let Some(mut queue) = world.get_resource_mut::<PendingRemoteHitQueue>() {
+            queue.0.push((target, hit));
+        } else if let Ok(mut target) = world.get_entity_mut(target) {
+            target.insert(hit);
+        }
+    });
+}
+
 const SNAPSHOT_INTERVAL: f32 = 0.05;
 
 pub struct NetworkPlugin;
@@ -1622,6 +1635,8 @@ struct StockPostHitStates {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) fn install_stock_observer_projection_for_test(app: &mut App) {
+    let serial = super::fighter_frame::installed(app);
+    install_stock_observer_smoothing(app);
     app.init_resource::<StockPostHitStates>().add_systems(
         Update,
         (
@@ -1630,7 +1645,7 @@ pub(crate) fn install_stock_observer_projection_for_test(app: &mut App) {
             net_handle_remote_hits,
             restore_stock_post_hit_states,
             net_apply_snapshot,
-            net_smooth_remote_fighters,
+            net_smooth_remote_fighters.run_if(move || !serial),
         )
             .chain()
             .in_set(NetworkFrameApply),
@@ -1665,6 +1680,19 @@ fn uses_stock_projection(net: Res<NetState>) -> bool {
 
 fn uses_web_projection(net: Res<NetState>) -> bool {
     !net.is_stock_udp()
+}
+
+pub(crate) fn install_stock_observer_smoothing(app: &mut App) {
+    if super::fighter_frame::installed(app) {
+        app.add_systems(
+            super::fighter_frame::FighterStepStart,
+            net_smooth_remote_fighters
+                .before(super::character_contact_plugin::begin_character_contact_frame)
+                .run_if(uses_stock_projection)
+                .run_if(super::simulation_frame)
+                .run_if(super::ui_plugin::gameplay_hud_visibility::scene_session_active),
+        );
+    }
 }
 
 fn defer_stock_post_hit_states(
@@ -1711,8 +1739,40 @@ fn restore_stock_post_hit_states(
     net.pending_pose_chains.append(&mut deferred.chains);
 }
 
+#[derive(Resource, Default)]
+struct PendingLocalPoseChains(Vec<(u32, u16, f32)>);
+
+fn capture_local_pose_chains(
+    mut queued: ResMut<PendingLocalPoseChains>,
+    mut fighters: Query<
+        (&PoseRuntime, &mut crate::components::fighter::EntryBlend),
+        With<LocalFighter>,
+    >,
+) {
+    for (pose, mut blend) in &mut fighters {
+        if let Some(chain) = blend.pending_local_chain.take() {
+            if (pose.pose_instance_id, pose.pose_id) == (chain.0, chain.1) {
+                queued.0.push(chain);
+            }
+        }
+    }
+}
+
+fn install_pose_chain_capture(app: &mut App) {
+    if super::fighter_frame::installed(app) {
+        app.init_resource::<PendingLocalPoseChains>().add_systems(
+            super::fighter_frame::FighterStepEnd,
+            capture_local_pose_chains,
+        );
+    }
+}
+
 impl Plugin for NetworkPlugin {
     fn build(&self, app: &mut App) {
+        let serial = super::fighter_frame::installed(app);
+        install_stock_observer_smoothing(app);
+        install_pose_chain_capture(app);
+        app.init_resource::<PendingRemoteHitQueue>();
         super::native_text_input::install(app);
         room_browser::install(app);
         asset_barrier::install(app);
@@ -1780,7 +1840,9 @@ impl Plugin for NetworkPlugin {
                     net_handle_remote_hits,
                     restore_stock_post_hit_states,
                     net_apply_snapshot.run_if(uses_stock_projection),
-                    net_smooth_remote_fighters.run_if(uses_stock_projection),
+                    net_smooth_remote_fighters
+                        .run_if(uses_stock_projection)
+                        .run_if(move || !serial),
                     net_apply_authority_respawns,
                     net_apply_remote_vitals,
                     net_apply_scene_transfers,
@@ -7538,18 +7600,24 @@ fn net_send_pose_chains(
     mut sequence: ResMut<NetInputSequence>,
     net: Res<NetState>,
     tx: Option<Res<NetTx>>,
+    mut queued: Option<ResMut<PendingLocalPoseChains>>,
     mut fighters: Query<
         (&PoseRuntime, &mut crate::components::fighter::EntryBlend),
         With<LocalFighter>,
     >,
 ) {
+    let mut pending = queued
+        .as_deref_mut()
+        .map_or_else(Vec::new, |queue| std::mem::take(&mut queue.0));
+
     for (pose, mut blend) in &mut fighters {
-        let Some((instance, pose_id, blend_seconds)) = blend.pending_local_chain.take() else {
-            continue;
-        };
-        if pose.pose_instance_id != instance || pose.pose_id != pose_id {
-            continue;
+        if let Some(chain) = blend.pending_local_chain.take() {
+            if (pose.pose_instance_id, pose.pose_id) == (chain.0, chain.1) {
+                pending.push(chain);
+            }
         }
+    }
+    for (instance, pose_id, blend_seconds) in pending {
         if !net.is_stock_udp() && net.status == NetStatus::InRoom && net.round_active {
             if let (Some(tx), Some(match_epoch), Some(round_epoch)) =
                 (tx.as_deref(), net.match_epoch, net.round_epoch)
@@ -9608,6 +9676,8 @@ fn net_send_hits(
     net_tx: Option<Res<NetTx>>,
     #[cfg(not(target_arch = "wasm32"))] mut trace: Option<ResMut<super::combat_trace::CombatTrace>>,
     mut sequence: ResMut<NetInputSequence>,
+    mut queued: Option<ResMut<PendingRemoteHitQueue>>,
+    remotes: Query<&RemoteFighter>,
     self_effects: Query<(), With<PendingSelfEffect>>,
     hits: Query<
         (Entity, &RemoteFighter, &PendingRemoteHit),
@@ -9615,6 +9685,9 @@ fn net_send_hits(
     >,
 ) {
     if !net.round_active {
+        if let Some(queue) = queued.as_deref_mut() {
+            queue.0.clear();
+        }
         for (entity, _, _) in &hits {
             commands.entity(entity).remove::<PendingRemoteHit>();
         }
@@ -9623,7 +9696,17 @@ fn net_send_hits(
     let Some(tx) = net_tx else {
         return;
     };
-    for (entity, remote, hit) in &hits {
+    let mut pending = queued
+        .as_deref_mut()
+        .map_or_else(Vec::new, |queue| std::mem::take(&mut queue.0));
+    for (entity, _, hit) in &hits {
+        pending.push((entity, hit.clone()));
+        commands.entity(entity).remove::<PendingRemoteHit>();
+    }
+    for (entity, hit) in pending {
+        let Ok(remote) = remotes.get(entity) else {
+            continue;
+        };
         #[cfg(not(target_arch = "wasm32"))]
         if net.is_stock_udp() {
             if let Some(stock_hit) = hit.stock_request {
@@ -9647,7 +9730,7 @@ fn net_send_hits(
             &mut sequence,
             &net,
             remote,
-            hit,
+            &hit,
             !self_effects.is_empty(),
         );
         #[cfg(not(target_arch = "wasm32"))]
@@ -9665,6 +9748,7 @@ fn net_send_hits(
 #[cfg(test)]
 pub(crate) fn install_hit_sender_for_test(app: &mut App) {
     app.init_resource::<NetInputSequence>()
+        .init_resource::<PendingRemoteHitQueue>()
         .add_systems(PostUpdate, net_send_hits);
 }
 
@@ -11261,12 +11345,13 @@ mod tests {
             ..NetState::default()
         })
         .insert_resource(crate::app_state::Keymap::default())
-        .insert_resource(LocalCombatInput {
-            edges: vec![
+        .insert_resource({
+            let mut input = LocalCombatInput::default();
+            input.edges = vec![
                 LocalCombatInputEdge::DropItem,
                 LocalCombatInputEdge::DropWeapon,
-            ],
-            ..Default::default()
+            ];
+            input
         })
         .init_resource::<ButtonInput<KeyCode>>()
         .init_resource::<ButtonInput<MouseButton>>()
@@ -11291,9 +11376,10 @@ mod tests {
             ..Default::default()
         })
         .init_resource::<crate::app_state::Keymap>()
-        .insert_resource(LocalCombatInput {
-            edges: vec![LocalCombatInputEdge::Cure],
-            ..Default::default()
+        .insert_resource({
+            let mut input = LocalCombatInput::default();
+            input.edges = vec![LocalCombatInputEdge::Cure];
+            input
         })
         .init_resource::<ButtonInput<KeyCode>>()
         .init_resource::<ButtonInput<MouseButton>>()
@@ -11931,6 +12017,107 @@ mod tests {
             receiver.try_recv().is_err(),
             "entering a round must not flush an old commit"
         );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn stock_pose_chains_survive_later_substep_pose_changes_and_send_once() {
+        use crate::components::fighter::EntryBlend;
+        use crate::plugins::fighter_frame::{FighterStepEnd, FighterUpdate, SerialFighterSet};
+        use bevy::prelude::{Query, ResMut, Resource};
+        #[derive(Resource, Default)]
+        struct StepCount(u32);
+        fn advance_test_actor(
+            mut count: ResMut<StepCount>,
+            mut actor: Query<(&mut PoseRuntime, &mut EntryBlend), With<LocalFighter>>,
+        ) {
+            count.0 += 1;
+            let (mut pose, mut blend) = actor.single_mut().unwrap();
+
+            if count.0 <= 2 {
+                pose.pose_id = 252 + count.0 as u16;
+                pose.pose_instance_id = 100 + count.0;
+                blend.pending_local_chain = Some((pose.pose_instance_id, pose.pose_id, 0.01));
+            } else {
+                pose.pose_id = 0;
+                pose.pose_instance_id = 103;
+            }
+        }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut app = App::new();
+        crate::plugins::configure_fighter_frame_sets(&mut app);
+        crate::plugins::fighter_frame::install(&mut app);
+        crate::plugins::install_frame_clock(&mut app);
+        super::install_pose_chain_capture(&mut app);
+        app.init_resource::<Time>()
+            .init_resource::<Time<bevy::time::Real>>()
+            .init_resource::<crate::app_state::Settings>()
+            .init_resource::<StepCount>()
+            .init_resource::<NetInputSequence>()
+            .insert_resource(NetState {
+                status: NetStatus::InRoom,
+                address: "udp://127.0.0.1:5230".into(),
+                round_active: true,
+                ..default()
+            })
+            .insert_resource(NetTx {
+                active: Some(sender),
+                connecting: None,
+            })
+            .add_systems(FighterUpdate, advance_test_actor)
+            .add_systems(Update, super::net_send_pose_chains.after(SerialFighterSet));
+        let entity = app
+            .world_mut()
+            .spawn((
+                LocalFighter,
+                Fighter {
+                    character_id: 0,
+                    player_slot: 0,
+                    weapon: 5,
+                    weapon_slots: [5, 0],
+                    weapon_slot: 0,
+                    weapon_variant: 0,
+                    weapon_slot_variants: [0, 0],
+                },
+                PoseRuntime::idle(),
+                EntryBlend::default(),
+            ))
+            .id();
+        for clock in [false, true] {
+            let dt = std::time::Duration::from_secs_f32(0.025);
+            app.world_mut().resource_mut::<Time>().advance_by(dt);
+            app.world_mut()
+                .resource_mut::<Time<bevy::time::Real>>()
+                .advance_by(dt);
+            app.update();
+            let sent: Vec<_> = receiver
+                .try_iter()
+                .map(|message| match message {
+                    NetOutbound::StockPoseChain(chain) => (chain.sequence, chain.pose_id),
+                    _ => panic!("unexpected network route"),
+                })
+                .collect();
+            assert_eq!(
+                sent,
+                if clock {
+                    vec![]
+                } else {
+                    vec![(101, 253), (102, 254)]
+                }
+            );
+        }
+        assert_eq!(app.world().get::<PoseRuntime>(entity).unwrap().pose_id, 0);
+
+        app.world_mut()
+            .get_mut::<EntryBlend>(entity)
+            .unwrap()
+            .pending_local_chain = Some((1, 253, 0.01));
+        app.world_mut().run_schedule(FighterStepEnd);
+        assert!(app
+            .world()
+            .resource::<super::PendingLocalPoseChains>()
+            .0
+            .is_empty());
     }
 
     #[test]
@@ -17129,6 +17316,76 @@ mod tests {
         );
         app.update();
         assert!(received().is_empty(), "one collision must send once");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn stock_hit_queue_keeps_two_same_target_substep_claims_in_order() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        let character =
+            crate::plugins::character_plugin::load_character_asset_for_test(&[root], "p0").unwrap();
+        let poses = character.poses.keys().copied().collect::<Vec<_>>();
+        let first = meteor_network::stock_protocol::StockHitRequest::from_attack(
+            1,
+            316,
+            9,
+            &character.poses[&316].attacks[0],
+            meteor_combat::hit_reaction::FacingBucket::Default,
+            &poses,
+        );
+        let second = meteor_network::stock_protocol::StockHitRequest::from_attack(
+            1,
+            258,
+            5,
+            &character.poses[&258].attacks[0],
+            meteor_combat::hit_reaction::FacingBucket::Right,
+            &poses,
+        );
+        let (tx, received) = super::stock_hit_test_channel();
+        let mut app = App::new();
+        app.insert_resource(NetState {
+            status: NetStatus::InRoom,
+            address: "udp://127.0.0.1:5230".into(),
+            player_id: "stock-2".into(),
+            round_active: true,
+            ..Default::default()
+        })
+        .insert_resource(tx);
+        super::install_hit_sender_for_test(&mut app);
+        let target = app
+            .world_mut()
+            .spawn(RemoteFighter {
+                player_id: "stock-1".into(),
+            })
+            .id();
+        for (index, request) in [first, second].into_iter().enumerate() {
+            super::queue_remote_hit(
+                &mut app.world_mut().commands(),
+                target,
+                super::PendingRemoteHit {
+                    stock_request: Some(request),
+                    damage: 1.0,
+                    pose_id: if index == 0 { 316 } else { 258 },
+                    attack_index: index as u32,
+                    frame: 4518.0,
+                    cursor: 8.0,
+                    attack_origin: Vec3::ZERO,
+                    attack_forward: Vec3::Z,
+                },
+            );
+        }
+        app.world_mut().flush();
+        app.update();
+        let sent = received();
+        assert_eq!(
+            sent.iter().map(|(_, request)| *request).collect::<Vec<_>>(),
+            [first, second]
+        );
+        app.update();
+        assert!(
+            received().is_empty(),
+            "queued contacts are emitted exactly once"
+        );
     }
 
     #[test]

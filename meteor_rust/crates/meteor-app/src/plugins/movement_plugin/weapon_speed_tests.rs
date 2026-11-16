@@ -213,6 +213,8 @@ fn weapon_speed_changes_live_with_refinement_and_active_slot() {
             .get_mut::<MotionState>(entity)
             .unwrap()
             .velocity = Vec3::ZERO;
+
+        *app.world_mut().get_mut::<FighterAir>(entity).unwrap() = FighterAir::default();
         for _ in 0..60 {
             app.update();
         }

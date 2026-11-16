@@ -239,7 +239,14 @@ pub(crate) fn advance_pon_ef_clocks(
     let dt = crate::plugins::simulation_dt(frame_clock.as_deref(), time.delta_secs());
     for (entity, mut player, start_time, advanced) in &mut players {
         if start_time.is_some() {
-            continue;
+            if frame_clock
+                .as_deref()
+                .is_some_and(|clock| clock.substep.is_some())
+            {
+                commands.entity(entity).remove::<PonEfStartTime>();
+            } else {
+                continue;
+            }
         }
         player.elapsed += dt;
         if let Some(mut advanced) = advanced {
@@ -965,18 +972,22 @@ pub struct EffectPlugin;
 
 pub(crate) fn install_effect_playback_systems(app: &mut App) {
     let clocks = advance_pon_ef_clocks.run_if(crate::plugins::simulation_frame);
-    app.add_systems(
-        Update,
-        if super::fighter_frame::installed(app) {
-            clocks
-                .after(crate::plugins::FighterFrameSet::PoseDecision)
-                .before(super::fighter_frame::SerialFighterSet)
-        } else {
+    if super::fighter_frame::installed(app) {
+        app.add_systems(super::fighter_frame::FighterStepStart, clocks)
+            .add_systems(
+                super::fighter_frame::FighterUpdate,
+                clear_interrupted_pose_effects
+                    .before(crate::plugins::FighterFrameSet::Movement)
+                    .run_if(crate::plugins::simulation_frame),
+            );
+    } else {
+        app.add_systems(
+            Update,
             clocks
                 .after(crate::plugins::FighterFrameSet::SkeletonSample)
-                .before(crate::plugins::FighterFrameSet::HitJudge)
-        },
-    );
+                .before(crate::plugins::FighterFrameSet::HitJudge),
+        );
+    }
 
     app.add_systems(
         super::fighter_frame::schedule(app),
@@ -3054,11 +3065,15 @@ fn pose_effect_spawn_ready(
 }
 
 pub(crate) fn clear_interrupted_pose_effects(
+    active_fighter: Option<Res<super::fighter_frame::ActiveFighter>>,
     mut commands: Commands,
     fighters: Query<(&PoseRuntime, Option<&CombatState>), With<Fighter>>,
     effects: Query<(Entity, &PoseOwnedPonEf)>,
 ) {
     for (entity, owned) in &effects {
+        if !super::fighter_frame::accepts(active_fighter.as_deref(), owned.fighter) {
+            continue;
+        }
         let stale = fighters
             .get(owned.fighter)
             .map(|(pose, combat)| {

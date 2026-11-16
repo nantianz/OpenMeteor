@@ -40,9 +40,23 @@ pub(crate) struct FrameClock {
     pub wall_dt: f32,
     pub wall_step: f32,
     accumulator: f32,
-    pending_wall: f32,
+    pending_wall: f64,
     target_fps: u32,
+    pub(crate) measured_wall_step: f64,
+
+    pub(crate) substep: Option<ControllerSubstep>,
 }
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ControllerSubstep {
+    pub now_seconds: f64,
+    pub first: bool,
+    pub last: bool,
+    pub remaining_wall_seconds: f64,
+}
+
+#[derive(Resource)]
+pub(crate) struct FrameClockInstalled;
 
 impl Default for FrameClock {
     fn default() -> Self {
@@ -53,19 +67,27 @@ impl Default for FrameClock {
             accumulator: 0.0,
             pending_wall: 0.0,
             target_fps: 0,
+            measured_wall_step: 0.0,
+            substep: None,
         }
     }
 }
 
+#[cfg(test)]
 fn advance_frame_clock(clock: &mut FrameClock, raw_wall_dt: f32, target_fps: u32) {
+    advance_frame_clock_seconds(clock, f64::from(raw_wall_dt), target_fps);
+}
+
+fn advance_frame_clock_seconds(clock: &mut FrameClock, raw_wall_dt: f64, target_fps: u32) {
     let raw = raw_wall_dt.max(0.0);
-    clock.wall_dt = raw;
+    clock.substep = None;
+    clock.wall_dt = raw as f32;
     clock.pending_wall += raw;
     if clock.target_fps != target_fps {
         clock.target_fps = target_fps;
         clock.accumulator = 0.0;
     }
-    clock.accumulator += raw;
+    clock.accumulator += raw as f32;
     let interval = 1.0 / target_fps.clamp(1, 240) as f32;
     clock.sim_dt = if target_fps == 0 || clock.accumulator >= interval {
         clock.accumulator = if target_fps == 0 {
@@ -73,16 +95,18 @@ fn advance_frame_clock(clock: &mut FrameClock, raw_wall_dt: f32, target_fps: u32
         } else {
             clock.accumulator % interval
         };
-        clock.pending_wall.min(meteor_core::MAX_FRAME_DT)
+        clock.pending_wall.min(f64::from(meteor_core::MAX_FRAME_DT)) as f32
     } else {
         0.0
     };
     if clock.sim_dt > 0.0 {
-        clock.wall_step = std::mem::take(&mut clock.pending_wall);
+        clock.measured_wall_step = std::mem::take(&mut clock.pending_wall);
+        clock.wall_step = clock.measured_wall_step as f32;
 
         clock.sim_dt = clock.wall_step.min(meteor_core::MAX_FRAME_DT);
     } else {
         clock.wall_step = 0.0;
+        clock.measured_wall_step = 0.0;
     }
 }
 
@@ -96,7 +120,7 @@ fn begin_frame_clock(
     mrc: Option<Res<replay_plugin::MrcPlayback>>,
     player: Option<Res<replay_plugin::ReplayPlayer>>,
 ) {
-    advance_frame_clock(&mut clock, time.delta_secs(), settings.target_fps);
+    advance_frame_clock_seconds(&mut clock, time.delta_secs_f64(), settings.target_fps);
     if loading.is_some_and(|loading| loading.active) {
         clock.sim_dt = 0.0;
     }
@@ -138,6 +162,30 @@ pub(crate) fn simulation_wall_step(clock: Option<&FrameClock>, fallback: f32) ->
         .unwrap_or_else(|| fallback.max(0.0))
 }
 
+pub(crate) fn simulation_now(clock: Option<&FrameClock>, fallback: f64) -> f64 {
+    clock
+        .and_then(|clock| clock.substep)
+        .map_or(fallback, |step| step.now_seconds)
+}
+
+pub(crate) fn first_simulation_substep(clock: Option<&FrameClock>) -> bool {
+    clock
+        .and_then(|clock| clock.substep)
+        .is_none_or(|step| step.first)
+}
+
+pub(crate) fn input_simulation_substep(clock: Option<&FrameClock>) -> bool {
+    clock
+        .and_then(|clock| clock.substep)
+        .is_none_or(|step| step.last)
+}
+
+pub(crate) fn simulation_remaining_wall(clock: Option<&FrameClock>) -> f64 {
+    clock
+        .and_then(|clock| clock.substep)
+        .map_or(0.0, |step| step.remaining_wall_seconds)
+}
+
 fn suspend_offline_frame_clock(
     state: Option<Res<State<AppState>>>,
     net: Option<Res<network_plugin::NetState>>,
@@ -153,6 +201,7 @@ fn suspend_offline_frame_clock(
 
 pub(crate) fn install_frame_clock(app: &mut App) {
     app.init_resource::<FrameClock>()
+        .insert_resource(FrameClockInstalled)
         .add_systems(First, begin_frame_clock.after(bevy::time::TimeSystems))
         .add_systems(
             bevy::state::state::StateTransition,

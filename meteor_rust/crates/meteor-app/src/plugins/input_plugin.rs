@@ -5,8 +5,7 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use meteor_core::FighterState;
 use meteor_input::command_parser::{CommandInput, Dir};
-
-const DODGE_TAP_WINDOW_SECONDS: f64 = 0.25;
+use meteor_input::direction_tap::DirectionTap;
 
 #[derive(Resource, Debug, Default)]
 pub struct LocalCommandInput(pub CommandInput);
@@ -14,11 +13,33 @@ pub struct LocalCommandInput(pub CommandInput);
 #[derive(Resource, Debug, Default)]
 pub(crate) struct LocalCrouchInput {
     pub held: bool,
+    frame_start_held: bool,
+}
+
+impl LocalCrouchInput {
+    pub(crate) fn held_for_step(&self, clock: Option<&super::FrameClock>) -> bool {
+        if super::input_simulation_substep(clock) {
+            self.held
+        } else {
+            self.frame_start_held
+        }
+    }
 }
 
 #[derive(Resource, Debug, Default)]
 pub(crate) struct LocalGuardInput {
     pub held: bool,
+    frame_start_held: bool,
+}
+
+impl LocalGuardInput {
+    pub(crate) fn held_for_step(&self, clock: Option<&super::FrameClock>) -> bool {
+        if super::input_simulation_substep(clock) {
+            self.held
+        } else {
+            self.frame_start_held
+        }
+    }
 }
 
 #[derive(Resource, Debug, Default)]
@@ -29,16 +50,34 @@ pub(crate) struct LocalCombatInput {
 
     pub command_update_ms: Option<f64>,
 
+    pub(crate) captured_real_at_seconds: Option<f64>,
+
     pub initial_crouch_held: bool,
+
+    frame_start_direction: Option<Vec3>,
+    direction: Vec3,
 
     pub(crate) window_event_floor: usize,
 }
 
 impl LocalCombatInput {
+    pub(crate) fn direction_for_step(
+        &self,
+        clock: Option<&super::FrameClock>,
+        current: Vec3,
+    ) -> Vec3 {
+        if super::input_simulation_substep(clock) {
+            current
+        } else {
+            self.frame_start_direction.unwrap_or(current)
+        }
+    }
+
     fn begin_frame(&mut self) {
         self.edges.clear();
         self.raw_bindings.clear();
         self.command_update_ms = None;
+        self.captured_real_at_seconds = None;
     }
 
     fn clear(&mut self) {
@@ -95,6 +134,7 @@ pub(crate) fn ordered_local_discrete_actions(
 pub(crate) enum LocalCombatInputEdge {
     DirectionPress(Dir),
     DirectionRelease(Dir),
+    DoubleTap(Dir),
     Dodge { direction: Dir, burst: bool },
     DirectDodge { burst: bool },
     Attack,
@@ -155,6 +195,7 @@ impl SyntheticInputStream {
         &mut self,
         binding: crate::app_state::InputBinding,
         pressed: bool,
+        event_seconds: f64,
     ) {
         self.edges.push(SyntheticInputEdge::Binding {
             edge: DirectionInputEdge {
@@ -163,8 +204,8 @@ impl SyntheticInputStream {
                 repeat: false,
             },
             record_direction: true,
-            detect_dodge: false,
-            event_seconds: None,
+            detect_dodge: true,
+            event_seconds: Some(event_seconds),
         });
     }
 
@@ -315,10 +356,14 @@ pub(crate) struct LocalJumpInput {
     pub held: bool,
     pub hold_seconds: f32,
     pressed_at: Option<f64>,
+    frame_start_pressed_at: Option<f64>,
+    frame_time_seconds: f64,
 }
 
 impl LocalJumpInput {
     fn begin_frame(&mut self, now: f64) {
+        self.frame_time_seconds = now;
+        self.frame_start_pressed_at = self.pressed_at;
         self.pressed = false;
         self.released = false;
         self.action_accepted = false;
@@ -346,7 +391,29 @@ impl LocalJumpInput {
         true
     }
 
-    pub(crate) fn consume_charge(&mut self) {
+    pub(crate) fn sample_for_step(&self, clock: Option<&super::FrameClock>) -> (bool, f32) {
+        let Some(step) = clock.and_then(|clock| clock.substep) else {
+            return (self.held, self.hold_seconds);
+        };
+
+        let now = self.frame_time_seconds - step.remaining_wall_seconds;
+        if !step.last {
+            return self
+                .frame_start_pressed_at
+                .map_or((false, 0.0), |start| (true, (now - start).max(0.0) as f32));
+        }
+        (
+            self.held,
+            self.pressed_at
+                .map_or(self.hold_seconds, |start| (now - start).max(0.0) as f32),
+        )
+    }
+
+    pub(crate) fn consume_charge(&mut self, clock: Option<&super::FrameClock>) {
+        let previous = self.frame_start_pressed_at.take();
+        if !super::input_simulation_substep(clock) && self.pressed_at != previous {
+            return;
+        }
         self.pressed_at = None;
         self.held = false;
     }
@@ -362,9 +429,33 @@ pub(crate) struct DodgeGesture {
     pub burst: bool,
 }
 
+pub(crate) fn ordinary_direction_dodge_allowed(
+    state: FighterState,
+    movement: meteor_core::MovementMode,
+) -> bool {
+    if matches!(state, FighterState::Down | FighterState::Fake) {
+        return true;
+    }
+    matches!(
+        state,
+        FighterState::Name
+            | FighterState::Think
+            | FighterState::View
+            | FighterState::Look
+            | FighterState::GetItem
+            | FighterState::Spawn
+    ) && matches!(
+        movement,
+        meteor_core::MovementMode::Idle
+            | meteor_core::MovementMode::Walk
+            | meteor_core::MovementMode::Run
+            | meteor_core::MovementMode::Crouch
+    )
+}
+
 #[derive(Resource, Debug, Default)]
 pub(crate) struct DesktopDodgeInput {
-    last_tap: [Option<f64>; 4],
+    taps: DirectionTap,
     pub pending: Option<DodgeGesture>,
 
     pub pending_state_accepted: bool,
@@ -377,19 +468,18 @@ impl DesktopDodgeInput {
         &mut self,
         index: usize,
         direction: Vec2,
-        burst: bool,
+        _guard_held: bool,
         now: f64,
     ) -> Option<DodgeGesture> {
-        let previous = self.last_tap[index];
-        if previous
-            .is_some_and(|previous| now >= previous && now - previous < DODGE_TAP_WINDOW_SECONDS)
-        {
-            self.last_tap[index] = None;
-            Some(DodgeGesture { direction, burst })
-        } else {
-            self.last_tap[index] = Some(now);
-            None
-        }
+        let dir = [Dir::Up, Dir::Down, Dir::Left, Dir::Right][index];
+        self.taps.press(dir, now).then_some(DodgeGesture {
+            direction,
+            burst: false,
+        })
+    }
+
+    fn update(&mut self, now: f64) {
+        self.taps.update(now);
     }
 
     fn register_tap(&mut self, index: usize, direction: Vec2, burst: bool, now: f64) {
@@ -570,6 +660,8 @@ pub(crate) fn capture_local_hold_inputs(
     mut guard: ResMut<LocalGuardInput>,
     net: Option<Res<super::network_plugin::NetState>>,
 ) {
+    crouch.frame_start_held = crouch.held;
+    guard.frame_start_held = guard.held;
     if net.is_some_and(|net| net.battle_result.is_some()) {
         crouch.held = false;
         guard.held = false;
@@ -618,6 +710,7 @@ fn update_desktop_dodge_input(
     now: f64,
 ) {
     update_desktop_dodge_input_skipping(dodge, keymap, keys, mouse, now, [false; 4]);
+    dodge.update(now);
 }
 
 fn update_desktop_dodge_input_skipping(
@@ -875,13 +968,13 @@ where
                             .push(LocalCombatInputEdge::DirectionPress(*direction));
                     }
                     if detect_dodge {
-                        if let Some(gesture) =
-                            dodge.detect_tap(index, *dodge_direction, guard_held, edge_seconds)
+                        if dodge
+                            .detect_tap(index, *dodge_direction, guard_held, edge_seconds)
+                            .is_some()
                         {
-                            combat.edges.push(LocalCombatInputEdge::Dodge {
-                                direction: *direction,
-                                burst: gesture.burst,
-                            });
+                            combat
+                                .edges
+                                .push(LocalCombatInputEdge::DoubleTap(*direction));
                         }
                     }
                 }
@@ -1001,12 +1094,13 @@ fn append_fallback_direction_edges(
             combat
                 .edges
                 .push(LocalCombatInputEdge::DirectionPress(direction));
-            if let Some(gesture) = dodge.detect_tap(index, dodge_direction, guard_held, now_seconds)
+            if dodge
+                .detect_tap(index, dodge_direction, guard_held, now_seconds)
+                .is_some()
             {
-                combat.edges.push(LocalCombatInputEdge::Dodge {
-                    direction,
-                    burst: gesture.burst,
-                });
+                combat
+                    .edges
+                    .push(LocalCombatInputEdge::DoubleTap(direction));
             }
         }
         if binding.just_released(keys, mouse) {
@@ -1102,6 +1196,7 @@ pub(crate) fn capture_local_command_input(
 
     if dbg.is_some_and(|dbg| dbg.captures_input()) {
         input.window_events.read().for_each(drop);
+        state.dodge.clear();
         return;
     }
 
@@ -1136,6 +1231,10 @@ pub(crate) fn capture_local_command_input(
         .take_frame_clock_seconds()
         .unwrap_or_else(|| time.elapsed_secs_f64());
     state.combat.begin_frame();
+    state.combat.captured_real_at_seconds = Some(time.elapsed_secs_f64());
+    state.combat.frame_start_direction = Some(state.combat.direction);
+    state.combat.direction =
+        super::movement_plugin::directional_input(&input.keys, &input.mouse, &input.keymap);
     state.jump.begin_frame(now_seconds);
     let (raw_direction_seen, jump_edge_seen) = collect_ordered_combat_edges(
         &mut state.combat,
@@ -1210,12 +1309,108 @@ pub(crate) fn capture_local_command_input(
         );
         state.combat.command_update_ms = Some(now_seconds * 1_000.0);
     }
+    state.dodge.update(now_seconds);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app_state::InputBinding;
+
+    #[test]
+    fn catchup_jump_samples_the_recorded_clock_instead_of_the_application_epoch() {
+        let mut jump = LocalJumpInput::default();
+        jump.press(10.0);
+        jump.begin_frame(10.15);
+        let mut clock = super::super::FrameClock {
+            substep: Some(super::super::ControllerSubstep {
+                now_seconds: 100.05,
+                first: false,
+                last: false,
+                remaining_wall_seconds: 0.1,
+            }),
+            ..default()
+        };
+        let (held, age) = jump.sample_for_step(Some(&clock));
+        assert!(held && (age - 0.05).abs() < 1e-6);
+        clock.substep = Some(super::super::ControllerSubstep {
+            now_seconds: 100.15,
+            first: false,
+            last: true,
+            remaining_wall_seconds: 0.0,
+        });
+        let (held, age) = jump.sample_for_step(Some(&clock));
+        assert!(held && (age - 0.15).abs() < 1e-6);
+    }
+
+    #[test]
+    fn consuming_old_catchup_jump_preserves_a_later_key_press() {
+        let mut jump = LocalJumpInput::default();
+        jump.press(1.0);
+        jump.begin_frame(1.2);
+        jump.release(1.2);
+        jump.press(1.2);
+        let mut clock = super::super::FrameClock {
+            substep: Some(super::super::ControllerSubstep {
+                now_seconds: 1.12,
+                first: false,
+                last: false,
+                remaining_wall_seconds: 0.08,
+            }),
+            ..default()
+        };
+        let (held, age) = jump.sample_for_step(Some(&clock));
+        assert!(held && (age - 0.12).abs() < 1e-6);
+        jump.consume_charge(Some(&clock));
+        assert_eq!(jump.sample_for_step(Some(&clock)), (false, 0.0));
+        clock.substep = Some(super::super::ControllerSubstep {
+            now_seconds: 1.2,
+            first: false,
+            last: true,
+            remaining_wall_seconds: 0.0,
+        });
+        assert_eq!(jump.sample_for_step(Some(&clock)), (true, 0.0));
+        assert!(jump.pressed);
+    }
+
+    #[test]
+    fn ordinary_double_tap_gate_maps_native_modes_without_guard_idle_alias() {
+        use meteor_core::MovementMode;
+        for movement in [
+            MovementMode::Idle,
+            MovementMode::Walk,
+            MovementMode::Run,
+            MovementMode::Crouch,
+        ] {
+            assert!(ordinary_direction_dodge_allowed(
+                FighterState::Name,
+                movement
+            ));
+            assert!(!ordinary_direction_dodge_allowed(
+                FighterState::Guard,
+                movement
+            ));
+            assert!(!ordinary_direction_dodge_allowed(
+                FighterState::Attack1,
+                movement
+            ));
+        }
+        assert!(!ordinary_direction_dodge_allowed(
+            FighterState::Name,
+            MovementMode::Airborne
+        ));
+        assert!(!ordinary_direction_dodge_allowed(
+            FighterState::Name,
+            MovementMode::WallRun
+        ));
+        for state in [FighterState::Fake, FighterState::Down] {
+            assert!(ordinary_direction_dodge_allowed(state, MovementMode::Idle));
+            assert!(ordinary_direction_dodge_allowed(
+                state,
+                MovementMode::Airborne
+            ));
+        }
+    }
 
     #[test]
     fn captures_rebound_keyboard_direction_edges() {
@@ -1309,7 +1504,7 @@ mod tests {
     }
 
     #[test]
-    fn ordered_same_frame_double_tap_keeps_guard_burst_kind() {
+    fn ordered_same_frame_double_tap_never_promotes_guard_to_force() {
         let keymap = Keymap::default();
         let mut command = CommandInput::new();
         let mut dodge = DesktopDodgeInput::default();
@@ -1344,13 +1539,13 @@ mod tests {
             dodge.pending,
             Some(DodgeGesture {
                 direction: Vec2::NEG_X,
-                burst: true,
+                burst: false,
             })
         );
     }
 
     #[test]
-    fn ordered_guard_edges_choose_dodge_or_burst_at_direction_event_time() {
+    fn ordered_guard_edges_do_not_change_ordinary_double_tap_kind() {
         fn second_tap_with_edges(
             keymap: &Keymap,
             initial_guard_held: bool,
@@ -1408,8 +1603,8 @@ mod tests {
         };
 
         assert!(!second_tap_with_edges(&keymap, false, [direction, guard_press]).burst);
-        assert!(second_tap_with_edges(&keymap, false, [guard_press, direction]).burst);
-        assert!(second_tap_with_edges(&keymap, true, [direction, guard_release]).burst);
+        assert!(!second_tap_with_edges(&keymap, false, [guard_press, direction]).burst);
+        assert!(!second_tap_with_edges(&keymap, true, [direction, guard_release]).burst);
         assert!(!second_tap_with_edges(&keymap, true, [guard_release, direction]).burst);
     }
 
@@ -1460,7 +1655,7 @@ mod tests {
             dodge.pending,
             Some(DodgeGesture {
                 direction: Vec2::Y,
-                burst: true,
+                burst: false,
             })
         );
     }
@@ -1621,10 +1816,7 @@ mod tests {
             vec![
                 LocalCombatInputEdge::GuardPress,
                 LocalCombatInputEdge::DirectionPress(Dir::Up),
-                LocalCombatInputEdge::Dodge {
-                    direction: Dir::Up,
-                    burst: true,
-                },
+                LocalCombatInputEdge::DoubleTap(Dir::Up),
             ]
         );
     }
@@ -1807,10 +1999,7 @@ mod tests {
 
             let direction_and_dodge = [
                 LocalCombatInputEdge::DirectionPress(Dir::Up),
-                LocalCombatInputEdge::Dodge {
-                    direction: Dir::Up,
-                    burst: false,
-                },
+                LocalCombatInputEdge::DoubleTap(Dir::Up),
             ];
             if attack_first {
                 assert_eq!(combat.edges[0], LocalCombatInputEdge::Attack);
@@ -1863,10 +2052,7 @@ mod tests {
             vec![
                 LocalCombatInputEdge::CrouchPress,
                 LocalCombatInputEdge::DirectionPress(Dir::Up),
-                LocalCombatInputEdge::Dodge {
-                    direction: Dir::Up,
-                    burst: false,
-                },
+                LocalCombatInputEdge::DoubleTap(Dir::Up),
                 LocalCombatInputEdge::CrouchRelease,
             ]
         );
@@ -1877,8 +2063,9 @@ mod tests {
         let keymap = Keymap::default();
 
         let mut mobile = SyntheticInputStream::default();
-        mobile.push_mobile_direction(keymap.move_up, true);
-        mobile.push_dodge(Dir::Up, false);
+        mobile.push_mobile_direction(keymap.move_up, true, 0.725);
+        mobile.push_mobile_direction(keymap.move_up, false, 0.8);
+        mobile.push_mobile_direction(keymap.move_up, true, 1.0);
         mobile.push_action(keymap.attack, SyntheticAction::Attack, true, None);
         let mut combat = LocalCombatInput::default();
         let mut jump = LocalJumpInput::default();
@@ -1896,10 +2083,9 @@ mod tests {
             combat.edges,
             vec![
                 LocalCombatInputEdge::DirectionPress(Dir::Up),
-                LocalCombatInputEdge::Dodge {
-                    direction: Dir::Up,
-                    burst: false,
-                },
+                LocalCombatInputEdge::DirectionRelease(Dir::Up),
+                LocalCombatInputEdge::DirectionPress(Dir::Up),
+                LocalCombatInputEdge::DoubleTap(Dir::Up),
                 LocalCombatInputEdge::Attack,
             ]
         );
@@ -2586,7 +2772,7 @@ mod tests {
     }
 
     #[test]
-    fn desktop_direction_double_tap_emits_dodge_and_guard_burst() {
+    fn desktop_direction_double_tap_keeps_guard_request_ordinary() {
         let keymap = Keymap::default();
         let mut keys = ButtonInput::<KeyCode>::default();
         let mouse = ButtonInput::<MouseButton>::default();
@@ -2623,16 +2809,22 @@ mod tests {
             guarded.pending,
             Some(DodgeGesture {
                 direction: Vec2::NEG_X,
-                burst: true,
+                burst: false,
             })
         );
     }
 
     #[test]
-    fn desktop_double_tap_window_is_strictly_less_than_quarter_second() {
+    fn desktop_double_tap_uses_three_tenths_controller_expiry() {
         let mut dodge = DesktopDodgeInput::default();
-        dodge.register_tap(3, Vec2::X, false, 4.0);
-        dodge.register_tap(3, Vec2::X, false, 4.25);
+        dodge.register_tap(3, Vec2::X, false, 0.0);
+        dodge.update(0.275);
+        dodge.register_tap(3, Vec2::X, false, 0.275);
+        assert!(dodge.pending.is_some());
+        dodge.clear();
+        dodge.register_tap(3, Vec2::X, false, 0.0);
+        dodge.update(0.3);
+        dodge.register_tap(3, Vec2::X, false, 0.3);
         assert_eq!(dodge.pending, None);
     }
 
@@ -2640,8 +2832,8 @@ mod tests {
     fn first_same_frame_double_tap_request_wins() {
         let mut dodge = DesktopDodgeInput::default();
         dodge.register_tap(0, Vec2::Y, false, 1.0);
-        dodge.register_tap(2, Vec2::NEG_X, false, 1.0);
         dodge.register_tap(0, Vec2::Y, false, 1.2);
+        dodge.register_tap(2, Vec2::NEG_X, false, 1.2);
         dodge.register_tap(2, Vec2::NEG_X, true, 1.2);
         assert_eq!(
             dodge.pending,

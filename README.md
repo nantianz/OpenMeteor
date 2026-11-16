@@ -94,7 +94,7 @@ cargo test --workspace --locked
 
 依赖原版游戏文件或独立参考采集数据的测试由 `original-assets` feature 控制。启用该功能前，需要在本地准备匹配的资源与测试数据；这些文件未随源码分发。
 
-本次更新已在 macOS 上使用 Rust 1.97.1 通过工作区编译与默认测试（1132 项通过、2 项忽略），并通过独立 WebAssembly crate 的编译检查：
+本次更新已在 macOS 上使用 Rust 1.97.1 通过工作区编译与默认测试（1139 项通过、2 项忽略），并通过独立 WebAssembly crate 的编译检查：
 
 ```sh
 rustup target add wasm32-unknown-unknown

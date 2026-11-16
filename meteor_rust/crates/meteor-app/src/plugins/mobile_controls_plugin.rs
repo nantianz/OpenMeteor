@@ -6,6 +6,7 @@ use crate::plugins::ui_scale_plugin::{EffectiveUiScale, SafeAreaInsets};
 use bevy::input::touch::{TouchInput, TouchPhase};
 use bevy::prelude::*;
 use bevy::ui::ComputedStackIndex;
+#[cfg(test)]
 use meteor_input::command_parser::Dir;
 use std::collections::{HashMap, HashSet};
 
@@ -13,7 +14,6 @@ const STICK_THRESHOLD: f32 = 0.28;
 const COMMAND_PRESS_THRESHOLD: f32 = 0.28;
 const COMMAND_RELEASE_THRESHOLD: f32 = 0.18;
 const COMMAND_AXIS_SWITCH_RATIO: f32 = 1.3;
-const DODGE_TAP_WINDOW: f64 = 0.25;
 
 const MIN_TOUCH_TARGET: f32 = 48.0;
 
@@ -1086,24 +1086,6 @@ enum MobileDirection {
 
 impl MobileDirection {
     const ALL: [Self; 4] = [Self::Forward, Self::Backward, Self::Left, Self::Right];
-
-    fn index(self) -> usize {
-        match self {
-            Self::Forward => 0,
-            Self::Backward => 1,
-            Self::Left => 2,
-            Self::Right => 3,
-        }
-    }
-
-    fn command_direction(self) -> Dir {
-        match self {
-            Self::Forward => Dir::Up,
-            Self::Backward => Dir::Down,
-            Self::Left => Dir::Left,
-            Self::Right => Dir::Right,
-        }
-    }
 }
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1274,8 +1256,6 @@ struct MobileTouchState {
     stick_visual: Vec2,
 
     floating_stick_center: Option<Vec2>,
-    last_tap: [f64; 4],
-    tap_armed: [bool; 4],
 }
 
 #[derive(Resource, Default, Debug)]
@@ -1968,28 +1948,10 @@ fn set_stick_input(
     }
 
     if let Some(previous) = state.command_direction {
-        synthetic.push_mobile_direction(binding_for_direction(previous, keymap), false);
-        state.tap_armed[previous.index()] = false;
+        synthetic.push_mobile_direction(binding_for_direction(previous, keymap), false, now);
     }
     if let Some(direction) = next_command {
-        synthetic.push_mobile_direction(binding_for_direction(direction, keymap), true);
-        let index = direction.index();
-        if !state.tap_armed[index] {
-            state.tap_armed[index] = true;
-            let previous = state.last_tap[index];
-            if previous > 0.0 && now - previous < DODGE_TAP_WINDOW {
-                let burst = state
-                    .action_counts
-                    .get(&MobileAction::Guard)
-                    .copied()
-                    .unwrap_or_default()
-                    > 0;
-                synthetic.push_dodge(direction.command_direction(), burst);
-                state.last_tap[index] = 0.0;
-            } else {
-                state.last_tap[index] = now;
-            }
-        }
+        synthetic.push_mobile_direction(binding_for_direction(direction, keymap), true, now);
     }
     state.command_direction = next_command;
 }
@@ -2360,7 +2322,7 @@ fn release_all_mobile_inputs_inner(
     synthetic.clear();
 
     if let Some(direction) = command_direction {
-        synthetic.push_mobile_direction(binding_for_direction(direction, keymap), false);
+        synthetic.push_mobile_direction(binding_for_direction(direction, keymap), false, 0.0);
     }
 }
 
@@ -3542,7 +3504,7 @@ mod tests {
     }
 
     #[test]
-    fn direction_double_tap_requests_dodge_and_guard_burst() {
+    fn direction_double_tap_preserves_edges_without_forcing_guard_burst() {
         let keymap = Keymap::default();
         let mut keys = ButtonInput::<KeyCode>::default();
         let mut mouse = ButtonInput::<MouseButton>::default();
@@ -3586,7 +3548,8 @@ mod tests {
             &mut mouse,
             &mut synthetic,
         );
-        assert!(synthetic.contains_dodge(Dir::Up, true));
+        assert!(!synthetic.contains_dodge(Dir::Up, true));
+        assert!(!synthetic.contains_dodge(Dir::Up, false));
         assert!(keymap.move_up.pressed(&keys, &mouse));
     }
 

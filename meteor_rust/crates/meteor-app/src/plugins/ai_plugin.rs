@@ -1917,7 +1917,10 @@ pub(crate) fn drive_npc_ai(
                 let roll = (next_npc_rand(&mut patrol.rng) * 0x0100_0000 as f32) as u32;
                 let spare = fighter.weapon_slots[1 - usize::from(fighter.weapon_slot.min(1))];
                 if roll % 5 == 0 && spare != 0 {
-                    patrol.last_weapon_switch_time = Some(time.elapsed_secs_f64());
+                    patrol.last_weapon_switch_time = Some(crate::plugins::simulation_now(
+                        frame_clock.as_deref(),
+                        time.elapsed_secs_f64(),
+                    ));
                     let delay = meteor_ai::combat::decision_interval(base_think, 0.6);
                     patrol.think_remaining = delay;
                     *intent = default();
@@ -2627,7 +2630,12 @@ pub(crate) fn drive_npc_ai(
                 let delta = enemy.position - npc_pos;
                 let elapsed = patrol
                     .last_weapon_switch_time
-                    .map_or(f64::INFINITY, |last| time.elapsed_secs_f64() - last);
+                    .map_or(f64::INFINITY, |last| {
+                        crate::plugins::simulation_now(
+                            frame_clock.as_deref(),
+                            time.elapsed_secs_f64(),
+                        ) - last
+                    });
                 let spare = fighter.weapon_slots[1 - usize::from(fighter.weapon_slot.min(1))];
                 if meteor_ai::combat::wants_weapon_switch(
                     fighter.weapon,
@@ -2637,7 +2645,10 @@ pub(crate) fn drive_npc_ai(
                     elapsed,
                     || (next_npc_rand(&mut patrol.rng) * 0x0100_0000 as f32) as u32,
                 ) {
-                    patrol.last_weapon_switch_time = Some(time.elapsed_secs_f64());
+                    patrol.last_weapon_switch_time = Some(crate::plugins::simulation_now(
+                        frame_clock.as_deref(),
+                        time.elapsed_secs_f64(),
+                    ));
                     let delay = meteor_ai::combat::decision_interval(base_think, 0.6);
                     patrol.think_remaining = delay;
                     intent.attack_cooldown = delay;
@@ -3121,7 +3132,10 @@ pub(crate) fn drive_npc_ai(
                         {
                             let delay = meteor_ai::combat::decision_interval(base_think, 0.6);
                             patrol.think_remaining = delay;
-                            patrol.last_weapon_switch_time = Some(time.elapsed_secs_f64());
+                            patrol.last_weapon_switch_time = Some(crate::plugins::simulation_now(
+                                frame_clock.as_deref(),
+                                time.elapsed_secs_f64(),
+                            ));
                             *intent = default();
                             intent.want_weapon_switch = true;
                             intent.attack_cooldown = delay;

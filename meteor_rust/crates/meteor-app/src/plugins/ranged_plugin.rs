@@ -7,6 +7,7 @@ use crate::components::projectile::{
 };
 use crate::plugins::stage_collider::StageCollider;
 use crate::plugins::stage_material::GmdlMaterial;
+use bevy::ecs::schedule::ScheduleLabel;
 use bevy::prelude::*;
 use meteor_combat::ranged_weapons::{
     wheel_guide_score, DART_GRAVITY, DART_SPIN_SPEED, GUN_RANGE, PROJECTILE_MAX_AGE,
@@ -47,9 +48,14 @@ type ProjectileQuery<'w, 's> = Query<
 impl Plugin for RangedPlugin {
     fn build(&self, app: &mut App) {
         network_sync::install(app);
+        let step_schedule = if super::fighter_frame::installed(app) {
+            super::fighter_frame::FighterStepStart.intern()
+        } else {
+            Update.intern()
+        };
         app.init_resource::<PendingRangedHits>()
             .add_systems(
-                Update,
+                step_schedule,
                 update_projectiles
                     .in_set(crate::plugins::FighterFrameSet::Movement)
                     .run_if(crate::plugins::simulation_frame)
