@@ -1167,11 +1167,11 @@ fn apply_mrc_session_events(
                 },
                 crate::components::fighter::Qi::default(),
                 crate::components::fighter::CombatState::default(),
-                MotionState {
-                    movement_mode: role_movement_mode(state),
-                    velocity,
+                super::stage_plugin::FighterPlacement {
+                    position: visible_position,
                     facing: yaw,
-                },
+                }
+                .spawn_bundle(role_movement_mode(state), velocity),
                 pose,
                 blend,
             ),
@@ -1183,7 +1183,6 @@ fn apply_mrc_session_events(
                 },
                 air,
                 crate::plugins::movement_plugin::FighterDodge::default(),
-                Transform::from_translation(visible_position),
                 crate::plugins::network_plugin::RemoteTransformTarget {
                     translation: position,
                     yaw,

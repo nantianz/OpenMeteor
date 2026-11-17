@@ -52,6 +52,45 @@ fn assert_heading(app: &App, fighter: Entity, camera: Entity) {
 }
 
 #[test]
+fn production_free_follow_uses_local_facing_when_other_fighters_enter() {
+    use crate::plugins::combat_plugin::NpcFighter;
+    use crate::plugins::network_plugin::RemoteFighter;
+
+    let (mut app, fighter, camera) = follow_app(60.0);
+    let other_motion = MotionState {
+        facing: 1.2 + std::f32::consts::PI,
+        movement_mode: meteor_core::MovementMode::Idle,
+        velocity: Vec3::ZERO,
+    };
+    app.world_mut().spawn((
+        NpcFighter,
+        Transform::from_xyz(20.0, 8.0, -15.0),
+        other_motion.clone(),
+    ));
+    app.update();
+    assert_heading(&app, fighter, camera);
+    let eye = app.world().get::<Transform>(camera).unwrap().translation;
+
+    app.world_mut().spawn((
+        RemoteFighter {
+            player_id: "guest".into(),
+        },
+        Transform::from_xyz(9.0, 8.0, -22.0),
+        other_motion,
+    ));
+    app.update();
+    assert_heading(&app, fighter, camera);
+    assert!(
+        app.world()
+            .get::<Transform>(camera)
+            .unwrap()
+            .translation
+            .distance(eye)
+            < 1e-5
+    );
+}
+
+#[test]
 fn production_free_follow_keeps_heading_after_root_turn_and_large_pointer_batches() {
     for fps in [30.0, 60.0, 120.0] {
         let (mut app, fighter, camera) = follow_app(fps);

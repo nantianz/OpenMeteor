@@ -569,6 +569,7 @@ impl Plugin for CharacterPlugin {
         remake::install(app);
         let actor_schedule = super::fighter_frame::schedule(app);
         let serial = super::fighter_frame::installed(app);
+        configure_placement_model_sync(app);
         app.add_systems(
             Update,
             (drive_fighter_animation, capture_collision_transforms)
@@ -1243,6 +1244,7 @@ type SpawnFighterModelQuery<'w, 's> = Query<
         &'static crate::components::fighter::Fighter,
         &'static crate::components::fighter::WeaponForm,
         &'static crate::components::fighter::PoseRuntime,
+        &'static crate::components::fighter::MotionState,
         Option<&'static crate::plugins::stage_plugin::LocalFighter>,
         Option<&'static crate::plugins::network_plugin::RemoteFighter>,
     ),
@@ -1268,7 +1270,7 @@ fn spawn_fighter_model(
         return;
     };
     let roots = resource_roots(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    for (fighter, fighter_meta, weapon_form, pose, local, remote) in &fighters {
+    for (fighter, fighter_meta, weapon_form, pose, motion, local, remote) in &fighters {
         if models.iter().any(|model| model.fighter == fighter) {
             continue;
         }
@@ -1290,6 +1292,7 @@ fn spawn_fighter_model(
             ),
             &character,
             character_assets,
+            motion.facing,
             network_skin_color_index(&net, local.is_some(), remote),
             &mut meshes,
             &mut materials,
@@ -1310,6 +1313,7 @@ fn spawn_fighter_model_for(
     weapon_form: u8,
     character: &str,
     assets: &CharacterAssets,
+    facing: f32,
     color_index: u8,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<GmdlMaterial>,
@@ -1331,8 +1335,7 @@ fn spawn_fighter_model_for(
             },
             Visibility::default(),
             InheritedVisibility::default(),
-            Transform::from_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2))
-                .with_scale(Vec3::splat(0.12)),
+            Transform::from_rotation(fighter_model_rotation(facing)).with_scale(Vec3::splat(0.12)),
         ))
         .id();
     commands.entity(model).insert(ChildOf(fighter));
@@ -2594,8 +2597,7 @@ fn drive_fighter_animation(
             .amb_for_pose(&common_amb.0, pose.pose_id)
             .sample_at(frame);
 
-        model_transform.rotation = Quat::from_rotation_y(motion.facing)
-            * Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
+        model_transform.rotation = fighter_model_rotation(motion.facing);
 
         let blend_active = blend.is_active_for(pose.pose_id) || zero_retiring;
         if blend_active && blend.started_at_seconds.is_none() {
@@ -2866,8 +2868,7 @@ pub(crate) fn sync_fighter_model_facing(
             continue;
         }
         if let Ok((motion, reaction)) = fighters.get(model.fighter) {
-            let next = Quat::from_rotation_y(motion.facing)
-                * Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
+            let next = fighter_model_rotation(motion.facing);
             if reaction.is_some_and(|reaction| reaction.current.is_some()) {
                 let compensation = next.inverse() * transform.rotation;
                 let mut nodes = dummies.iter_many_mut(model_dummies(model_entity, &skeletons));
@@ -2878,6 +2879,36 @@ pub(crate) fn sync_fighter_model_facing(
                 }
             }
             transform.rotation = next;
+        }
+    }
+}
+
+fn fighter_model_rotation(facing: f32) -> Quat {
+    Quat::from_rotation_y(facing) * Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)
+}
+
+pub(super) fn configure_placement_model_sync(app: &mut App) {
+    app.add_systems(
+        Update,
+        sync_placed_model_facing
+            .after(super::network_plugin::NetworkFrameApply)
+            .after(super::FighterFrameSet::PoseResolve)
+            .before(super::FighterFrameSet::CameraFinalize),
+    );
+}
+
+fn sync_placed_model_facing(
+    placed: Query<
+        (&crate::components::fighter::MotionState, &Children),
+        Changed<super::camera_plugin::CameraFollowReset>,
+    >,
+    mut models: Query<&mut Transform, With<FighterModel>>,
+) {
+    for (motion, children) in &placed {
+        for child in children.iter() {
+            if let Ok(mut transform) = models.get_mut(child) {
+                transform.rotation = fighter_model_rotation(motion.facing);
+            }
         }
     }
 }
@@ -2917,6 +2948,9 @@ pub(crate) fn spawn_fighter_model_for_test(world: &mut World, fighter: Entity) {
         .get::<crate::components::fighter::Fighter>(fighter)
         .unwrap()
         .clone();
+    let facing = world
+        .get::<crate::components::fighter::MotionState>(fighter)
+        .map_or(0.0, |motion| motion.facing);
     let new_models = world
         .get_resource::<crate::app_state::Settings>()
         .is_none_or(|s| s.new_character_models);
@@ -2944,6 +2978,7 @@ pub(crate) fn spawn_fighter_model_for_test(world: &mut World, fighter: Entity) {
             0,
             &character,
             &assets.0[&character],
+            facing,
             0,
             &mut meshes,
             &mut materials,
@@ -4383,6 +4418,7 @@ pub(crate) fn spawn_live_portrait_fixture(
             0,
             "p1",
             &assets,
+            0.0,
             0,
             &mut meshes,
             &mut materials,

@@ -6685,15 +6685,13 @@ fn net_apply_scene_transfers(
             }
 
             super::stage_plugin::apply_scene_transfer_transform(
+                commands.entity(entity),
                 &mut transform,
                 Some(&mut motion),
                 air.as_deref_mut(),
                 Vec3::from_array(transfer.position),
                 transfer.yaw,
             );
-            commands
-                .entity(entity)
-                .insert(super::camera_plugin::CameraFollowReset);
             if let Some(mut target) = target {
                 target.translation = transform.translation;
                 target.yaw = transfer.yaw;
@@ -6875,22 +6873,26 @@ mod scene_transfer_tests {
 
     #[test]
     fn stock_scene_transfer_event_applies_centered_matrix_without_ack_or_pose_reset() {
+        use super::super::character_plugin::FighterModel;
+
         let (sender, receiver) = std::sync::mpsc::channel();
         let mut app = App::new();
-        app.insert_resource(NetState {
-            status: NetStatus::InRoom,
-            address: "udp://127.0.0.1:5230".into(),
-            room_id: "stock-udp".into(),
-            player_id: "stock-42".into(),
-            stage: "sn22".into(),
-            round_active: true,
-            ..Default::default()
-        })
-        .insert_resource(NetTx {
-            active: Some(sender),
-            connecting: None,
-        })
-        .add_systems(Update, net_apply_scene_transfers);
+        super::super::character_plugin::configure_placement_model_sync(&mut app);
+        app.add_plugins(bevy::transform::TransformPlugin)
+            .insert_resource(NetState {
+                status: NetStatus::InRoom,
+                address: "udp://127.0.0.1:5230".into(),
+                room_id: "stock-udp".into(),
+                player_id: "stock-42".into(),
+                stage: "sn22".into(),
+                round_active: true,
+                ..Default::default()
+            })
+            .insert_resource(NetTx {
+                active: Some(sender),
+                connecting: None,
+            })
+            .add_systems(Update, net_apply_scene_transfers.in_set(NetworkFrameApply));
         let local = app
             .world_mut()
             .spawn((
@@ -6907,6 +6909,17 @@ mod scene_transfer_tests {
                 },
                 PoseRuntime::idle(),
                 FighterAir::default(),
+            ))
+            .id();
+        let model = app
+            .world_mut()
+            .spawn((
+                FighterModel {
+                    fighter: local,
+                    character: "p0".into(),
+                },
+                ChildOf(local),
+                Transform::from_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
             ))
             .id();
         let expected = Vec3::new(31.0, 2.0, -46.0);
@@ -6953,6 +6966,14 @@ mod scene_transfer_tests {
                 .abs()
                 < 0.0001
         );
+        let model_forward = app
+            .world()
+            .get::<GlobalTransform>(model)
+            .unwrap()
+            .affine()
+            .transform_vector3(Vec3::NEG_Y)
+            .normalize();
+        assert!(model_forward.distance(Vec3::X) < 1e-5);
         assert_eq!(
             app.world().get::<MotionState>(local).unwrap().velocity,
             Vec3::ZERO
@@ -8365,6 +8386,7 @@ fn net_apply_snapshot(
         );
         fighter_air.ground_contact = !fighter_air.air.airborne;
         net.remote_pose_ids.insert(remote_id.clone(), snap.pose_id);
+        let position = Vec3::new(snap.x, snap.y, snap.z);
         commands.spawn((
             (
                 RemoteFighter {
@@ -8386,11 +8408,11 @@ fn net_apply_snapshot(
                 health,
                 Qi::default(),
                 CombatState::default(),
-                MotionState {
-                    movement_mode,
-                    velocity: Vec3::ZERO,
+                super::stage_plugin::FighterPlacement {
+                    position,
                     facing: snap.yaw,
-                },
+                }
+                .spawn_bundle(movement_mode, Vec3::ZERO),
                 pose,
                 crate::components::fighter::EntryBlend::default(),
             ),
@@ -8403,9 +8425,8 @@ fn net_apply_snapshot(
                 },
                 fighter_air,
                 FighterDodge::default(),
-                Transform::from_xyz(snap.x, snap.y, snap.z),
                 RemoteTransformTarget {
-                    translation: Vec3::new(snap.x, snap.y, snap.z),
+                    translation: position,
                     yaw: snap.yaw,
                 },
                 RemoteAuthorityGeneration {
@@ -9533,7 +9554,8 @@ fn net_apply_authority_respawns(
             }
             None => None,
         };
-        if assigned.is_some() || relocations.contains(&actor) || death.active {
+        let was_dead = death.active;
+        if assigned.is_some() || relocations.contains(&actor) || was_dead {
             if let Ok((mut status, mut worn)) = statuses.get_mut(entity) {
                 status.clear(&mut worn);
             }
@@ -9602,11 +9624,19 @@ fn net_apply_authority_respawns(
                     )
                 }
             });
-            transform.translation = position;
-
+            super::stage_plugin::FighterPlacement { position, facing }.apply(
+                commands.entity(entity),
+                &mut transform,
+                Some(&mut motion),
+            );
             death.spawn_pos = position;
-            motion.facing = facing;
             air.ground_y = position.y;
+        } else if was_dead {
+            super::stage_plugin::FighterPlacement {
+                position: transform.translation,
+                facing: motion.facing,
+            }
+            .apply(commands.entity(entity), &mut transform, Some(&mut motion));
         }
         death.active = false;
         death.timer = 0.0;
@@ -13144,6 +13174,172 @@ mod tests {
         assert!((motion.facing - yaw).abs() < 1e-6);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn production_spawn_camera_and_first_w_follow_local_with_simultaneous_arrivals() {
+        use super::NetworkFrameApply;
+        use bevy::math::Vec3Swizzles;
+        use bevy::prelude::{Children, GlobalTransform, Startup, Without, World};
+
+        use crate::app_state::{Keymap, LoadedStageAssets, LoadedStageInfo, Settings};
+        use crate::plugins::{
+            camera_plugin::{self, ThirdPersonState},
+            character_plugin::{self, CharacterAssetsSet, FighterModel},
+            input_plugin::LocalCrouchInput,
+            movement_plugin::move_local_fighter,
+            stage_collider::{StageCollider, StageMeshCollider},
+            stage_plugin::{spawn_local_fighter, StageMissionRuntime},
+            FighterFrameSet,
+        };
+
+        fn attach_fighter_models(world: &mut World) {
+            let fighters = world
+                .query_filtered::<Entity, (With<Fighter>, Without<Children>)>()
+                .iter(world)
+                .collect::<Vec<_>>();
+            for fighter in fighters {
+                character_plugin::spawn_fighter_model_for_test(world, fighter);
+            }
+        }
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        if !root.is_dir() {
+            eprintln!("origin_res missing, skipping");
+            return;
+        }
+        for (quaternion, forward, peers) in [
+            ("1 0 0 0", Vec3::Z, 0),
+            ("0.707107 0 0 0.707107", Vec3::X, 2),
+            ("0 0 0 1", Vec3::NEG_Z, 2),
+        ] {
+            let des = format!(
+                "SceneObjects 0 DummeyObjects 1\nObject D_user01\n{{\nPosition: 0 0 0\n\
+                 Quaternion: {quaternion}\nCustom:\n{{\nname=\"user01\"\n}}\n}}\n"
+            );
+            let mut net = NetState {
+                status: NetStatus::InRoom,
+                wire_format: NetWireFormat::V4,
+                address: "udp://127.0.0.1:5230".into(),
+                player_id: "stock-1".into(),
+                ..default()
+            };
+            for (index, yaw) in [0.35_f32, -2.4].into_iter().take(peers).enumerate() {
+                let mut snapshot = fighter_snapshot(0);
+                snapshot.x = 15.0 + index as f32;
+                snapshot.yaw = yaw;
+                net.pending_snapshots
+                    .push((format!("peer-{index}"), snapshot, Some(1)));
+            }
+            let mut mesh = StageMeshCollider::default();
+            mesh.append_world_triangles(
+                &[
+                    [-100.0, 0.0, -100.0],
+                    [-100.0, 0.0, 100.0],
+                    [100.0, 0.0, 100.0],
+                    [100.0, 0.0, -100.0],
+                ],
+                &[0, 1, 2, 0, 2, 3],
+            );
+            let mut time = Time::<()>::default();
+            time.advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
+            let mut app = App::new();
+            crate::plugins::configure_fighter_frame_sets(&mut app);
+            character_plugin::configure_placement_model_sync(&mut app);
+            app.add_plugins(bevy::transform::TransformPlugin)
+                .insert_resource(net)
+                .insert_resource(time)
+                .insert_resource(LaunchRequest {
+                    mode: "leader".into(),
+                    character_id: 0,
+                    ..default()
+                })
+                .insert_resource(LoadedStageAssets {
+                    des: Some(des.into_bytes()),
+                    ..default()
+                })
+                .init_resource::<LoadedStageInfo>()
+                .init_resource::<StageMissionRuntime>()
+                .init_resource::<Settings>()
+                .init_resource::<Keymap>()
+                .init_resource::<ButtonInput<KeyCode>>()
+                .init_resource::<ButtonInput<MouseButton>>()
+                .init_resource::<CameraBasis>()
+                .init_resource::<LockOnController>()
+                .init_resource::<LocalCrouchInput>()
+                .init_resource::<crate::plugins::item_plugin::ItemBuffs>()
+                .insert_resource(StageCollider { mesh: Some(mesh) })
+                .insert_resource(CharacterAssetsSet(
+                    [(
+                        "p0".into(),
+                        character_plugin::load_character_asset_for_test(
+                            std::slice::from_ref(&root),
+                            "p0",
+                        )
+                        .expect("original p0 assets"),
+                    )]
+                    .into(),
+                ))
+                .add_systems(Startup, spawn_local_fighter)
+                .add_systems(Update, net_apply_snapshot.in_set(NetworkFrameApply))
+                .add_systems(
+                    Update,
+                    attach_fighter_models.in_set(FighterFrameSet::PoseDecision),
+                )
+                .add_systems(
+                    Update,
+                    move_local_fighter.in_set(FighterFrameSet::Locomotion),
+                );
+            camera_plugin::install_camera_input_for_test(&mut app);
+            let camera = camera_plugin::install_follow_camera_for_test(&mut app);
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .press(KeyCode::KeyW);
+            app.update();
+
+            let world = app.world_mut();
+            let local = world
+                .query_filtered::<Entity, With<LocalFighter>>()
+                .single(world)
+                .unwrap();
+            assert_eq!(world.query::<&RemoteFighter>().iter(world).count(), peers);
+            let position = world.get::<Transform>(local).unwrap().translation;
+            let travelled = position.xz();
+            assert!(
+                travelled.length() > 1e-4,
+                "W must advance on the first frame"
+            );
+            assert!(travelled.normalize().distance(forward.xz()) < 1e-5);
+            let eye = world.get::<Transform>(camera).unwrap();
+            assert!((eye.translation - position).dot(forward) < 0.0);
+            assert!(
+                world
+                    .get::<ThirdPersonState>(camera)
+                    .unwrap()
+                    .follow_focus_for_test()
+                    .distance(position + Vec3::Y * camera_plugin::LOOK_HEIGHT)
+                    < 1e-4
+            );
+            let mut models = world.query::<(&FighterModel, &GlobalTransform)>();
+            assert_eq!(models.iter(world).count(), peers + 1);
+            for (model, transform) in models.iter(world) {
+                let facing = world.get::<MotionState>(model.fighter).unwrap().facing;
+                let expected = if model.fighter == local {
+                    forward
+                } else {
+                    Quat::from_rotation_y(facing) * Vec3::Z
+                };
+                assert!(
+                    transform
+                        .affine()
+                        .transform_vector3(Vec3::NEG_Y)
+                        .normalize()
+                        .distance(expected)
+                        < 1e-5
+                );
+            }
+        }
+    }
+
     #[test]
     fn production_snapshot_projects_remote_airborne_state_for_character_contacts() {
         let mut net = NetState::default();
@@ -15174,8 +15370,12 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn stock_owner_respawn_uses_real_stage_pads_while_cure_stays_in_place() {
+        use super::NetworkFrameApply;
         use crate::app_state::{LoadedStageAssets, LoadedStageInfo};
+        use crate::plugins::camera_plugin::{self, ThirdPersonState};
+        use crate::plugins::character_plugin::{self, FighterModel};
         use crate::plugins::stage_collider::{StageCollider, StageMeshCollider};
+        use bevy::prelude::{ChildOf, GlobalTransform};
         use meteor_network::stock_game::StockGameEvent;
         use meteor_network::stock_protocol::StockRespawnEvent;
         use meteor_physics::collision::MeshCollider;
@@ -15198,7 +15398,10 @@ mod tests {
             let corpse = Vec3::new(95.0, -25.0, 93.0);
             for (team, prefix) in [(None, "user"), (Some(1), "teama"), (Some(2), "teamb")] {
                 let mut app = App::new();
-                app.init_resource::<LockOnController>()
+                character_plugin::configure_placement_model_sync(&mut app);
+                app.add_plugins(bevy::transform::TransformPlugin)
+                    .init_resource::<Time>()
+                    .init_resource::<LockOnController>()
                     .init_resource::<CameraBasis>()
                     .init_resource::<crate::plugins::item_plugin::ItemBuffs>()
                     .insert_resource(LoadedStageAssets {
@@ -15233,7 +15436,11 @@ mod tests {
                         }],
                         ..Default::default()
                     })
-                    .add_systems(Update, net_apply_authority_respawns);
+                    .add_systems(
+                        Update,
+                        net_apply_authority_respawns.in_set(NetworkFrameApply),
+                    );
+                let camera = camera_plugin::install_follow_camera_for_test(&mut app);
                 let entity = app
                     .world_mut()
                     .spawn((
@@ -15277,6 +15484,19 @@ mod tests {
                             FighterHitReaction::default(),
                             GunAimState::default(),
                         ),
+                    ))
+                    .id();
+                let model = app
+                    .world_mut()
+                    .spawn((
+                        FighterModel {
+                            fighter: entity,
+                            character: "p0".into(),
+                        },
+                        ChildOf(entity),
+                        Transform::from_rotation(Quat::from_rotation_x(
+                            -std::f32::consts::FRAC_PI_2,
+                        )),
                     ))
                     .id();
                 let mut request = LaunchRequest {
@@ -15345,6 +15565,18 @@ mod tests {
                 let facing = app.world().get::<MotionState>(entity).unwrap().facing;
                 assert!(
                     (Quat::from_rotation_y(facing) * Vec3::Z).distance(authored_heading) < 0.005
+                );
+                let model = app.world().get::<GlobalTransform>(model).unwrap();
+                let world_forward = model.affine().transform_vector3(Vec3::NEG_Y).normalize();
+                assert!(world_forward.distance(authored_heading) < 0.005);
+                let eye = app.world().get::<Transform>(camera).unwrap().translation;
+                assert!((eye - actual).dot(world_forward) < 0.0);
+                let follow = app.world().get::<ThirdPersonState>(camera).unwrap();
+                assert!(
+                    follow
+                        .follow_focus_for_test()
+                        .distance(actual + Vec3::Y * camera_plugin::LOOK_HEIGHT)
+                        < 1e-4
                 );
                 assert!(actual.distance(corpse) > 10.0);
                 assert_eq!(

@@ -831,6 +831,7 @@ fn spawn_training_npc(
     }
     let mut offset = NPC_SPAWN_OFFSET;
     for (slot, member) in (1u8..).zip(room.members.iter().filter(|m| m.is_npc)) {
+        let position = Vec3::new(0.0, 0.9, offset);
         let mut patrol = crate::plugins::ai_plugin::NpcPatrol::default();
         patrol.schedule_initial_think(crate::plugins::ai_plugin::STOCK_NPC_THINK, i64::from(slot));
         commands
@@ -848,16 +849,16 @@ fn spawn_training_npc(
                 Health::default(),
                 Qi::default(),
                 CombatState::default(),
-                MotionState {
-                    movement_mode: meteor_core::MovementMode::Idle,
-                    velocity: Vec3::ZERO,
+                super::stage_plugin::FighterPlacement {
+                    position,
 
                     facing: std::f32::consts::PI,
-                },
+                }
+                .spawn_bundle(meteor_core::MovementMode::Idle, Vec3::ZERO),
                 PoseRuntime::idle(),
                 SmState::default(),
                 DeathRespawn {
-                    spawn_pos: Vec3::new(0.0, 0.9, offset),
+                    spawn_pos: position,
                     ..default()
                 },
                 FighterAir::default(),
@@ -868,7 +869,6 @@ fn spawn_training_npc(
                     crate::plugins::ai_plugin::StockNpcBrain,
                     crate::plugins::ai_plugin::stock_npc_profile(),
                 ),
-                Transform::from_xyz(0.0, 0.9, offset),
             ))
             .insert(Visibility::default())
             .insert(InheritedVisibility::default())
@@ -7104,7 +7104,11 @@ pub(super) fn death_respawn(
             wall.as_deref_mut(),
         );
         commands.entity(entity).remove::<WeaponSwitchActive>();
-        transform.translation = death.spawn_pos;
+        super::stage_plugin::FighterPlacement {
+            position: death.spawn_pos,
+            facing: motion.facing,
+        }
+        .apply(commands.entity(entity), &mut transform, Some(&mut motion));
         if local.is_some() {
             let _ = clear_lock_targets(&mut lock);
             camera_basis.yaw = motion.facing;
@@ -9156,6 +9160,13 @@ mod tests {
 
     #[test]
     fn production_solo_mission_death_respects_rule_and_keeps_mission_npc_dead() {
+        use crate::plugins::{
+            camera_plugin::{self, ThirdPersonState},
+            character_plugin::{self, FighterModel},
+            stage_collider::StageCollider,
+            FighterFrameSet,
+        };
+
         fn spawn_dead_fighter(world: &mut World, slot: u8) -> Entity {
             let sm = SmState {
                 current: FighterState::Dead,
@@ -9189,7 +9200,7 @@ mod tests {
                         },
                         PoseRuntime::idle(),
                         sm,
-                        Transform::default(),
+                        Transform::from_xyz(15.0, -28.0, -9.0),
                     ),
                     (
                         crate::components::fighter::TargetHitClock::default(),
@@ -9197,7 +9208,7 @@ mod tests {
                         MotionState {
                             movement_mode: meteor_core::MovementMode::Idle,
                             velocity: Vec3::ZERO,
-                            facing: 0.0,
+                            facing: std::f32::consts::FRAC_PI_2,
                         },
                         FighterAir::default(),
                         FighterDodge::default(),
@@ -9210,16 +9221,32 @@ mod tests {
         }
 
         let mut app = App::new();
-        app.init_resource::<Time>()
+        crate::plugins::configure_fighter_frame_sets(&mut app);
+        character_plugin::configure_placement_model_sync(&mut app);
+        app.add_plugins(bevy::transform::TransformPlugin)
+            .init_resource::<Time>()
+            .init_resource::<StageCollider>()
             .insert_resource(crate::app_state::LaunchRequest::default())
             .init_resource::<NetState>()
             .insert_resource(MatchEnd::default())
             .insert_resource(LockOnController::default())
             .insert_resource(crate::plugins::camera_plugin::CameraBasis::default())
-            .add_systems(Update, death_respawn);
+            .add_systems(Update, death_respawn.in_set(FighterFrameSet::PoseResolve));
+        let camera = camera_plugin::install_follow_camera_for_test(&mut app);
 
         let player = spawn_dead_fighter(app.world_mut(), 0);
         app.world_mut().entity_mut(player).insert(LocalFighter);
+        let model = app
+            .world_mut()
+            .spawn((
+                FighterModel {
+                    fighter: player,
+                    character: "p0".into(),
+                },
+                ChildOf(player),
+                Transform::from_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
+            ))
+            .id();
         let npc = spawn_dead_fighter(app.world_mut(), 1);
         app.world_mut().entity_mut(npc).insert((
             NpcFighter,
@@ -9283,6 +9310,24 @@ mod tests {
         let player_health = app.world().get::<Health>(player).unwrap();
         assert!(!player_death.active);
         assert_eq!(player_health.current, player_health.max);
+        let model = app.world().get::<GlobalTransform>(model).unwrap();
+        assert!(
+            model
+                .affine()
+                .transform_vector3(Vec3::NEG_Y)
+                .distance(Vec3::X)
+                < 1e-5
+        );
+        let follow = app.world().get::<ThirdPersonState>(camera).unwrap();
+        assert!(
+            follow
+                .follow_focus_for_test()
+                .distance(player_death.spawn_pos + Vec3::Y * camera_plugin::LOOK_HEIGHT)
+                < 1e-5
+        );
+        assert!(
+            app.world().get::<Transform>(camera).unwrap().translation.x < player_death.spawn_pos.x
+        );
 
         let npc_death = app.world().get::<DeathRespawn>(npc).unwrap();
         let npc_health = app.world().get::<Health>(npc).unwrap();

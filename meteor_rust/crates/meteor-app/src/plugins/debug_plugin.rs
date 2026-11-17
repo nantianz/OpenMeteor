@@ -2716,11 +2716,6 @@ fn spawn_debug_npc(
             },
             Qi::default(),
             CombatState::default(),
-            MotionState {
-                movement_mode: meteor_core::MovementMode::Idle,
-                velocity: Vec3::ZERO,
-                facing: yaw + std::f32::consts::PI,
-            },
             PoseRuntime::idle(),
             SmState::default(),
             DeathRespawn {
@@ -2734,7 +2729,11 @@ fn spawn_debug_npc(
             AiIntent::default(),
             crate::plugins::ai_plugin::NpcPatrol::default(),
             crate::plugins::ai_plugin::stock_npc_profile(),
-            Transform::from_translation(spawn_pos),
+            super::stage_plugin::FighterPlacement {
+                position: spawn_pos,
+                facing: yaw + std::f32::consts::PI,
+            }
+            .spawn_bundle(meteor_core::MovementMode::Idle, Vec3::ZERO),
         ),
     ));
     entity_commands.insert(Visibility::default());

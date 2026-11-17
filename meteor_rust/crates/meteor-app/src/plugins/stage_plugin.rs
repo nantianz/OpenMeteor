@@ -12,6 +12,7 @@ mod mission_targets;
 use crate::app_state::{AppState, LaunchRequest, LoadedStageAssets, LoadedStageInfo};
 use crate::components::fighter::{CombatState, Fighter, Health, MotionState, Qi};
 use bevy::asset::RenderAssetUsages;
+use bevy::ecs::system::EntityCommands;
 use bevy::material::AlphaMode;
 use bevy::prelude::*;
 use bevy::render::render_resource::PrimitiveTopology;
@@ -1461,7 +1462,7 @@ fn resolve_player_spawn_loadout(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn spawn_local_fighter(
+pub(super) fn spawn_local_fighter(
     mut commands: Commands,
     request: Res<LaunchRequest>,
     waypoints: Option<Res<WaypointGraph>>,
@@ -1554,11 +1555,7 @@ fn spawn_local_fighter(
                 max: meteor_core::DEFAULT_QI_MAX,
             },
             CombatState::default(),
-            MotionState {
-                movement_mode: MovementMode::Idle,
-                velocity: Vec3::ZERO,
-                facing,
-            },
+            FighterPlacement { position, facing }.spawn_bundle(MovementMode::Idle, Vec3::ZERO),
             crate::plugins::movement_plugin::FighterAir::default(),
             crate::plugins::movement_plugin::FighterDodge::default(),
             crate::components::fighter::PoseRuntime::idle(),
@@ -1569,7 +1566,6 @@ fn spawn_local_fighter(
             },
             crate::components::fighter::AiIntent::default(),
             crate::components::fighter::HeadTrackState::default(),
-            Transform::from_translation(position),
         ))
         .insert(Visibility::default())
         .insert(InheritedVisibility::default())
@@ -2511,15 +2507,13 @@ fn scene_script_touch_and_transfer(
             };
             if matches {
                 apply_scene_transfer_transform(
+                    commands.entity(entity),
                     &mut transform,
                     motion.as_deref_mut(),
                     air.as_deref_mut(),
                     position,
                     yaw,
                 );
-                commands
-                    .entity(entity)
-                    .insert(super::camera_plugin::CameraFollowReset);
                 if let Some(mut target) = target {
                     target.translation = position;
                     target.yaw = yaw;
@@ -2536,17 +2530,57 @@ fn scene_script_touch_and_transfer(
     }
 }
 
+pub(super) struct FighterPlacement {
+    pub(super) position: Vec3,
+    pub(super) facing: f32,
+}
+
+impl FighterPlacement {
+    pub(super) fn spawn_bundle(
+        self,
+        movement_mode: MovementMode,
+        velocity: Vec3,
+    ) -> (
+        Transform,
+        MotionState,
+        super::camera_plugin::CameraFollowReset,
+    ) {
+        (
+            Transform::from_translation(self.position),
+            MotionState {
+                movement_mode,
+                velocity,
+                facing: self.facing,
+            },
+            super::camera_plugin::CameraFollowReset,
+        )
+    }
+
+    pub(super) fn apply(
+        self,
+        mut fighter: EntityCommands<'_>,
+        transform: &mut Transform,
+        motion: Option<&mut MotionState>,
+    ) {
+        transform.translation = self.position;
+        transform.rotation = Quat::IDENTITY;
+        if let Some(motion) = motion {
+            motion.facing = self.facing;
+        }
+        fighter.insert(super::camera_plugin::CameraFollowReset);
+    }
+}
+
 pub(super) fn apply_scene_transfer_transform(
+    fighter: EntityCommands<'_>,
     transform: &mut Transform,
     motion: Option<&mut MotionState>,
     air: Option<&mut super::movement_plugin::FighterAir>,
     position: Vec3,
     yaw: f32,
 ) {
-    transform.translation = position;
-    transform.rotation = Quat::from_rotation_y(yaw);
-    if let Some(motion) = motion {
-        motion.facing = yaw;
+    let mut motion = motion;
+    if let Some(motion) = motion.as_deref_mut() {
         motion.velocity = Vec3::ZERO;
     }
     if let Some(air) = air {
@@ -2557,6 +2591,11 @@ pub(super) fn apply_scene_transfer_transform(
         air.landed_planar = Vec2::ZERO;
         air.ground_y = position.y;
     }
+    FighterPlacement {
+        position,
+        facing: yaw,
+    }
+    .apply(fighter, transform, motion);
 }
 
 fn stock_scene_touch_contacts(
@@ -3919,12 +3958,12 @@ fn spawn_mission_npc(
             },
             Qi::default(),
             CombatState::default(),
-            MotionState {
-                movement_mode: meteor_core::MovementMode::Idle,
-                velocity: Vec3::ZERO,
+            FighterPlacement {
+                position,
 
                 facing: std::f32::consts::PI,
-            },
+            }
+            .spawn_bundle(MovementMode::Idle, Vec3::ZERO),
             crate::components::fighter::PoseRuntime::idle(),
             crate::components::fighter::SmState::default(),
             crate::components::fighter::DeathRespawn {
@@ -3935,7 +3974,6 @@ fn spawn_mission_npc(
             crate::plugins::movement_plugin::FighterDodge::default(),
             crate::components::fighter::AiIntent::default(),
             initial_patrol,
-            Transform::from_translation(position),
         ))
         .insert(Visibility::default())
         .insert(InheritedVisibility::default())
@@ -6014,15 +6052,25 @@ mod tests {
 
     #[test]
     fn origin_sn22_render_empty_portal_triggers_ecs_transfer() {
-        check_sn22_ecs_transfer(false);
+        check_sn22_ecs_transfer(false, 1);
+    }
+
+    #[test]
+    fn origin_sn22_half_turn_portals_keep_camera_behind_model_on_entry_and_exit() {
+        check_sn22_ecs_transfer(false, 2);
     }
 
     #[test]
     fn origin_sn22_stock_guest_triggers_host_transfer_with_large_actor_id() {
-        check_sn22_ecs_transfer(true);
+        check_sn22_ecs_transfer(true, 1);
     }
 
-    fn check_sn22_ecs_transfer(stock_guest: bool) {
+    fn check_sn22_ecs_transfer(stock_guest: bool, pad: u8) {
+        use crate::plugins::camera_plugin::{
+            self, CameraFollowReset, ThirdPersonState, LOOK_HEIGHT,
+        };
+        use crate::plugins::character_plugin::FighterModel;
+
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
         if !root.join("sn22/sn22.pst").exists() {
             eprintln!("origin_res missing, skipping");
@@ -6125,14 +6173,18 @@ mod tests {
                 Visibility::Visible,
             )
         };
-        let ec = prop("D_tpEC01");
+        let ec = prop(&format!("D_tpEC{pad:02}"));
         let ec_feet = snap_scene_transfer_position(&collider, ec.1.translation);
         assert!(
             ec_feet.y < ec.1.translation.y - 0.5,
             "portal must be tested from its real floor"
         );
-        let ed = prop("D_tpED01");
+        let ed = prop(&format!("D_tpED{pad:02}"));
         let expected = snap_scene_transfer_position(&collider, ed.1.translation);
+        let cage_exit = prop("D_tpEC18");
+        let cage_exit_feet = snap_scene_transfer_position(&collider, cage_exit.1.translation);
+        let outside_cage = prop("D_tpED18");
+        let outside_cage_feet = snap_scene_transfer_position(&collider, outside_cage.1.translation);
 
         let mut net = crate::plugins::network_plugin::NetState::default();
         if stock_guest {
@@ -6161,7 +6213,9 @@ mod tests {
             crate::plugins::network_plugin::NetTx::capture_scene_transfers_for_test();
         let mut app = App::new();
         crate::plugins::configure_fighter_frame_sets(&mut app);
-        app.insert_resource(net_tx)
+        crate::plugins::character_plugin::configure_placement_model_sync(&mut app);
+        app.add_plugins(bevy::transform::TransformPlugin)
+            .insert_resource(net_tx)
             .init_resource::<Time>()
             .insert_resource(crate::plugins::FrameClock {
                 sim_dt: 0.13,
@@ -6178,7 +6232,7 @@ mod tests {
                     .after(crate::plugins::FighterFrameSet::RootMotion)
                     .before(crate::plugins::FighterFrameSet::PoseResolve),
             );
-        let camera = crate::plugins::camera_plugin::install_follow_camera_for_test(&mut app);
+        let camera = camera_plugin::install_follow_camera_for_test(&mut app);
         app.world_mut().spawn(ec);
         app.world_mut().spawn(ed);
         let fighter = if stock_guest {
@@ -6223,6 +6277,20 @@ mod tests {
                 ))
                 .id()
         };
+        let model = app
+            .world_mut()
+            .spawn((
+                FighterModel {
+                    fighter,
+                    character: "p0".into(),
+                },
+                ChildOf(fighter),
+                Transform::from_rotation(
+                    Quat::from_rotation_y(1.2)
+                        * Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+                ),
+            ))
+            .id();
         app.update();
         let actual = app
             .world()
@@ -6232,31 +6300,58 @@ mod tests {
             .translation;
         assert!(
             actual.distance(expected) < 1e-4,
-            "EC01 must transfer the local fighter to snapped ED01: {actual:?} vs {expected:?}"
+            "EC{pad:02} must transfer to snapped ED{pad:02}: {actual:?} vs {expected:?}"
         );
         if !stock_guest {
-            let motion = app.world().get::<MotionState>(fighter).unwrap();
-            assert!(
-                motion.facing.abs() < 1e-5,
-                "destination yaw must replace pre-transfer yaw"
+            let check_landing = |world: &World, position: Vec3, forward: Vec3| {
+                let root = world.get::<Transform>(fighter).unwrap();
+                assert!(root.translation.distance(position) < 1e-4);
+                let motion = world.get::<MotionState>(fighter).unwrap();
+                assert!((Quat::from_rotation_y(motion.facing) * Vec3::Z).distance(forward) < 1e-5);
+                assert_eq!(motion.velocity, Vec3::ZERO);
+                let model_forward = world
+                    .get::<GlobalTransform>(model)
+                    .unwrap()
+                    .affine()
+                    .transform_vector3(Vec3::NEG_Y)
+                    .normalize();
+                let eye = world.get::<Transform>(camera).unwrap();
+                let view = (eye.rotation * Vec3::NEG_Z).xz().normalize();
+                assert!(view.distance(forward.xz()) < 1e-5);
+                assert!(
+                    (eye.translation - position).dot(model_forward) < 0.0,
+                    "camera sees the front of the model: eye={:?}, forward={model_forward:?}",
+                    eye.translation,
+                );
+                assert!(model_forward.distance(forward) < 1e-5);
+                let cam = world.get::<ThirdPersonState>(camera).unwrap();
+                assert!(
+                    cam.follow_focus_for_test()
+                        .distance(position + Vec3::Y * LOOK_HEIGHT)
+                        < 1e-4
+                );
+                assert!(world.get::<CameraFollowReset>(fighter).is_none());
+            };
+
+            check_landing(
+                app.world(),
+                expected,
+                if pad == 1 { Vec3::Z } else { Vec3::NEG_Z },
             );
-            assert_eq!(motion.velocity, Vec3::ZERO);
-            let eye = app.world().get::<Transform>(camera).unwrap();
-            let forward = eye.rotation * Vec3::NEG_Z;
-            assert!(forward.x.abs() < 1e-5 && forward.z > 0.0);
-            let cam = app
-                .world()
-                .get::<crate::plugins::camera_plugin::ThirdPersonState>(camera)
-                .unwrap();
-            assert!(
-                cam.follow_focus_for_test()
-                    .distance(expected + Vec3::Y * crate::plugins::camera_plugin::LOOK_HEIGHT)
-                    < 1e-4
-            );
-            assert!(app
-                .world()
-                .get::<crate::plugins::camera_plugin::CameraFollowReset>(fighter)
-                .is_none());
+            if pad == 2 {
+                app.world_mut().spawn(cage_exit);
+                app.world_mut().spawn(outside_cage);
+                app.world_mut()
+                    .get_mut::<Transform>(fighter)
+                    .unwrap()
+                    .translation = cage_exit_feet;
+                app.world_mut()
+                    .get_mut::<MotionState>(fighter)
+                    .unwrap()
+                    .facing = 0.8;
+                app.update();
+                check_landing(app.world(), outside_cage_feet, Vec3::NEG_Z);
+            }
         }
         if stock_guest {
             let requests = captured_transfers();
