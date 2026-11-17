@@ -174,6 +174,9 @@ pub(crate) struct FighterBone {
 }
 
 #[derive(Component)]
+struct HeadPoseSample(Quat);
+
+#[derive(Component)]
 #[relationship(relationship_target = FighterModelDummies)]
 pub(crate) struct FighterDummy {
     #[relationship]
@@ -1392,22 +1395,24 @@ fn spawn_fighter_model_for(
             }
             entity
         } else {
-            commands
-                .spawn((
-                    FighterBone {
-                        model,
-                        name: node.name.clone(),
-                        skin_index: skin_node_map
-                            .get(&node_index)
-                            .copied()
-                            .unwrap_or(usize::MAX),
-                        node_index,
-                    },
-                    Visibility::default(),
-                    InheritedVisibility::default(),
-                    transform,
-                ))
-                .id()
+            let mut bone = commands.spawn((
+                FighterBone {
+                    model,
+                    name: node.name.clone(),
+                    skin_index: skin_node_map
+                        .get(&node_index)
+                        .copied()
+                        .unwrap_or(usize::MAX),
+                    node_index,
+                },
+                Visibility::default(),
+                InheritedVisibility::default(),
+                transform,
+            ));
+            if node.name == "bau_Head" {
+                bone.insert(HeadPoseSample(transform.rotation));
+            }
+            bone.id()
         };
         node_entities[node_index] = Some(entity);
         if skin_node_map.contains_key(&node_index) {
@@ -2536,7 +2541,10 @@ fn drive_fighter_animation(
         With<crate::components::fighter::Fighter>,
     >,
     skeletons: FighterSkeletonQuery,
-    mut bones: Query<(&FighterBone, &mut Transform), Without<FighterDummy>>,
+    mut bones: Query<
+        (&FighterBone, &mut Transform, Option<&mut HeadPoseSample>),
+        Without<FighterDummy>,
+    >,
     mut dummies: Query<(&FighterDummy, &mut Transform)>,
     mut models: ModelTransformQuery<'_, '_>,
 ) {
@@ -2603,7 +2611,9 @@ fn drive_fighter_animation(
         if blend_active && blend.started_at_seconds.is_none() {
             let mut root_snap = [0.0f32; 3];
             blend.from_quats.clear();
-            for (bone, transform) in bones.iter_many(model_bones(model_entity, &skeletons)) {
+            for (bone, transform, head_sample) in
+                bones.iter_many(model_bones(model_entity, &skeletons))
+            {
                 if bone.skin_index == 0 {
                     root_snap = [
                         transform.translation.x,
@@ -2615,12 +2625,9 @@ fn drive_fighter_animation(
                     while blend.from_quats.len() <= bone.skin_index {
                         blend.from_quats.push([0.0, 0.0, 0.0, 1.0]);
                     }
-                    blend.from_quats[bone.skin_index] = [
-                        transform.rotation.x,
-                        transform.rotation.y,
-                        transform.rotation.z,
-                        transform.rotation.w,
-                    ];
+
+                    let rotation = head_sample.map_or(transform.rotation, |sample| sample.0);
+                    blend.from_quats[bone.skin_index] = rotation.to_array();
                 }
             }
             blend.from_root = root_snap;
@@ -2740,14 +2747,18 @@ fn drive_fighter_animation(
         }
 
         let mut model_bones = bones.iter_many_mut(model_bones(model_entity, &skeletons));
-        while let Some((bone, mut transform)) = model_bones.fetch_next() {
+        while let Some((bone, mut transform, head_sample)) = model_bones.fetch_next() {
             let quat = sampled.bone_quats.get(bone.skin_index).copied();
             if let Some(q) = quat {
                 let target = Quat::from_xyzw(q[0], q[1], q[2], q[3]);
-                if t < 1.0 && bone.skin_index < blend.from_quats.len() {
-                    transform.rotation = blend_quat(blend.from_quats[bone.skin_index], target, t);
+                let rotation = if t < 1.0 && bone.skin_index < blend.from_quats.len() {
+                    blend_quat(blend.from_quats[bone.skin_index], target, t)
                 } else {
-                    transform.rotation = target;
+                    target
+                };
+                transform.rotation = rotation;
+                if let Some(mut sample) = head_sample {
+                    sample.0 = rotation;
                 }
             }
             if bone.skin_index == 0 {
@@ -3006,9 +3017,16 @@ fn resample_late_air_pose_visual(
         &mut crate::plugins::movement_plugin::FighterAir,
         Option<&mut crate::components::fighter::VisualRootPin>,
     )>,
+    local_heads: Query<
+        &crate::components::fighter::HeadTrackState,
+        With<crate::plugins::stage_plugin::LocalFighter>,
+    >,
     models: Query<(Entity, &FighterModel)>,
     skeletons: FighterSkeletonQuery,
-    mut bones: Query<(&FighterBone, &mut Transform), Without<FighterDummy>>,
+    mut bones: Query<
+        (&FighterBone, &mut Transform, Option<&mut HeadPoseSample>),
+        Without<FighterDummy>,
+    >,
     mut dummies: Query<(&FighterDummy, &mut Transform)>,
 ) {
     #[cfg(not(target_arch = "wasm32"))]
@@ -3050,9 +3068,16 @@ fn resample_late_air_pose_visual(
         }
 
         let mut model_bones = bones.iter_many_mut(model_bones(model_entity, &skeletons));
-        while let Some((bone, mut transform)) = model_bones.fetch_next() {
+        while let Some((bone, mut transform, head_sample)) = model_bones.fetch_next() {
             if let Some(q) = sampled.bone_quats.get(bone.skin_index) {
-                transform.rotation = Quat::from_xyzw(q[0], q[1], q[2], q[3]);
+                let rotation = Quat::from_array(*q);
+                transform.rotation = rotation;
+                if let Some(mut sample) = head_sample {
+                    sample.0 = rotation;
+                    if let Ok(head) = local_heads.get(model.fighter) {
+                        transform.rotation = rotation * Quat::from_rotation_x(head.current);
+                    }
+                }
             }
             if bone.skin_index == 0 {
                 let root = if base_dummy_index.is_none() {
@@ -3171,46 +3196,26 @@ fn rebuild_weapon_inventory(
 
 fn head_track(
     active_fighter: Option<Res<super::fighter_frame::ActiveFighter>>,
-    assets: Option<Res<CharacterAssetsSet>>,
     players: Query<
         (Entity, &crate::components::fighter::HeadTrackState),
         With<crate::plugins::stage_plugin::LocalFighter>,
     >,
     models: Query<(Entity, &FighterModel)>,
     skeletons: FighterSkeletonQuery,
-    mut bones: Query<(&FighterBone, &mut Transform), Without<FighterDummy>>,
+    mut bones: Query<(&HeadPoseSample, &mut Transform)>,
 ) {
-    let Some(assets) = assets else {
-        return;
-    };
     for (fighter_entity, head) in &players {
         if !super::fighter_frame::accepts(active_fighter.as_deref(), fighter_entity) {
             continue;
         }
-        if head.current.abs() < 1e-8 {
-            continue;
-        }
-        let Some((model_entity, model)) = models.iter().find(|(_, m)| m.fighter == fighter_entity)
-        else {
-            continue;
-        };
-        let Some(character_assets) = assets.0.get(&model.character) else {
-            continue;
-        };
-        let Some(head_index) = character_assets
-            .skeleton
-            .nodes
-            .iter()
-            .position(|node| node.name == "bau_Head")
+        let Some((model_entity, _)) = models.iter().find(|(_, m)| m.fighter == fighter_entity)
         else {
             continue;
         };
         let rotation = Quat::from_rotation_x(head.current);
         let mut model_bones = bones.iter_many_mut(model_bones(model_entity, &skeletons));
-        while let Some((bone, mut transform)) = model_bones.fetch_next() {
-            if bone.node_index == head_index {
-                transform.rotation *= rotation;
-            }
+        while let Some((sample, mut transform)) = model_bones.fetch_next() {
+            transform.rotation = sample.0 * rotation;
         }
     }
 }
@@ -3306,7 +3311,12 @@ mod tests {
     }
 
     #[test]
-    fn head_track_keeps_applying_a_decaying_angle_after_target_loss() {
+    fn head_track_composes_once_when_the_animation_sample_is_retained() {
+        use crate::components::fighter::{
+            Fighter, FighterHitReaction, GunAimState, HeadTrackState, MotionState, SmState,
+        };
+        use crate::plugins::{movement_plugin::FighterAir, stage_plugin::LocalFighter};
+
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
         if !root.exists() {
             eprintln!("origin_res missing, skipping");
@@ -3317,57 +3327,143 @@ mod tests {
             eprintln!("p0 assets missing, skipping");
             return;
         };
-        let head_index = character
-            .skeleton
-            .nodes
-            .iter()
-            .position(|node| node.name == "bau_Head")
-            .expect("p0 bau_Head");
-        let skin_index = character
-            .skeleton
-            .skin_indices
-            .iter()
-            .position(|node| *node == head_index)
-            .unwrap_or(usize::MAX);
+        let common = parse_amb(&std::fs::read(root.join("Common/character.amb")).unwrap()).unwrap();
+        let mut pose = PoseRuntime::idle();
+        character.apply_pose(&mut pose, 15, true);
+        let pose_id = pose.pose_id;
         let mut app = App::new();
-        app.insert_resource(CharacterAssetsSet(std::collections::HashMap::from([(
-            "p0".to_string(),
-            character,
-        )])));
-        app.add_systems(Update, head_track);
+        app.init_resource::<Time<bevy::time::Real>>()
+            .insert_resource(CommonAmb(common))
+            .insert_resource(CharacterAssetsSet(std::collections::HashMap::from([(
+                "p0".to_string(),
+                character,
+            )])))
+            .add_systems(
+                Update,
+                (
+                    drive_fighter_animation,
+                    head_track,
+                    resample_late_air_pose_visual,
+                )
+                    .chain(),
+            );
         let fighter = app
             .world_mut()
             .spawn((
-                crate::plugins::stage_plugin::LocalFighter,
-                crate::components::fighter::HeadTrackState { current: 0.25 },
-            ))
-            .id();
-        let model = app
-            .world_mut()
-            .spawn(FighterModel {
-                fighter,
-                character: "p0".to_string(),
-            })
-            .id();
-        let authored = Quat::from_rotation_y(0.2);
-        let head = app
-            .world_mut()
-            .spawn((
-                FighterBone {
-                    model,
-                    name: "bau_Head".to_string(),
-                    skin_index,
-                    node_index: head_index,
+                LocalFighter,
+                Fighter {
+                    character_id: 0,
+                    player_slot: 0,
+                    weapon: 5,
+                    weapon_slots: [5, 0],
+                    weapon_slot: 0,
+                    weapon_slot_variants: [0; 2],
+                    weapon_variant: 0,
                 },
-                Transform::from_rotation(authored),
+                MotionState {
+                    movement_mode: meteor_core::MovementMode::Idle,
+                    velocity: Vec3::ZERO,
+                    facing: 0.0,
+                },
+                pose,
+                EntryBlend::default(),
+                SmState::default(),
+                FighterHitReaction::default(),
+                GunAimState::default(),
+                FighterAir::default(),
+                HeadTrackState::default(),
             ))
             .id();
-
+        spawn_fighter_model_for_test(app.world_mut(), fighter);
+        let (head, skin_index) = app
+            .world_mut()
+            .query_filtered::<(Entity, &FighterBone), With<HeadPoseSample>>()
+            .single(app.world())
+            .map(|(entity, bone)| (entity, bone.skin_index))
+            .unwrap();
         app.update();
+        let authored = app.world().get::<Transform>(head).unwrap().rotation;
+        let assert_angle = |app: &App, angle| {
+            let actual = app.world().get::<Transform>(head).unwrap().rotation;
+            let expected = authored * Quat::from_rotation_x(angle);
+            assert!(
+                actual.dot(expected).abs() > 0.9999,
+                "head angle {angle}: {actual:?}"
+            );
+        };
 
-        let actual = app.world().get::<Transform>(head).unwrap().rotation;
-        let expected = authored * Quat::from_rotation_x(0.25);
-        assert!(actual.dot(expected).abs() > 0.9999);
+        app.world_mut()
+            .get_mut::<HeadTrackState>(fighter)
+            .unwrap()
+            .current = 0.25;
+        app.update();
+        assert_angle(&app, 0.25);
+
+        app.world_mut()
+            .get_mut::<EntryBlend>(fighter)
+            .unwrap()
+            .preserve_sample_once = true;
+        app.update();
+        assert_angle(&app, 0.25);
+        app.world_mut()
+            .get_mut::<HeadTrackState>(fighter)
+            .unwrap()
+            .current = 0.0;
+        app.update();
+        assert_angle(&app, 0.0);
+
+        app.world_mut()
+            .get_mut::<HeadTrackState>(fighter)
+            .unwrap()
+            .current = -0.25;
+        app.world_mut()
+            .get_mut::<EntryBlend>(fighter)
+            .unwrap()
+            .preserve_sample_once = false;
+        app.update();
+        assert_angle(&app, -0.25);
+        *app.world_mut().get_mut::<EntryBlend>(fighter).unwrap() = EntryBlend {
+            pose_id,
+            zero_duration_pending: true,
+            ..default()
+        };
+        app.update();
+        assert!(
+            app.world()
+                .get::<EntryBlend>(fighter)
+                .unwrap()
+                .preserve_sample_once
+        );
+        assert_angle(&app, -0.25);
+
+        *app.world_mut().get_mut::<EntryBlend>(fighter).unwrap() = EntryBlend {
+            pose_id,
+            duration: 0.1,
+            ..default()
+        };
+        app.update();
+        assert_angle(&app, -0.25);
+        let blend = app.world().get::<EntryBlend>(fighter).unwrap();
+        assert!(
+            Quat::from_array(blend.from_quats[skin_index])
+                .dot(authored)
+                .abs()
+                > 0.9999
+        );
+
+        {
+            let mut air = app.world_mut().get_mut::<FighterAir>(fighter).unwrap();
+            air.motion_root_pin_pose_id = pose_id;
+            air.late_visual_pose_snap = true;
+        }
+        app.update();
+        assert!(
+            !app.world()
+                .get::<FighterAir>(fighter)
+                .unwrap()
+                .late_visual_pose_snap
+        );
+        assert_angle(&app, -0.25);
     }
 
     #[test]
