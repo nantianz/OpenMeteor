@@ -72,10 +72,19 @@ def graphics_files():
         return path
 
     index = json.loads(add("graphics-enhancement.json").read_text(encoding="utf-8"))
-    for name in index["packs"]:
+    demo = "graphics-packs/meshlet-demo/pack.json"
+    for name in dict.fromkeys([*index["packs"], demo]):
         manifest = json.loads(add(name).read_text(encoding="utf-8"))
+        parent = PurePosixPath(name).parent
         for resource in manifest.get("resources", {}).values():
-            add(resource, PurePosixPath(name).parent)
+            add(resource, parent)
+        for model in manifest.get("meshlet_models", {}).values():
+            source = add(model["file"], parent)
+            if source.suffix != ".mlmesh" or not 44 <= source.stat().st_size <= 16 * 1024 * 1024:
+                raise ValueError(f"invalid Meshlet file: {model['file']}")
+            payload = source.read_bytes()
+            if payload[:8] != b"MLMESH01" or payload[8:40] != hashlib.sha256(payload[40:]).digest():
+                raise ValueError(f"invalid Meshlet version or checksum: {model['file']}")
     return files
 
 

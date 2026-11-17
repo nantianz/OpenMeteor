@@ -101,63 +101,7 @@ impl<'a> SceneGraphics<'a> {
         if let Some((i, id)) =
             selected_material.filter(|_| allow_pbr && material.mode == GmdlMode::Opaque)
         {
-            let p = self.packs.unwrap().packs[i].config.materials[&id].clone();
-            material.pbr = Vec4::new(1., p.metallic, p.roughness, p.vertex_color);
-            material.pbr_tint = Vec3::from_array(p.tint).extend(0.);
-            if let Some(id) = p.base_color {
-                material.texture = Some(self.texture(i, &id, true, false, images));
-                material.params.has_texture = 1;
-                material.pbr_textures.y = 1.;
-            }
-            if let Some(id) = p.normal {
-                if mesh.generate_tangents().is_ok() {
-                    material.normal_texture = Some(self.texture(i, &id, false, false, images));
-                    material.normal_strength = p.normal_strength;
-                    material.normal_contrast = 1.0;
-                } else {
-                    warn!("graphics normal map: {object} has no valid tangent basis");
-                }
-            }
-            if let Some(id) = p.orm {
-                material.orm_texture = Some(self.texture(i, &id, false, false, images));
-                material.pbr_textures.x = 1.;
-            }
-            if let Some((ei, e)) = self.environment.clone() {
-                if let Some(id) = e.diffuse {
-                    material.env_diffuse = Some(self.texture(ei, &id, true, true, images));
-                    material.pbr_tint.w = 1.;
-                }
-                if let Some(id) = e.specular_mips.first() {
-                    let h = self
-                        .specular
-                        .get_or_insert_with(|| {
-                            let levels = &self.packs.unwrap().packs[ei].images;
-                            let base = &levels[id];
-                            let h = crate::plugins::pak_textures::image_from_decoded(images, base);
-                            let mut image = images.get_mut(&h).unwrap();
-                            image.texture_descriptor.format = TextureFormat::Rgba8UnormSrgb;
-                            image.texture_descriptor.mip_level_count = e.specular_mips.len() as u32;
-                            image.data = Some(
-                                e.specular_mips
-                                    .iter()
-                                    .flat_map(|id| levels[id].rgba.iter().copied())
-                                    .collect(),
-                            );
-                            image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-                                address_mode_u: ImageAddressMode::Repeat,
-                                address_mode_v: ImageAddressMode::ClampToEdge,
-                                mag_filter: ImageFilterMode::Linear,
-                                min_filter: ImageFilterMode::Linear,
-                                mipmap_filter: ImageFilterMode::Linear,
-                                ..default()
-                            });
-                            h
-                        })
-                        .clone();
-                    material.env_specular = Some(h);
-                    material.pbr_textures.z = 1.;
-                }
-            }
+            self.apply_pbr(i, &id, object, material, mesh, images);
         }
         let w = selected_wind.filter(|_| allow_wind)?;
         let Some(VertexAttributeValues::Float32x3(positions)) =
@@ -196,6 +140,80 @@ impl<'a> SceneGraphics<'a> {
             tangents,
             profile: w,
         })
+    }
+    pub(super) fn apply_pbr(
+        &mut self,
+        i: usize,
+        id: &str,
+        object: &str,
+        material: &mut GmdlMaterial,
+        mesh: &mut Mesh,
+        images: &mut Assets<Image>,
+    ) {
+        let p = self.packs.unwrap().packs[i].config.materials[id].clone();
+        material.pbr = Vec4::new(1., p.metallic, p.roughness, p.vertex_color);
+        material.pbr_tint = Vec3::from_array(p.tint).extend(0.);
+        if let Some(id) = p.base_color {
+            material.texture = Some(self.texture(i, &id, true, false, images));
+            material.params.has_texture = 1;
+            material.pbr_textures.y = 1.;
+        }
+        if let Some(id) = p.normal {
+            if mesh.attribute(Mesh::ATTRIBUTE_TANGENT).is_some() || mesh.generate_tangents().is_ok()
+            {
+                material.normal_texture = Some(self.texture(i, &id, false, false, images));
+                material.normal_strength = p.normal_strength;
+                material.normal_contrast = 1.0;
+            } else {
+                warn!("graphics normal map: {object} has no valid tangent basis");
+            }
+        }
+        if let Some(id) = p.orm {
+            material.orm_texture = Some(self.texture(i, &id, false, false, images));
+            material.pbr_textures.x = 1.;
+        }
+        if let Some((ei, e)) = self.environment.clone() {
+            if let Some(id) = e.diffuse {
+                material.env_diffuse = Some(self.texture(ei, &id, true, true, images));
+                material.pbr_tint.w = 1.;
+            }
+            if let Some(id) = e.specular_mips.first() {
+                let h = self
+                    .specular
+                    .get_or_insert_with(|| {
+                        let levels = &self.packs.unwrap().packs[ei].images;
+                        let base = &levels[id];
+                        let h = crate::plugins::pak_textures::image_from_decoded(images, base);
+                        let mut image = images.get_mut(&h).unwrap();
+                        image.texture_descriptor.format = TextureFormat::Rgba8UnormSrgb;
+                        image.texture_descriptor.mip_level_count = e.specular_mips.len() as u32;
+                        image.data = Some(
+                            e.specular_mips
+                                .iter()
+                                .flat_map(|id| levels[id].rgba.iter().copied())
+                                .collect(),
+                        );
+                        image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+                            address_mode_u: ImageAddressMode::Repeat,
+                            address_mode_v: ImageAddressMode::ClampToEdge,
+                            mag_filter: ImageFilterMode::Linear,
+                            min_filter: ImageFilterMode::Linear,
+                            mipmap_filter: ImageFilterMode::Linear,
+                            ..default()
+                        });
+                        h
+                    })
+                    .clone();
+                material.env_specular = Some(h);
+                material.pbr_textures.z = 1.;
+            }
+        }
+    }
+
+    pub(super) fn has_wind(&self, object: &str, texture: Option<&str>) -> bool {
+        self.rules
+            .iter()
+            .any(|(_, rule)| rule.wind.is_some() && rule.matches(object, texture))
     }
 }
 #[derive(Component)]

@@ -11,11 +11,14 @@ use std::{
 pub struct LoadedPack {
     pub config: Pack,
     pub images: BTreeMap<String, Arc<DecodedImage>>,
+    pub(super) prefix: String,
 }
 #[derive(Resource, Default)]
 pub struct GraphicsPacks {
     pub packs: Vec<LoadedPack>,
     pub error: Option<String>,
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    pub(super) loose_root: Option<PathBuf>,
 }
 
 pub fn parse_index(bytes: &[u8]) -> Result<Index, String> {
@@ -107,9 +110,13 @@ pub fn load_with_reader(
                 }
             }
         }
-        packs.push(LoadedPack { config, images });
+        packs.push(LoadedPack {
+            config,
+            images,
+            prefix: prefix.into(),
+        });
     }
-    Ok(GraphicsPacks { packs, error: None })
+    Ok(GraphicsPacks { packs, ..default() })
 }
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 pub fn read_bounded(root: &Path, name: &str) -> Result<Vec<u8>, String> {
@@ -135,6 +142,12 @@ pub fn read_bounded(root: &Path, name: &str) -> Result<Vec<u8>, String> {
     Ok(data)
 }
 impl GraphicsPacks {
+    #[cfg(all(test, not(any(target_arch = "wasm32", target_os = "android"))))]
+    pub(crate) fn with_test_loose_root(mut self, root: PathBuf) -> Self {
+        self.loose_root = Some(root);
+        self
+    }
+
     pub fn load() -> Self {
         match Self::try_load() {
             Ok(p) => {
@@ -146,6 +159,7 @@ impl GraphicsPacks {
                 Self {
                     packs: vec![],
                     error: Some(error),
+                    ..default()
                 }
             }
         }
@@ -178,7 +192,9 @@ impl GraphicsPacks {
                     .ok_or("invalid graphics config filename")?;
                 let bytes = read_bounded(root, filename)?;
                 info!("graphics config: {}", path.display());
-                return load_with_reader(&bytes, |name| read_bounded(root, name));
+                let mut packs = load_with_reader(&bytes, |name| read_bounded(root, name))?;
+                packs.loose_root = Some(root.to_owned());
+                return Ok(packs);
             }
         }
         let bundled = include_bytes!("../../../../../config/graphics-enhancement.json");
@@ -188,6 +204,34 @@ impl GraphicsPacks {
             meteor_asset::runtime_assets::read_entry(&format!("graphics/{name}"))
                 .ok_or_else(|| format!("missing graphics/{name}"))
         })
+    }
+    pub(super) fn has_loose_model_root(&self) -> bool {
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        {
+            self.loose_root.is_some()
+        }
+        #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+        {
+            false
+        }
+    }
+    pub(super) fn read_meshlet_model(
+        &self,
+        pack: &LoadedPack,
+        file: &str,
+    ) -> Result<Vec<u8>, String> {
+        let path = if pack.prefix.is_empty() {
+            file.to_owned()
+        } else {
+            format!("{}/{file}", pack.prefix)
+        };
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        if let Some(root) = &self.loose_root {
+            return read_bounded(root, &path);
+        }
+        Err(format!(
+            "{path}: Meshlet models require desktop loose configuration"
+        ))
     }
     pub fn scenes<'a>(
         &'a self,

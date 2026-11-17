@@ -1,0 +1,35 @@
+{
+  "schema_version": 2,
+  "id": "meshlet-demo",
+  "materials": {
+    "bronze": {
+      "tint": [
+        0.62,
+        0.31,
+        0.085
+      ],
+      "metallic": 0.35,
+      "roughness": 0.47
+    }
+  },
+  "meshlet_models": {
+    "ornament": {
+      "file": "models/bronze-ornament.mlmesh",
+      "materials": {
+        "bronze": "bronze"
+      }
+    }
+  },
+  "scenes": [
+    {
+      "stage": "sn07",
+      "meshlet_replacements": [
+        {
+          "object": "Cy01",
+          "model": "ornament",
+          "source_sha256": "1229e92e61b15d562e7fa3f16cd9e8ad347b956c1914fdd7fc6b76f58f93f28a"
+        }
+      ]
+    }
+  ]
+}

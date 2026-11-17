@@ -1,5 +1,6 @@
 pub(crate) mod config;
 mod loader;
+pub(crate) mod meshlets;
 mod runtime;
 mod surfaces;
 use bevy::prelude::*;

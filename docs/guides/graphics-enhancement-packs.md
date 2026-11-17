@@ -14,6 +14,9 @@ config/
     starter/
       pack.json
       textures/
+    meshlet-demo/
+      pack.json
+      models/
 ```
 
 打开 `config/graphics-enhancement.json`，把 `enabled` 改成 `true` 并重启：
@@ -67,3 +70,11 @@ PBR 适用于匹配到的不透明场景批次，原版水面和透明特效由�
 同类场景设置以最后一个显式匹配的条目为准，匹配顺序先按 `packs` 列表、再按包内 `scenes` 列表。把通用 `*` 条目放在关卡条目前面。PNG 单张最多 16 MiB，宽高各最多 4096，所有包解码后的 RGBA 合计最多 256 MiB。
 
 修改后重启生效。若启动页提示加载失败，按错误信息检查 JSON 版本、键名和图片路径，或改回 `"enabled": false`。入口 JSON 如已损坏，可以先从 GitHub 恢复模板。
+
+## Meshlet 模型替换
+
+Windows DX12、桌面 Vulkan 和 macOS Metal 可以使用 v2 清单为静态不透明物件指定外部模型。要试用随包附带的青铜摆件，把 `graphics-packs/meshlet-demo/pack.json` 加入 `packs`，确认 `enabled` 为 `true`，重启进入 `sn07` 查看 `Cy01`。样例匹配指定版本的原版关卡文件，成功时日志会显示 `graphics meshlets sn07 / Cy01` 和 74 个簇。
+
+移除该包并重启可以恢复原外观。模型缺失、源文件版本不同、目标冲突或渲染后端不支持时，也会保留原版物件。碰撞和联机数据始终来自原版。局域网可用一端启用、一端关闭，核对同一位置的通行和攻击结果。
+
+`meshlet_models` 指定相对清单的 `.mlmesh` 路径及材质槽映射，`scenes[].meshlet_replacements` 用 `object` 和 `model` 绑定静态对象，可用 `placement` 调整世界偏移、绕 Y 轴的角度与统一缩放。v1 材质包仍能使用。Meshlet 文件由桌面客户端在进入对应关卡时读取，Web、Android 和 OpenGL 路径显示原版物件。

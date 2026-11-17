@@ -218,3 +218,150 @@ fn headless_pbr_environment_fog_contacts_and_disabled_restoration() {
         "disabled pack restores original shader output exactly"
     );
 }
+
+#[test]
+fn headless_meshlet_matches_full_indexed_mesh_in_partial_view() {
+    use bevy::{
+        asset::RenderAssetUsages,
+        camera::{visibility::ViewVisibility, ScalingMode},
+        mesh::{Indices, PrimitiveTopology},
+    };
+
+    let mut app = App::new();
+    app.add_plugins(
+        DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: None,
+                exit_condition: bevy::window::ExitCondition::DontExit,
+                ..default()
+            })
+            .set(RenderPlugin {
+                synchronous_pipeline_compilation: true,
+                ..default()
+            })
+            .disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>()
+            .disable::<bevy::winit::WinitPlugin>()
+            .disable::<bevy::audio::AudioPlugin>(),
+    )
+    .insert_state(crate::app_state::AppState::Playing)
+    .init_resource::<crate::app_state::Settings>()
+    .add_plugins(crate::plugins::stage_material::GmdlMaterialPlugin);
+    crate::plugins::frame_work::install(&mut app);
+
+    let file = config_root().join("graphics-packs/meshlet-demo/models/bronze-ornament.mlmesh");
+    let model = meteor_asset::mlmesh::Model::decode(&std::fs::read(file).unwrap()).unwrap();
+    let p = &model.primitives[0];
+    let full_indices = p
+        .meshlets
+        .iter()
+        .flat_map(|m| {
+            m.indices
+                .iter()
+                .map(|&index| m.vertices[usize::from(index)])
+        })
+        .collect();
+    let full = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD,
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, p.positions.clone())
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, p.normals.clone())
+    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, p.uvs.clone())
+    .with_inserted_indices(Indices::U32(full_indices));
+
+    let mut image = Image::new_target_texture(128, 128, TextureFormat::Rgba8UnormSrgb, None);
+    image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
+    let target = app.world_mut().resource_mut::<Assets<Image>>().add(image);
+    app.world_mut().spawn((
+        Camera3d::default(),
+        Camera {
+            clear_color: ClearColorConfig::Custom(Color::BLACK),
+            ..default()
+        },
+        Projection::Orthographic(OrthographicProjection {
+            scaling_mode: ScalingMode::Fixed {
+                width: 0.8,
+                height: 1.0,
+            },
+            ..OrthographicProjection::default_3d()
+        }),
+        RenderTarget::Image(target.clone().into()),
+        Msaa::Off,
+        bevy::core_pipeline::tonemapping::Tonemapping::None,
+        Transform::from_xyz(0.48, 0.43, 3.).looking_at(Vec3::new(0.48, 0.43, 0.), Vec3::Y),
+    ));
+
+    let material = app
+        .world_mut()
+        .resource_mut::<Assets<GmdlMaterial>>()
+        .add(plain());
+    let full = app.world_mut().resource_mut::<Assets<Mesh>>().add(full);
+    let source = app
+        .world_mut()
+        .spawn((
+            Mesh3d(full),
+            MeshMaterial3d(material.clone()),
+            Transform::IDENTITY,
+        ))
+        .id();
+    let pixels = Arc::new(Mutex::new(vec![]));
+    let out = pixels.clone();
+    app.world_mut()
+        .spawn(Readback::texture(target))
+        .observe(move |event: On<ReadbackComplete>| *out.lock().unwrap() = event.data.clone());
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while app.plugins_state() != PluginsState::Ready {
+        assert!(std::time::Instant::now() < deadline);
+        bevy::tasks::tick_global_task_pools_on_main_thread();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    app.finish();
+    app.cleanup();
+    let baseline = capture(&mut app, &pixels);
+    assert!(
+        baseline
+            .chunks_exact(4)
+            .filter(|c| c[0] > 3 || c[1] > 3 || c[2] > 3)
+            .count()
+            > 700
+    );
+    app.world_mut().despawn(source);
+
+    let mut entities = Vec::new();
+    for cluster in crate::plugins::graphics_pack::meshlets::split_meshes(p) {
+        let mesh = app.world_mut().resource_mut::<Assets<Mesh>>().add(cluster);
+        entities.push(
+            app.world_mut()
+                .spawn((
+                    Mesh3d(mesh),
+                    MeshMaterial3d(material.clone()),
+                    Transform::IDENTITY,
+                ))
+                .id(),
+        );
+    }
+    let clustered = capture(&mut app, &pixels);
+    assert!(
+        changed(&baseline, &clustered) <= 4,
+        "clustered mesh pixels differ"
+    );
+    let visible = entities
+        .iter()
+        .filter(|&&e| app.world().get::<ViewVisibility>(e).unwrap().get())
+        .count();
+    assert!(
+        visible > 0 && visible < entities.len(),
+        "expected partial frustum visibility: {visible}/{}",
+        entities.len()
+    );
+    let gpu_culling = app
+        .sub_app(bevy::render::RenderApp)
+        .world()
+        .resource::<bevy::render::batching::gpu_preprocessing::GpuPreprocessingSupport>()
+        .is_culling_supported();
+    println!(
+        "visible meshlets: {visible}/{}; GPU culling available: {gpu_culling}",
+        entities.len()
+    );
+}

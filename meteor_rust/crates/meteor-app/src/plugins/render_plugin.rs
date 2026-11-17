@@ -20,6 +20,12 @@ use meteor_physics::collision::{CollisionSystem, Point3};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 mod gem_visual;
+#[cfg(all(
+    test,
+    feature = "original-assets",
+    not(any(target_arch = "wasm32", target_os = "android"))
+))]
+mod meshlet_tests;
 #[cfg(test)]
 mod tree_opacity_tests;
 #[cfg(test)]
@@ -2461,6 +2467,7 @@ fn setup_stage_scene(
     mut stage_collider: ResMut<StageCollider>,
     mut hazards: ResMut<super::hazard_plugin::StageHazardRuntime>,
     graphics: Option<Res<super::graphics_pack::GraphicsPacks>>,
+    render_adapter: Option<Res<bevy::render::renderer::RenderAdapterInfo>>,
 ) {
     hazards.0 = Default::default();
     let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
@@ -2575,6 +2582,12 @@ fn setup_stage_scene(
     let mut normal_cache = HashMap::new();
     let hd_pack = SceneTexturePack::load(&loaded.stage_id, settings.hd_scene);
     let mut water_cache = super::stage_material::water::WaterCache::default();
+    let mut meshlets = super::graphics_pack::meshlets::SceneMeshlets::new(
+        graphics.as_deref(),
+        &loaded.stage_id,
+        bytes,
+        render_adapter.as_ref().map(|adapter| adapter.0.backend),
+    );
     let mut graphics =
         super::graphics_pack::SceneGraphics::new(graphics.as_deref(), &loaded.stage_id);
     let mut normal_batches = 0usize;
@@ -2612,6 +2625,37 @@ fn setup_stage_scene(
             continue;
         }
         if object.indices.is_empty() || object.positions.is_empty() {
+            continue;
+        }
+        let scene_obj = stage_desc
+            .as_ref()
+            .and_then(|d| d.scene_objects.iter().find(|obj| obj.name == object.name));
+        if let Some(replacement) = meshlets.replace(
+            &gmdl,
+            object,
+            scene_obj,
+            loaded.center,
+            || {
+                script
+                    .script()
+                    .is_some_and(|script| script.host().resolve_name(&object.name).is_some())
+            },
+            &mut graphics,
+            &mut images,
+        ) {
+            for (clusters, material) in replacement.primitives {
+                let material = materials.add(material);
+                for mesh in clusters {
+                    drawn_objects += 1;
+                    drawn_faces += mesh.indices().map_or(0, |indices| indices.len() / 3);
+                    commands.spawn((
+                        PlayingSceneEntity,
+                        Mesh3d(meshes.add(mesh)),
+                        MeshMaterial3d(material.clone()),
+                        replacement.transform,
+                    ));
+                }
+            }
             continue;
         }
 
@@ -2703,9 +2747,6 @@ fn setup_stage_scene(
                 world_min = world_min.min(p);
                 world_max = world_max.max(p);
             }
-            let scene_obj = stage_desc
-                .as_ref()
-                .and_then(|d| d.scene_objects.iter().find(|obj| obj.name == object.name));
             let (mut mesh, transform) =
                 build_scene_mesh(object, &indices, loaded.center, scene_obj);
             let deform = scene_obj.and_then(|obj| SceneDeform::from_mesh(object, &mesh, obj));
@@ -2888,6 +2929,7 @@ fn setup_stage_scene(
         "spawned {} stage mesh batches, {} faces (textured {} faces, ifl materials {}, ifl frames {})",
         drawn_objects, drawn_faces, textured_faces, ifl_materials, ifl_frames_total
     );
+    meshlets.warn_unmatched();
 
     if let Some(mesh) = stage_collider.mesh.as_mut() {
         spawn_stage_props_with_hd(

@@ -20,6 +20,8 @@ pub struct Pack {
     pub materials: BTreeMap<String, Pbr>,
     #[serde(default)]
     pub scenes: Vec<Scene>,
+    #[serde(default)]
+    pub meshlet_models: BTreeMap<String, MeshletModel>,
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -63,6 +65,40 @@ pub struct Scene {
     pub fog: Option<Vec<Fog>>,
     #[serde(default)]
     pub surfaces: Vec<Surface>,
+    #[serde(default)]
+    pub meshlet_replacements: Vec<MeshletReplacement>,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MeshletModel {
+    pub file: String,
+    pub materials: BTreeMap<String, String>,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MeshletReplacement {
+    pub object: String,
+    pub model: String,
+    #[serde(default)]
+    pub placement: Placement,
+    #[serde(default)]
+    pub source_sha256: Option<String>,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Placement {
+    pub offset: [f32; 3],
+    pub yaw_degrees: f32,
+    pub scale: f32,
+}
+impl Default for Placement {
+    fn default() -> Self {
+        Self {
+            offset: [0.; 3],
+            yaw_degrees: 0.,
+            scale: 1.,
+        }
+    }
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -235,7 +271,7 @@ fn color(name: &str, v: [f32; 3]) -> Result<(), String> {
 }
 impl Pack {
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema_version != 1 || self.id.is_empty() || self.id.len() > 80 {
+        if !matches!(self.schema_version, 1 | 2) || self.id.is_empty() || self.id.len() > 80 {
             return Err("invalid pack schema_version/id".into());
         }
         if self.resources.len() > 128 || self.materials.len() > 128 || self.scenes.len() > 64 {
@@ -244,6 +280,57 @@ impl Pack {
         for (id, path) in &self.resources {
             if id.is_empty() || !relative_path(path) {
                 return Err(format!("invalid resource {id}: {path}"));
+            }
+        }
+        let has_meshlets = !self.meshlet_models.is_empty()
+            || self
+                .scenes
+                .iter()
+                .any(|s| !s.meshlet_replacements.is_empty());
+        if has_meshlets && self.schema_version != 2 {
+            return Err("meshlet replacements require pack schema_version 2".into());
+        }
+        if self.meshlet_models.len() > 64 {
+            return Err("too many meshlet models".into());
+        }
+        for (id, model) in &self.meshlet_models {
+            if id.is_empty()
+                || id.len() > 80
+                || !relative_path(&model.file)
+                || !model.file.ends_with(".mlmesh")
+                || !(1..=32).contains(&model.materials.len())
+                || model.materials.iter().any(|(slot, material)| {
+                    slot.is_empty() || slot.len() > 80 || !self.materials.contains_key(material)
+                })
+            {
+                return Err(format!("invalid meshlet model {id}"));
+            }
+        }
+        for scene in &self.scenes {
+            if scene.meshlet_replacements.is_empty() {
+                continue;
+            }
+            if scene.stage == "*" || scene.meshlet_replacements.len() > 32 {
+                return Err(
+                    "meshlet replacements require an exact stage and at most 32 targets".into(),
+                );
+            }
+            for target in &scene.meshlet_replacements {
+                if target.object.is_empty()
+                    || target.object.len() > 120
+                    || target.object.contains('*')
+                    || !self.meshlet_models.contains_key(&target.model)
+                    || target.source_sha256.as_ref().is_some_and(|hash| {
+                        hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    })
+                {
+                    return Err(format!("invalid meshlet target {}", target.object));
+                }
+                for offset in target.placement.offset {
+                    range("meshlet offset", offset, -1000., 1000.)?;
+                }
+                range("meshlet yaw", target.placement.yaw_degrees, -360., 360.)?;
+                range("meshlet scale", target.placement.scale, 0.01, 100.)?;
             }
         }
         let resource = |id: &str| {
