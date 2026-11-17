@@ -37,7 +37,9 @@ impl Plugin for DynamicShadowsPlugin {
 fn sync_dynamic_sun(
     mut commands: Commands,
     settings: Res<Settings>,
-    mut existing: Query<(Entity, &mut DirectionalLight), With<MeteorDynamicSun>>,
+    mut existing: Query<(Entity, &mut DirectionalLight, &mut Transform), With<MeteorDynamicSun>>,
+    graphics: Option<Res<crate::plugins::graphics_pack::GraphicsPacks>>,
+    loaded: Option<Res<crate::app_state::LoadedStageInfo>>,
     mut frame: ResMut<FrameUniforms>,
 ) {
     frame.lighting = Vec4::new(
@@ -50,8 +52,31 @@ fn sync_dynamic_sun(
         0.55,
         if settings.dynamic_shadows { 0.8 } else { 0.0 },
     );
+    let stage = loaded.as_ref().map_or("", |s| s.stage_id.as_str());
+    let environment = graphics.as_ref().and_then(|p| {
+        p.scenes(stage)
+            .filter_map(|(_, s)| s.environment.as_ref())
+            .last()
+    });
+    let direction = environment
+        .map_or(Vec3::new(40.0, 80.0, 30.0), |e| {
+            Vec3::from_array(e.sun_direction)
+        })
+        .normalize();
+    let sun_transform = if environment.is_some() {
+        Transform::from_translation(direction * 100.0).looking_at(
+            Vec3::ZERO,
+            if direction.dot(Vec3::Y).abs() > 0.99 {
+                Vec3::Z
+            } else {
+                Vec3::Y
+            },
+        )
+    } else {
+        Transform::from_xyz(40.0, 80.0, 30.0).looking_at(Vec3::ZERO, Vec3::Y)
+    };
     let want = settings.dynamic_shadows || settings.environment_lighting;
-    let have = existing.iter().next().map(|(entity, _)| entity);
+    let have = existing.iter().next().map(|(entity, _, _)| entity);
     match sun_action(want, have.is_some()) {
         SunAction::Spawn => {
             commands.spawn((
@@ -65,7 +90,7 @@ fn sync_dynamic_sun(
                     shadow_normal_bias: 1.0,
                     ..default()
                 },
-                Transform::from_xyz(40.0, 80.0, 30.0).looking_at(Vec3::ZERO, Vec3::Y),
+                sun_transform,
                 bevy::light::CascadeShadowConfigBuilder {
                     num_cascades: 1,
                     maximum_distance: 10_000.0,
@@ -80,7 +105,10 @@ fn sync_dynamic_sun(
             }
         }
         SunAction::Keep => {
-            for (_, mut light) in &mut existing {
+            for (_, mut light, mut transform) in &mut existing {
+                if *transform != sun_transform {
+                    *transform = sun_transform;
+                }
                 if light.shadow_maps_enabled != settings.dynamic_shadows {
                     light.shadow_maps_enabled = settings.dynamic_shadows;
                 }

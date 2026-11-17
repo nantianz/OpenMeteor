@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "id": "openmeteor-starter",
+  "resources": {
+    "stone_color": "textures/stone-color.png",
+    "stone_normal": "textures/stone-normal.png",
+    "stone_orm": "textures/stone-orm.png",
+    "studio_diffuse": "textures/studio-diffuse.png",
+    "studio_spec_0": "textures/studio-specular-0.png",
+    "studio_spec_1": "textures/studio-specular-1.png",
+    "studio_spec_2": "textures/studio-specular-2.png",
+    "studio_spec_3": "textures/studio-specular-3.png",
+    "studio_spec_4": "textures/studio-specular-4.png",
+    "studio_spec_5": "textures/studio-specular-5.png"
+  },
+  "materials": {
+    "stone": {
+      "base_color": "stone_color",
+      "normal": "stone_normal",
+      "orm": "stone_orm",
+      "roughness": 0.85,
+      "metallic": 0.0,
+      "vertex_color": 0.2
+    }
+  },
+  "scenes": [
+    {
+      "stage": "*",
+      "environment": {
+        "diffuse": "studio_diffuse",
+        "specular_mips": ["studio_spec_0", "studio_spec_1", "studio_spec_2", "studio_spec_3", "studio_spec_4", "studio_spec_5"]
+      },
+      "wind": {"direction": [1.0, 0.3], "strength": 0.35, "gust": 0.3},
+      "clothing": {"density": 0.25, "stretch_compliance": 0.0000001, "bend_compliance": 100.0, "damping": 2.0, "wind_drag": 0.6, "thickness": 0.008, "motion_limit": 0.4, "iterations": 4, "self_collision": false},
+      "contact_shadows": {"strength": 0.25, "radius": 1.2, "max_height": 2.5}
+    },
+    {
+      "stage": "sn06",
+      "surfaces": [{"texture": "sn064.jpg", "material": "stone"}],
+      "fog": [{"center": [0.0, 6.0, 0.0], "radius": 30.0, "color": [0.58, 0.65, 0.72], "density": 0.008}]
+    }
+  ]
+}

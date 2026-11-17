@@ -139,6 +139,10 @@ All five UI images are embedded in `OpenMeteor.exe`; no separate image directory
 is needed. Packaging checks image dimensions and the actual EXE contents,
 rejecting missing images or 1x1 placeholders before publication.
 
+Graphics packs are disabled by default. Edit `config/graphics-enhancement.json`
+to enable the included sample. See the [graphics pack guide](docs/guides/graphics-enhancement-packs.md)
+for installation, texture formats, and configuration fields.
+
 ## Tests
 
 From the repository root:
@@ -152,9 +156,7 @@ Tests that require original game files or separate reference captures are gated
 behind `original-assets`. Enabling this feature requires providing the matching
 resources and fixtures locally; they are excluded from this source distribution.
 
-The preceding source baseline passed the workspace build and default tests on macOS with Rust
-1.97.1 (1146 passed, 2 ignored), plus a compilation check of the separate
-WebAssembly crate:
+Check the separate WebAssembly crate with:
 
 ```sh
 rustup target add wasm32-unknown-unknown

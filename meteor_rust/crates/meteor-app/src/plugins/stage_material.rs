@@ -91,6 +91,15 @@ pub struct GmdlMaterial {
     pub texture: Option<Handle<Image>>,
 
     pub normal_texture: Option<Handle<Image>>,
+    pub orm_texture: Option<Handle<Image>>,
+    pub env_diffuse: Option<Handle<Image>>,
+    pub env_specular: Option<Handle<Image>>,
+
+    pub pbr: Vec4,
+
+    pub pbr_tint: Vec4,
+
+    pub pbr_textures: Vec4,
 
     pub normal_strength: f32,
     pub normal_contrast: f32,
@@ -134,6 +143,12 @@ impl GmdlMaterial {
             params,
             texture,
             normal_texture: None,
+            orm_texture: None,
+            env_diffuse: None,
+            env_specular: None,
+            pbr: Vec4::ZERO,
+            pbr_tint: Vec4::ZERO,
+            pbr_textures: Vec4::ZERO,
             normal_strength: 1.0,
             normal_contrast: 0.8,
             uv_scroll: Vec4::ZERO,
@@ -163,6 +178,7 @@ impl GmdlMaterial {
     ) -> Self {
         Self {
             camera_occlusion_enabled: true,
+            pbr_textures: Vec4::new(0.0, 0.0, 0.0, 1.0),
             ..Self::new(params, texture, two_side, mode)
         }
     }

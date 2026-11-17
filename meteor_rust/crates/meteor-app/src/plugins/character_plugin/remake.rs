@@ -1,6 +1,9 @@
 use super::*;
 use serde::Deserialize;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
+mod cloth;
+mod cloth_runtime;
+use cloth_runtime::update;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -31,6 +34,7 @@ struct Control {
 pub(crate) struct VisualAssets {
     skins: [meteor_asset::skc::SkinMesh; 2],
     controls: Vec<Control>,
+    cloth: Arc<cloth::topology::Topology>,
     textures: [Vec<u8>; 3],
     mesh_handles: [OnceLock<Handle<Mesh>>; 2],
     texture_handles: [OnceLock<Handle<bevy::image::Image>>; 3],
@@ -47,9 +51,11 @@ impl VisualAssets {
     }
 
     pub(super) fn mesh(&self, meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
-        self.mesh_handles[lod()]
+        let base = self.mesh_handles[lod()]
             .get_or_init(|| meshes.add(build_group_mesh(self.skin(), &self.skin().indices)))
-            .clone()
+            .clone();
+
+        meshes.add(meshes.get(&base).expect("prepared display mesh").clone())
     }
 
     pub(super) fn material(
@@ -111,26 +117,14 @@ impl VisualAssets {
                     source,
                     joint,
                     control: control.clone(),
-                    angle: Vec2::ZERO,
-                    target: Vec2::ZERO,
-                    angular_velocity: Vec2::ZERO,
-                    pivot: None,
-                    pivot_velocity: Vec3::ZERO,
-                    gravity_axis: Mat4::from_cols_array(
-                        &skeleton.skin_world_bind_inverse[control.anchor].m,
-                    )
-                    .transform_vector3(Vec3::NEG_Z),
                 }
             })
             .collect();
         commands.entity(model).insert(SecondaryMotion {
             nodes,
-            elapsed: 0.0,
-            accumulated: 0.0,
-            velocity: Vec3::ZERO,
+            cloth: cloth::Simulation::default(),
             anchor: None,
-            sampled_position: None,
-            facing: 0.0,
+            deformed: false,
         });
     }
 
@@ -267,9 +261,14 @@ fn prepared(
         }
         textures.push(bytes);
     }
+    let cloth = Arc::new(cloth::topology::Topology::prepare(
+        &skins[1],
+        &skins[lod()],
+    )?);
     Ok(VisualAssets {
         skins: skins.try_into().map_err(|_| "LOD count")?,
         controls: meta.controls,
+        cloth,
         textures: textures.try_into().map_err(|_| "texture count")?,
         mesh_handles: std::array::from_fn(|_| OnceLock::new()),
         texture_handles: std::array::from_fn(|_| OnceLock::new()),
@@ -414,23 +413,14 @@ struct DisplayNode {
     source: Entity,
     joint: Entity,
     control: Control,
-    angle: Vec2,
-    target: Vec2,
-    angular_velocity: Vec2,
-    pivot: Option<Vec3>,
-    pivot_velocity: Vec3,
-    gravity_axis: Vec3,
 }
 
 #[derive(Component)]
 struct SecondaryMotion {
     nodes: Vec<DisplayNode>,
-    elapsed: f32,
-    accumulated: f32,
-    velocity: Vec3,
+    cloth: cloth::Simulation,
     anchor: Option<Vec3>,
-    sampled_position: Option<Vec3>,
-    facing: f32,
+    deformed: bool,
 }
 
 pub(super) fn install(app: &mut App) {
@@ -447,200 +437,6 @@ pub(super) fn install(app: &mut App) {
             .after(super::hit_sway::HitSwaySet)
             .before(crate::plugins::rebalance_plugin::sync_afterimage),
     );
-}
-
-fn update(
-    time: Option<Res<Time>>,
-    clock: Option<Res<crate::plugins::FrameClock>>,
-    state: Option<Res<State<crate::app_state::AppState>>>,
-    settings: Option<Res<crate::app_state::Settings>>,
-    actors: Query<(
-        &crate::components::fighter::MotionState,
-        Option<&crate::components::fighter::Health>,
-    )>,
-    cameras: Query<
-        &GlobalTransform,
-        (
-            With<crate::plugins::camera_plugin::GameplayCamera>,
-            Without<SecondaryJoint>,
-        ),
-    >,
-    mut models: Query<(Entity, &FighterModel, &DisplaySkin, &mut SecondaryMotion)>,
-    skins: Query<&SkinnedMesh, With<FighterSkin>>,
-    sources: Query<&GlobalTransform, Without<SecondaryJoint>>,
-    mut joints: Query<&mut GlobalTransform, With<SecondaryJoint>>,
-) {
-    let dt = if state
-        .as_ref()
-        .is_none_or(|s| *s.get() == crate::app_state::AppState::Playing)
-    {
-        crate::plugins::simulation_dt(clock.as_deref(), time.map_or(0.0, |time| time.delta_secs()))
-    } else {
-        0.0
-    };
-    let eye = cameras.iter().next().map(GlobalTransform::translation);
-    let enabled = settings
-        .as_ref()
-        .is_none_or(|s| s.character_motion && s.texture_quality < 2);
-    for (entity, model, display, mut motion) in &mut models {
-        let Ok(world) = sources.get(entity) else {
-            continue;
-        };
-        let position = world.translation();
-        let reset = motion
-            .anchor
-            .is_none_or(|last| last.distance(position) > 8.0);
-        motion.anchor = Some(position);
-        let (velocity, facing, alive) =
-            actors
-                .get(model.fighter)
-                .map_or((Vec3::ZERO, 0.0, true), |(v, h)| {
-                    let facing = if v.facing.is_finite() { v.facing } else { 0.0 };
-                    let velocity = if v.velocity.is_finite() {
-                        v.velocity
-                    } else {
-                        Vec3::ZERO
-                    };
-                    (velocity, facing, h.is_none_or(|h| h.current > 0.0))
-                });
-        let distance = eye.map_or(0.0, |eye| eye.distance(position));
-        let gain = if enabled && alive {
-            (1.0 - (distance - 30.0) / 25.0).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        if reset || !dt.is_finite() || dt > 0.25 || gain == 0.0 {
-            motion.velocity = velocity;
-            motion.facing = facing;
-            motion.accumulated = 0.0;
-            motion.sampled_position = Some(position);
-            for node in &mut motion.nodes {
-                node.angle = Vec2::ZERO;
-                node.target = Vec2::ZERO;
-                node.angular_velocity = Vec2::ZERO;
-                node.pivot = None;
-                node.pivot_velocity = Vec3::ZERO;
-            }
-        } else if dt > 0.0 {
-            motion.elapsed = (motion.elapsed + dt) % (std::f32::consts::TAU * 100.0);
-            motion.accumulated += dt;
-            if motion.accumulated >= 1.0 / 30.0 {
-                let step = motion.accumulated.min(0.1);
-                motion.accumulated = 0.0;
-                let acceleration = ((velocity - motion.velocity) / step).clamp_length_max(55.0);
-                motion.velocity = velocity;
-                let turn = (facing - motion.facing + std::f32::consts::PI)
-                    .rem_euclid(std::f32::consts::TAU)
-                    - std::f32::consts::PI;
-                motion.facing = facing;
-                let turn_rate = (turn / step).clamp(-12.0, 12.0);
-                let root_velocity = motion
-                    .sampled_position
-                    .map_or(Vec3::ZERO, |last| (position - last) / step);
-                motion.sampled_position = Some(position);
-                let phase = motion.elapsed;
-
-                for (i, node) in motion.nodes.iter_mut().enumerate() {
-                    let anchor = skins
-                        .get(display.0)
-                        .ok()
-                        .and_then(|skin| skin.joints.get(node.control.anchor))
-                        .copied()
-                        .unwrap_or(node.source);
-                    let Ok(source) = sources.get(anchor) else {
-                        continue;
-                    };
-                    let pivot = source.transform_point(Vec3::from_array(node.control.pivot));
-                    let part_velocity = node.pivot.map_or(Vec3::ZERO, |last| {
-                        ((pivot - last) / step - root_velocity).clamp_length_max(12.0)
-                    });
-                    let part_acceleration =
-                        ((part_velocity - node.pivot_velocity) / step).clamp_length_max(40.0);
-                    node.pivot = Some(pivot);
-                    node.pivot_velocity = part_velocity;
-                    let drag = local_response(facing, velocity + part_velocity) / 9.0;
-                    let inertia = local_response(facing, acceleration + part_acceleration) / 55.0;
-                    let hanging = source
-                        .affine()
-                        .transform_vector3(node.gravity_axis)
-                        .normalize_or_zero();
-                    let gravity = world.rotation().inverse() * (hanging.cross(Vec3::NEG_Y));
-                    let response =
-                        -drag - inertia - Vec2::new(0.0, turn_rate * 0.1 * node.control.side)
-                            + Vec2::new(gravity.x, gravity.y) * 0.3;
-                    let breeze = Vec2::new(
-                        (phase * 2.2 + i as f32 * 0.7).sin(),
-                        (phase * 1.7 + node.control.side).sin(),
-                    ) * 0.025;
-                    node.target =
-                        (response + breeze).clamp_length_max(1.0) * node.control.limit * gain;
-                }
-            }
-            for node in &mut motion.nodes {
-                advance_spring(node, dt);
-            }
-        }
-        for node in &motion.nodes {
-            let anchor = skins
-                .get(display.0)
-                .ok()
-                .and_then(|skin| skin.joints.get(node.control.anchor))
-                .copied()
-                .unwrap_or(node.source);
-            let (Ok(source), Ok(mut joint)) = (sources.get(anchor), joints.get_mut(node.joint))
-            else {
-                continue;
-            };
-            if node.angle == Vec2::ZERO {
-                *joint = *source;
-            } else {
-                let pivot = source.transform_point(Vec3::from_array(node.control.pivot));
-                let axis = world.rotation() * Vec3::new(node.angle.x, node.angle.y, 0.0);
-                *joint = GlobalTransform::from(
-                    Mat4::from_translation(pivot)
-                        * Mat4::from_quat(Quat::from_scaled_axis(axis))
-                        * Mat4::from_translation(-pivot)
-                        * source.to_matrix(),
-                );
-            }
-        }
-    }
-}
-
-fn local_response(facing: f32, velocity: Vec3) -> Vec2 {
-    let (sin, cos) = facing.sin_cos();
-    Vec2::new(
-        velocity.z * cos + velocity.x * sin,
-        velocity.x * cos - velocity.z * sin,
-    )
-}
-
-fn advance_spring(node: &mut DisplayNode, dt: f32) {
-    let (frequency, damping): (f32, f32) = match node.control.kind.as_str() {
-        "ribbon" if node.control.name.ends_with("_tip") => (8.0, 0.48),
-        "ribbon" => (11.0, 0.7),
-        "hair" => (14.0, 0.65),
-        _ => (20.0, 0.9),
-    };
-
-    let decay = frequency * damping;
-    let oscillation = frequency * (1.0 - damping * damping).sqrt();
-    let (sin, cos) = (oscillation * dt).sin_cos();
-    let attenuation = (-decay * dt).exp();
-    let offset = node.angle - node.target;
-    let speed = node.angular_velocity;
-    node.angle =
-        node.target + attenuation * (offset * cos + (speed + decay * offset) * (sin / oscillation));
-    node.angular_velocity = attenuation
-        * (speed * cos - (decay * speed + frequency * frequency * offset) * (sin / oscillation));
-    if node.angle.length_squared() > node.control.limit * node.control.limit {
-        node.angle = node.angle.clamp_length_max(node.control.limit);
-        let normal = node.angle.normalize_or_zero();
-        node.angular_velocity -= normal * node.angular_velocity.dot(normal).max(0.0);
-    }
-    node.angular_velocity = node
-        .angular_velocity
-        .clamp_length_max(frequency * node.control.limit * 2.0);
 }
 
 #[cfg(test)]

@@ -9,7 +9,7 @@ use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderSystems};
 use std::collections::{HashMap, HashSet};
 
-type ParamKey = [u32; 38];
+type ParamKey = [u32; 50];
 
 #[derive(Resource, Default, Clone)]
 pub(crate) struct FrameUniforms {
@@ -20,6 +20,7 @@ pub(crate) struct FrameUniforms {
     pub liquid_contacts: LiquidContacts,
 
     pub lighting: Vec4,
+    pub graphics: crate::plugins::graphics_pack::GraphicsFrame,
 }
 
 pub(crate) fn split_time(seconds: f64) -> Vec2 {
@@ -38,6 +39,9 @@ struct GpuParams {
     water_bounds: Vec4,
     first_person_clip: Vec4,
     water_dynamics_bounds: Vec4,
+    pbr: Vec4,
+    pbr_tint: Vec4,
+    pbr_textures: Vec4,
 }
 
 impl GmdlMaterial {
@@ -82,6 +86,18 @@ impl GmdlMaterial {
             self.water_dynamics_bounds.y.to_bits(),
             self.water_dynamics_bounds.z.to_bits(),
             self.water_dynamics_bounds.w.to_bits(),
+            self.pbr.x.to_bits(),
+            self.pbr.y.to_bits(),
+            self.pbr.z.to_bits(),
+            self.pbr.w.to_bits(),
+            self.pbr_tint.x.to_bits(),
+            self.pbr_tint.y.to_bits(),
+            self.pbr_tint.z.to_bits(),
+            self.pbr_tint.w.to_bits(),
+            self.pbr_textures.x.to_bits(),
+            self.pbr_textures.y.to_bits(),
+            self.pbr_textures.z.to_bits(),
+            self.pbr_textures.w.to_bits(),
         ]
     }
 }
@@ -96,6 +112,7 @@ pub struct SharedBuffers {
     clock: UniformBuffer<Vec4>,
     lighting: UniformBuffer<Vec4>,
     liquid_contacts: UniformBuffer<LiquidContacts>,
+    graphics: UniformBuffer<crate::plugins::graphics_pack::GraphicsFrame>,
 }
 
 #[derive(Resource, Default)]
@@ -114,6 +131,9 @@ impl ParamBuffers {
             .or_insert_with(|| {
                 let mut uniform = UniformBuffer::from(GpuParams {
                     base: material.params.clone(),
+                    pbr: material.pbr,
+                    pbr_tint: material.pbr_tint,
+                    pbr_textures: material.pbr_textures,
                     scroll: material.uv_scroll,
                     body_glow: material.body_glow,
                     body_style: material.body_style,
@@ -214,18 +234,42 @@ impl AsBindGroup for GmdlMaterial {
             .buffer()
             .ok_or(AsBindGroupError::RetryNextUpdate)?
             .clone();
+
+        let pbr = self.pbr.x > 0.5;
         let mut result = Textures {
             texture: self.texture.clone(),
             normal_texture: self.normal_texture.clone(),
-            water_reflection: self.water_reflection.clone(),
-            water_depth: self.water_depth.clone(),
-            water_normal: self.water_normal.clone(),
+            water_reflection: if pbr {
+                self.env_specular.clone()
+            } else {
+                self.water_reflection.clone()
+            },
+            water_depth: if pbr {
+                self.env_diffuse.clone()
+            } else {
+                self.water_depth.clone()
+            },
+            water_normal: if pbr {
+                self.orm_texture.clone()
+            } else {
+                self.water_normal.clone()
+            },
             water_dynamics: self.water_dynamics.clone(),
         }
         .unprepared_bind_group(layout, device, textures, force_no_bindless)?;
         result
             .bindings
             .push((14, OwnedBindingResource::Buffer(liquid_contacts)));
+        result.bindings.push((
+            17,
+            OwnedBindingResource::Buffer(
+                shared
+                    .graphics
+                    .buffer()
+                    .ok_or(AsBindGroupError::RetryNextUpdate)?
+                    .clone(),
+            ),
+        ));
         let buffer = cache.get_buffer(self, device, queue);
         result
             .bindings
@@ -254,6 +298,10 @@ impl AsBindGroup for GmdlMaterial {
         entries.push(uniform_buffer::<Vec4>(false).build(4, ShaderStages::FRAGMENT));
         entries.push(uniform_buffer::<Vec4>(false).build(5, ShaderStages::FRAGMENT));
         entries.push(uniform_buffer::<LiquidContacts>(false).build(14, ShaderStages::FRAGMENT));
+        entries.push(
+            uniform_buffer::<crate::plugins::graphics_pack::GraphicsFrame>(false)
+                .build(17, ShaderStages::FRAGMENT),
+        );
         entries
     }
 }
@@ -318,6 +366,10 @@ fn upload_frame(
     {
         shared.liquid_contacts.set(frame.liquid_contacts);
         shared.liquid_contacts.write_buffer(&device, &queue);
+    }
+    if shared.graphics.buffer().is_none() || *shared.graphics.get() != frame.graphics {
+        shared.graphics.set(frame.graphics);
+        shared.graphics.write_buffer(&device, &queue);
     }
     let clock = split_time(frame.seconds)
         .extend(if frame.scene_normal_maps { 1.0 } else { 0.0 })
@@ -464,7 +516,7 @@ mod tests {
 
         let entries = GmdlMaterial::bind_group_layout_entries(&device, false);
 
-        assert_eq!(entries.len(), 17);
+        assert_eq!(entries.len(), 18);
 
         use bevy::render::render_resource::*;
         let source = super::super::standalone_shader_source(true)

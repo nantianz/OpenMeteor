@@ -102,6 +102,8 @@ ZIP 包含 `OpenMeteor.exe`、`config/` 配置、`fonts/ui.ttf` 中文字体和�
 
 五张界面图片内置在 `OpenMeteor.exe`，不需要额外图片目录。打包时检查每张图片的尺寸和实际 EXE 内容，缺图或仍使用 1×1 占位图时停止发布。
 
+图形增强包默认关闭，可编辑 `config/graphics-enhancement.json` 启用随包提供的示例。安装方式、贴图规范和各项参数见[图形增强包指南](docs/guides/graphics-enhancement-packs.md)。
+
 ## 测试
 
 在仓库根目录运行：
@@ -113,7 +115,7 @@ cargo test --workspace --locked
 
 依赖原版游戏文件或独立参考采集数据的测试由 `original-assets` feature 控制。启用该功能前，需要在本地准备匹配的资源与测试数据；这些文件未随源码分发。
 
-此前源码基线已在 macOS 上使用 Rust 1.97.1 通过工作区编译与默认测试（1146 项通过、2 项忽略），并通过独立 WebAssembly crate 的编译检查：
+独立 WebAssembly crate 可以用以下命令检查：
 
 ```sh
 rustup target add wasm32-unknown-unknown

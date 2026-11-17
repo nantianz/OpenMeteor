@@ -1,0 +1,479 @@
+use super::loader::{load_with_reader, parse_index};
+use super::*;
+use crate::plugins::stage_material::{FrameUniforms, GmdlMaterial, GmdlMaterialParams, GmdlMode};
+use serde_json::json;
+fn config_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config")
+}
+fn starter() -> GraphicsPacks {
+    load_with_reader(
+        br#"{"schema_version":1,"enabled":true,"packs":["graphics-packs/starter/pack.json"]}"#,
+        |name| std::fs::read(config_root().join(name)).map_err(|e| e.to_string()),
+    )
+    .unwrap()
+}
+fn plain() -> GmdlMaterial {
+    GmdlMaterial::new_scene(
+        GmdlMaterialParams {
+            opacity: 1.,
+            alpha_cutoff: 0.,
+            mode: 0,
+            has_texture: 0,
+            uv_offset: Vec2::ZERO,
+        },
+        None,
+        false,
+        GmdlMode::Opaque,
+    )
+}
+#[test]
+fn disabled_never_reads_assets_and_invalid_schema_is_diagnostic() {
+    let p = load_with_reader(
+        br#"{"schema_version":1,"enabled":false,"packs":["missing.json"]}"#,
+        |_| panic!("disabled must not load files"),
+    )
+    .unwrap();
+    assert!(p.packs.is_empty());
+    for v in [
+        json!({"schema_version":2,"enabled":false,"packs":[]}),
+        json!({"schema_version":1,"enabled":true,"packs":["../bad"]}),
+        json!({"schema_version":1,"enabled":true,"packs":["x","x"]}),
+        json!({"schema_version":1,"enabled":true,"packs":[],"typo":1}),
+    ] {
+        assert!(parse_index(v.to_string().as_bytes()).is_err());
+    }
+    let index = br#"{"schema_version":1,"enabled":true,"packs":["p.json"]}"#;
+    assert!(load_with_reader(index, |_| Err("missing p.json".into()))
+        .err()
+        .unwrap()
+        .contains("p.json"));
+    let invalid = json!({"schema_version":1,"id":"bad","scenes":[{"stage":"*","fog":[{"center":[0,0,0],"radius":-1,"color":[1,1,1],"density":0.1}]}]});
+    assert!(load_with_reader(index, |_| Ok(invalid.to_string().into_bytes())).is_err());
+}
+#[test]
+fn starter_resources_are_real_and_surface_scope_and_color_spaces_are_correct() {
+    let packs = starter();
+    let mut images = Assets::<Image>::default();
+    let mut mesh = Plane3d::default().mesh().size(4., 4.).build();
+    let positions = mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap().clone();
+    let mut material = plain();
+    let original = material.param_snapshot();
+    let mut other = SceneGraphics::new(Some(&packs), "sn01");
+    assert!(other
+        .configure(
+            "floor",
+            Some("sn064.jpg"),
+            &mut material,
+            &mut mesh,
+            true,
+            true,
+            &mut images
+        )
+        .is_none());
+    assert_eq!(material.param_snapshot(), original);
+    let mut selected = SceneGraphics::new(Some(&packs), "sn06");
+    selected.configure(
+        "floor",
+        Some("SN064.JPG"),
+        &mut material,
+        &mut mesh,
+        true,
+        true,
+        &mut images,
+    );
+    assert_eq!(material.pbr.x, 1.);
+    assert_eq!(material.pbr_textures.x, 1.);
+    assert_eq!(
+        images
+            .get(material.texture.as_ref().unwrap())
+            .unwrap()
+            .texture_descriptor
+            .format,
+        bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb
+    );
+    assert_eq!(
+        images
+            .get(material.orm_texture.as_ref().unwrap())
+            .unwrap()
+            .texture_descriptor
+            .format,
+        bevy::render::render_resource::TextureFormat::Rgba8Unorm
+    );
+    assert_eq!(
+        images
+            .get(material.env_specular.as_ref().unwrap())
+            .unwrap()
+            .texture_descriptor
+            .mip_level_count,
+        6
+    );
+    assert_eq!(
+        format!("{positions:?}"),
+        format!("{:?}", mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap())
+    );
+    let mut duplicate = plain();
+    selected.configure(
+        "floor",
+        Some("sn064.jpg"),
+        &mut duplicate,
+        &mut mesh,
+        true,
+        true,
+        &mut images,
+    );
+    assert_eq!(
+        material.env_specular, duplicate.env_specular,
+        "one environment asset per stage"
+    );
+    let mut smoke = plain();
+    smoke.mode = GmdlMode::Add;
+    selected.configure(
+        "floor",
+        Some("sn064.jpg"),
+        &mut smoke,
+        &mut mesh,
+        false,
+        false,
+        &mut images,
+    );
+    assert_eq!(smoke.pbr.x, 0.);
+}
+impl GmdlMaterial {
+    fn param_snapshot(&self) -> [f32; 6] {
+        [
+            self.pbr.x,
+            self.params.opacity,
+            self.params.alpha_cutoff,
+            self.normal_strength,
+            self.normal_contrast,
+            self.pbr_textures.w,
+        ]
+    }
+}
+#[test]
+fn frame_configuration_clears_on_scene_exit_and_keeps_gameplay_resources_read_only() {
+    use crate::app_state::{AppState, LoadedStageInfo};
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+        .insert_state(AppState::Playing)
+        .insert_resource(starter())
+        .init_resource::<FrameUniforms>()
+        .insert_resource(LoadedStageInfo {
+            stage_id: "sn06".into(),
+            ..default()
+        })
+        .init_resource::<crate::plugins::stage_collider::StageCollider>()
+        .add_systems(Update, runtime::update_frame);
+    let before = app
+        .world()
+        .resource::<crate::plugins::stage_collider::StageCollider>()
+        .mesh
+        .is_none();
+    app.update();
+    assert_eq!(
+        app.world().resource::<FrameUniforms>().graphics.counts.x,
+        1.
+    );
+    app.insert_resource(crate::app_state::Settings {
+        volumetric_fog: false,
+        ..default()
+    });
+    app.update();
+    assert_eq!(
+        app.world().resource::<FrameUniforms>().graphics.counts.x,
+        0.
+    );
+    app.world_mut()
+        .resource_mut::<crate::app_state::Settings>()
+        .volumetric_fog = true;
+    app.update();
+    assert_eq!(
+        app.world().resource::<FrameUniforms>().graphics.counts.x,
+        1.
+    );
+    app.world_mut().resource_mut::<LoadedStageInfo>().stage_id = "sn03".into();
+    app.update();
+    assert_eq!(
+        app.world().resource::<FrameUniforms>().graphics.counts.x,
+        0.
+    );
+    app.world_mut()
+        .resource_mut::<NextState<AppState>>()
+        .set(AppState::Menu);
+    app.update();
+    assert_eq!(
+        app.world().resource::<FrameUniforms>().graphics,
+        GraphicsFrame::default()
+    );
+    assert_eq!(
+        app.world()
+            .resource::<crate::plugins::stage_collider::StageCollider>()
+            .mesh
+            .is_none(),
+        before
+    );
+}
+#[test]
+fn wind_is_bounded_and_shared_across_display_consumers() {
+    let wind = config::Wind::default();
+    for t in 0..1000 {
+        let v = wind_at(&wind, Vec3::new(3., 4., 5.), t as f64 / 60.);
+        assert!(v.is_finite());
+        assert!(v.length() <= wind.strength * (1. + wind.gust) + 1e-5);
+    }
+    let wrap = std::f64::consts::TAU / f64::from(wind.frequency);
+    assert!(
+        (wind_at(&wind, Vec3::ZERO, wrap - 0.00001) - wind_at(&wind, Vec3::ZERO, wrap + 0.00001))
+            .length()
+            < 0.0001
+    );
+    assert_eq!(
+        wind_at(&wind, Vec3::ZERO, 12.),
+        wind_at(&wind, Vec3::ZERO, 12.)
+    );
+}
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+mod gpu;
+
+#[test]
+fn contact_shadows_skip_hidden_dead_airborne_and_leave_fighters_and_collision_unchanged() {
+    use crate::{
+        app_state::{AppState, LoadedStageInfo},
+        components::fighter::{Concealment, Fighter, Health, MotionState},
+        plugins::stage_collider::{StageCollider, StageMeshCollider},
+    };
+    let mut collider = StageMeshCollider::default();
+    collider.append_world_triangles(
+        &[
+            [-10., 0., -10.],
+            [-10., 0., 10.],
+            [10., 0., 10.],
+            [10., 0., -10.],
+        ],
+        &[0, 1, 2, 0, 2, 3],
+    );
+    let before = format!("{collider:?}");
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+        .insert_state(AppState::Playing)
+        .insert_resource(starter())
+        .insert_resource(LoadedStageInfo {
+            stage_id: "sn06".into(),
+            ..default()
+        })
+        .insert_resource(StageCollider {
+            mesh: Some(collider),
+        })
+        .init_resource::<FrameUniforms>()
+        .add_systems(Update, runtime::update_frame);
+    let mut actors = vec![];
+    for i in 0..4 {
+        let position = Vec3::new(i as f32, if i == 3 { 4. } else { 0. }, 0.);
+        let actor = app
+            .world_mut()
+            .spawn((
+                Fighter {
+                    character_id: 0,
+                    player_slot: i,
+                    weapon: 6,
+                    weapon_slots: [6, 0],
+                    weapon_slot: 0,
+                    weapon_slot_variants: [0, 0],
+                    weapon_variant: 0,
+                },
+                GlobalTransform::from_translation(position),
+                Transform::from_translation(position),
+                MotionState {
+                    movement_mode: meteor_core::MovementMode::Idle,
+                    velocity: Vec3::new(1., 2., 3.),
+                    facing: 0.5,
+                },
+                Health {
+                    current: if i == 2 { 0. } else { 100. },
+                    max: 100.,
+                },
+                Concealment {
+                    remaining: if i == 1 { 1. } else { 0. },
+                },
+            ))
+            .id();
+        actors.push((actor, position));
+    }
+    app.update();
+    assert_eq!(
+        app.world().resource::<FrameUniforms>().graphics.counts.y,
+        1.
+    );
+    for (actor, position) in actors {
+        assert_eq!(
+            app.world().get::<Transform>(actor).unwrap().translation,
+            position
+        );
+        assert_eq!(
+            app.world().get::<MotionState>(actor).unwrap().velocity,
+            Vec3::new(1., 2., 3.)
+        );
+    }
+    assert_eq!(
+        format!(
+            "{:?}",
+            app.world()
+                .resource::<StageCollider>()
+                .mesh
+                .as_ref()
+                .unwrap()
+        ),
+        before
+    );
+}
+
+#[test]
+fn selected_wind_mesh_bends_only_display_and_freezes_when_paused() {
+    use crate::app_state::{AppState, LoadedStageInfo};
+    use bevy::mesh::VertexAttributeValues;
+    let manifest = json!({"schema_version":1,"id":"wind-test","scenes":[{"stage":"sn06","wind":{"strength":1,"gust":0},"surfaces":[{"object":"test-flag","wind":{"amplitude":0.25,"start_height":0,"end_height":1}}]}]});
+    let packs = load_with_reader(
+        br#"{"schema_version":1,"enabled":true,"packs":["pack.json"]}"#,
+        |_| Ok(manifest.to_string().into_bytes()),
+    )
+    .unwrap();
+    let mut mesh = Mesh::from(Cuboid::new(2., 2., 2.));
+    let mut images = Assets::<Image>::default();
+    let wind = SceneGraphics::new(Some(&packs), "sn06")
+        .configure(
+            "test-flag",
+            None,
+            &mut plain(),
+            &mut mesh,
+            false,
+            true,
+            &mut images,
+        )
+        .unwrap();
+    let baseline = wind.positions.clone();
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+        .insert_state(AppState::Playing)
+        .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            std::time::Duration::from_secs_f32(1. / 30.),
+        ))
+        .insert_resource(packs)
+        .insert_resource(LoadedStageInfo {
+            stage_id: "sn06".into(),
+            ..default()
+        })
+        .init_resource::<Assets<Mesh>>()
+        .add_systems(Update, surfaces::update_wind);
+    let handle = app.world_mut().resource_mut::<Assets<Mesh>>().add(mesh);
+    let entity = app
+        .world_mut()
+        .spawn((Mesh3d(handle.clone()), GlobalTransform::IDENTITY, wind))
+        .id();
+    for _ in 0..4 {
+        app.update();
+    }
+    let positions = |app: &App| -> Vec<[f32; 3]> {
+        let meshes = app.world().resource::<Assets<Mesh>>();
+        let Some(VertexAttributeValues::Float32x3(v)) = meshes
+            .get(&handle)
+            .unwrap()
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("positions")
+        };
+        v.clone()
+    };
+    let bent = positions(&app);
+    assert_ne!(bent, baseline);
+    for (p, b) in bent.iter().zip(&baseline).filter(|(_, b)| b[1] <= 0.) {
+        assert_eq!(p, b, "base remains anchored");
+    }
+    assert_eq!(
+        app.world()
+            .get::<surfaces::WindMesh>(entity)
+            .unwrap()
+            .positions,
+        baseline
+    );
+    assert_eq!(
+        *app.world().get::<GlobalTransform>(entity).unwrap(),
+        GlobalTransform::IDENTITY
+    );
+    app.world_mut()
+        .resource_mut::<NextState<AppState>>()
+        .set(AppState::Paused);
+    for _ in 0..4 {
+        app.update();
+    }
+    assert_eq!(positions(&app), bent);
+    let converted = GlobalTransform::from(
+        Transform::from_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2))
+            .with_scale(Vec3::splat(0.12)),
+    );
+    app.world_mut().entity_mut(entity).insert(converted);
+    app.world_mut()
+        .resource_mut::<NextState<AppState>>()
+        .set(AppState::Playing);
+    for _ in 0..4 {
+        app.update();
+    }
+    let changed = positions(&app);
+    let mut moved = 0;
+    for (p, b) in changed.iter().zip(&baseline) {
+        let old_world = converted.transform_point(Vec3::from_array(*b));
+        let new_world = converted.transform_point(Vec3::from_array(*p));
+        assert!(
+            (old_world.y - new_world.y).abs() < 1e-6,
+            "horizontal wind preserves world height"
+        );
+        if old_world.y <= 0. {
+            assert_eq!(p, b, "Z-up lower half stays anchored");
+        } else {
+            assert!(new_world.distance(old_world) > 0.001);
+            moved += 1;
+        }
+    }
+    assert!(moved > 0);
+}
+
+#[test]
+fn malformed_resources_fail_before_use_and_color_mips_preserve_energy() {
+    assert!(super::loader::decode_resource(b"not a png").is_err());
+    let index = br#"{"schema_version":1,"enabled":true,"packs":["p.json"]}"#;
+    let manifest = json!({"schema_version":1,"id":"bad","materials":{"x":{"normal":"missing"}}});
+    assert!(
+        load_with_reader(index, |_| Ok(manifest.to_string().into_bytes()))
+            .err()
+            .unwrap()
+            .contains("unknown resource")
+    );
+    super::surfaces::test_mips();
+}
+
+#[test]
+fn cloth_config_accepts_xpbd_and_rejects_unstable_values_and_legacy_springs() {
+    let index = br#"{"schema_version":1,"enabled":true,"packs":["p.json"]}"#;
+    for cloth in [
+        json!({"density":0}),
+        json!({"iterations":0}),
+        json!({"iterations":9}),
+        json!({"max_characters":0}),
+        json!({"max_characters":17}),
+        json!({"stretch_compliance":-0.1}),
+        json!({"bend_compliance":10001}),
+        json!({"thickness":0}),
+        json!({"motion_limit":9}),
+        json!({"damping":30}),
+        json!({"frequency_scale":1}),
+    ] {
+        let pack =
+            json!({"schema_version":1,"id":"cloth","scenes":[{"stage":"*","clothing":cloth}]});
+        assert!(load_with_reader(index, |_| Ok(pack.to_string().into_bytes())).is_err());
+    }
+    let config = starter().packs[0].config.scenes[0]
+        .clothing
+        .clone()
+        .unwrap();
+    assert_eq!(config.iterations, 4);
+    assert_eq!(config.density, 0.25);
+}

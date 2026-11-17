@@ -1,3 +1,4 @@
+pub(crate) mod graphics_pack;
 pub mod mrc_file_picker;
 pub(crate) mod server_route;
 pub(crate) mod studio_splash;

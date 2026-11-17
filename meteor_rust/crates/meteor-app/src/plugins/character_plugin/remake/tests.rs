@@ -1,129 +1,28 @@
+#![cfg(feature = "original-assets")]
 use super::*;
 use crate::components::fighter::*;
 use crate::plugins::combat_plugin::HitGeometryQueries;
 use crate::plugins::rebalance_plugin::{sync_afterimage, BalanceAfterimage, BalanceGlow};
 use bevy::ecs::system::RunSystemOnce;
 
-fn spring_node() -> DisplayNode {
-    DisplayNode {
-        source: Entity::PLACEHOLDER,
-        joint: Entity::PLACEHOLDER,
-        control: Control {
-            name: "ribbon_L_tip".into(),
-            anchor: 2,
-            pivot: [0.0; 3],
-            kind: "ribbon".into(),
-            side: -1.0,
-            limit: 0.18,
-        },
-        angle: Vec2::ZERO,
-        target: Vec2::ZERO,
-        angular_velocity: Vec2::ZERO,
-        pivot: None,
-        pivot_velocity: Vec3::ZERO,
-        gravity_axis: Vec3::NEG_Z,
-    }
-}
-
 #[test]
-fn remake_inertial_spring_coasts_rebounds_and_settles_independently_of_frame_rate() {
-    let mut results = Vec::new();
-    for fps in [30, 60, 144] {
-        let mut node = spring_node();
-        node.target = Vec2::new(0.065, 0.0);
-        for _ in 0..fps {
-            advance_spring(&mut node, 1.0 / fps as f32);
-        }
-        node.target = Vec2::ZERO;
-        advance_spring(&mut node, 1.0 / fps as f32);
-        assert!(node.angle.x > 0.04, "stopping must retain momentum");
-        let mut crossed_rest = false;
-        for _ in 1..fps * 3 {
-            advance_spring(&mut node, 1.0 / fps as f32);
-            crossed_rest |= node.angle.x < -0.001;
-            assert!(node.angle.length() <= node.control.limit + 1e-6);
-        }
-        assert!(crossed_rest, "the damped ribbon must rebound");
-        assert!(node.angle.length() < 1e-5 && node.angular_velocity.length() < 1e-4);
-        results.push((node.angle, node.angular_velocity));
-    }
-    for pair in results.windows(2) {
-        assert!(pair[0].0.distance(pair[1].0) < 1e-6);
-        assert!(pair[0].1.distance(pair[1].1) < 1e-6);
-    }
-}
-
-#[cfg(feature = "original-assets")]
-#[test]
-fn remake_spring_extreme_forcing_stays_bounded_and_disable_clears_momentum() {
-    let mut node = spring_node();
-    for i in 0..1000 {
-        node.target = Vec2::new(if i % 7 < 3 { 0.18 } else { -0.18 }, 0.0);
-        advance_spring(&mut node, if i % 3 == 0 { 0.12 } else { 1.0 / 144.0 });
-        assert!(node.angle.is_finite() && node.angular_velocity.is_finite());
-        assert!(node.angle.length() <= node.control.limit + 1e-6);
-    }
-    let (mut app, fighter, model) = fixture();
-    app.world_mut()
-        .get_mut::<MotionState>(fighter)
-        .unwrap()
-        .velocity = Vec3::new(4.0, 0.0, 6.0);
-    for _ in 0..10 {
-        app.update();
-    }
-    assert!(app
-        .world()
-        .get::<SecondaryMotion>(model)
-        .unwrap()
-        .nodes
-        .iter()
-        .any(|n| n.angular_velocity.length() > 1e-4));
-    app.world_mut()
-        .resource_mut::<crate::app_state::Settings>()
-        .character_motion = false;
-    app.update();
-    assert!(app
-        .world()
-        .get::<SecondaryMotion>(model)
-        .unwrap()
-        .nodes
-        .iter()
-        .all(|n| n.angle == Vec2::ZERO && n.angular_velocity == Vec2::ZERO && n.pivot.is_none()));
-}
-
-#[cfg(feature = "original-assets")]
-#[test]
-fn remake_hair_measures_head_motion_without_moving_the_waist_or_stock_bones() {
+fn remake_legacy_hair_joints_follow_animated_head_without_spring() {
     let (mut app, _, model) = fixture();
-    for _ in 0..4 {
-        app.world_mut().run_system_once(update).unwrap();
-    }
     let display = app.world().get::<DisplaySkin>(model).unwrap().0;
     let head = app.world().get::<SkinnedMesh>(display).unwrap().joints[13];
     let before = *app.world().get::<GlobalTransform>(head).unwrap();
-    let shifted = GlobalTransform::from(
-        Mat4::from_translation(Vec3::new(0.3, 0.0, 0.0)) * before.to_matrix(),
-    );
+    let shifted =
+        GlobalTransform::from(Mat4::from_translation(Vec3::new(0.3, 0., 0.)) * before.to_matrix());
     app.world_mut().entity_mut(head).insert(shifted);
-    for _ in 0..2 {
-        app.world_mut().run_system_once(update).unwrap();
-    }
+    app.world_mut().run_system_once(update).unwrap();
     let motion = app.world().get::<SecondaryMotion>(model).unwrap();
-    assert!(motion
-        .nodes
-        .iter()
-        .filter(|n| n.control.kind == "hair")
-        .all(|n| n.pivot_velocity.length() > 3.0));
-    assert!(motion
-        .nodes
-        .iter()
-        .filter(|n| n.control.kind == "ribbon")
-        .all(|n| n.pivot_velocity.length() < 1e-5));
-    assert_eq!(
-        *app.world().get::<GlobalTransform>(head).unwrap(),
-        shifted,
-        "secondary motion must never write back to its source"
-    );
+    for node in motion.nodes.iter().filter(|n| n.control.kind == "hair") {
+        assert_eq!(
+            *app.world().get::<GlobalTransform>(node.joint).unwrap(),
+            shifted
+        );
+    }
+    assert_eq!(*app.world().get::<GlobalTransform>(head).unwrap(), shifted);
 }
 
 fn prepared_for(skeleton: &Skeleton) -> VisualAssets {
@@ -144,9 +43,8 @@ fn character() -> CharacterAssets {
     assets
 }
 
-#[cfg(feature = "original-assets")]
 #[test]
-fn remake_rejects_changed_stock_bind_and_reuses_gpu_mesh_texture_and_inverse() {
+fn remake_rejects_changed_stock_bind_and_isolates_mesh_but_reuses_texture_and_inverse() {
     let character = character();
     let visual = character.visual.as_ref().unwrap();
     assert!(visual.skins[0].triangle_count <= 48_000);
@@ -173,8 +71,8 @@ fn remake_rejects_changed_stock_bind_and_reuses_gpu_mesh_texture_and_inverse() {
         }
     }
     let mut meshes = Assets::<Mesh>::default();
-    assert_eq!(visual.mesh(&mut meshes), visual.mesh(&mut meshes));
-    assert_eq!(meshes.len(), 1);
+    assert_ne!(visual.mesh(&mut meshes), visual.mesh(&mut meshes));
+    assert_eq!(meshes.len(), 3);
     let mut images = Assets::<bevy::image::Image>::default();
     let mut materials = Assets::<GmdlMaterial>::default();
     let mut quality = crate::plugins::pak_textures::QualityTextureHandles::default();
@@ -309,7 +207,6 @@ fn boxes(
         .collect()
 }
 
-#[cfg(feature = "original-assets")]
 #[test]
 fn remake_motion_keeps_authored_bones_hands_weapon_dummies_boxes_and_pose_identical() {
     let (mut app, fighter, model) = fixture();
@@ -349,14 +246,18 @@ fn remake_motion_keeps_authored_bones_hands_weapon_dummies_boxes_and_pose_identi
     }
     let motion = app.world().get::<SecondaryMotion>(model).unwrap();
     assert_eq!(motion.nodes.len(), 8);
-    assert!(motion.nodes.iter().any(|n| n.angle.length() > 0.001));
+    assert!(motion
+        .cloth
+        .positions
+        .iter()
+        .zip(&motion.cloth.anchors)
+        .any(|(a, b)| a.distance(*b) > 0.001));
     for n in &motion.nodes {
         assert!(app.world().get::<Transform>(n.joint).is_none());
         assert!(app.world().get::<FighterBone>(n.joint).is_none());
         assert!(app.world().get::<FighterDummy>(n.joint).is_none());
-        assert!(n.angle.length() <= n.control.limit + 1e-6);
     }
-    let angles: Vec<_> = motion.nodes.iter().map(|n| n.angle).collect();
+    let positions = motion.cloth.positions.clone();
     app.world_mut()
         .insert_resource(crate::plugins::FrameClock::default());
     app.update();
@@ -364,11 +265,9 @@ fn remake_motion_keeps_authored_bones_hands_weapon_dummies_boxes_and_pose_identi
         app.world()
             .get::<SecondaryMotion>(model)
             .unwrap()
-            .nodes
-            .iter()
-            .map(|n| n.angle)
-            .collect::<Vec<_>>(),
-        angles,
+            .cloth
+            .positions,
+        positions,
         "hit stop / skipped simulation frames freeze cosmetic motion"
     );
     app.world_mut()
@@ -380,11 +279,9 @@ fn remake_motion_keeps_authored_bones_hands_weapon_dummies_boxes_and_pose_identi
         app.world()
             .get::<SecondaryMotion>(model)
             .unwrap()
-            .nodes
-            .iter()
-            .map(|n| n.angle)
-            .collect::<Vec<_>>(),
-        angles
+            .cloth
+            .positions,
+        positions
     );
     app.world_mut()
         .insert_resource(State::new(crate::app_state::AppState::Playing));
@@ -396,9 +293,10 @@ fn remake_motion_keeps_authored_bones_hands_weapon_dummies_boxes_and_pose_identi
         .world()
         .get::<SecondaryMotion>(model)
         .unwrap()
-        .nodes
+        .cloth
+        .velocities
         .iter()
-        .all(|n| n.angle == Vec2::ZERO));
+        .all(|v| *v == Vec3::ZERO));
     app.world_mut()
         .resource_mut::<crate::app_state::Settings>()
         .character_motion = true;
@@ -412,12 +310,12 @@ fn remake_motion_keeps_authored_bones_hands_weapon_dummies_boxes_and_pose_identi
         .world()
         .get::<SecondaryMotion>(model)
         .unwrap()
-        .nodes
+        .cloth
+        .velocities
         .iter()
-        .all(|n| n.angle == Vec2::ZERO));
+        .all(|v| *v == Vec3::ZERO));
 }
 
-#[cfg(feature = "original-assets")]
 #[test]
 fn remake_rebalance_afterimage_copies_all_38_live_joints_and_releases() {
     let (mut app, fighter, model) = fixture();
@@ -440,7 +338,6 @@ fn remake_rebalance_afterimage_copies_all_38_live_joints_and_releases() {
     assert!(app.world().get::<BalanceAfterimage>(model).is_none());
 }
 
-#[cfg(feature = "original-assets")]
 #[test]
 fn remake_toggle_replaces_only_body_draws_and_updates_ghosts_and_joint_counts() {
     let (mut app, fighter, model) = fixture();
@@ -548,7 +445,6 @@ fn remake_toggle_replaces_only_body_draws_and_updates_ghosts_and_joint_counts() 
     }
 }
 
-#[cfg(feature = "original-assets")]
 #[test]
 fn remake_toggle_preserves_concealment_while_settings_pause_the_session() {
     let (mut app, fighter, model) = fixture();
@@ -587,7 +483,6 @@ fn remake_toggle_preserves_concealment_while_settings_pause_the_session() {
     assert!(found > 1, "stock P0 has multiple material groups");
 }
 
-#[cfg(feature = "original-assets")]
 #[test]
 fn remake_can_start_stock_then_enable_and_reuse_the_original_draws() {
     let (mut app, _, model) = fixture_with_models(false);
@@ -632,7 +527,6 @@ fn remake_can_start_stock_then_enable_and_reuse_the_original_draws() {
     assert_eq!(restored, expected);
 }
 
-#[cfg(feature = "original-assets")]
 #[test]
 fn remake_hit_sway_keeps_cosmetic_suffix_and_authored_hand_matrices() {
     use meteor_combat::hit_reaction::{FacingBucket, HitReact, HitReactKind};
@@ -720,7 +614,6 @@ fn remake_hit_sway_keeps_cosmetic_suffix_and_authored_hand_matrices() {
         .all(|e| app.world().get::<FighterBone>(*e).is_some()));
 }
 
-#[cfg(feature = "original-assets")]
 #[test]
 fn remake_secondary_update_is_isolated_across_real_stock_poses() {
     let (mut app, fighter, _) = fixture();
@@ -741,5 +634,247 @@ fn remake_secondary_update_is_isolated_across_real_stock_poses() {
             assert_eq!(*app.world().get::<Transform>(e).unwrap(), a);
             assert_eq!(*app.world().get::<GlobalTransform>(e).unwrap(), b);
         }
+    }
+}
+
+#[test]
+fn graphics_pack_wind_and_clothing_change_display_without_changing_hit_boxes() {
+    let (mut plain, _, plain_model) = fixture();
+    let (mut enhanced, fighter, enhanced_model) = fixture();
+    let packs = crate::plugins::graphics_pack::load_with_reader(
+        br#"{"schema_version":1,"enabled":true,"packs":["pack.json"]}"#,
+        |_| Ok(br#"{"schema_version":1,"id":"cloth-test","scenes":[{"stage":"*","wind":{"strength":2,"gust":0},"clothing":{"wind_drag":2,"bend_compliance":1000,"damping":3}}]}"#.to_vec()),
+    ).unwrap();
+    enhanced.insert_resource(packs);
+    let before_boxes = enhanced.world_mut().run_system_once(boxes).unwrap();
+    let pose = format!(
+        "{:?}",
+        enhanced.world().get::<PoseRuntime>(fighter).unwrap()
+    );
+    for _ in 0..20 {
+        plain.update();
+        enhanced.update();
+        assert_eq!(
+            enhanced.world_mut().run_system_once(boxes).unwrap(),
+            before_boxes
+        );
+        assert_eq!(
+            format!(
+                "{:?}",
+                enhanced.world().get::<PoseRuntime>(fighter).unwrap()
+            ),
+            pose
+        );
+    }
+    let baseline = plain.world().get::<SecondaryMotion>(plain_model).unwrap();
+    let modified = enhanced
+        .world()
+        .get::<SecondaryMotion>(enhanced_model)
+        .unwrap();
+    assert!(baseline
+        .cloth
+        .positions
+        .iter()
+        .zip(&modified.cloth.positions)
+        .any(|(a, b)| a.distance(*b) > 0.001));
+    assert!(modified.cloth.positions.iter().all(|p| p.is_finite()));
+    enhanced
+        .world_mut()
+        .resource_mut::<crate::plugins::graphics_pack::GraphicsPacks>()
+        .packs[0]
+        .config
+        .scenes[0]
+        .clothing
+        .as_mut()
+        .unwrap()
+        .enabled = false;
+    enhanced.update();
+    assert!(enhanced
+        .world()
+        .get::<SecondaryMotion>(enhanced_model)
+        .unwrap()
+        .cloth
+        .velocities
+        .iter()
+        .all(|v| *v == Vec3::ZERO));
+}
+
+#[test]
+fn cloth_real_p0_deforms_vertices_welds_seams_and_restores_exact_bind_positions() {
+    let (mut app, _, model) = fixture();
+    let display = app.world().get::<DisplaySkin>(model).unwrap().0;
+    let handle = app.world().get::<Mesh3d>(display).unwrap().0.clone();
+    let read = |app: &App| {
+        let mesh = app.world().resource::<Assets<Mesh>>().get(&handle).unwrap();
+        let VertexAttributeValues::Float32x3(values) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap()
+        else {
+            panic!()
+        };
+        values.clone()
+    };
+    let read_normals = |app: &App| {
+        app.world()
+            .resource::<Assets<Mesh>>()
+            .get(&handle)
+            .unwrap()
+            .attribute(Mesh::ATTRIBUTE_NORMAL)
+            .unwrap()
+            .as_float3()
+            .unwrap()
+            .to_vec()
+    };
+    let original_normals = read_normals(&app);
+    let original = read(&app);
+    for _ in 0..20 {
+        app.update();
+    }
+    let deformed = read(&app);
+    assert!(
+        original
+            .iter()
+            .zip(&deformed)
+            .filter(|(a, b)| Vec3::from_array(**a).distance(Vec3::from_array(**b)) > 0.001)
+            .count()
+            > 100
+    );
+    let mut seams = std::collections::HashMap::new();
+    for (a, b) in original.iter().zip(&deformed) {
+        let key = a.map(f32::to_bits);
+        if let Some(previous) = seams.insert(key, *b) {
+            assert_eq!(previous, *b, "cloth must not open UV seams");
+        }
+    }
+    let data = &app.world().resource::<CharacterAssetsSet>().0["p0"]
+        .visual
+        .as_ref()
+        .unwrap()
+        .cloth;
+    assert!(data.points.len() > 100 && data.points.len() <= 1536);
+    assert!(data.bends.len() > 100);
+    let motion = app.world().get::<SecondaryMotion>(model).unwrap();
+    for i in 0..data.points.len() {
+        if data.freedom[i] == 0. {
+            assert_eq!(motion.cloth.positions[i], motion.cloth.anchors[i]);
+        }
+    }
+    app.world_mut()
+        .resource_mut::<crate::app_state::Settings>()
+        .character_motion = false;
+    app.update();
+    assert_eq!(read(&app), original);
+    assert_eq!(read_normals(&app), original_normals);
+}
+
+#[test]
+fn cloth_second_actor_has_own_mesh_and_ghost_uses_its_deformed_mesh() {
+    let (mut app, fighter, model) = fixture();
+    let skin = app.world().get::<DisplaySkin>(model).unwrap().0;
+    let handle = app.world().get::<Mesh3d>(skin).unwrap().0.clone();
+    let second = app
+        .world_mut()
+        .spawn((
+            Fighter {
+                player_slot: 1,
+                ..app_fighter()
+            },
+            Transform::from_xyz(12., 2., -3.),
+            MotionState {
+                movement_mode: meteor_core::MovementMode::Idle,
+                velocity: Vec3::ZERO,
+                facing: 0.0,
+            },
+            PoseRuntime::idle(),
+            Health::default(),
+        ))
+        .id();
+    spawn_fighter_model_for_test(app.world_mut(), second);
+    app.update();
+    let other = app
+        .world_mut()
+        .query::<(&FighterModel, &DisplaySkin)>()
+        .iter(app.world())
+        .find(|(m, _)| m.fighter == second)
+        .unwrap()
+        .1
+         .0;
+    let other_handle = app.world().get::<Mesh3d>(other).unwrap().0.clone();
+    assert_ne!(handle, other_handle);
+    let positions = |app: &App, h: &Handle<Mesh>| {
+        app.world()
+            .resource::<Assets<Mesh>>()
+            .get(h)
+            .unwrap()
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .unwrap()
+            .as_float3()
+            .unwrap()
+            .to_vec()
+    };
+    let untouched = positions(&app, &other_handle);
+    {
+        let mut meshes = app.world_mut().resource_mut::<Assets<Mesh>>();
+        let mut mesh = meshes.get_mut(&handle).unwrap();
+        let Some(VertexAttributeValues::Float32x3(p)) =
+            mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!()
+        };
+        p[0][0] += 1.;
+    }
+    assert_eq!(positions(&app, &other_handle), untouched);
+    app.world_mut()
+        .entity_mut(fighter)
+        .insert(BalanceGlow::armor(93));
+    app.update();
+    let ghost = app.world().get::<BalanceAfterimage>(model).unwrap();
+    assert!(ghost
+        .ghost_meshes
+        .iter()
+        .any(|e| app.world().get::<Mesh3d>(*e).unwrap().0 == handle));
+    let packs=crate::plugins::graphics_pack::load_with_reader(
+        br#"{"schema_version":1,"enabled":true,"packs":["p.json"]}"#,
+        |_|Ok(br#"{"schema_version":1,"id":"budget","scenes":[{"stage":"*","clothing":{"max_characters":1}}]}"#.to_vec())).unwrap();
+    app.insert_resource(packs);
+    app.update();
+    let count = app
+        .world_mut()
+        .query::<&SecondaryMotion>()
+        .iter(app.world())
+        .filter(|m| m.deformed)
+        .count();
+    assert_eq!(
+        count, 1,
+        "display cloth has a bounded per-frame actor budget"
+    );
+}
+fn app_fighter() -> Fighter {
+    Fighter {
+        character_id: 0,
+        player_slot: 0,
+        weapon: 5,
+        weapon_slots: [5, 0],
+        weapon_slot: 0,
+        weapon_slot_variants: [0, 0],
+        weapon_variant: 0,
+    }
+}
+
+#[test]
+fn cloth_proxy_supports_both_display_lods_and_has_anchored_free_surface() {
+    let character = character();
+    let visual = character.visual.as_ref().unwrap();
+    for (lod, skin) in visual.skins.iter().enumerate() {
+        let proxy = cloth::topology::Topology::prepare(&visual.skins[1], skin).unwrap();
+        assert!(proxy.freedom.iter().filter(|x| **x > 0.).count() > 100);
+        assert!(proxy.freedom.contains(&0.));
+        assert!(!proxy.edges.is_empty() && !proxy.bends.is_empty());
+        println!(
+            "LOD {lod}: particles={}, triangles={}, hinges={}, mapped vertices={}",
+            proxy.points.len(),
+            proxy.triangles.len(),
+            proxy.bends.len(),
+            proxy.bindings.len()
+        );
     }
 }

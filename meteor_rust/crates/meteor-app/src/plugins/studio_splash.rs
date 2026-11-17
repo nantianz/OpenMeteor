@@ -306,6 +306,7 @@ fn animate(
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))] water: Option<
         Res<super::stage_material::water::startup::WaterStartup>,
     >,
+    graphics: Option<Res<super::graphics_pack::GraphicsPacks>>,
     mut next: ResMut<NextState<AppState>>,
     mut logos: Query<
         (&MaterialNode<LogoMaterial>, &mut UiTransform),
@@ -317,6 +318,9 @@ fn animate(
     mut roots: Query<(Entity, &mut BackgroundColor), With<SplashRoot>>,
     mut texts: Query<&mut TextColor, With<SplashNotice>>,
 ) {
+    if graphics.is_some_and(|p| p.error.is_some()) {
+        return;
+    }
     let Some(mut clock) = clock else {
         return;
     };

@@ -103,6 +103,7 @@ impl Plugin for MeteorPlugin {
             });
         #[cfg(target_os = "android")]
         android_assets::install(app);
+        plugins::graphics_pack::install(app);
         plugins::install_frame_clock(app);
         plugins::configure_fighter_frame_sets(app);
         plugins::fighter_frame::install(app);
@@ -162,6 +163,7 @@ pub fn build_app() -> App {
     let graphics_settings =
         neural_rendering::install(&mut app, graphics_settings, settings.dlss5_neural_rendering);
     app.insert_resource(settings).insert_resource(keymap);
+    app.insert_resource(plugins::graphics_pack::GraphicsPacks::load());
     app.insert_resource(plugins::battle_result::timing::BestTimes::load());
     let default_plugins = DefaultPlugins
         .set(bevy::asset::AssetPlugin {

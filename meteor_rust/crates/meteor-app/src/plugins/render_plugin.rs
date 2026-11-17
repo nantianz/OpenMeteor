@@ -2460,6 +2460,7 @@ fn setup_stage_scene(
     mut collision: ResMut<StageCollision>,
     mut stage_collider: ResMut<StageCollider>,
     mut hazards: ResMut<super::hazard_plugin::StageHazardRuntime>,
+    graphics: Option<Res<super::graphics_pack::GraphicsPacks>>,
 ) {
     hazards.0 = Default::default();
     let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
@@ -2574,6 +2575,8 @@ fn setup_stage_scene(
     let mut normal_cache = HashMap::new();
     let hd_pack = SceneTexturePack::load(&loaded.stage_id, settings.hd_scene);
     let mut water_cache = super::stage_material::water::WaterCache::default();
+    let mut graphics =
+        super::graphics_pack::SceneGraphics::new(graphics.as_deref(), &loaded.stage_id);
     let mut normal_batches = 0usize;
     let mut world_min = Vec3::splat(f32::MAX);
     let mut world_max = Vec3::splat(f32::MIN);
@@ -2804,6 +2807,35 @@ fn setup_stage_scene(
             } else {
                 None
             };
+            let wind = graphics.configure(
+                &object.name,
+                gmdl.resolve_texture_name(mat),
+                &mut materials.get_mut(&material_handle).unwrap(),
+                &mut mesh,
+                curated_surface && liquid_surface.is_none(),
+                deform.is_none()
+                    && ifl_frames.is_none()
+                    && wave_mesh.is_none()
+                    && !scrolling
+                    && scene_obj.is_none_or(|o| o.billboard != 1),
+                &mut images,
+            );
+            let wind_bounds = wind.as_ref().map(|w| {
+                use bevy::camera::primitives::Aabb;
+                let pad = Vec3::splat(w.profile.amplitude * 8.0)
+                    / transform.scale.abs().max(Vec3::splat(0.0001));
+                let min = w
+                    .positions
+                    .iter()
+                    .map(|p| Vec3::from_array(*p))
+                    .fold(Vec3::splat(f32::INFINITY), Vec3::min);
+                let max = w
+                    .positions
+                    .iter()
+                    .map(|p| Vec3::from_array(*p))
+                    .fold(Vec3::splat(f32::NEG_INFINITY), Vec3::max);
+                Aabb::from_min_max(min - pad, max + pad)
+            });
             let entity = commands
                 .spawn((
                     PlayingSceneEntity,
@@ -2812,6 +2844,9 @@ fn setup_stage_scene(
                     transform,
                 ))
                 .id();
+            if let Some(wind) = wind {
+                commands.entity(entity).insert((wind, wind_bounds.unwrap()));
+            }
             if let Some(surface) = liquid_surface {
                 commands.entity(entity).insert(surface);
             }

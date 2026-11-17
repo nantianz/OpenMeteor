@@ -1,7 +1,7 @@
 import argparse
 import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import struct
 import zipfile
@@ -27,6 +27,7 @@ For shortcuts, set the working directory to the original game directory.
 The Chinese font is included as fonts/ui.ttf, with its license in licenses/.
 The startup logo, menu title and background, campaign map, and halo are embedded
 in OpenMeteor.exe. No separate UI image download is needed.
+See GRAPHICS-README.md to enable the included optional graphics pack.
 The package does not enable optional DLSS or ANGLE backends.
 
 将 ZIP 完整解压到原版游戏目录，保留 config/ 和 fonts/ 的目录结构，
@@ -36,6 +37,7 @@ The package does not enable optional DLSS or ANGLE backends.
 包内已附带 fonts/ui.ttf 中文字体及 licenses/ 中的字体许可。
 启动 Logo、主界面标题与背景、战役地图和光晕已内置于 OpenMeteor.exe，
 不需要另行下载界面图片。
+随包附带图形增强配置和示例，请查阅 GRAPHICS-README.md。
 """
 
 
@@ -52,6 +54,29 @@ def verify_embedded_ui(binary):
             raise ValueError(f"invalid or placeholder UI image: {name}")
         if image not in data:
             raise ValueError(f"UI image is not embedded in the executable: {name}")
+
+
+def graphics_files():
+    config = (ROOT / "meteor_rust/config").resolve()
+    files = {"GRAPHICS-README.md": ROOT / "docs/guides/graphics-enhancement-packs.md"}
+
+    def add(name, parent=PurePosixPath()):
+        if (not isinstance(name, str) or any(c in name for c in "\\:\0")
+                or any(part in ("", ".", "..") for part in name.split("/"))):
+            raise ValueError(f"invalid graphics resource path: {name}")
+        relative = parent / name
+        path = config / relative
+        if not path.resolve(strict=True).is_relative_to(config):
+            raise ValueError(f"graphics resource escapes config directory: {relative}")
+        files["config/" + relative.as_posix()] = path
+        return path
+
+    index = json.loads(add("graphics-enhancement.json").read_text(encoding="utf-8"))
+    for name in index["packs"]:
+        manifest = json.loads(add(name).read_text(encoding="utf-8"))
+        for resource in manifest.get("resources", {}).values():
+            add(resource, PurePosixPath(name).parent)
+    return files
 
 
 def package(binary, architecture, version, commit, font, output):
@@ -82,6 +107,7 @@ def package(binary, architecture, version, commit, font, output):
         path = ROOT / "meteor_rust/config" / name
         json.loads(path.read_text(encoding="utf-8"))
         files["config/" + name] = path
+    files.update(graphics_files())
     for path in sorted((ROOT / "licenses").rglob("*")):
         if path.is_file():
             files[path.relative_to(ROOT).as_posix()] = path

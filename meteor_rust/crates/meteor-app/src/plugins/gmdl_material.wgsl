@@ -56,6 +56,7 @@ struct GmdlGpuParams {
     water_bounds: vec4<f32>,
     first_person_clip: vec4<f32>,
     water_dynamics_bounds: vec4<f32>,
+    pbr: vec4<f32>, pbr_tint: vec4<f32>, pbr_textures: vec4<f32>,
 };
 
 struct CameraOcclusionParams {
@@ -358,7 +359,7 @@ fn scene_detail_normal(in: VertexOutput, uv: vec2<f32>) -> vec3<f32> {
 #ifdef VERTEX_TANGENTS
 
     let sample = textureSample(normal_texture, normal_sampler, uv).xyz * 2.0 - 1.0;
-    if (material.detail.x > 0.0 && simulation_time.z > 0.0) {
+    if (material.detail.x > 0.0 && (simulation_time.z > 0.0 || material.pbr.x > 0.5)) {
         let tangent = in.world_tangent.xyz - normal * dot(normal, in.world_tangent.xyz);
         if (dot(tangent, tangent) > 0.000001) {
             let t = normalize(tangent);
@@ -407,6 +408,101 @@ fn scene_lighting(in: VertexOutput, detail_normal: vec3<f32>) -> f32 {
 #endif
 }
 
+struct GraphicsFrame {
+    sky: vec4<f32>, ground: vec4<f32>, sun: vec4<f32>, sun_color: vec4<f32>,
+    environment: vec4<f32>,
+    fog_bounds: array<vec4<f32>,8>, fog_colors: array<vec4<f32>,8>,
+    contacts: array<vec4<f32>,16>, contact_normals: array<vec4<f32>,16>,
+    counts: vec4<f32>,
+};
+@group(#{MATERIAL_BIND_GROUP}) @binding(17) var<uniform> graphics: GraphicsFrame;
+
+fn pack_srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    return select(c / 12.92, pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4)), c > vec3<f32>(0.04045));
+}
+fn pack_linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
+    let x = max(c, vec3<f32>(0.0));
+    return select(x * 12.92, 1.055 * pow(x, vec3<f32>(1.0 / 2.4)) - 0.055, x > vec3<f32>(0.0031308));
+}
+fn pack_env_uv(n: vec3<f32>) -> vec2<f32> {
+
+    return vec2<f32>(fract(atan2(n.z, n.x) / 6.2831853 + 0.5 + graphics.environment.y / 6.2831853), asin(clamp(n.y,-1.0,1.0)) / 3.14159265 + 0.5);
+}
+fn pack_pbr(in: VertexOutput, n: vec3<f32>, texel: vec3<f32>, vertex: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
+    var base = texel;
+    if (material.pbr_textures.y < 0.5) { base = pack_srgb_to_linear(base); }
+    base *= material.pbr_tint.rgb * mix(vec3<f32>(1.0), pack_srgb_to_linear(vertex), material.pbr.w);
+    var orm = vec3<f32>(1.0);
+    if (material.pbr_textures.x > 0.5) { orm = textureSample(water_normal, water_normal_sampler, uv).rgb; }
+    let rough = clamp(material.pbr.z * orm.g, 0.045, 1.0);
+    let metal = clamp(material.pbr.y * orm.b, 0.0, 1.0);
+    let v = normalize(view.world_position - in.world_position.xyz + vec3<f32>(0.00001));
+    let l = normalize(graphics.sun.xyz + vec3<f32>(0.00001));
+    let h = normalize(v + l + vec3<f32>(0.00001));
+    let nv = max(dot(n,v),0.001);
+    let nl = max(dot(n,l),0.0);
+    let nh = max(dot(n,h),0.0);
+    let vh = max(dot(v,h),0.0);
+    let f0 = mix(vec3<f32>(0.04),base,metal);
+    let f = f0 + (vec3<f32>(1.0)-f0) * pow(1.0-vh,5.0);
+    let a2 = pow(rough,4.0);
+    let d = a2 / max(3.14159265 * pow(nh*nh*(a2-1.0)+1.0,2.0),0.000001);
+    let k = pow(rough+1.0,2.0)/8.0;
+    let g = nv/(nv*(1.0-k)+k) * nl/(nl*(1.0-k)+k);
+    var shadow = 1.0;
+#ifdef VERTEX_OUTPUT_INSTANCE_INDEX
+    if (lights.n_directional_lights > 0u && lighting.w > 0.0) {
+        shadow = mix(1.0, fetch_directional_shadow(0u,in.world_position,n,(view.view_from_world*in.world_position).z,in.position.xy), lighting.w);
+    }
+#endif
+    let direct = ((vec3<f32>(1.0)-f)*(1.0-metal)*base/3.14159265 + f*d*g/max(4.0*nv*nl,0.001))
+        * graphics.sun_color.rgb * graphics.sun.w * nl * shadow;
+    var irradiance = mix(graphics.ground.rgb,graphics.sky.rgb,n.y*0.5+0.5);
+    if (material.pbr_tint.w > 0.5) { irradiance = textureSampleLevel(water_depth,water_depth_sampler,pack_env_uv(n),0.0).rgb; }
+    let r = reflect(-v,n);
+    var radiance = mix(graphics.ground.rgb,graphics.sky.rgb,r.y*0.5+0.5);
+    if (material.pbr_textures.z > 0.5) { radiance = textureSampleLevel(water_reflection,water_reflection_sampler,pack_env_uv(r),rough*graphics.environment.w).rgb; }
+
+    let coeff = rough*vec4<f32>(-1.0,-0.0275,-0.572,0.022) + vec4<f32>(1.0,0.0425,1.04,-0.04);
+    let a004 = min(coeff.x*coeff.x,exp2(-9.28*nv))*coeff.x+coeff.y;
+    let ab = vec2<f32>(-1.04,1.04)*a004+coeff.zw;
+    let ambient = ((1.0-metal)*base*irradiance + radiance*(f0*ab.x+vec3<f32>(ab.y))) * graphics.environment.x * orm.r;
+    let x = max((direct+ambient)*graphics.environment.z,vec3<f32>(0.0));
+    let mapped = clamp((x*(2.51*x+0.03))/(x*(2.43*x+0.59)+0.14),vec3<f32>(0.0),vec3<f32>(1.0));
+    return pack_linear_to_srgb(mapped);
+}
+fn pack_contacts(position: vec3<f32>, normal: vec3<f32>) -> f32 {
+    if (graphics.counts.y <= 0.0) { return 1.0; }
+    var shade = 1.0;
+    for (var i=0u; i<min(u32(graphics.counts.y),16u); i+=1u) {
+        let c=graphics.contacts[i]; let n=graphics.contact_normals[i];
+        let delta=position-c.xyz; let height=abs(dot(delta,n.xyz));
+        let radial=length(delta-n.xyz*dot(delta,n.xyz))/max(c.w,0.01);
+        let amount=(1.0-smoothstep(0.0,1.0,radial))*(1.0-smoothstep(0.04,0.18,height))
+            *smoothstep(0.5,0.9,dot(normal,n.xyz))*n.w;
+        shade *= 1.0-amount;
+    }
+    return max(shade,0.2);
+}
+fn pack_fog(position: vec3<f32>, color: vec3<f32>) -> vec3<f32> {
+    if (graphics.counts.x <= 0.0) { return color; }
+    let ray=position-view.world_position; let distance_to_surface=length(ray);
+    let direction=ray/max(distance_to_surface,0.0001);
+    var optical_depth=0.0; var tint=vec3<f32>(0.0);
+    for (var i=0u;i<min(u32(graphics.counts.x),8u);i+=1u) {
+        let sphere=graphics.fog_bounds[i]; let fog=graphics.fog_colors[i];
+        let offset=view.world_position-sphere.xyz;
+        let b=dot(offset,direction);let d=b*b-dot(offset,offset)+sphere.w*sphere.w;
+        if (d>0.0) {
+            let entry=max(-b-sqrt(d),0.0);let exit=min(-b+sqrt(d),distance_to_surface);
+            let depth=max(exit-entry,0.0)*fog.w;
+            optical_depth+=depth;tint+=fog.rgb*depth;
+        }
+    }
+    let transmittance=exp(-min(optical_depth,16.0));
+    return color*transmittance+tint/max(optical_depth,0.0001)*(1.0-transmittance);
+}
+
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let params = material.base;
@@ -450,9 +546,14 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
             color = shade_water(in, shading_normal, color, shade);
         } else if (material.water.x == 4.0) {
             color = shade_spray(in, shading_normal, color, shade);
+        } else if (material.pbr.x > 0.5) {
+            color = vec4<f32>(pack_pbr(in, shading_normal, texel.rgb, diffuse.rgb, in.uv + uv_offset), color.a);
         } else {
             color = vec4<f32>(color.rgb * shade, color.a);
         }
+    }
+    if (material.pbr_textures.w > 0.5 && params.mode == 0u) {
+        color = vec4<f32>(color.rgb * pack_contacts(in.world_position.xyz, normalize(in.world_normal)), color.a);
     }
 
     if (material.first_person_clip.w > 0.0 && occlusion.self_eye.w > 0.0
@@ -502,6 +603,9 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         let sheen = emission * (vec3<f32>(0.16) + texel.rgb * 0.20) * (0.30 + 1.20 * flow);
         let shell = emission * (0.18 + 3.4 * rim * rim * (0.45 + 1.6 * rays) + 1.1 * rim * flow);
         color = vec4<f32>(color.rgb + sheen + shell, color.a);
+    }
+    if (params.mode == 0u || params.mode == 1u) {
+        color = vec4<f32>(pack_fog(in.world_position.xyz, color.rgb), color.a);
     }
     return color;
 }
