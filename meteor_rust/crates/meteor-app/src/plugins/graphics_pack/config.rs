@@ -22,6 +22,8 @@ pub struct Pack {
     pub scenes: Vec<Scene>,
     #[serde(default)]
     pub meshlet_models: BTreeMap<String, MeshletModel>,
+    #[serde(default)]
+    pub cloth_meshes: BTreeMap<String, String>,
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -528,6 +530,8 @@ pub struct Clothing {
     pub motion_limit: f32,
     pub iterations: u32,
     pub self_collision: bool,
+    pub surface_collision: bool,
+    pub surface_recovery: f32,
     pub max_characters: usize,
     pub max_distance: f32,
 }
@@ -546,6 +550,8 @@ impl Default for Clothing {
             motion_limit: 0.4,
             iterations: 4,
             self_collision: false,
+            surface_collision: false,
+            surface_recovery: 0.,
             max_characters: if cfg!(any(target_arch = "wasm32", target_os = "android")) {
                 2
             } else {
@@ -577,6 +583,7 @@ impl Clothing {
         )?;
         range("clothing thickness", self.thickness, 0.001, 0.03)?;
         range("clothing motion_limit", self.motion_limit, 0.02, 0.8)?;
+        range("clothing surface_recovery", self.surface_recovery, 0., 0.5)?;
         if !(1..=8).contains(&self.iterations) {
             return Err("clothing iterations must be 1–8".into());
         }
@@ -591,14 +598,22 @@ impl Clothing {
 #[serde(default, deny_unknown_fields)]
 pub struct CharacterCloth {
     pub character: String,
+    pub slot: String,
     pub material: String,
+    pub opacity: f32,
     pub enabled: bool,
     pub bones: [String; 4],
+    pub anchor: Option<ClothPoint>,
+    pub rotation_degrees: [f32; 3],
+    pub colliders: Option<Vec<ClothCollider>>,
+    pub mesh: Option<ClothMesh>,
+    pub rigid_mesh: Option<ClothRigidMesh>,
     pub grid: [usize; 2],
     pub width: f32,
     pub length: f32,
     pub back_offset: f32,
     pub collision_margin: f32,
+    pub keep_visible_on_contact: bool,
     pub physics: Option<Clothing>,
 }
 
@@ -606,18 +621,98 @@ impl Default for CharacterCloth {
     fn default() -> Self {
         Self {
             character: String::new(),
+            slot: String::new(),
             material: String::new(),
+            opacity: 1.0,
             enabled: true,
             bones: ["bau_Neck", "bad_Pelvis", "bau_L_UpperArm", "bau_R_UpperArm"]
                 .map(str::to_owned),
+            anchor: None,
+            rotation_degrees: [0.0; 3],
+            colliders: None,
+            mesh: None,
+            rigid_mesh: None,
             grid: [7, 9],
             width: 0.95,
             length: 1.2,
             back_offset: 0.33,
             collision_margin: 0.016,
+            keep_visible_on_contact: false,
             physics: None,
         }
     }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClothRigidMesh {
+    pub id: String,
+    pub material: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClothMesh {
+    pub id: String,
+    #[serde(default)]
+    pub render_id: Option<String>,
+    #[serde(default)]
+    pub pin_vertices: Vec<usize>,
+    #[serde(default)]
+    pub pin_groups: Vec<ClothPinGroup>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClothPinGroup {
+    pub anchor: ClothPoint,
+    pub vertices: Vec<usize>,
+    pub rest_origin: [f32; 3],
+    #[serde(default)]
+    pub rest_rotation_degrees: [f32; 3],
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ClothNode {
+    Model {},
+    Actor {},
+    Bone { name: String },
+    Dummy { name: String },
+    Named { name: String },
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClothPoint {
+    pub node: ClothNode,
+    #[serde(default)]
+    pub offset: [f32; 3],
+}
+
+impl ClothPoint {
+    fn validate(&self) -> Result<(), String> {
+        match &self.node {
+            ClothNode::Bone { name } | ClothNode::Dummy { name } | ClothNode::Named { name }
+                if name.trim().is_empty() || name.len() > 80 =>
+            {
+                return Err("invalid cloth attachment node name".into());
+            }
+            _ => {}
+        }
+        for offset in self.offset {
+            range("cloth attachment offset", offset, -5.0, 5.0)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClothCollider {
+    pub a: ClothPoint,
+    pub b: ClothPoint,
+    pub radius: f32,
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -709,6 +804,14 @@ fn validate_sun_direction(direction: [f32; 3]) -> Result<(), String> {
 }
 impl Pack {
     pub fn validate(&self) -> Result<(), String> {
+        if self.cloth_meshes.len() > 16
+            || self
+                .cloth_meshes
+                .values()
+                .any(|path| !relative_path(path) || !path.to_ascii_lowercase().ends_with(".obj"))
+        {
+            return Err("invalid cloth_meshes budget or OBJ path".into());
+        }
         if !matches!(self.schema_version, 1 | 2) || self.id.is_empty() || self.id.len() > 80 {
             return Err("invalid pack schema_version/id".into());
         }
@@ -851,7 +954,11 @@ impl Pack {
                 let character = cloth.character.to_ascii_lowercase();
                 if !character.strip_prefix('p').is_some_and(|id| {
                     !id.is_empty() && id.len() <= 3 && id.bytes().all(|b| b.is_ascii_digit())
-                }) || !characters.insert(character)
+                }) || cloth.slot.len() > 32
+                    || !cloth.slot.bytes().all(|c| {
+                        c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_' || c == b'-'
+                    })
+                    || !characters.insert((character, &cloth.slot))
                 {
                     return Err(format!(
                         "invalid or duplicate character_cloth character {}",
@@ -867,24 +974,92 @@ impl Pack {
                         cloth.material
                     ));
                 }
-                if cloth
-                    .bones
-                    .iter()
-                    .any(|name| name.is_empty() || name.len() > 80)
-                    || cloth
+                range("character_cloth opacity", cloth.opacity, 0., 1.)?;
+                if let Some(rigid) = &cloth.rigid_mesh {
+                    if cloth.anchor.is_none()
+                        || !self.cloth_meshes.contains_key(&rigid.id)
+                        || !self.materials.contains_key(&rigid.material)
+                    {
+                        return Err(
+                            "character_cloth rigid_mesh requires a known OBJ, material and anchor"
+                                .into(),
+                        );
+                    }
+                }
+                if cloth.anchor.is_none()
+                    && (cloth
                         .bones
                         .iter()
-                        .collect::<std::collections::HashSet<_>>()
-                        .len()
-                        != 4
-                    || !(3..=12).contains(&cloth.grid[0])
-                    || !(3..=16).contains(&cloth.grid[1])
+                        .any(|name| name.is_empty() || name.len() > 80)
+                        || cloth
+                            .bones
+                            .iter()
+                            .collect::<std::collections::HashSet<_>>()
+                            .len()
+                            != 4)
                 {
-                    return Err("invalid character_cloth bones or grid".into());
+                    return Err("invalid character_cloth bones".into());
+                }
+                if let Some(anchor) = &cloth.anchor {
+                    anchor.validate()?;
+                    if cloth.colliders.as_ref().is_none_or(Vec::is_empty) {
+                        return Err("character_cloth anchor requires body colliders".into());
+                    }
+                }
+                if let Some(colliders) = &cloth.colliders {
+                    if !(1..=16).contains(&colliders.len()) {
+                        return Err("character_cloth colliders must contain 1–16 capsules".into());
+                    }
+                    for collider in colliders {
+                        collider.a.validate()?;
+                        collider.b.validate()?;
+                        range("cloth capsule radius", collider.radius, 0.02, 2.0)?;
+                    }
+                }
+                for angle in cloth.rotation_degrees {
+                    range("cloth attachment rotation", angle, -360.0, 360.0)?;
+                }
+                if let Some(mesh) = &cloth.mesh {
+                    if !self.cloth_meshes.contains_key(&mesh.id)
+                        || mesh
+                            .render_id
+                            .as_ref()
+                            .is_some_and(|id| !self.cloth_meshes.contains_key(id))
+                        || (mesh.pin_vertices.is_empty() && mesh.pin_groups.is_empty())
+                    {
+                        return Err(
+                            "character_cloth mesh requires a known OBJ and pinned vertices".into(),
+                        );
+                    }
+                    if mesh.pin_groups.len() > 16
+                        || mesh.pin_vertices.len()
+                            + mesh
+                                .pin_groups
+                                .iter()
+                                .map(|group| group.vertices.len())
+                                .sum::<usize>()
+                            > 384
+                    {
+                        return Err("character_cloth exceeds its pin group or vertex budget".into());
+                    }
+                    for group in &mesh.pin_groups {
+                        group.anchor.validate()?;
+                        if group.vertices.is_empty() {
+                            return Err("cloth pin group needs at least one vertex".into());
+                        }
+                        for value in group.rest_origin {
+                            range("cloth pin rest origin", value, -5.0, 5.0)?;
+                        }
+                        for angle in group.rest_rotation_degrees {
+                            range("cloth pin rest rotation", angle, -360.0, 360.0)?;
+                        }
+                    }
+                } else if !(3..=12).contains(&cloth.grid[0]) || !(3..=16).contains(&cloth.grid[1]) {
+                    return Err("invalid character_cloth grid".into());
                 }
                 range("character_cloth width", cloth.width, 0.25, 1.8)?;
                 range("character_cloth length", cloth.length, 0.25, 2.)?;
-                range("character_cloth back_offset", cloth.back_offset, 0.1, 0.7)?;
+                range("character_cloth back_offset", cloth.back_offset, -0.7, 0.7)?;
                 range(
                     "character_cloth collision_margin",
                     cloth.collision_margin,

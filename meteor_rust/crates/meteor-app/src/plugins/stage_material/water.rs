@@ -174,6 +174,9 @@ impl WaterCache {
             )),
             _ => None,
         };
+        if profile.is_some() {
+            material.camera_occlusion_enabled = false;
+        }
         material.water = Vec4::new(
             setting.kind as f32,
             setting.max_depth,

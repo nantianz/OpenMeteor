@@ -32,7 +32,7 @@ config/
 }
 ```
 
-示例在 `sn06` 为原版贴图 `sn064.jpg` 对应的不透明表面应用石材 PBR。打开「体积雾」可看到关卡的局部雾。通用条目提供风场、接地阴影和 P0 斗篷。斗篷使用「角色衣物摆动」开关，贴图质量需高于最低档。
+示例在 `sn06` 为原版贴图 `sn064.jpg` 对应的不透明表面应用石材 PBR。打开「体积雾」可看到关卡的局部雾。通用条目提供风场、接地阴影及 P0、P1 的布料示例。布料使用「角色衣物摆动」开关，贴图质量需高于最低档。
 
 将 `enabled` 改回 `false` 并重启即可停用包内配置。水面由独立的 `config/water-enhancement.json` 控制。锐化、动态阴影继续由游戏图形设置控制。
 
@@ -99,7 +99,7 @@ Starter 的 `stage: "*"` 提供默认风，金华城（`sn13`）有自己的覆�
 
 ## 可交互草地
 
-开启图形增强包后可在一线天（`sn03`）和四方阵（`sn06`）测试。前者匹配 `ground / sn302.jpg`，后者覆盖 `Box02 / sn06mian5.jpg` 主庭院。细长草叶、芒穗、阔叶及枯黄叶尖成片混合。跑过时草会弯倒，离开后回弹。天空替换生效后，草叶随天空补光和太阳变亮或变暗。局内可切换「可交互草地」，在同一机位和分辨率对比帧时间。
+开启图形增强包后可在一线天（`sn03`）和四方阵（`sn06`）测试。前者匹配 `ground / sn302.jpg`，后者覆盖 `Box02 / sn06mian5.jpg` 主庭院。细长草叶、芒穗、阔叶及枯黄叶尖成片混合。跑过时草会弯倒，离开后回弹。天空替换生效后，草叶随天空补光和太阳变亮或变暗。 近地的挥砍、剑气和飞行道具也可压弯草叶，动作经过后草会回弹。局内可切换「可交互草地」，在同一机位和分辨率对比帧时间。
 
 在 `config/graphics-packs/starter/pack.json` 的 `scenes[].grass` 调整以下参数。修改后重启。
 
@@ -136,22 +136,118 @@ Windows 上使用 DX12 或 Vulkan。参考 [HPVolumeCloud](https://github.com/As
 
 ## 人物布料
 
-Starter 的 `scenes[].character_cloth` 默认给 P0 的原版或重制模型挂载红色金属光泽斗篷。开启「角色衣物摆动」及图形增强包后生效。
-`{"character":"p0","enabled":false}` 可在某个关卡关闭斗篷。
+发行包随 Starter 附带 P0 的绛红织锦护衣。启用增强包与「角色衣物摆动」后，选择 P0 即可看到。
+两只袖口各跟随对应前臂，四片下摆和两条长腰带只在腰部固定，末端能在跑动时拖尾、急停后回摆。
+原版 P0 和重制 P0 共用这些骨骼挂点。
+样衣使用 `models/p0-split-coat-sim.obj`、`models/p0-split-coat-render.obj` 和
+`textures/p0-split-coat-brocade.png`。原来的 `red_cape` OBJ 和材质仍可由自定义配置引用。
+关卡可用 `"character_cloth": [{"character":"p0","enabled":false}]` 隐藏外衣。
 
-| 字段 | 用法 |
+样衣通过 `physics.motion_limit` 控制自由段的最大摆幅，通过 `physics.damping` 控制回摆衰减速度，
+并用 `physics.wind_drag` 控制它对关卡风场的响应。服装网格的长度和固定点分布也会影响摆动。
+
+Starter 同时给 P1 配了斗笠、前短后长的半透明白纱和整圈粉裙。两件布料网格在周向焊接，
+裙腰按站姿校正，裙子从腰到下摆连续变形。帽纱使用头部挂点，粉裙使用腰部挂点，两者均启用低模布面碰撞。
+粉裙另启用朝外恢复，减轻屈腿时腿穿过裙面的现象。碰撞以人体胶囊为代理，极端动作仍可能出现局部交叠。
+关卡可用 `{"character":"p1","slot":"veil_hat","enabled":false}`
+隐藏帽子，粉裙的 `slot` 是 `pink_skirt`。
+
+| 挂载字段 | 用途 |
 | --- | --- |
-| `bones` | 依次为颈部、骨盆、左肩、右肩骨骼名 |
-| `grid`、`width`、`length`、`back_offset` | 网格尺寸默认 7×9，宽度、长度和背向偏移使用世界单位 |
-| `collision_margin` | 人体胶囊额外留空 |
-| `material` | 同包材质 ID，支持 `tint`、`metallic`、`roughness` 与 PBR 贴图 |
-| `physics` | 可选的每件布料参数，支持 `density`、`stretch_compliance`、`bend_compliance`、`damping`、`wind_drag`、`gravity_scale`、`collision_friction`、`thickness`、`motion_limit`、`iterations`、`self_collision`、`max_characters`、`max_distance` |
+| `character`、`enabled` | 精确的角色资源 ID（例如 `p0`）和开关 |
+| `slot` | 同一角色可用不同名称挂多件衣物。同名条目按包和场景顺序覆盖，空名禁用条目作用于该角色的全部衣物 |
+| `bones` | 省略 `anchor` 时使用。依次指定颈部、骨盆、左肩、右肩 |
+| `anchor` | 单个挂点，使用 `node` 和可选的局部 `offset`。节点类型为 `model`（显示模型根）、`actor`（角色根）、`bone`、`dummy`、`named`（模型下的命名节点）。后三种另填 `name` |
+| `rotation_degrees` | 附加的 XYZ 欧拉角，用于对齐 OBJ 与挂点轴向 |
+| `colliders` | 1–16 个人体胶囊，每项填 `a`、`b` 和 `radius`。端点采用与 `anchor` 相同的写法。单挂点模式下必填 |
+| `mesh` | `id` 指向模拟 OBJ，`render_id` 可选择独立的显示 OBJ，`pin_vertices` 和 `pin_groups` 配置固定点。省略 `mesh` 时使用参数化网格 |
+| `grid` | 参数化网格的横向和纵向顶点数，范围 3–12 和 3–16，默认 7×9 |
+| `width`、`length`、`back_offset` | 肩部宽度、长度和背向偏移，使用世界单位 |
+| `collision_margin` | 人体胶囊外的额外留空，默认 0.016 |
+| `keep_visible_on_contact` | 为 `true` 时继续解算低模与胶囊的碰撞，并始终绘制完整衣物。快速动作可以出现短暂穿插。样衣启用此项 |
+| `material` | 同包的 PBR 材质 ID，可调颜色、金属度、粗糙度及可选贴图 |
+| `opacity` | 0–1，默认 1。小于 1 时使用透明混合，与贴图的 alpha 相乘 |
+| `rigid_mesh` | 可选，填 `id` 和 `material`。引用包中的 OBJ，并与主 `anchor` 共用坐标、偏移及旋转，适合帽体 |
+| `physics` | 可选的独立布料配置，可调整密度、阻尼、风阻、弯折和模拟范围。省略时继承关卡布料配置 |
 
-斗篷使用 XPBD、共享风和人体胶囊。每帧检查整片斗篷，重叠时回到安全姿态，仍重叠的帧会隐藏。快速翻滚和极端姿态建议用 P0 实测。场景墙面及地形未接入斗篷碰撞。
+自制斗篷放进增强包，例如包根填写 `"cloth_meshes": {"cape": "models/cape.obj"}`，在角色条目填写
+`"mesh": {"id": "cape", "pin_vertices": [1, 2, 3]}`。固定点按 OBJ 的 `v` 行从 1 编号，每个独立布片至少要有一个固定点。
+导出时三角化，以米为单位，局部原点设在挂点，+Y 朝上，裙边沿 -Y 下垂。模拟 OBJ 最多 384 个位置和 768 个三角形。
+OBJ 的材质库不读取。颜色、粗糙度和贴图在增强包中配置，有贴图的模型需要 UV。
+导出后可通过 `rotation_degrees` 对正轴向。带缩放的角色节点只提供位移和旋转，`offset`、网格和胶囊半径均使用世界单位。
+
+下面的角色条目使用无骨骼模型中名为 `cape_socket` 的节点。
+
+```json
+{
+  "character": "p0",
+  "material": "red_cape",
+  "mesh": {"id": "red_cape", "pin_vertices": [1, 2, 3, 4, 5, 6, 7]},
+  "anchor": {"node": {"kind": "named", "name": "cape_socket"}, "offset": [0, 0, 0.35]},
+  "back_offset": 0,
+  "colliders": [{
+    "a": {"node": {"kind": "actor"}, "offset": [0, 0.5, 0]},
+    "b": {"node": {"kind": "actor"}, "offset": [0, 1.45, 0]},
+    "radius": 0.24
+  }]
+}
+```
+
+命名节点必须在当前显示模型下唯一。节点稍后加载时会重新查找，挂点或自定义胶囊端点找不到时隐藏布料。
+
+#### 外套和其他多挂点服装
+
+在包清单的 `cloth_meshes` 中登记 `"coat_sim": "models/coat-sim.obj"` 和
+`"coat_render": "models/coat-render.obj"`。把角色条目中的 `mesh` 替换为对应的配置。
+
+```json
+{
+  "id": "coat_sim",
+  "render_id": "coat_render",
+  "pin_vertices": [1, 2],
+  "pin_groups": [
+    {
+      "anchor": {"node": {"kind": "named", "name": "left_cuff"}},
+      "vertices": [17, 18],
+      "rest_origin": [-0.48, -0.28, 0.04]
+    },
+    {
+      "anchor": {"node": {"kind": "named", "name": "right_cuff"}},
+      "vertices": [27, 28],
+      "rest_origin": [0.48, -0.28, 0.04]
+    }
+  ]
+}
+```
+
+`pin_vertices` 继续跟随主挂点，`pin_groups` 中每组可以选择任意一种节点类型。顶点编号来自模拟 OBJ。
+`rest_origin` 是该挂点在模拟 OBJ 静止姿势中的坐标。若静止姿势下挂点的轴向与 OBJ 不同，可填
+`rest_rotation_degrees`，按 XYZ 欧拉角指定。焊接到同一个位置的固定点必须归属同一挂点。
+同一布片可有多个挂点，每个独立布片至少固定一个顶点。
+
+两个 OBJ 使用同一坐标系和静止姿势。显示 OBJ 可增加褶皱和厚度，最多 4,096 个位置、8,192 个三角形，
+单个 OBJ 的大小上限为 1 MiB。显示顶点与模拟表面的距离须在 0.35 米内，贴图 UV 放在显示 OBJ 上。
+两套网格在加载时绑定。运行时只求解模拟网格，每个模拟三角形的局部坐标系每次更新只计算一次。
+多挂点或双网格的布料在慢帧最多补算 4 个子步，暂停且挂点与碰撞体未动时复用上一帧网格。
+多人同时穿戴时，可通过关卡布料的 `max_characters` 和 `max_distance` 限制同时更新的近处衣物。
+同一角色的多个 `slot` 各占一个模拟名额。
+
+固定点跟随挂点，人体胶囊参与低模求解。样衣在快速动作中保持整件绘制，胶囊近似可能留下局部穿插。
+未启用 `keep_visible_on_contact` 时，额外检查整片布料与胶囊的间距。出现重叠先尝试恢复静止形状，
+仍重叠的帧隐藏布料。
+布料自碰撞基于粒子接触，关卡墙面、地形和跨服装层的连续碰撞均不参与求解。
+
+设置「角色衣物摆动」继续控制此功能；最低画质、死亡、超距、传送或超过 0.2 秒的卡顿
+会清除旧惯性并恢复动画面。暂停／打击停顿不推进粒子。关闭增强包后，游戏自带布料
+仍受该设置控制，包内风场和材质参数不再生效；要完全关闭布料请关闭该设置。
+
+P1 的 `physics.surface_collision` 用低模三角形补充人体胶囊接触。`physics.surface_recovery` 设为 0–0.5 世界单位，可沿朝外的法线恢复已跨到布面另一侧的接触。
+
+在四方阵选 P1，开启图形增强和「角色衣物摆动」。站立时检查裙腰和白纱，跑动急停后查看下摆回落，再用闪避检查大腿和裙面的交叠。
 
 ## 深水和浅水
 
-水面通过 `config/water-enhancement.json` 的 `surfaces` 选择。每条规则用 `stage`、`object`、`texture` 精确匹配清水表面。省略 `profile` 时使用 `deep`。旧配置的 `legacy` 也按 `deep` 处理。金华城默认使用 `deep`，两种预设均保留触水波纹和飞溅。配置编辑后重启。
+水面通过 `config/water-enhancement.json` 的 `surfaces` 选择。每条规则用 `stage`、`object`、`texture` 精确匹配清水表面。省略 `profile` 时使用 `deep`。旧配置的 `legacy` 也按 `deep` 处理。金华城默认使用 `deep`，两种预设均保留触水波纹和飞溅。 水面折射遇到人物或武器前景时回退到原位置采样，清水表面不参与镜头遮挡消隐。配置编辑后重启。
 
 | `profile` | 配置文件 | 随包示例 |
 | --- | --- | --- |

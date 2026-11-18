@@ -1,3 +1,4 @@
+use super::cloth_binding::{DetailMesh, Pinning};
 use super::config::*;
 use bevy::prelude::*;
 use meteor_asset::texture::DecodedImage;
@@ -11,6 +12,8 @@ use std::{
 pub struct LoadedPack {
     pub config: Pack,
     pub images: BTreeMap<String, Arc<DecodedImage>>,
+    pub cloth_meshes: BTreeMap<String, super::cloth_obj::ClothObj>,
+    pub cloth_details: BTreeMap<(String, String), Arc<DetailMesh>>,
     pub(super) prefix: String,
 }
 #[derive(Resource, Default)]
@@ -88,7 +91,63 @@ pub fn load_with_reader(
             }
             images.insert(id.clone(), Arc::new(image));
         }
+        let mut cloth_meshes = BTreeMap::new();
+        for (id, file) in &config.cloth_meshes {
+            let full = if prefix.is_empty() {
+                file.clone()
+            } else {
+                format!("{prefix}/{file}")
+            };
+            let bytes = read(&full).map_err(|e| format!("{full}: {e}"))?;
+            let mesh =
+                super::cloth_obj::ClothObj::parse(&bytes).map_err(|e| format!("{full}: {e}"))?;
+            cloth_meshes.insert(id.clone(), mesh);
+        }
+        let mut cloth_details = BTreeMap::new();
         for s in &config.scenes {
+            for cloth in s.character_cloth.iter().filter(|cloth| cloth.enabled) {
+                if let Some(rigid) = &cloth.rigid_mesh {
+                    let material = &config.materials[&rigid.material];
+                    if !cloth_meshes[&rigid.id].has_uvs
+                        && [&material.base_color, &material.normal, &material.orm]
+                            .iter()
+                            .any(|id| id.is_some())
+                    {
+                        return Err(format!(
+                            "{path}: textured rigid OBJ requires UVs for all faces"
+                        ));
+                    }
+                }
+                if let Some(source) = &cloth.mesh {
+                    let mesh = &cloth_meshes[&source.id];
+                    Pinning::prepare(mesh, source).map_err(|e| format!("{path}: {e}"))?;
+                    let render = if let Some(id) = &source.render_id {
+                        let render = &cloth_meshes[id];
+                        let key = (source.id.clone(), id.clone());
+                        if !cloth_details.contains_key(&key) {
+                            if cloth_details.len() == 16 {
+                                return Err(format!("{path}: too many cloth mesh pairs"));
+                            }
+                            let detail = DetailMesh::prepare(mesh, render)
+                                .map_err(|e| format!("{path}: {id}: {e}"))?;
+                            cloth_details.insert(key, Arc::new(detail));
+                        }
+                        render
+                    } else {
+                        mesh
+                    };
+                    let material = &config.materials[&cloth.material];
+                    if !render.has_uvs
+                        && [&material.base_color, &material.normal, &material.orm]
+                            .iter()
+                            .any(|id| id.is_some())
+                    {
+                        return Err(format!(
+                            "{path}: textured cloth OBJ requires UVs for all faces"
+                        ));
+                    }
+                }
+            }
             if let Some(e) = &s.environment {
                 if let Some(id) = &e.diffuse {
                     let m = &images[id];
@@ -113,6 +172,8 @@ pub fn load_with_reader(
         packs.push(LoadedPack {
             config,
             images,
+            cloth_meshes,
+            cloth_details,
             prefix: prefix.into(),
         });
     }

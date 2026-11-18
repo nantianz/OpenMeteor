@@ -162,7 +162,7 @@ jobs:
             gh release upload $tag @assets --clobber
             if ($LASTEXITCODE -ne 0) { throw 'Release asset upload failed.' }
           } else {
-            $arguments = @('release', 'create', $tag, '--verify-tag', '--draft', '--title', "OpenMeteor $tag", '--notes', 'Windows x64 and x86 builds. Extract the complete ZIP into the original game directory and double-click OpenMeteor.exe. No launch arguments or MPK packs are required. GRAPHICS-README.md covers day-night modes, courtyard grass, the P0 cape, shared stage wind, and water presets. Jinhua City uses deep water by default. Graphics packs are off by default. A Chinese font and SHA-256 checksums are included. Original game resources are not included.') + $assets
+            $arguments = @('release', 'create', $tag, '--verify-tag', '--draft', '--title', "OpenMeteor $tag", '--notes', 'Windows x64 and x86 builds. Extract the complete ZIP into the original game directory and double-click OpenMeteor.exe. No launch arguments or MPK packs are required. GRAPHICS-README.md covers day-night modes, courtyard grass, the P0 outfit, the P1 pink skirt and translucent veil, shared stage wind, and water presets. Jinhua City uses deep water by default. Graphics packs are off by default. A Chinese font and SHA-256 checksums are included. Original game resources are not included.') + $assets
             if ($tag.Contains('-')) { $arguments += '--prerelease' }
             gh @arguments
             if ($LASTEXITCODE -ne 0) { throw 'Draft release creation failed.' }

@@ -2255,6 +2255,7 @@ impl HitGeometryQueries<'_, '_> {
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct HitFeedback<'w> {
     water: Option<ResMut<'w, super::stage_material::water::combat::WaterCombat>>,
+    grass: Option<ResMut<'w, super::graphics_pack::grass::GrassCombat>>,
     effects: Option<Res<'w, crate::plugins::effect_plugin::EffectAssets>>,
     impacts: MessageWriter<'w, crate::plugins::impact_fx_plugin::CombatImpactEvent>,
     settings: Res<'w, Settings>,
@@ -5320,6 +5321,16 @@ fn attack_windows(
                         character_assets,
                     );
                     if !effect_obbs.is_empty() {
+                        if let Some(grass) = feedback.grass.as_deref_mut() {
+                            grass.record_boxes(
+                                attacker_entity,
+                                pose.pose_instance_id,
+                                index,
+                                now_seconds,
+                                true,
+                                &effect_obbs,
+                            );
+                        }
                         if feedback.settings.water_enhance {
                             if let Some(water) = feedback.water.as_deref_mut() {
                                 water.record_boxes(
@@ -5392,6 +5403,24 @@ fn attack_windows(
             } else {
                 Vec::new()
             };
+            if let Some(grass) = feedback.grass.as_deref_mut() {
+                grass.record_boxes(
+                    attacker_entity,
+                    pose.pose_instance_id,
+                    index,
+                    now_seconds,
+                    false,
+                    &attack_obbs,
+                );
+                grass.record_boxes(
+                    attacker_entity,
+                    pose.pose_instance_id,
+                    index | (1 << 31),
+                    now_seconds,
+                    true,
+                    &effect_obbs,
+                );
+            }
             if feedback.settings.water_enhance {
                 if let Some(water) = feedback.water.as_deref_mut() {
                     water.record_boxes(
@@ -5447,6 +5476,14 @@ fn attack_windows(
         }
     }
     for hit in ranged.pending.0.drain(..) {
+        if let Some(grass) = feedback.grass.as_deref_mut() {
+            let width = if hit.kind == ProjectileKind::FlyingWheel {
+                0.22
+            } else {
+                0.075
+            };
+            grass.record_segment(hit.start, hit.end, width);
+        }
         if feedback.settings.water_enhance {
             if let Some(water) = feedback.water.as_deref_mut() {
                 let (velocity, radius) = match hit.kind {
@@ -16827,10 +16864,16 @@ mod tests {
     #[test]
     fn production_sword_wave_hits_at_range_on_live_playback_clock() {
         use crate::plugins::effect_plugin as fx;
+        use crate::plugins::graphics_pack::grass::GrassCombat;
         use bevy::ecs::system::RunSystemOnce;
         for fps in [20, 30, 60, 120] {
             let dt = 1.0 / fps as f32;
             let (mut h, target, take_hits) = spawn_local_stock_hit_harness(6);
+            h.app.init_resource::<GrassCombat>();
+            h.app
+                .world_mut()
+                .resource_mut::<GrassCombat>()
+                .set_eye(Some(Vec2::ZERO));
             h.app
                 .init_resource::<Assets<fx::PonEfMaterial>>()
                 .init_resource::<Assets<Mesh>>()
@@ -16884,10 +16927,21 @@ mod tests {
             h.release_mouse(MouseButton::Left);
             assert_eq!(h.pose_id(), 560);
             let mut hits = Vec::new();
+            let mut grass_reach = 0.0_f32;
             for _ in 0..fps * 3 {
                 h.step_dt(dt);
                 hits.extend(take_hits());
+                grass_reach = grass_reach.max(
+                    h.app
+                        .world_mut()
+                        .resource_mut::<GrassCombat>()
+                        .drain_effect_reach(0.0, 1.55),
+                );
             }
+            assert!(
+                grass_reach > 4.0,
+                "the authored sword wave must reach distant grass at {fps} FPS"
+            );
             assert_eq!(
                 hits.len(),
                 2,

@@ -2,6 +2,7 @@ use crate::plugins::graphics_pack::config::Clothing;
 use bevy::prelude::*;
 use std::collections::BTreeMap;
 
+pub(super) mod contact;
 #[cfg(test)]
 mod tests;
 pub(super) mod topology;
@@ -201,6 +202,18 @@ impl Simulation {
         }
         if config.self_collision {
             self.collide_self(data, &inverse_mass, config.thickness, scale);
+        }
+        if config.surface_collision {
+            contact::project_surface(
+                &mut self.positions,
+                &previous,
+                anchors,
+                &data.triangles,
+                &inverse_mass,
+                capsules,
+                config.thickness,
+                config.surface_recovery,
+            );
         }
         for i in 0..previous.len() {
             let mut contact = Vec3::ZERO;

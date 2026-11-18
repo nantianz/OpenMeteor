@@ -1,3 +1,5 @@
+pub(crate) mod cloth_binding;
+pub(crate) mod cloth_obj;
 pub(crate) mod config;
 pub(crate) mod grass;
 mod loader;

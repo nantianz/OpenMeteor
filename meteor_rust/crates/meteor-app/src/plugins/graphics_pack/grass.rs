@@ -1,3 +1,4 @@
+mod combat;
 mod geometry;
 mod interaction;
 mod placement;
@@ -28,9 +29,11 @@ use bevy::render::{
     renderer::RenderDevice,
 };
 use bevy::shader::{Shader, ShaderRef};
+pub(crate) use combat::GrassCombat;
 use geometry::{DISTANT, LODS};
 use interaction::{BendMap, BendUpload};
 use meteor_core::types::MovementMode;
+use meteor_physics::collision::MeshCollider;
 use placement::ROOTS_PER_TILE;
 use std::sync::Arc;
 
@@ -155,7 +158,8 @@ struct GrassTile {
 
 pub(super) fn install(app: &mut App) {
     interaction::install(app);
-    app.add_plugins(MaterialPlugin::<GrassMaterial>::default())
+    app.init_resource::<GrassCombat>()
+        .add_plugins(MaterialPlugin::<GrassMaterial>::default())
         .add_systems(
             PostUpdate,
             update
@@ -375,18 +379,34 @@ fn update(
     >,
     mut visible: Local<Vec<(f32, Entity, usize)>>,
     mut upload: ResMut<BendUpload>,
+    mut combat: ResMut<GrassCombat>,
+    collider: Option<Res<crate::plugins::stage_collider::StageCollider>>,
 ) {
     let Ok(mut field) = field.single_mut() else {
         if upload.data.is_some() {
             upload.data = None;
         }
+        combat.set_eye(None);
         return;
     };
     let Ok((camera, frustum)) = camera.single() else {
+        combat.set_eye(None);
         return;
     };
     let eye = camera.translation();
     let enabled = settings.as_ref().is_none_or(|s| s.grass_enhance);
+    let running = enabled && state.is_some_and(|state| *state.get() == AppState::Playing);
+    let ground = collider
+        .as_deref()
+        .and_then(|collider| collider.mesh.as_ref());
+    combat.set_eye((running && ground.is_some()).then_some(eye.xz()));
+    if running
+        && collider
+            .as_ref()
+            .is_some_and(|collider| collider.is_changed())
+    {
+        combat.invalidate_ground();
+    }
     let compact = cfg!(any(target_arch = "wasm32", target_os = "android"));
     let max_tiles = if compact {
         field.profile.max_visible_tiles.min(40)
@@ -463,7 +483,7 @@ fn update(
             mesh.0 = lod.clone();
         }
     }
-    if !enabled || !state.is_some_and(|state| *state.get() == AppState::Playing) {
+    if !running {
         field.previous_contacts.clear();
         return;
     }
@@ -475,6 +495,20 @@ fn update(
     let factor = (-4.0 * (field.elapsed - remainder) / field.profile.recovery_seconds).exp();
     field.elapsed = remainder;
     let mut dirty = field.bend.decay(eye.xz(), factor);
+    if let Some(ground) = ground {
+        let blade_height = field.profile.height[1] * 1.35;
+        dirty |= combat.paint(
+            &mut field.bend,
+            eye.xz(),
+            blade_height,
+            |p, reach, headroom| {
+                ground
+                    .sweep_foot_segment(p.x, p.y + headroom, p.z, p.y - reach)
+                    .filter(|hit| hit.ny >= 0.42)
+                    .map(|hit| p.with_y(hit.y))
+            },
+        );
+    }
     let mut contacts = actors
         .iter()
         .filter_map(|(id, transform, motion, health, conceal)| {

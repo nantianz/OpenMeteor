@@ -2,7 +2,7 @@ use super::render_tests::capture;
 use super::*;
 use crate::app_state::{AppState, Settings};
 use crate::plugins::stage_material::{
-    scene_normals, FrameUniforms, GmdlMaterialParams, GmdlMaterialPlugin,
+    scene_normals, CameraOcclusionParams, FrameUniforms, GmdlMaterialParams, GmdlMaterialPlugin,
 };
 use crate::plugins::{pak_textures, render_plugin};
 use bevy::render::{
@@ -12,6 +12,9 @@ use bevy::render::{
 };
 use bevy::{app::PluginsState, camera::RenderTarget};
 use std::sync::{Arc, Mutex};
+
+#[derive(Resource, Default)]
+struct TestCameraFade(CameraOcclusionParams);
 
 fn render_original_liquid(stage: &str, eye: Vec3, aim: Vec3, live_reflection: bool) {
     let mut app = App::new();
@@ -36,7 +39,14 @@ fn render_original_liquid(stage: &str, eye: Vec3, aim: Vec3, live_reflection: bo
         scene_normal_maps: true,
         ..default()
     })
-    .add_plugins(GmdlMaterialPlugin);
+    .add_plugins(GmdlMaterialPlugin)
+    .init_resource::<TestCameraFade>()
+    .add_systems(
+        PostUpdate,
+        |fade: Res<TestCameraFade>, mut frame: ResMut<FrameUniforms>| {
+            frame.camera = fade.0;
+        },
+    );
     crate::plugins::frame_work::install(&mut app);
     let mut image = Image::new_target_texture(512, 288, TextureFormat::Rgba8UnormSrgb, None);
     image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
@@ -226,6 +236,50 @@ fn render_original_liquid(stage: &str, eye: Vec3, aim: Vec3, live_reflection: bo
     let off = capture(&mut app, &pixels);
     app.world_mut().resource_mut::<Settings>().water_enhance = true;
     let on = capture(&mut app, &pixels);
+    if stage == "sn13" && !live_reflection {
+        let water = app
+            .world()
+            .resource::<Assets<GmdlMaterial>>()
+            .iter()
+            .find(|(_, material)| material.water.x == 1.0)
+            .unwrap()
+            .0;
+        let point = world(aim);
+        let camera = world(eye);
+        app.world_mut().resource_mut::<TestCameraFade>().0 = CameraOcclusionParams {
+            eye: camera.extend(0.8),
+            player: (point + (point - camera).normalize() * 4.0).extend(3.4),
+            ..default()
+        };
+        let normal = capture(&mut app, &pixels);
+        app.world_mut()
+            .resource_mut::<Assets<GmdlMaterial>>()
+            .get_mut(water)
+            .unwrap()
+            .camera_occlusion_enabled = true;
+        let pierced = capture(&mut app, &pixels);
+        app.world_mut()
+            .resource_mut::<Assets<GmdlMaterial>>()
+            .get_mut(water)
+            .unwrap()
+            .camera_occlusion_enabled = false;
+        let solid = capture(&mut app, &pixels);
+        app.world_mut().resource_mut::<TestCameraFade>().0 = default();
+        let difference = |a: &[u8], b: &[u8]| {
+            a.chunks_exact(4)
+                .zip(b.chunks_exact(4))
+                .filter(|(a, b)| a != b)
+                .count()
+        };
+        let hole = difference(&pierced, &solid);
+        let regression = difference(&normal, &solid);
+        eprintln!("sn13 camera fade: {hole} water pixels in forced hole, {regression} with configured material");
+        assert!(hole > 100, "test camera tunnel must intersect the river");
+        assert_eq!(
+            regression, 0,
+            "configured water must not be punched by camera fade"
+        );
+    }
     if live_reflection {
         let water_material = app
             .world()

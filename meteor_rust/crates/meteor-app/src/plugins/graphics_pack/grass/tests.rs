@@ -161,6 +161,9 @@ fn spawn_stock_preview(app: &mut App, stage: &'static str) -> Option<[Transform;
                         ));
                     }
                 }
+                commands.insert_resource(crate::plugins::stage_collider::StageCollider {
+                    mesh: Some(support.clone()),
+                });
             },
         )
         .unwrap();
@@ -260,7 +263,6 @@ fn stock_grass_uses_the_authored_ground_and_stays_inside_the_budget() {
 }
 
 #[cfg(feature = "original-assets")]
-
 #[test]
 fn si_fang_zhen_courtyard_reaches_all_edges_with_a_bounded_distant_lod() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
@@ -744,6 +746,12 @@ fn grass_gpu_draws_tracks_recovers_and_honors_visible_tile_limit() {
                 );
             }
             if stage == "sn06" {
+                let combat_lanes = std::env::var("METEOR_GRASS_COMBAT_BENCH")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(0)
+                    .min(12);
+                let combat_bench = combat_lanes > 0;
                 app.world_mut().entity_mut(readback).remove::<Readback>();
                 app.world_mut()
                     .resource_mut::<Assets<Image>>()
@@ -755,12 +763,44 @@ fn grass_gpu_draws_tracks_recovers_and_honors_visible_tile_limit() {
                         depth_or_array_layers: 1,
                     });
                 for (i, transform) in cameras.into_iter().enumerate() {
+                    if combat_bench && i == 0 {
+                        continue;
+                    }
                     *app.world_mut().get_mut::<Transform>(camera).unwrap() = transform;
+                    let actor = combat_bench.then(|| {
+                        app.world_mut()
+                            .spawn((
+                                Fighter {
+                                    character_id: 0,
+                                    player_slot: 0,
+                                    weapon: 0,
+                                    weapon_slots: [0; 2],
+                                    weapon_slot: 0,
+                                    weapon_variant: 0,
+                                    weapon_slot_variants: [0; 2],
+                                },
+                                Transform::from_translation(
+                                    transform.translation - Vec3::Y * 4.6 - Vec3::Z * 2.0,
+                                ),
+                            ))
+                            .id()
+                    });
                     let mut times = [Vec::new(), Vec::new()];
                     for enabled in [false, true, true, false] {
-                        app.world_mut().resource_mut::<Settings>().grass_enhance = enabled;
+                        app.world_mut().resource_mut::<Settings>().grass_enhance =
+                            combat_bench || enabled;
+                        let revision = app.world().resource::<BendUpload>().revision;
                         for sample in 0..96 {
                             let start = std::time::Instant::now();
+                            if enabled && combat_bench {
+                                let origin = transform.translation - Vec3::Y * 3.8;
+                                let jitter = (sample % 12) as f32 * 0.3;
+                                let mut combat = app.world_mut().resource_mut::<GrassCombat>();
+                                for lane in 0..combat_lanes {
+                                    let a = origin + Vec3::new(jitter + lane as f32 * 0.6, 0., -1.);
+                                    combat.record_segment(a, a - Vec3::Z * 3.5, 0.22);
+                                }
+                            }
                             app.update();
                             app.world()
                                 .resource::<RenderDevice>()
@@ -774,6 +814,9 @@ fn grass_gpu_draws_tracks_recovers_and_honors_visible_tile_limit() {
                                     .push(start.elapsed().as_secs_f64() * 1000.0);
                             }
                         }
+                        if enabled && combat_bench {
+                            assert!(app.world().resource::<BendUpload>().revision > revision);
+                        }
                         if enabled {
                             let triangles = submitted(app.world_mut());
                             let tiles = count(app.world_mut());
@@ -786,8 +829,16 @@ fn grass_gpu_draws_tracks_recovers_and_honors_visible_tile_limit() {
                     }
                     for (enabled, data) in times.iter_mut().enumerate() {
                         data.sort_by(f64::total_cmp);
-                        eprintln!("sn06 1440p view {} grass={enabled}: median {:.3} ms, p95 {:.3} ms ({} frames)",
+                        let label = if combat_bench {
+                            "grass-attacks"
+                        } else {
+                            "grass"
+                        };
+                        eprintln!("sn06 1440p view {} {label}={enabled}: median {:.3} ms, p95 {:.3} ms ({} frames)",
                             i + 1, data[data.len() / 2], data[data.len() * 95 / 100], data.len());
+                    }
+                    if let Some(actor) = actor {
+                        app.world_mut().despawn(actor);
                     }
                 }
             }

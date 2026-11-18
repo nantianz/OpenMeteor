@@ -80,36 +80,47 @@ impl BendMap {
     }
 
     pub fn stamp(&mut self, from: Vec3, to: Vec3, eye: Vec2, radius: f32) -> bool {
+        self.stamp_scaled(from, to, eye, radius, 1.0)
+    }
+
+    pub(super) fn stamp_scaled(
+        &mut self,
+        from: Vec3,
+        to: Vec3,
+        eye: Vec2,
+        radius: f32,
+        strength: f32,
+    ) -> bool {
         let a = from.xz();
         let b = to.xz();
         let path = b - a;
         let path_len = path.length_squared().max(0.0001);
+        let path_direction = path.normalize_or_zero();
+        let center = (eye / SPACING).floor().as_ivec2();
         let lo = ((a.min(b) - Vec2::splat(radius)) / SPACING)
             .floor()
-            .as_ivec2();
+            .as_ivec2()
+            .max(center - IVec2::splat(SIZE / 2 - 1));
         let hi = ((a.max(b) + Vec2::splat(radius)) / SPACING)
             .ceil()
-            .as_ivec2();
-        let center = (eye / SPACING).floor().as_ivec2();
+            .as_ivec2()
+            .min(center + IVec2::splat(SIZE / 2));
         let mut stamped = false;
         for y in lo.y..hi.y {
             for x in lo.x..hi.x {
                 let world = IVec2::new(x, y);
-                if (world - center).abs().max_element() >= SIZE / 2 {
-                    continue;
-                }
                 let point = (world.as_vec2() + Vec2::splat(0.5)) * SPACING;
                 let t = ((point - a).dot(path) / path_len).clamp(0.0, 1.0);
                 let delta = point - (a + path * t);
                 let influence = (1.0 - delta.length_squared() / (radius * radius)).max(0.0);
-                let pressure = influence * influence;
+                let pressure = influence * influence * strength;
                 let index = (y.rem_euclid(SIZE) * SIZE + x.rem_euclid(SIZE)) as usize;
                 let cell = &mut self.cells[index];
                 if pressure <= 1.0 / 255.0 || (cell.world == world && pressure < cell.pressure) {
                     continue;
                 }
-                let direction = (delta.normalize_or_zero() + 0.45 * path.normalize_or_zero())
-                    .normalize_or_zero();
+                let direction =
+                    (delta.normalize_or_zero() + 0.45 * path_direction).normalize_or_zero();
                 *cell = Cell {
                     world,
                     bend: pressure * direction,
