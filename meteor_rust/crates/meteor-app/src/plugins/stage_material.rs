@@ -107,6 +107,7 @@ pub struct GmdlMaterial {
     pub uv_scroll: Vec4,
 
     pub water: Vec4,
+    pub(crate) water_optics: WaterOptics,
 
     pub water_bounds: Vec4,
     pub water_reflection: Option<Handle<Image>>,
@@ -116,6 +117,7 @@ pub struct GmdlMaterial {
     pub water_dynamics_bounds: Vec4,
 
     pub water_live_reflection: bool,
+    pub(crate) water_screen_refraction: bool,
 
     pub body_glow: Vec4,
 
@@ -153,6 +155,7 @@ impl GmdlMaterial {
             normal_contrast: 0.8,
             uv_scroll: Vec4::ZERO,
             water: Vec4::ZERO,
+            water_optics: WaterOptics::default(),
             water_bounds: Vec4::ZERO,
             water_reflection: None,
             water_depth: None,
@@ -160,6 +163,7 @@ impl GmdlMaterial {
             water_dynamics: None,
             water_dynamics_bounds: Vec4::ZERO,
             water_live_reflection: false,
+            water_screen_refraction: false,
             body_glow: Vec4::ZERO,
             body_style: Vec4::ZERO,
             first_person_clip: Vec4::ZERO,
@@ -234,6 +238,13 @@ const GMDL_SHADER_HANDLE: Handle<Shader> =
 const GMDL_PREPASS_SHADER_HANDLE: Handle<Shader> =
     bevy::asset::uuid_handle!("c12c7fa4-5bdf-4c0b-9c44-41f1eac54d27");
 
+#[derive(ShaderType, Clone, Copy, Default)]
+pub(crate) struct WaterOptics {
+    pub absorption_ior: Vec4,
+    pub scattering_g: Vec4,
+    pub control: Vec4,
+}
+
 impl Material for GmdlMaterial {
     fn prepass_fragment_shader() -> ShaderRef {
         ShaderRef::Handle(GMDL_PREPASS_SHADER_HANDLE)
@@ -244,7 +255,7 @@ impl Material for GmdlMaterial {
     }
 
     fn reads_view_transmission_texture(&self) -> bool {
-        self.weapon_refraction_source || self.water_live_reflection
+        self.weapon_refraction_source || self.water_live_reflection || self.water_screen_refraction
     }
 
     fn depth_bias(&self) -> f32 {
@@ -256,7 +267,7 @@ impl Material for GmdlMaterial {
     }
 
     fn alpha_mode(&self) -> AlphaMode {
-        if self.weapon_refraction_source || self.water_live_reflection {
+        if self.reads_view_transmission_texture() {
             return AlphaMode::Opaque;
         }
         match self.mode {

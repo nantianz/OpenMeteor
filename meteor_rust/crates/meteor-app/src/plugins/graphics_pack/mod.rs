@@ -1,7 +1,9 @@
 pub(crate) mod config;
+pub(crate) mod grass;
 mod loader;
 pub(crate) mod meshlets;
 mod runtime;
+pub(crate) mod sky;
 mod surfaces;
 use bevy::prelude::*;
 #[cfg(test)]
@@ -11,6 +13,8 @@ pub(crate) use runtime::GraphicsFrame;
 pub(crate) use surfaces::SceneGraphics;
 
 pub fn install(app: &mut App) {
+    sky::install(app);
+    grass::install(app);
     app.init_resource::<GraphicsPacks>()
         .add_systems(Startup, show_error)
         .add_systems(

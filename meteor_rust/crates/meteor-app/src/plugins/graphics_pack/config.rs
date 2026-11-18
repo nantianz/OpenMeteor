@@ -54,6 +54,10 @@ impl Default for Pbr {
 pub struct Scene {
     pub stage: String,
     #[serde(default)]
+    pub sky: Option<Sky>,
+    #[serde(default)]
+    pub grass: Option<Grass>,
+    #[serde(default)]
     pub environment: Option<Environment>,
     #[serde(default)]
     pub wind: Option<Wind>,
@@ -67,6 +71,197 @@ pub struct Scene {
     pub surfaces: Vec<Surface>,
     #[serde(default)]
     pub meshlet_replacements: Vec<MeshletReplacement>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Grass {
+    pub enabled: bool,
+    pub surfaces: Vec<GrassSurface>,
+    pub bounds: Option<[[f32; 2]; 2]>,
+    pub density: f32,
+    pub tile_size: f32,
+    pub height: [f32; 2],
+    pub width: [f32; 2],
+    pub root_color: [f32; 3],
+    pub tip_color: [f32; 3],
+    pub min_up: f32,
+    pub near_distance: f32,
+    pub mid_distance: f32,
+    pub max_distance: f32,
+    pub max_visible_tiles: usize,
+    pub wind_strength: f32,
+    pub interaction_radius: f32,
+    pub recovery_seconds: f32,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrassSurface {
+    pub object: String,
+    pub texture: String,
+}
+
+impl Default for Grass {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            surfaces: Vec::new(),
+            bounds: None,
+            density: 5.0,
+            tile_size: 6.0,
+            height: [0.38, 1.12],
+            width: [0.07, 0.16],
+            root_color: [0.033, 0.070, 0.022],
+            tip_color: [0.23, 0.35, 0.095],
+            min_up: 0.72,
+            near_distance: 18.0,
+            mid_distance: 33.0,
+            max_distance: 56.0,
+            max_visible_tiles: 96,
+            wind_strength: 0.23,
+            interaction_radius: 1.05,
+            recovery_seconds: 1.45,
+        }
+    }
+}
+
+impl Grass {
+    fn validate(&self, stage: &str) -> Result<(), String> {
+        let mut seen = std::collections::HashSet::new();
+        if stage == "*"
+            || !(1..=24).contains(&self.surfaces.len())
+            || self.surfaces.iter().any(|target| {
+                [&target.object, &target.texture].into_iter().any(|name| {
+                    name.trim().is_empty() || name.len() > 120 || name.contains(['*', '?'])
+                }) || !seen.insert((
+                    target.object.to_ascii_lowercase(),
+                    target.texture.to_ascii_lowercase(),
+                ))
+            })
+        {
+            return Err(format!("{stage}: grass requires exact surface selectors"));
+        }
+        range("grass density", self.density, 0.1, 24.0)?;
+        range("grass tile size", self.tile_size, 4.0, 24.0)?;
+        range("grass minimum height", self.height[0], 0.08, 2.0)?;
+        range("grass maximum height", self.height[1], self.height[0], 2.0)?;
+        range("grass minimum width", self.width[0], 0.015, 0.35)?;
+        range("grass maximum width", self.width[1], self.width[0], 0.35)?;
+        color("grass root color", self.root_color)?;
+        color("grass tip color", self.tip_color)?;
+        range("grass ground slope", self.min_up, 0.55, 1.0)?;
+        range("grass near distance", self.near_distance, 4.0, 42.0)?;
+        range(
+            "grass mid distance",
+            self.mid_distance,
+            self.near_distance + 2.0,
+            66.0,
+        )?;
+        range(
+            "grass view distance",
+            self.max_distance,
+            self.mid_distance + 3.0,
+            90.0,
+        )?;
+        if !(4..=128).contains(&self.max_visible_tiles) {
+            return Err("grass max_visible_tiles must be 4..=128".into());
+        }
+        range("grass wind", self.wind_strength, 0.0, 0.55)?;
+        range(
+            "grass interaction radius",
+            self.interaction_radius,
+            0.5,
+            2.4,
+        )?;
+        range("grass recovery", self.recovery_seconds, 0.25, 5.0)?;
+        if let Some([min, max]) = self.bounds {
+            for axis in 0..2 {
+                range("grass bounds minimum", min[axis], -4096.0, 4096.0)?;
+                range("grass bounds extent", max[axis] - min[axis], 1.0, 512.0)?;
+            }
+        }
+        Ok(())
+    }
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Sky {
+    pub enabled: bool,
+    pub replace_skybox: bool,
+    pub skybox: Vec<SkyIdentity>,
+    pub horizon: [f32; 3],
+    pub zenith: [f32; 3],
+    pub cloud_color: [f32; 3],
+    pub base_height: f32,
+    pub thickness: f32,
+    pub density: f32,
+    pub coverage: f32,
+    pub scale: f32,
+    pub wind: [f32; 2],
+    pub steps: u32,
+}
+
+impl Default for Sky {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            replace_skybox: false,
+            skybox: Vec::new(),
+            horizon: [0.54, 0.64, 0.78],
+            zenith: [0.09, 0.23, 0.49],
+            cloud_color: [0.90, 0.94, 1.0],
+            base_height: 100.0,
+            thickness: 38.0,
+            density: 0.13,
+            coverage: 0.57,
+            scale: 0.017,
+            wind: [1.7, 0.6],
+            steps: 24,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkyIdentity {
+    pub object: String,
+    pub texture: String,
+}
+
+impl Sky {
+    fn validate(&self, stage: &str) -> Result<(), String> {
+        let mut seen = std::collections::HashSet::new();
+        if (self.replace_skybox && (stage == "*" || self.skybox.is_empty()))
+            || self.skybox.len() > 32
+            || self.skybox.iter().any(|target| {
+                [&target.object, &target.texture]
+                    .into_iter()
+                    .any(|s| s.trim().is_empty() || s.len() > 120 || s.contains(['*', '?']))
+                    || !seen.insert((
+                        target.object.to_ascii_lowercase(),
+                        target.texture.to_ascii_lowercase(),
+                    ))
+            })
+        {
+            return Err(format!("{stage}: invalid skybox selectors"));
+        }
+        if !(8..=48).contains(&self.steps) {
+            return Err(format!("{stage}: sky steps must be 8..=48"));
+        }
+        color("sky horizon", self.horizon)?;
+        color("sky zenith", self.zenith)?;
+        color("cloud color", self.cloud_color)?;
+        range("cloud height", self.base_height, -100., 3000.)?;
+        range("cloud thickness", self.thickness, 1., 1000.)?;
+        range("cloud density", self.density, 0., 1.)?;
+        range("cloud coverage", self.coverage, 0., 1.)?;
+        range("cloud scale", self.scale, 0.0001, 1.)?;
+        for speed in self.wind {
+            range("cloud wind", speed, -40., 40.)?;
+        }
+        Ok(())
+    }
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -353,6 +548,12 @@ impl Pack {
         for s in &self.scenes {
             if s.stage.is_empty() || s.surfaces.len() > 256 {
                 return Err("invalid stage/surface budget".into());
+            }
+            if let Some(sky) = &s.sky {
+                sky.validate(&s.stage)?;
+            }
+            if let Some(grass) = &s.grass {
+                grass.validate(&s.stage)?;
             }
             if let Some(e) = &s.environment {
                 color("sky", e.sky)?;

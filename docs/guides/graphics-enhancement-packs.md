@@ -10,6 +10,9 @@ OpenMeteor 的图形增强包可以按关卡配置 PBR 材质、环境光、风�
 OpenMeteor.exe
 config/
   graphics-enhancement.json
+  water-enhancement.json
+  water-deep.json
+  water-shallow.json
   graphics-packs/
     starter/
       pack.json
@@ -70,6 +73,42 @@ PBR 适用于匹配到的不透明场景批次，原版水面和透明特效由�
 同类场景设置以最后一个显式匹配的条目为准，匹配顺序先按 `packs` 列表、再按包内 `scenes` 列表。把通用 `*` 条目放在关卡条目前面。PNG 单张最多 16 MiB，宽高各最多 4096，所有包解码后的 RGBA 合计最多 256 MiB。
 
 修改后重启生效。若启动页提示加载失败，按错误信息检查 JSON 版本、键名和图片路径，或改回 `"enabled": false`。入口 JSON 如已损坏，可以先从 GitHub 恢复模板。
+
+## 可交互草地
+
+开启图形增强包后进入一线天（`sn03`）。示例在 `ground / sn302.jpg` 的泥地铺草。沿底层泥地跑过，脚边的草会弯倒，走开后回弹。局内通过设置里的「可交互草地」切换。测帧耗时，用相同分辨率、画质和机位分别记录开启和关闭后的帧时间。
+
+在 `config/graphics-packs/starter/pack.json` 的 `scenes[].grass` 调整以下参数。修改后重启。
+
+| 字段 | 用法 |
+| --- | --- |
+| `enabled`、`surfaces`、`bounds` | 关卡开关、精确的对象名与贴图名，以及可选的 `[[minX,minZ],[maxX,maxZ]]` 世界坐标范围 |
+| `density`、`tile_size`、`min_up` | 每平方世界单位的目标叶片数、草块边长和最小向上法线分量 |
+| `height`、`width`、`root_color`、`tip_color` | 叶片高宽范围及根部、叶尖的线性 RGB |
+| `near_distance`、`mid_distance`、`max_distance` | 三档距离阈值。越远越稀疏，超过最远距离裁剪 |
+| `max_visible_tiles` | 每帧可见草块上限。本例为 96。调低可减少渲染开销 |
+| `wind_strength`、`interaction_radius`、`recovery_seconds` | 风弯曲量、脚边影响范围和回弹时间 |
+
+三档每块最多绘制 192、72、24 片草。踩踏只更新相机附近的 64×64 交互纹理，最多跟踪 8 个落地角色。参考 [Grassworks](https://grassworks.techredux.co/docs/performance) 的分块和 LOD 方法。
+
+## 体积云和天空盒
+
+开启图形增强包后进入金华城（`sn13`）。在 `scenes[].sky` 指定 `enabled` 和 `replace_skybox`。后者开启时，`skybox` 里每组 `{"object":"Sphere01","texture":"sky1.bmp"}` 都要匹配，才会隐藏指定的原版材质批次。关闭替换会保留原天空盒，原天空面可能遮挡后方的体积云。游戏内的「天空增强」设置在下一局生效。
+
+`horizon`、`zenith` 和 `cloud_color` 是线性 RGB。可用 `base_height`、`thickness`、`coverage`、`density`、`scale`、`wind` 调整云层。`steps` 是采样步数，默认 24，范围 8–48。Windows 上使用 DX12 或 Vulkan。参考 [HPVolumeCloud](https://github.com/AshenOneArt/HPVolumeCloud) 的散射模型说明。
+
+## 深水和浅水
+
+水面通过 `config/water-enhancement.json` 的 `surfaces` 选择。每条规则用 `stage`、`object`、`texture` 精确匹配清水表面。省略 `profile` 时使用 `deep`。旧配置的 `legacy` 也按 `deep` 处理。金华城使用 `shallow`。两种预设均保留触水波纹和飞溅。配置编辑后重启。
+
+| `profile` | 配置文件 | 随包示例 |
+| --- | --- | --- |
+| `deep` | `config/water-deep.json` | `sn06 / Cylinder01 / sn06w.jpg`、`sn09 / Plane37 / sn914.jpg` |
+| `shallow` | `config/water-shallow.json` | 金华城 `sn13 / Plane02 / sn13w01.jpg` |
+
+两份配置的 `optics` 独立控制 `absorption`、`scattering`、`anisotropy`、`ior`、`roughness` 和 `max_path`。`refraction_strength` 设为 0 可关闭屏幕空间折射。浅水另有 `simulation`，用于调整重力、阻尼、模拟水深范围和网格大小。角色触水时，扰动沿河床范围传播。
+
+两份水体预设与 `water-enhancement.json` 放在同一目录。缺少的预设使用内置默认值。清水光学参考 [HPWater](https://github.com/AshenOneArt/HPWater/wiki/BSDF%E2%80%90Model)，浅水模拟参考 [Unity-SWE](https://github.com/AshenOneArt/Unity-SWE)。
 
 ## Meshlet 模型替换
 

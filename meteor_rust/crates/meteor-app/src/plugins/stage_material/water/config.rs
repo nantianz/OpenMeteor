@@ -1,3 +1,4 @@
+use super::profiles::{Profiles, WaterProfile};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, sync::OnceLock};
 
@@ -69,6 +70,11 @@ pub(super) struct Surface {
     pub reflection_face: usize,
     #[serde(default)]
     pub blend_mode: BlendMode,
+    #[serde(default, skip_serializing_if = "is_auto")]
+    pub profile: WaterProfile,
+}
+fn is_auto(profile: &WaterProfile) -> bool {
+    *profile == WaterProfile::Auto
 }
 fn yes() -> bool {
     true
@@ -84,6 +90,13 @@ pub(super) enum BlendMode {
     SrcColorOne,
 }
 impl Surface {
+    pub fn clear_profile(&self) -> Option<WaterProfile> {
+        (self.kind == 1).then_some(match self.profile {
+            WaterProfile::Auto => WaterProfile::Deep,
+            profile => profile,
+        })
+    }
+
     pub fn matches(&self, stage: &str, object: &str, texture: &str) -> bool {
         let normalized = texture.replace('\\', "/");
         self.stage.eq_ignore_ascii_case(stage)
@@ -97,7 +110,7 @@ impl Surface {
     }
 }
 
-fn range(name: &str, v: f32, lo: f32, hi: f32) -> Result<(), String> {
+pub(super) fn range(name: &str, v: f32, lo: f32, hi: f32) -> Result<(), String> {
     if v.is_finite() && (lo..=hi).contains(&v) {
         Ok(())
     } else {
@@ -197,6 +210,9 @@ impl WaterConfig {
             {
                 return Err("kind 应为 1 清水 / 2 毒液 / 3 岩浆；加色混合仅支持毒液".into());
             }
+            if s.profile != WaterProfile::Auto && s.kind != 1 {
+                return Err("深水和浅水预设仅适用于清水".into());
+            }
             range("max_depth", s.max_depth, 0.1, 100.0)?;
             range("extinction", s.extinction, 0.0, 20.0)?;
             if ![32, 64, 128, 256].contains(&s.reflection_face) {
@@ -209,64 +225,115 @@ impl WaterConfig {
 
 struct Snapshot {
     config: WaterConfig,
+    profiles: Profiles,
     error: Option<String>,
 }
 static CONFIG: OnceLock<Snapshot> = OnceLock::new();
-pub(super) fn get() -> &'static WaterConfig {
-    &CONFIG
-        .get_or_init(|| Snapshot {
+impl Snapshot {
+    fn bundled() -> Self {
+        Self {
             config: WaterConfig::bundled(),
+            profiles: Profiles::bundled(),
             error: None,
-        })
-        .config
+        }
+    }
+}
+pub(super) fn get() -> &'static WaterConfig {
+    &CONFIG.get_or_init(Snapshot::bundled).config
+}
+pub(super) fn profiles() -> &'static Profiles {
+    &CONFIG.get_or_init(Snapshot::bundled).profiles
 }
 pub(super) fn initialize() {
-    CONFIG.get_or_init(|| match load() {
-        Ok(config) => Snapshot {
-            config,
-            error: None,
-        },
-        Err(error) => Snapshot {
-            config: WaterConfig::bundled(),
+    CONFIG.get_or_init(|| {
+        load().unwrap_or_else(|error| Snapshot {
             error: Some(error),
-        },
+            ..Snapshot::bundled()
+        })
     });
 }
 pub(super) fn error() -> Option<&'static str> {
     CONFIG.get().and_then(|c| c.error.as_deref())
 }
-fn load() -> Result<WaterConfig, String> {
+fn load() -> Result<Snapshot, String> {
     #[cfg(all(not(test), not(any(target_arch = "wasm32", target_os = "android"))))]
     {
-        let explicit = std::env::var_os("METEOR_WATER_CONFIG").map(std::path::PathBuf::from);
-        let path = explicit.or_else(|| {
-            let mut paths = vec![
-                "config/water-enhancement.json".into(),
-                "meteor_rust/config/water-enhancement.json".into(),
-            ];
-            if let Ok(exe) = std::env::current_exe() {
-                if let Some(parent) = exe.parent() {
-                    paths.push(parent.join("config/water-enhancement.json"));
-                }
+        use std::{
+            io::Read,
+            path::{Path, PathBuf},
+        };
+        let mut directories = vec![PathBuf::from("config"), PathBuf::from("meteor_rust/config")];
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(parent) = exe.parent() {
+                directories.push(parent.join("config"));
             }
-            paths.into_iter().find(|p: &std::path::PathBuf| p.is_file())
+        }
+        let explicit = std::env::var_os("METEOR_WATER_CONFIG").map(PathBuf::from);
+        let path = explicit.or_else(|| {
+            directories
+                .iter()
+                .map(|dir| dir.join("water-enhancement.json"))
+                .find(|p| p.is_file())
         });
         if let Some(path) = path {
-            use std::io::Read;
             let mut json = String::new();
             std::fs::File::open(&path)
                 .and_then(|f| f.take(1_048_577).read_to_string(&mut json))
                 .map_err(|e| format!("{}: {e}", path.display()))?;
             bevy::log::info!("水面配置: {}", path.display());
-            return WaterConfig::from_json(&json).map_err(|e| format!("{}: {e}", path.display()));
+            let config =
+                WaterConfig::from_json(&json).map_err(|e| format!("{}: {e}", path.display()))?;
+            let directory = path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            return Ok(Snapshot {
+                config,
+                profiles: Profiles::load(directory)?,
+                error: None,
+            });
+        }
+        if let Some(directory) = directories.iter().find(|dir| {
+            [super::profiles::DEEP_FILE, super::profiles::SHALLOW_FILE]
+                .iter()
+                .any(|name| dir.join(name).exists())
+        }) {
+            return Ok(Snapshot {
+                config: WaterConfig::bundled(),
+                profiles: Profiles::load(directory)?,
+                error: None,
+            });
         }
     }
-    Ok(WaterConfig::bundled())
+    Ok(Snapshot::bundled())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn clear_water_defaults_to_deep_and_preserves_the_shallow_selection() {
+        let config = WaterConfig::bundled();
+        for surface in config.surfaces {
+            let expected = if surface.kind != 1 {
+                None
+            } else if surface.stage == "sn13" {
+                Some(WaterProfile::Shallow)
+            } else {
+                Some(WaterProfile::Deep)
+            };
+            assert_eq!(surface.clear_profile(), expected);
+        }
+        let text = BUNDLED.replace("\"profile\": \"deep\"", "\"profile\": \"legacy\"");
+        let config = WaterConfig::from_json(&text).unwrap();
+        let old = config
+            .surfaces
+            .iter()
+            .find(|surface| surface.stage == "sn09")
+            .unwrap();
+        assert_eq!(old.clear_profile(), Some(WaterProfile::Deep));
+    }
+
     #[test]
     fn rejects_unsafe_and_ambiguous_configuration() {
         let original: serde_json::Value = serde_json::from_str(BUNDLED).unwrap();

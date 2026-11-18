@@ -102,6 +102,11 @@ fn on_screen_wall_and_actor_contribute_to_clear_water() {
     water.water_depth = Some(image_handles.1);
     water.water_normal = Some(image_handles.2);
     water.water_live_reflection = true;
+    water.water_optics = super::super::WaterOptics {
+        absorption_ior: Vec4::new(0.30, 0.12, 0.06, 1.333),
+        scattering_g: Vec4::new(0.05, 0.12, 0.17, 0.35),
+        control: Vec4::new(0.16, 1.0, 12.0, 1.0),
+    };
     let water = app
         .world_mut()
         .resource_mut::<Assets<GmdlMaterial>>()
@@ -230,5 +235,40 @@ fn on_screen_wall_and_actor_contribute_to_clear_water() {
     assert!(
         reflected_changes(&actor_frame, &actor_without_reflection, 248, 280) > 80,
         "actor must reflect below its directly visible silhouette"
+    );
+
+    *app.world_mut().get_mut::<Visibility>(wall).unwrap() = Visibility::Hidden;
+    let opaque = app
+        .world()
+        .get::<MeshMaterial3d<GmdlMaterial>>(wall)
+        .unwrap()
+        .clone();
+    let bed = colored_mesh(
+        Mesh::from(Cuboid::new(1.4, 0.12, 3.0)),
+        [0.9, 0.4, 0.12, 1.0],
+    );
+    let bed = app.world_mut().resource_mut::<Assets<Mesh>>().add(bed);
+    app.world_mut()
+        .spawn((Mesh3d(bed), opaque, Transform::from_xyz(0.4, -1.0, -0.5)));
+    {
+        let mut materials = app.world_mut().resource_mut::<Assets<GmdlMaterial>>();
+        let mut material = materials.get_mut(&water).unwrap();
+        material.water_live_reflection = true;
+        material.water_optics = super::super::WaterOptics {
+            absorption_ior: Vec4::new(0.30, 0.12, 0.06, 1.333),
+            scattering_g: Vec4::new(0.05, 0.12, 0.17, 0.35),
+            control: Vec4::new(0.16, 1.0, 12.0, 1.0),
+        };
+    }
+    let undistorted_bed = capture(&mut app, &pixels);
+    app.world_mut()
+        .resource_mut::<Assets<GmdlMaterial>>()
+        .get_mut(&water)
+        .unwrap()
+        .water_screen_refraction = true;
+    let refracted_bed = capture(&mut app, &pixels);
+    assert!(
+        reflected_changes(&undistorted_bed, &refracted_bed, 190, 310) > 100,
+        "enhanced refraction must change how the submerged bed appears"
     );
 }

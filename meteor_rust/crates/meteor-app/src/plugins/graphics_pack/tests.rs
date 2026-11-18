@@ -5,7 +5,7 @@ use serde_json::json;
 fn config_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config")
 }
-fn starter() -> GraphicsPacks {
+pub(super) fn starter() -> GraphicsPacks {
     load_with_reader(
         br#"{"schema_version":1,"enabled":true,"packs":["graphics-packs/starter/pack.json"]}"#,
         |name| std::fs::read(config_root().join(name)).map_err(|e| e.to_string()),

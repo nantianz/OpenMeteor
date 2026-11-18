@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "optics": {
+    "absorption": [
+      0.78,
+      0.32,
+      0.24
+    ],
+    "scattering": [
+      0.046,
+      0.12,
+      0.104
+    ],
+    "anisotropy": 0.48,
+    "ior": 1.333,
+    "roughness": 0.19,
+    "refraction_strength": 0.62,
+    "max_path": 6.0
+  },
+  "simulation": {
+    "gravity": 9.81,
+    "drag": 1.15,
+    "min_depth": 0.05,
+    "fallback_depth": 0.8,
+    "max_depth": 3.0,
+    "max_grid_side": 128
+  }
+}

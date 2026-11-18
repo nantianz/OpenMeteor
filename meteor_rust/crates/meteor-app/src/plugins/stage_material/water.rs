@@ -156,15 +156,36 @@ impl WaterCache {
             }
         }
         let ripple = self.ripple.get_or_insert_with(|| {
-            super::super::pak_textures::image_from_decoded_with_quality(images, &ripple_map::generate(), 0)
+            super::super::pak_textures::image_from_decoded_with_quality(
+                images,
+                &ripple_map::generate(),
+                0,
+            )
         });
         material.water_normal = Some(ripple.clone());
+        use profiles::WaterProfile;
+        let profiles = config::profiles();
+        let profile = match setting.clear_profile() {
+            Some(WaterProfile::Deep) => Some((profiles.deep, 1.0, setting.max_depth)),
+            Some(WaterProfile::Shallow) => Some((
+                profiles.shallow_optics,
+                2.0,
+                profiles.shallow.fallback_depth.min(setting.max_depth),
+            )),
+            _ => None,
+        };
         material.water = Vec4::new(
             setting.kind as f32,
             setting.max_depth,
             vertex_alpha,
-            setting.extinction,
+            profile.map_or(setting.extinction, |(_, _, fallback_depth)| fallback_depth),
         );
+        material.water_optics =
+            profile.map_or_else(Default::default, |(p, style, _)| super::WaterOptics {
+                absorption_ior: Vec3::from_array(p.absorption).extend(p.ior),
+                scattering_g: Vec3::from_array(p.scattering).extend(p.anisotropy),
+                control: Vec4::new(p.roughness, p.refraction_strength, p.max_path, style),
+            });
         material.water_bounds = Vec4::new(
             bounds[0] - center[0] * MODEL_SCALE,
             bounds[1] + center[1] * MODEL_SCALE,
@@ -372,7 +393,11 @@ mod tests {
 #[cfg(all(test, feature = "original-assets"))]
 mod render_tests;
 
-#[cfg(all(test, feature = "original-assets", not(any(target_arch = "wasm32", target_os = "android"))))]
+#[cfg(all(
+    test,
+    feature = "original-assets",
+    not(any(target_arch = "wasm32", target_os = "android"))
+))]
 mod live_reflection_tests;
 #[cfg(all(test, feature = "original-assets"))]
 mod scene_render_tests;
@@ -381,7 +406,9 @@ pub(crate) mod interaction;
 
 pub(crate) mod waves;
 
+mod profiles;
 pub(crate) mod screen_reflection;
+mod shallow;
 mod splash;
 mod spray;
 

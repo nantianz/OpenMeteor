@@ -2238,7 +2238,7 @@ fn update_scene_billboard(
 }
 
 #[derive(Component)]
-struct PlayingSceneEntity;
+pub(super) struct PlayingSceneEntity;
 
 #[derive(Component)]
 struct StageSkyDome;
@@ -2468,6 +2468,10 @@ fn setup_stage_scene(
     mut hazards: ResMut<super::hazard_plugin::StageHazardRuntime>,
     graphics: Option<Res<super::graphics_pack::GraphicsPacks>>,
     render_adapter: Option<Res<bevy::render::renderer::RenderAdapterInfo>>,
+    (mut cloud_materials, mut grass_materials): (
+        Option<ResMut<Assets<super::graphics_pack::sky::CloudSkyMaterial>>>,
+        Option<ResMut<Assets<super::graphics_pack::grass::GrassMaterial>>>,
+    ),
 ) {
     hazards.0 = Default::default();
     let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
@@ -2570,15 +2574,6 @@ fn setup_stage_scene(
             paks.iter().map(PakArchive::len).sum::<usize>()
         );
     }
-    spawn_stage_sky(
-        &mut commands,
-        &mut meshes,
-        &mut standard_materials,
-        &mut images,
-        &gmdl,
-        &loaded.stage_id,
-    );
-
     let mut normal_cache = HashMap::new();
     let hd_pack = SceneTexturePack::load(&loaded.stage_id, settings.hd_scene);
     let mut water_cache = super::stage_material::water::WaterCache::default();
@@ -2588,7 +2583,7 @@ fn setup_stage_scene(
         bytes,
         render_adapter.as_ref().map(|adapter| adapter.0.backend),
     );
-    let mut graphics =
+    let mut surfaces =
         super::graphics_pack::SceneGraphics::new(graphics.as_deref(), &loaded.stage_id);
     let mut normal_batches = 0usize;
     let mut world_min = Vec3::splat(f32::MAX);
@@ -2620,6 +2615,64 @@ fn setup_stage_scene(
         );
     }
 
+    use super::graphics_pack::sky;
+    use bevy::render::settings::Backends;
+    let mut sky_replacements = HashSet::new();
+    let mut enhanced_sky = false;
+    let native_sky = !cfg!(any(target_arch = "wasm32", target_os = "android"))
+        && render_adapter.as_ref().is_some_and(|adapter| {
+            let backend = Backends::from(adapter.0.backend);
+            backend.intersects(Backends::DX12 | Backends::METAL | Backends::VULKAN)
+        });
+    let sky_profile = graphics
+        .as_deref()
+        .filter(|_| settings.sky_enhance && native_sky)
+        .and_then(|packs| sky::scene(packs, &loaded.stage_id));
+    if let (Some(materials), Some((profile, lighting))) =
+        (cloud_materials.as_deref_mut(), sky_profile)
+    {
+        match sky::replacements(profile, &gmdl, &skip_render) {
+            Ok(replacements) => {
+                sky_replacements = replacements;
+                enhanced_sky = true;
+                commands.spawn((
+                    PlayingSceneEntity,
+                    sky::CloudSky,
+                    bevy::camera::visibility::NoFrustumCulling,
+                    Mesh3d(meshes.add(Sphere::new(1.0).mesh().uv(24, 12))),
+                    MeshMaterial3d(materials.add(sky::material(profile, &lighting))),
+                    Transform::IDENTITY,
+                ));
+            }
+            Err(error) => warn!("{} sky enhancement skipped: {error}", loaded.stage_id),
+        }
+    }
+    if !enhanced_sky {
+        spawn_stage_sky(
+            &mut commands,
+            &mut meshes,
+            &mut standard_materials,
+            &mut images,
+            &gmdl,
+            &loaded.stage_id,
+        );
+    }
+    if let (Some(packs), Some(materials)) = (graphics.as_deref(), grass_materials.as_deref_mut()) {
+        super::graphics_pack::grass::spawn(
+            &mut commands,
+            &mut meshes,
+            &mut images,
+            materials,
+            packs,
+            &loaded.stage_id,
+            &gmdl,
+            stage_desc.as_ref(),
+            &collision.face_ids,
+            stage_collider.mesh.as_ref(),
+            loaded.center,
+        );
+    }
+
     for (obj_idx, object) in gmdl.objects.iter().enumerate() {
         if skip_render.contains(object.name.as_str()) {
             continue;
@@ -2630,19 +2683,24 @@ fn setup_stage_scene(
         let scene_obj = stage_desc
             .as_ref()
             .and_then(|d| d.scene_objects.iter().find(|obj| obj.name == object.name));
-        if let Some(replacement) = meshlets.replace(
-            &gmdl,
-            object,
-            scene_obj,
-            loaded.center,
-            || {
-                script
-                    .script()
-                    .is_some_and(|script| script.host().resolve_name(&object.name).is_some())
-            },
-            &mut graphics,
-            &mut images,
-        ) {
+        let replacement = (!sky_replacements.iter().any(|&(index, _)| index == obj_idx))
+            .then(|| {
+                meshlets.replace(
+                    &gmdl,
+                    object,
+                    scene_obj,
+                    loaded.center,
+                    || {
+                        script.script().is_some_and(|script| {
+                            script.host().resolve_name(&object.name).is_some()
+                        })
+                    },
+                    &mut surfaces,
+                    &mut images,
+                )
+            })
+            .flatten();
+        if let Some(replacement) = replacement {
             for (clusters, material) in replacement.primitives {
                 let material = materials.add(material);
                 for mesh in clusters {
@@ -2670,6 +2728,9 @@ fn setup_stage_scene(
                 .extend_from_slice(&object.indices[face * 3..face * 3 + 3]);
         }
         for (mat_idx, indices) in groups {
+            if sky_replacements.contains(&(obj_idx, mat_idx)) {
+                continue;
+            }
             drawn_objects += 1;
             drawn_faces += indices.len() / 3;
             let mat = &gmdl.materials[mat_idx as usize];
@@ -2833,9 +2894,14 @@ fn setup_stage_scene(
                 }
             }
             let wave_mesh = if liquid_surface.as_ref().is_some_and(|s| s.is_clear_water()) {
-                if let Some((refined, wave)) =
+                if let Some((refined, mut wave)) =
                     super::stage_material::water::waves::WaterWaveMesh::refine(&mesh, &indices)
                 {
+                    wave.configure_shallow(
+                        materials.get(&material_handle).unwrap(),
+                        &images,
+                        &transform,
+                    );
                     mesh = refined;
                     Some(wave)
                 } else {
@@ -2848,7 +2914,7 @@ fn setup_stage_scene(
             } else {
                 None
             };
-            let wind = graphics.configure(
+            let wind = surfaces.configure(
                 &object.name,
                 gmdl.resolve_texture_name(mat),
                 &mut materials.get_mut(&material_handle).unwrap(),

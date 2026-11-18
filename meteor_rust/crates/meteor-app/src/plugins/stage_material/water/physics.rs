@@ -18,6 +18,7 @@ pub(super) struct WaveField {
     active_lo: UVec2,
     active_hi: UVec2,
     pub(super) dirty: bool,
+    shallow: Option<super::shallow::ShallowFlow>,
 }
 
 fn contains(p: Vec2, [a, b, c]: [Vec2; 3]) -> bool {
@@ -34,6 +35,10 @@ fn contains(p: Vec2, [a, b, c]: [Vec2; 3]) -> bool {
 
 impl WaveField {
     pub(super) fn new(triangles: &[[Vec2; 3]]) -> Self {
+        Self::grid(triangles, None)
+    }
+
+    fn grid(triangles: &[[Vec2; 3]], shallow: Option<super::profiles::Shallow>) -> Self {
         let config = &super::config::get().simulation;
         let mut lo = Vec2::splat(f32::INFINITY);
         let mut hi = Vec2::splat(f32::NEG_INFINITY);
@@ -41,8 +46,13 @@ impl WaveField {
             lo = lo.min(p);
             hi = hi.max(p);
         }
-        let spacing =
-            ((hi - lo).max_element() / (config.max_side - 3) as f32).max(config.min_spacing);
+        let max_side = shallow.map_or(config.max_side, |s| s.max_grid_side.min(config.max_side));
+        let min_spacing = shallow.map_or(config.min_spacing, |s| {
+            config
+                .min_spacing
+                .max(STEP * ((s.gravity * (s.max_depth + 1.0)).sqrt() + 2.5) / 0.35)
+        });
+        let spacing = ((hi - lo).max_element() / (max_side - 3) as f32).max(min_spacing);
         let origin = lo - Vec2::splat(spacing);
         let size = ((hi - lo) / spacing).ceil().as_uvec2() + UVec2::splat(3);
         let (width, height) = (size.x as usize, size.y as usize);
@@ -69,7 +79,32 @@ impl WaveField {
             active_lo: UVec2::new(width as u32, height as u32),
             active_hi: UVec2::ZERO,
             dirty: true,
+            shallow: None,
         }
+    }
+
+    pub(super) fn use_shallow(&mut self, depth_at: impl Fn(Vec2) -> Option<f32>) {
+        let settings = super::config::profiles().shallow;
+        *self = Self::grid(&self.triangles, Some(settings));
+        let rest = self
+            .wet
+            .iter_mut()
+            .enumerate()
+            .map(|(i, wet)| {
+                if !*wet {
+                    return 0.0;
+                }
+                let cell = Vec2::new((i % self.width) as f32, (i / self.width) as f32);
+                let depth =
+                    depth_at(self.origin + cell * self.spacing).unwrap_or(settings.fallback_depth);
+                if depth <= 0.0 {
+                    *wet = false;
+                    return 0.0;
+                }
+                depth.clamp(settings.min_depth, settings.max_depth)
+            })
+            .collect();
+        self.shallow = Some(super::shallow::ShallowFlow::new(rest, settings));
     }
 
     pub(super) fn clear(&mut self) {
@@ -82,6 +117,9 @@ impl WaveField {
         self.active_lo = UVec2::new(self.width as u32, self.height as u32);
         self.active_hi = UVec2::ZERO;
         self.dirty = true;
+        if let Some(flow) = &mut self.shallow {
+            flow.clear();
+        }
     }
 
     #[cfg(test)]
@@ -142,6 +180,13 @@ impl WaveField {
 
         self.awake |= !footprint.is_empty();
         let mean = footprint.iter().map(|(_, v)| v).sum::<f32>() / footprint.len().max(1) as f32;
+        if let Some(flow) = &self.shallow {
+            for (_, v) in &mut footprint {
+                *v *= STEP;
+            }
+            flow.displace(&mut self.displacement, &footprint, mean * STEP);
+            return;
+        }
         for (i, velocity) in footprint {
             self.velocity[i] = (self.velocity[i] + velocity - mean).clamp(-6.0, 6.0);
         }
@@ -155,6 +200,28 @@ impl WaveField {
         self.remainder += dt.clamp(0.0, 0.1);
         self.dirty = true;
         let config = &super::config::get().simulation;
+        if let Some(flow) = &mut self.shallow {
+            while self.remainder + 1e-7 >= STEP {
+                self.remainder = (self.remainder - STEP).max(0.0);
+                let mut peak = flow.step(
+                    self.width,
+                    self.spacing,
+                    STEP,
+                    &self.displacement,
+                    &mut self.next,
+                );
+                std::mem::swap(&mut self.displacement, &mut self.next);
+                for (height, foam) in self.displacement.iter().zip(&mut self.foam) {
+                    *foam *= 1.0 - STEP * config.foam_decay;
+                    peak = peak.max(height.abs()).max(*foam);
+                }
+                if peak < 1e-4 {
+                    self.clear();
+                    break;
+                }
+            }
+            return;
+        }
         let k = config.speed * config.speed / (self.spacing * self.spacing);
         while self.remainder + 1e-7 >= STEP {
             self.remainder = (self.remainder - STEP).max(0.0);

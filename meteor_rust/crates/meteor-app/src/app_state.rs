@@ -144,6 +144,8 @@ pub struct Settings {
 
     pub new_character_models: bool,
     pub volumetric_fog: bool,
+    pub sky_enhance: bool,
+    pub grass_enhance: bool,
     pub target_fps: u32,
     pub brightness: f32,
     pub contrast: f32,
@@ -203,6 +205,8 @@ impl Default for Settings {
             character_motion: true,
             new_character_models: true,
             volumetric_fog: false,
+            sky_enhance: true,
+            grass_enhance: true,
             target_fps: 0,
             brightness: 94.0,
             contrast: 94.0,
@@ -741,6 +745,8 @@ hit_sway={}
 character_motion={}
 new_character_models={}
 volumetric_fog={}
+sky_enhance={}
+grass_enhance={}
 target_fps={}
 brightness={}
 contrast={}
@@ -776,6 +782,8 @@ touch_controls={}
         u8::from(settings.character_motion),
         u8::from(settings.new_character_models),
         u8::from(settings.volumetric_fog),
+        u8::from(settings.sky_enhance),
+        u8::from(settings.grass_enhance),
         settings.target_fps,
         settings.brightness,
         settings.contrast,
@@ -915,6 +923,8 @@ fn parse_settings(text: &str) -> (Settings, Keymap) {
             "character_motion" => settings.character_motion = parse_bool(value),
             "new_character_models" => settings.new_character_models = parse_bool(value),
             "volumetric_fog" => settings.volumetric_fog = parse_bool(value),
+            "sky_enhance" => settings.sky_enhance = parse_bool(value),
+            "grass_enhance" => settings.grass_enhance = parse_bool(value),
             "target_fps" => settings.target_fps = value.parse().unwrap_or(settings.target_fps),
             "brightness" => settings.brightness = value.parse().unwrap_or(settings.brightness),
             "contrast" => settings.contrast = value.parse().unwrap_or(settings.contrast),
@@ -1025,6 +1035,8 @@ pub enum SettingsBoolField {
     CharacterMotion,
     NewCharacterModels,
     VolumetricFog,
+    SkyEnhance,
+    GrassEnhance,
     DynamicShadows,
     SceneNormalMaps,
     HdScene,

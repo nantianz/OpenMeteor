@@ -27,7 +27,7 @@ For shortcuts, set the working directory to the original game directory.
 The Chinese font is included as fonts/ui.ttf, with its license in licenses/.
 The startup logo, menu title and background, campaign map, and halo are embedded
 in OpenMeteor.exe. No separate UI image download is needed.
-See GRAPHICS-README.md to enable the included optional graphics pack.
+See GRAPHICS-README.md for the interactive grass, volumetric sky, and water settings.
 The package does not enable optional DLSS or ANGLE backends.
 
 将 ZIP 完整解压到原版游戏目录，保留 config/ 和 fonts/ 的目录结构，
@@ -37,7 +37,7 @@ The package does not enable optional DLSS or ANGLE backends.
 包内已附带 fonts/ui.ttf 中文字体及 licenses/ 中的字体许可。
 启动 Logo、主界面标题与背景、战役地图和光晕已内置于 OpenMeteor.exe，
 不需要另行下载界面图片。
-随包附带图形增强配置和示例，请查阅 GRAPHICS-README.md。
+随包附带可交互草地、体积云和深浅水的配置与示例，请查阅 GRAPHICS-README.md。
 """
 
 
@@ -72,6 +72,8 @@ def graphics_files():
         return path
 
     index = json.loads(add("graphics-enhancement.json").read_text(encoding="utf-8"))
+    for preset in ("water-deep.json", "water-shallow.json"):
+        json.loads(add(preset).read_text(encoding="utf-8"))
     demo = "graphics-packs/meshlet-demo/pack.json"
     for name in dict.fromkeys([*index["packs"], demo]):
         manifest = json.loads(add(name).read_text(encoding="utf-8"))

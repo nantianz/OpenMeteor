@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "optics": {
+    "absorption": [
+      0.72,
+      0.31,
+      0.19
+    ],
+    "scattering": [
+      0.035,
+      0.095,
+      0.105
+    ],
+    "anisotropy": 0.68,
+    "ior": 1.333,
+    "roughness": 0.14,
+    "refraction_strength": 0.85,
+    "max_path": 16.0
+  }
+}

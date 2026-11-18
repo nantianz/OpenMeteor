@@ -175,8 +175,13 @@ fn render_original_liquid(stage: &str, eye: Vec3, aim: Vec3, live_reflection: bo
                 water_count += 1;
             }
             let wave = if stage == "sn13" && is_water {
-                let (refined, wave) = super::waves::WaterWaveMesh::refine(&mesh, &indices)
+                let (refined, mut wave) = super::waves::WaterWaveMesh::refine(&mesh, &indices)
                     .expect("audited sn13 water must refine within the vertex budget");
+                wave.configure_shallow(
+                    &material,
+                    app.world().resource::<Assets<Image>>(),
+                    &transform,
+                );
                 mesh = refined;
                 Some(wave)
             } else {

@@ -561,6 +561,22 @@ fn spawn_graphics_fieldset(
                 SettingsBoolField::VolumetricFog,
                 settings.volumetric_fog,
             );
+            if !cfg!(any(target_arch = "wasm32", target_os = "android")) {
+                spawn_check_row(
+                    fs,
+                    font,
+                    "天空增强（下局生效）",
+                    SettingsBoolField::SkyEnhance,
+                    settings.sky_enhance,
+                );
+            }
+            spawn_check_row(
+                fs,
+                font,
+                "可交互草地",
+                SettingsBoolField::GrassEnhance,
+                settings.grass_enhance,
+            );
             spawn_check_row(
                 fs,
                 font,
@@ -1252,6 +1268,8 @@ fn read_bool(settings: &Settings, field: SettingsBoolField) -> bool {
         SettingsBoolField::CharacterMotion => settings.character_motion,
         SettingsBoolField::NewCharacterModels => settings.new_character_models,
         SettingsBoolField::VolumetricFog => settings.volumetric_fog,
+        SettingsBoolField::SkyEnhance => settings.sky_enhance,
+        SettingsBoolField::GrassEnhance => settings.grass_enhance,
         SettingsBoolField::DynamicShadows => settings.dynamic_shadows,
         SettingsBoolField::SceneNormalMaps => settings.scene_normal_maps,
         SettingsBoolField::HdScene => settings.hd_scene,
@@ -1280,6 +1298,8 @@ fn write_bool(settings: &mut Settings, field: SettingsBoolField, value: bool) {
         SettingsBoolField::CharacterMotion => settings.character_motion = value,
         SettingsBoolField::NewCharacterModels => settings.new_character_models = value,
         SettingsBoolField::VolumetricFog => settings.volumetric_fog = value,
+        SettingsBoolField::SkyEnhance => settings.sky_enhance = value,
+        SettingsBoolField::GrassEnhance => settings.grass_enhance = value,
         SettingsBoolField::DynamicShadows => settings.dynamic_shadows = value,
         SettingsBoolField::SceneNormalMaps => settings.scene_normal_maps = value,
         SettingsBoolField::HdScene => settings.hd_scene = value,

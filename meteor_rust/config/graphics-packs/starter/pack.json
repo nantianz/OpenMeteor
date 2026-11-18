@@ -38,6 +38,48 @@
       "stage": "sn06",
       "surfaces": [{"texture": "sn064.jpg", "material": "stone"}],
       "fog": [{"center": [0.0, 6.0, 0.0], "radius": 30.0, "color": [0.58, 0.65, 0.72], "density": 0.008}]
+    },
+    {
+      "stage": "sn03",
+      "grass": {
+        "surfaces": [{"object": "ground", "texture": "sn302.jpg"}],
+        "density": 3.0,
+        "tile_size": 8.0,
+        "height": [0.36, 1.08],
+        "width": [0.075, 0.17],
+        "root_color": [0.040, 0.072, 0.024],
+        "tip_color": [0.32, 0.42, 0.12],
+        "near_distance": 18.0,
+        "mid_distance": 33.0,
+        "max_distance": 56.0,
+        "max_visible_tiles": 96,
+        "interaction_radius": 1.05,
+        "recovery_seconds": 1.45
+      }
+    },
+    {
+      "stage": "sn13",
+      "sky": {
+        "enabled": true,
+        "replace_skybox": true,
+        "skybox": [
+          {"object": "Sphere01", "texture": "sky1.bmp"},
+          {"object": "Sphere01", "texture": "sky2.bmp"},
+          {"object": "Sphere01", "texture": "sky3.bmp"},
+          {"object": "Sphere02", "texture": "am2sky1.jpg"},
+          {"object": "Sphere03", "texture": "am2sky1.jpg"}
+        ],
+        "horizon": [0.54, 0.64, 0.78],
+        "zenith": [0.09, 0.23, 0.49],
+        "cloud_color": [0.90, 0.94, 1.0],
+        "base_height": 100.0,
+        "thickness": 38.0,
+        "density": 0.13,
+        "coverage": 0.57,
+        "scale": 0.017,
+        "wind": [1.7, 0.6],
+        "steps": 24
+      }
     }
   ]
 }

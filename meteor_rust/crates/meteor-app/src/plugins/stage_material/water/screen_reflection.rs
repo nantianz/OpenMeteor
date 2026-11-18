@@ -10,19 +10,17 @@ struct WaterReflectionDepthOwner;
 
 #[derive(Resource)]
 struct WaterReflectionRuntime {
-    enabled_at_startup: bool,
-    session_prepared: bool,
+    reflection_at_startup: bool,
+    prepared_water_enabled: Option<bool>,
 }
 
 impl FromWorld for WaterReflectionRuntime {
     fn from_world(world: &mut World) -> Self {
-        let enabled_at_startup = !cfg!(any(target_arch = "wasm32", target_os = "android"))
-            && world
-                .get_resource::<Settings>()
-                .is_some_and(|settings| settings.water_enhance && settings.water_live_reflections);
         Self {
-            enabled_at_startup,
-            session_prepared: false,
+            reflection_at_startup: world
+                .get_resource::<Settings>()
+                .is_some_and(|settings| settings.water_live_reflections),
+            prepared_water_enabled: None,
         }
     }
 }
@@ -46,10 +44,11 @@ fn clear_on_session_exit(
     mut materials: ResMut<Assets<GmdlMaterial>>,
     mut runtime: ResMut<WaterReflectionRuntime>,
 ) {
-    runtime.session_prepared = false;
+    runtime.prepared_water_enabled = None;
     for (_, material) in materials.iter_mut() {
-        if material.water_live_reflection {
+        if material.water_live_reflection || material.water_screen_refraction {
             material.water_live_reflection = false;
+            material.water_screen_refraction = false;
         }
     }
     for (entity, owned) in &cameras {
@@ -75,34 +74,40 @@ fn release_depth_prepass(commands: &mut Commands, entity: Entity, settings: Opti
 
 fn prepare_session(
     mut commands: Commands,
+    settings: Option<Res<Settings>>,
     mut runtime: ResMut<WaterReflectionRuntime>,
-    cameras: Query<(Entity, Has<DepthPrepass>), With<GameplayCamera>>,
+    cameras: Query<
+        (Entity, Has<DepthPrepass>, Has<WaterReflectionDepthOwner>),
+        With<GameplayCamera>,
+    >,
     surfaces: Query<(&LiquidSurface, &MeshMaterial3d<GmdlMaterial>)>,
     mut materials: ResMut<Assets<GmdlMaterial>>,
 ) {
-    if runtime.session_prepared || cameras.is_empty() {
+    let enabled = !cfg!(any(target_arch = "wasm32", target_os = "android"))
+        && settings
+            .as_ref()
+            .is_some_and(|settings| settings.water_enhance);
+    if runtime.prepared_water_enabled == Some(enabled) || cameras.is_empty() {
         return;
     }
-    runtime.session_prepared = true;
-    if !runtime.enabled_at_startup {
-        return;
-    }
-    let mut any_clear_water = false;
+    runtime.prepared_water_enabled = Some(enabled);
+    let mut needs_depth = false;
     for (_, handle) in &surfaces {
         if let Some(mut material) = materials.get_mut(&handle.0) {
             if material.water.x == 1.0 {
-                material.water_live_reflection = true;
-                any_clear_water = true;
+                material.water_live_reflection = enabled && runtime.reflection_at_startup;
+                material.water_screen_refraction = enabled && material.water_optics.control.y > 0.0;
+                needs_depth |= material.water_live_reflection || material.water_screen_refraction;
             }
         }
     }
-    if any_clear_water {
-        for (entity, has_depth_prepass) in &cameras {
-            if !has_depth_prepass {
-                commands
-                    .entity(entity)
-                    .insert((DepthPrepass, WaterReflectionDepthOwner));
-            }
+    for (entity, has_depth_prepass, owned) in &cameras {
+        if needs_depth && !has_depth_prepass {
+            commands
+                .entity(entity)
+                .insert((DepthPrepass, WaterReflectionDepthOwner));
+        } else if !needs_depth && owned {
+            release_depth_prepass(&mut commands, entity, settings.as_deref());
         }
     }
 }
@@ -197,6 +202,29 @@ mod tests {
         on.update();
         assert!(material_live(&on, &on_material));
         assert!(on.world().get::<DepthPrepass>(on_camera).is_some());
+    }
+
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    #[test]
+    fn water_toggle_releases_refraction_pass_and_restores_it() {
+        let (mut app, camera, water) = fixture(false);
+        app.world_mut()
+            .resource_mut::<Assets<GmdlMaterial>>()
+            .get_mut(&water)
+            .unwrap()
+            .water_optics
+            .control
+            .y = 0.6;
+        for enabled in [true, false, true] {
+            app.world_mut().resource_mut::<Settings>().water_enhance = enabled;
+            app.update();
+            let materials = app.world().resource::<Assets<GmdlMaterial>>();
+            assert_eq!(
+                materials.get(&water).unwrap().water_screen_refraction,
+                enabled
+            );
+            assert_eq!(app.world().get::<DepthPrepass>(camera).is_some(), enabled);
+        }
     }
 
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]

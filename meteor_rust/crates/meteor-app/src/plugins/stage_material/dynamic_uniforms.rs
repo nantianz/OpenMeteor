@@ -9,7 +9,7 @@ use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderSystems};
 use std::collections::{HashMap, HashSet};
 
-type ParamKey = [u32; 50];
+type ParamKey = [u32; 63];
 
 #[derive(Resource, Default, Clone)]
 pub(crate) struct FrameUniforms {
@@ -42,12 +42,13 @@ struct GpuParams {
     pbr: Vec4,
     pbr_tint: Vec4,
     pbr_textures: Vec4,
+    water_optics: WaterOptics,
 }
 
 impl GmdlMaterial {
     fn param_key(&self) -> ParamKey {
         let p = &self.params;
-        [
+        let existing = [
             p.opacity.to_bits(),
             p.alpha_cutoff.to_bits(),
             p.mode,
@@ -98,7 +99,20 @@ impl GmdlMaterial {
             self.pbr_textures.y.to_bits(),
             self.pbr_textures.z.to_bits(),
             self.pbr_textures.w.to_bits(),
-        ]
+        ];
+        let mut key = [0; 63];
+        key[..50].copy_from_slice(&existing);
+        key[50] = self.water_screen_refraction as u32;
+        key[51..55].copy_from_slice(
+            &self
+                .water_optics
+                .absorption_ior
+                .to_array()
+                .map(f32::to_bits),
+        );
+        key[55..59].copy_from_slice(&self.water_optics.scattering_g.to_array().map(f32::to_bits));
+        key[59..63].copy_from_slice(&self.water_optics.control.to_array().map(f32::to_bits));
+        key
     }
 }
 
@@ -141,17 +155,17 @@ impl ParamBuffers {
                     water_bounds: material.water_bounds,
                     first_person_clip: material.first_person_clip,
                     water_dynamics_bounds: material.water_dynamics_bounds,
+                    water_optics: material.water_optics,
                     detail: Vec4::new(
                         if material.normal_texture.is_some() {
                             1.0
                         } else {
                             0.0
                         },
-                        if material.water_live_reflection {
-                            1.0
-                        } else {
-                            0.0
-                        },
+                        f32::from(
+                            material.water_live_reflection as u8
+                                + 2 * material.water_screen_refraction as u8,
+                        ),
                         material.normal_strength,
                         material.normal_contrast,
                     ),

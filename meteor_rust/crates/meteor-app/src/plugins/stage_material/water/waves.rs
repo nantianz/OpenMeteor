@@ -139,6 +139,44 @@ fn grid_index(row: usize, col: usize, subdivisions: usize) -> usize {
 }
 
 impl WaterWaveMesh {
+    pub(crate) fn configure_shallow(
+        &mut self,
+        material: &super::GmdlMaterial,
+        images: &Assets<Image>,
+        transform: &Transform,
+    ) {
+        if material.water_optics.control.w != 2.0 {
+            return;
+        }
+        let bed = material
+            .water_depth
+            .as_ref()
+            .and_then(|handle| images.get(handle));
+        let bounds = material.water_bounds;
+        self.physics.use_shallow(|point| {
+            let bed = bed?;
+            let data = bed.data.as_deref()?;
+            let world = transform.transform_point(Vec3::new(
+                point.x / MODEL_SCALE,
+                -point.y / MODEL_SCALE,
+                0.0,
+            ));
+            let uv = (world.xz() - bounds.xy()) / Vec2::new(bounds.z, bounds.w);
+            if !uv.cmpge(Vec2::ZERO).all() || !uv.cmple(Vec2::ONE).all() {
+                return None;
+            }
+            let size = bed.texture_descriptor.size;
+            let x = ((uv.x * size.width as f32) as u32).min(size.width.saturating_sub(1));
+            let y = ((uv.y * size.height as f32) as u32).min(size.height.saturating_sub(1));
+            let offset = (y as usize * size.width as usize + x as usize) * 4;
+            let pixel = data.get(offset..offset + 4)?;
+            if pixel[2] == 0 {
+                return Some(0.0);
+            }
+            (pixel[1] != 0).then(|| f32::from(pixel[0].max(1)) * material.water.y / 255.0)
+        });
+    }
+
     pub(crate) fn refine(mesh: &Mesh, faces: &[u32]) -> Option<(Mesh, Self)> {
         let VertexAttributeValues::Float32x3(source_positions) =
             mesh.attribute(Mesh::ATTRIBUTE_POSITION)?

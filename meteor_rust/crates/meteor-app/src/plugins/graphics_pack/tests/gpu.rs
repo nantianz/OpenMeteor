@@ -39,6 +39,114 @@ fn changed(a: &[u8], b: &[u8]) -> usize {
         .filter(|(a, b)| (0..3).any(|i| a[i].abs_diff(b[i]) > 2))
         .count()
 }
+
+#[test]
+fn headless_cloud_sky_renders_and_respects_opaque_depth() {
+    use crate::plugins::graphics_pack::{config, sky};
+
+    let mut app = App::new();
+    app.add_plugins(
+        DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: None,
+                exit_condition: bevy::window::ExitCondition::DontExit,
+                ..default()
+            })
+            .set(RenderPlugin {
+                synchronous_pipeline_compilation: true,
+                ..default()
+            })
+            .disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>()
+            .disable::<bevy::winit::WinitPlugin>()
+            .disable::<bevy::audio::AudioPlugin>(),
+    );
+    sky::install(&mut app);
+    let mut image = Image::new_target_texture(128, 128, TextureFormat::Rgba8UnormSrgb, None);
+    image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
+    let target = app.world_mut().resource_mut::<Assets<Image>>().add(image);
+    app.world_mut().spawn((
+        Camera3d::default(),
+        Camera {
+            clear_color: ClearColorConfig::Custom(Color::BLACK),
+            ..default()
+        },
+        RenderTarget::Image(target.clone().into()),
+        Msaa::Off,
+        bevy::core_pipeline::tonemapping::Tonemapping::None,
+        Transform::IDENTITY.looking_at(Vec3::new(0., 0.65, -1.), Vec3::Y),
+    ));
+    let profile = config::Sky {
+        density: 0.0,
+        coverage: 1.0,
+        ..default()
+    };
+    let light = config::Environment::default();
+    let cloud = app
+        .world_mut()
+        .resource_mut::<Assets<sky::CloudSkyMaterial>>()
+        .add(sky::material(&profile, &light));
+    let shell = app
+        .world_mut()
+        .resource_mut::<Assets<Mesh>>()
+        .add(Sphere::new(1.).mesh().uv(24, 12));
+    app.world_mut().spawn((
+        sky::CloudSky,
+        bevy::camera::visibility::NoFrustumCulling,
+        Mesh3d(shell),
+        MeshMaterial3d(cloud.clone()),
+        Transform::IDENTITY,
+    ));
+    let solid = app
+        .world_mut()
+        .resource_mut::<Assets<StandardMaterial>>()
+        .add(StandardMaterial {
+            base_color: Color::srgb(1., 0., 0.),
+            unlit: true,
+            ..default()
+        });
+    let mesh = app
+        .world_mut()
+        .resource_mut::<Assets<Mesh>>()
+        .add(Cuboid::new(0.6, 0.6, 0.6));
+    app.world_mut().spawn((
+        Mesh3d(mesh),
+        MeshMaterial3d(solid),
+        Transform::from_xyz(0., 1.3, -2.),
+    ));
+    let pixels = Arc::new(Mutex::new(Vec::new()));
+    let output = pixels.clone();
+    app.world_mut()
+        .spawn(Readback::texture(target))
+        .observe(move |e: On<ReadbackComplete>| {
+            *output.lock().unwrap() = e.data.clone();
+        });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while app.plugins_state() != PluginsState::Ready {
+        assert!(std::time::Instant::now() < deadline, "render plugins");
+        bevy::tasks::tick_global_task_pools_on_main_thread();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    app.finish();
+    app.cleanup();
+    let clear_sky = capture(&mut app, &pixels);
+    let cloudy = config::Sky {
+        density: 0.4,
+        ..profile
+    };
+    *app.world_mut()
+        .resource_mut::<Assets<sky::CloudSkyMaterial>>()
+        .get_mut(&cloud)
+        .unwrap() = sky::material(&cloudy, &light);
+    let cloudy_sky = capture(&mut app, &pixels);
+    assert!(changed(&clear_sky, &cloudy_sky) > 1024);
+    let middle = (64 * 128 + 64) * 4;
+    assert_eq!(&clear_sky[middle..middle + 3], &[255, 0, 0]);
+    assert_eq!(
+        &clear_sky[middle..middle + 4],
+        &cloudy_sky[middle..middle + 4]
+    );
+}
+
 #[test]
 fn headless_pbr_environment_fog_contacts_and_disabled_restoration() {
     let mut app = App::new();
