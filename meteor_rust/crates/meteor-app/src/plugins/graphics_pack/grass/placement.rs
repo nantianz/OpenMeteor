@@ -55,10 +55,11 @@ pub(super) fn place(
             let Some(texture) = mesh.resolve_texture_name(material) else {
                 continue;
             };
-            let Some(target) = grass.surfaces.iter().position(|target| {
-                target.object.eq_ignore_ascii_case(&object.name)
-                    && target.texture.eq_ignore_ascii_case(texture)
-            }) else {
+            let Some(target) = grass
+                .surfaces
+                .iter()
+                .position(|target| target.matches(&object.name, texture))
+            else {
                 continue;
             };
             let (mode, _, cutoff) = classify_gmdl_material(material);
@@ -106,7 +107,7 @@ fn unit(seed: u32) -> f32 {
     (hash(seed) >> 8) as f32 / 16_777_216.0
 }
 
-fn ground(point: Vec2, [a, b, c]: [Vec3; 3]) -> Option<f32> {
+fn ground(point: Vec2, [a, b, c]: [Vec3; 3]) -> Option<(f32, Vec2)> {
     let u = b.xz() - a.xz();
     let v = c.xz() - a.xz();
     let det = u.perp_dot(v);
@@ -116,7 +117,42 @@ fn ground(point: Vec2, [a, b, c]: [Vec3; 3]) -> Option<f32> {
     let rel = point - a.xz();
     let s = rel.perp_dot(v) / det;
     let t = u.perp_dot(rel) / det;
-    (s >= 0.0 && t >= 0.0 && s + t <= 1.0).then_some(a.y + s * (b.y - a.y) + t * (c.y - a.y))
+    (s >= 0.0 && t >= 0.0 && s + t <= 1.0).then(|| {
+        let normal = (b - a).cross(c - a);
+        (
+            a.y + s * (b.y - a.y) + t * (c.y - a.y),
+            -normal.xz() / normal.y,
+        )
+    })
+}
+
+fn vegetation(grass: &Grass, point: Vec2, seed: u32) -> u32 {
+    let patch = point / grass.patch_size;
+    let phase = patch - patch.floor();
+    let border = phase * phase * (Vec2::splat(3.0) - phase * 2.0);
+    let pick = Vec2::new(unit(seed ^ 31), unit(seed ^ 117));
+    let influences = IVec2::new(i32::from(pick.x < border.x), i32::from(pick.y < border.y));
+    let cell = patch.floor().as_ivec2() + influences;
+    let patch_seed = (cell.x as u32).wrapping_mul(0x9e3779b9) ^ (cell.y as u32).rotate_left(13);
+    let species = grass.species;
+    let roll = if unit(seed ^ 593) < 0.12 {
+        unit(seed ^ 721)
+    } else {
+        unit(patch_seed)
+    } * (species.grass + species.plumes + species.broadleaf);
+    if roll < species.grass {
+        0
+    } else if roll < species.grass + species.plumes {
+        1
+    } else {
+        2
+    }
+}
+
+fn root_style(species: u32, slope: Vec2, seed: u32) -> f32 {
+    let quantize = |v: f32| ((v.clamp(-1.52, 1.52) / 1.52 * 0.5 + 0.5) * 127.0).round() as u32;
+    let random = (hash(seed) >> 24) & 255;
+    (1 + (random | (species << 8) | (quantize(slope.x) << 10) | (quantize(slope.y) << 17))) as f32
 }
 
 fn distribute(
@@ -175,10 +211,10 @@ fn distribute(
             if bounds.is_some_and(|[lo, hi]| !point.cmpge(lo).all() || !point.cmplt(hi).all()) {
                 continue;
             }
-            let Some(height) = faces
+            let Some((height, slope)) = faces
                 .iter()
                 .filter_map(|&i| ground(point, triangles[i]))
-                .reduce(f32::max)
+                .max_by(|a, b| a.0.total_cmp(&b.0))
             else {
                 continue;
             };
@@ -192,9 +228,9 @@ fn distribute(
             let position = Vec3::new(point.x, height + 0.018, point.y);
             min = min.min(position);
             max = max.max(position);
-            roots.push(position.extend(0.01 + unit(key ^ 71) * 0.98));
+            roots.push(position.extend(root_style(vegetation(grass, point, key), slope, key ^ 71)));
         }
-        roots.sort_unstable_by(|a, b| a.w.total_cmp(&b.w));
+        roots.sort_unstable_by_key(|root| (root.w as u32 - 1) & 255);
         roots.truncate(target as usize);
         if !roots.is_empty() {
             tiles.push(Tile { roots, min, max });

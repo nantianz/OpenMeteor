@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 mod dynamic_uniforms;
+pub(super) use dynamic_uniforms::SharedBuffers;
 pub(crate) mod scene_normals;
 pub(crate) mod scene_textures;
 pub(crate) mod water;
@@ -108,6 +109,8 @@ pub struct GmdlMaterial {
 
     pub water: Vec4,
     pub(crate) water_optics: WaterOptics,
+    pub(crate) grass_ground: Vec4,
+    pub(crate) grass_bounds: Vec4,
 
     pub water_bounds: Vec4,
     pub water_reflection: Option<Handle<Image>>,
@@ -156,6 +159,8 @@ impl GmdlMaterial {
             uv_scroll: Vec4::ZERO,
             water: Vec4::ZERO,
             water_optics: WaterOptics::default(),
+            grass_ground: Vec4::ZERO,
+            grass_bounds: Vec4::ZERO,
             water_bounds: Vec4::ZERO,
             water_reflection: None,
             water_depth: None,

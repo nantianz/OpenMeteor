@@ -45,9 +45,7 @@ pub(super) fn update(
                 .last()
         })
         .unwrap_or(&fallback);
-    let wind = graphics
-        .as_ref()
-        .and_then(|p| p.scenes(stage).filter_map(|(_, s)| s.wind.as_ref()).last());
+    let wind = graphics.as_ref().and_then(|p| p.wind(stage));
     let eye = cameras.iter().next().map(GlobalTransform::translation);
     let enabled = settings
         .as_ref()
@@ -137,7 +135,7 @@ pub(super) fn update(
                     position,
                     graphics_frame.as_ref().map_or(0., |f| f.seconds),
                 );
-                Vec3::new(v.x, 0., v.y)
+                Vec3::new(v.x, 0., v.y) * w.response.map_or(1.0, |response| response.cloth)
             });
             let scale = world.to_scale_rotation_translation().0.abs().max_element();
 

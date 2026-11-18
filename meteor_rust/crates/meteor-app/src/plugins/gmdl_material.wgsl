@@ -58,6 +58,8 @@ struct GmdlGpuParams {
     water_dynamics_bounds: vec4<f32>,
     pbr: vec4<f32>, pbr_tint: vec4<f32>, pbr_textures: vec4<f32>,
     water_optics: WaterOptics,
+    grass_ground: vec4<f32>,
+    grass_bounds: vec4<f32>,
 };
 
 struct WaterOptics {
@@ -138,14 +140,17 @@ fn liquid_contact_slope(world: vec3<f32>) -> vec2<f32> {
 
 fn water_surface_normal(in: VertexOutput) -> vec3<f32> {
     let clear = material.water.x < 1.5;
+    let shared_wind = clear && graphics.water_wind.w > 0.5;
     let uv = in.world_position.xz * select(0.09, 0.14, clear);
     let direction = material.scroll.xy / max(length(material.scroll.xy), 0.001);
     let speed = select(select(1.0, 0.55, material.water.x > 1.5), 0.25, material.water.x > 2.5);
     let velocity = (direction * 0.017 + vec2<f32>(0.003, 0.001)) * speed;
 
-    let phase = fract(velocity * simulation_time.x) + fract(velocity * simulation_time.y);
+    let phase = select(fract(velocity * simulation_time.x) + fract(velocity * simulation_time.y),
+        graphics.water_wind.xy, shared_wind);
     let cross_velocity = vec2<f32>(-0.011, 0.007) * speed;
-    let cross_phase = fract(cross_velocity * simulation_time.x) + fract(cross_velocity * simulation_time.y);
+    let cross_phase = select(fract(cross_velocity * simulation_time.x) + fract(cross_velocity * simulation_time.y),
+        graphics.water_wind_cross.xy, shared_wind);
     let a = textureSample(water_normal, water_normal_sampler, uv + phase).xy * 2.0 - 1.0;
     let cross_uv = select(vec2<f32>(-uv.y, uv.x) * 1.73,
         vec2<f32>(uv.x * 0.54 - uv.y * 0.84, uv.x * 0.84 + uv.y * 0.54) * 1.47, clear);
@@ -157,7 +162,8 @@ fn water_surface_normal(in: VertexOutput) -> vec3<f32> {
     let fade = 1.0 - smoothstep(0.025, 0.20, footprint);
     let slope = ((a * select(0.65, 0.72, clear)
         + cross_slope * select(0.35, 0.28, clear))
-        * select(1.0, 0.75, clear) + liquid_contact_slope(in.world_position.xyz)) * fade;
+        * select(1.0, 0.75, clear) * select(1.0, graphics.water_wind.z, shared_wind)
+        + liquid_contact_slope(in.world_position.xyz)) * fade;
     let dynamic = water_disturbance(in.world_position.xyz);
     return normalize(normalize(in.world_normal) + vec3<f32>(slope.x - dynamic.x, 0.0, slope.y - dynamic.y));
 }
@@ -324,7 +330,12 @@ fn enhanced_water(
     let cos_theta = dot(ray, light_dir);
     let g = optics.scattering_g.w;
     let phase = (1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * cos_theta, 0.08), 1.5);
-    let sun = select(vec3<f32>(1.0), graphics.sun_color.rgb, graphics.sun.w > 0.001);
+    var sun = select(vec3<f32>(1.0), graphics.sun_color.rgb, graphics.sun.w > 0.001);
+    var ambient = vec3<f32>(0.12);
+    if (graphics.counts.w > 0.5) {
+        sun = graphics.sun_color.rgb * graphics.sun.w;
+        ambient = graphics.sky.rgb * 0.32;
+    }
     let angular = min(phase, 4.0);
     let surface_light = max(dot(surface_normal, light_dir), 0.0);
     let light_cos = sqrt(1.0 - (1.0 - surface_light * surface_light) / (ior * ior));
@@ -335,7 +346,7 @@ fn enhanced_water(
     let thin_path = min(path, 0.4);
     let shallow_scatter = (1.0 - exp(-extinction * thin_path))
         * (0.10 * (1.0 - abs(n_dot_l)) + 0.18 * max(-n_dot_l, 0.0) * exp(-path));
-    let volume = albedo * ((1.0 - transmission) * 0.12
+    let volume = albedo * ((1.0 - transmission) * ambient
         + sun * light_entry * (transmitted_light + shallow_scatter * angular) * shade);
     let refracted = water_screen_refraction(world, ray, path);
     let seen = refracted.a;
@@ -399,7 +410,7 @@ fn shade_water(in: VertexOutput, normal: vec3<f32>, color: vec4<f32>, shade: f32
 #endif
     if (!poison) {
         if (material.water_optics.control.w < 0.5) { return color; }
-        if (graphics.sun.w > 0.001) { light_dir = graphics.sun.xyz; }
+        if (graphics.counts.w > 0.5 || graphics.sun.w > 0.001) { light_dir = graphics.sun.xyz; }
         let optical_depth = mix(material.water.w, depth, valid_bed);
         return enhanced_water(in.world_position.xyz, surface_normal, normal, view_dir,
             light_dir, reflected_rgb, reflection_valid, optical_depth, coverage, shade, dynamic.z);
@@ -478,30 +489,35 @@ fn scene_detail_factor(in: VertexOutput, normal: vec3<f32>) -> f32 {
     return clamp(1.0 + material.detail.w * (perturbed - base), 1.0 - limit, 1.0 + limit);
 }
 
-fn scene_lighting(in: VertexOutput, detail_normal: vec3<f32>) -> f32 {
-#ifdef VERTEX_OUTPUT_INSTANCE_INDEX
+fn scene_lighting(in: VertexOutput, detail_normal: vec3<f32>) -> vec3<f32> {
 
     if (material.base.mode == 2u || material.base.mode == 3u || material.base.mode == 4u) {
-        return 1.0;
+        return vec3<f32>(1.0);
     }
-    if (lights.n_directional_lights == 0u) { return scene_detail_factor(in, detail_normal); }
-    let normal = normalize(in.world_normal);
-    let light = lights.directional_lights[0u];
     var shadow = 1.0;
-    if (lighting.w > 0.0 && (mesh[in.instance_index].flags & MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u) {
-        shadow = fetch_directional_shadow(0u, in.world_position, normal,
+#ifdef VERTEX_OUTPUT_INSTANCE_INDEX
+    if (lights.n_directional_lights > 0u && lighting.w > 0.0
+        && (mesh[in.instance_index].flags & MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u) {
+        shadow = fetch_directional_shadow(0u, in.world_position, normalize(in.world_normal),
             (view.view_from_world * in.world_position).z, in.position.xy);
     }
-    if (lighting.x > 0.0) {
+#endif
+    if (graphics.counts.w > 0.5) {
+        let irradiance = mix(graphics.ground.rgb, graphics.sky.rgb, detail_normal.y * 0.5 + 0.5);
+        let sun = graphics.sun_color.rgb * graphics.sun.w * max(dot(detail_normal, graphics.sun.xyz), 0.0);
+        let exposure = graphics.environment.z;
+        let linear = exposure * (1.60 * irradiance + sun * (0.55 * mix(1.0, shadow, lighting.w)));
+        return pack_linear_to_srgb(linear);
+    }
+#ifdef VERTEX_OUTPUT_INSTANCE_INDEX
+    if (lighting.x > 0.0 && lights.n_directional_lights > 0u) {
 
         let ambient = lighting.y * mix(1.0, shadow, lighting.w * 0.5);
-        let diffuse = ambient + lighting.z * max(dot(detail_normal, light.direction_to_light), 0.0) * shadow;
-        return diffuse * select(1.0, scene_detail_factor(in, detail_normal), material.detail.w > 0.8);
+        let diffuse = ambient + lighting.z * max(dot(detail_normal, lights.directional_lights[0u].direction_to_light), 0.0) * shadow;
+        return vec3<f32>(diffuse * select(1.0, scene_detail_factor(in, detail_normal), material.detail.w > 0.8));
     }
-    return mix(1.0, shadow, lighting.w) * scene_detail_factor(in, detail_normal);
-#else
-    return scene_detail_factor(in, detail_normal);
 #endif
+    return vec3<f32>(mix(1.0, shadow, lighting.w) * scene_detail_factor(in, detail_normal));
 }
 
 struct GraphicsFrame {
@@ -510,6 +526,7 @@ struct GraphicsFrame {
     fog_bounds: array<vec4<f32>,8>, fog_colors: array<vec4<f32>,8>,
     contacts: array<vec4<f32>,16>, contact_normals: array<vec4<f32>,16>,
     counts: vec4<f32>,
+    water_wind: vec4<f32>, water_wind_cross: vec4<f32>,
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(17) var<uniform> graphics: GraphicsFrame;
 
@@ -554,10 +571,10 @@ fn pack_pbr(in: VertexOutput, n: vec3<f32>, texel: vec3<f32>, vertex: vec3<f32>,
     let direct = ((vec3<f32>(1.0)-f)*(1.0-metal)*base/3.14159265 + f*d*g/max(4.0*nv*nl,0.001))
         * graphics.sun_color.rgb * graphics.sun.w * nl * shadow;
     var irradiance = mix(graphics.ground.rgb,graphics.sky.rgb,n.y*0.5+0.5);
-    if (material.pbr_tint.w > 0.5) { irradiance = textureSampleLevel(water_depth,water_depth_sampler,pack_env_uv(n),0.0).rgb; }
+    if (material.pbr_tint.w > 0.5 && graphics.counts.w < 0.5) { irradiance = textureSampleLevel(water_depth,water_depth_sampler,pack_env_uv(n),0.0).rgb; }
     let r = reflect(-v,n);
     var radiance = mix(graphics.ground.rgb,graphics.sky.rgb,r.y*0.5+0.5);
-    if (material.pbr_textures.z > 0.5) { radiance = textureSampleLevel(water_reflection,water_reflection_sampler,pack_env_uv(r),rough*graphics.environment.w).rgb; }
+    if (material.pbr_textures.z > 0.5 && graphics.counts.w < 0.5) { radiance = textureSampleLevel(water_reflection,water_reflection_sampler,pack_env_uv(r),rough*graphics.environment.w).rgb; }
 
     let coeff = rough*vec4<f32>(-1.0,-0.0275,-0.572,0.022) + vec4<f32>(1.0,0.0425,1.04,-0.04);
     let a004 = min(coeff.x*coeff.x,exp2(-9.28*nv))*coeff.x+coeff.y;
@@ -631,17 +648,30 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     }
     var color = texel * diffuse;
     color.a *= params.opacity;
+    if (graphics.counts.z > 0.5 && material.grass_ground.w > 0.0) {
+        let point = in.world_position.xz;
+        let low = point - material.grass_bounds.xy;
+        let high = material.grass_bounds.zw - point;
+        let edge = min(min(low.x, low.y), min(high.x, high.y));
+        let slope = smoothstep(0.50, 0.82, normalize(in.world_normal).y);
+        let soil = dot(color.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+        let variation = 0.80 + 0.12 * sin(dot(point, vec2<f32>(0.29, 0.44)))
+            + 0.08 * sin(dot(point, vec2<f32>(0.53, -0.38)));
+        let turf = material.grass_ground.rgb * mix(0.20, 0.53, soil) * variation;
+        color = vec4<f32>(mix(color.rgb, turf, material.grass_ground.w * slope
+            * smoothstep(0.0, 1.4, edge)), color.a);
+    }
 
     if (params.mode == 3u) {
 
         color = vec4<f32>(vec3<f32>(1.0) - color.rgb, 1.0);
     } else {
 
-        var shade = scene_lighting(in, shading_normal);
+        let shade = scene_lighting(in, shading_normal);
         if (water) {
-            color = shade_water(in, shading_normal, color, shade);
+            color = shade_water(in, shading_normal, color, dot(shade, vec3<f32>(0.2126, 0.7152, 0.0722)));
         } else if (material.water.x == 4.0) {
-            color = shade_spray(in, shading_normal, color, shade);
+            color = shade_spray(in, shading_normal, color, dot(shade, vec3<f32>(0.2126, 0.7152, 0.0722)));
         } else if (material.pbr.x > 0.5) {
             color = vec4<f32>(pack_pbr(in, shading_normal, texel.rgb, diffuse.rgb, in.uv + uv_offset), color.a);
         } else {

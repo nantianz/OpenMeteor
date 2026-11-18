@@ -1,3 +1,4 @@
+mod geometry;
 mod interaction;
 mod placement;
 #[cfg(test)]
@@ -6,28 +7,36 @@ mod tests;
 use super::{config::Grass, GraphicsPacks};
 use crate::app_state::{AppState, Settings};
 use crate::components::fighter::{Concealment, Fighter, Health, MotionState};
+use crate::plugins::stage_material::SharedBuffers;
 use crate::plugins::{camera_plugin::GameplayCamera, render_plugin::PlayingSceneEntity};
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::{
     primitives::{Aabb, Frustum},
     visibility::{NoAutoAabb, VisibilitySystems},
 };
-use bevy::mesh::{Indices, MeshTag, MeshVertexBufferLayoutRef, PrimitiveTopology};
+use bevy::ecs::system::SystemParamItem;
+use bevy::mesh::{MeshTag, MeshVertexBufferLayoutRef};
 use bevy::pbr::{MaterialPipeline, MaterialPipelineKey};
 use bevy::prelude::*;
-use bevy::render::render_resource::{
-    AsBindGroup, Extent3d, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
-    TextureDimension, TextureFormat,
+use bevy::render::{
+    render_resource::{
+        binding_types::uniform_buffer, AsBindGroup, AsBindGroupError, BindGroupLayout,
+        BindGroupLayoutEntry, Extent3d, OwnedBindingResource, RenderPipelineDescriptor,
+        ShaderStages, ShaderType, SpecializedMeshPipelineError, TextureDimension, TextureFormat,
+        UnpreparedBindGroup,
+    },
+    renderer::RenderDevice,
 };
 use bevy::shader::{Shader, ShaderRef};
+use geometry::LODS;
 use interaction::{BendMap, BendUpload};
 use meteor_core::types::MovementMode;
 use placement::ROOTS_PER_TILE;
 use std::sync::Arc;
 
 const SHADER: Handle<Shader> = bevy::asset::uuid_handle!("9a315511-160c-4087-af9c-ef5cd526b723");
-const MID_ROOTS: usize = 72;
-const FAR_ROOTS: usize = 24;
+const CLUMP_BUCKET_SIZE: usize = ROOTS_PER_TILE / 4;
+const COMPACT_TRIANGLE_BUDGET: usize = 28_000;
 const CONTACTS: usize = 8;
 const CONTACT_INTERVAL: f32 = 1.0 / 30.0;
 
@@ -39,10 +48,11 @@ struct GrassUniform {
     distances: Vec4,
     contact: Vec4,
     wind: Vec4,
+    wind_environment: Vec4,
 }
 
-#[derive(Asset, TypePath, AsBindGroup, Clone)]
-pub(crate) struct GrassMaterial {
+#[derive(AsBindGroup, Clone)]
+pub(crate) struct GrassBindings {
     #[uniform(0)]
     field: GrassUniform,
     #[texture(1, filterable = false, visibility(vertex))]
@@ -50,6 +60,47 @@ pub(crate) struct GrassMaterial {
     #[texture(2, visibility(vertex))]
     #[sampler(3, visibility(vertex))]
     bend: Handle<Image>,
+}
+
+#[derive(Asset, TypePath, Clone)]
+pub(crate) struct GrassMaterial(GrassBindings);
+
+impl AsBindGroup for GrassMaterial {
+    type Data = ();
+    type Param = (
+        <GrassBindings as AsBindGroup>::Param,
+        Res<'static, SharedBuffers>,
+    );
+
+    fn label() -> &'static str {
+        "grass"
+    }
+    fn bind_group_data(&self) -> Self::Data {}
+
+    fn unprepared_bind_group(
+        &self,
+        layout: &BindGroupLayout,
+        device: &RenderDevice,
+        (bindings, buffers): &mut SystemParamItem<'_, '_, Self::Param>,
+        force_no_bindless: bool,
+    ) -> Result<UnpreparedBindGroup, AsBindGroupError> {
+        let mut result =
+            self.0
+                .unprepared_bind_group(layout, device, bindings, force_no_bindless)?;
+        result
+            .bindings
+            .push((4, OwnedBindingResource::Buffer(buffers.clock()?)));
+        Ok(result)
+    }
+
+    fn bind_group_layout_entries(
+        device: &RenderDevice,
+        force_no_bindless: bool,
+    ) -> Vec<BindGroupLayoutEntry> {
+        let mut entries = GrassBindings::bind_group_layout_entries(device, force_no_bindless);
+        entries.push(uniform_buffer::<Vec4>(false).build(4, ShaderStages::VERTEX));
+        entries
+    }
 }
 
 impl Material for GrassMaterial {
@@ -69,18 +120,22 @@ impl Material for GrassMaterial {
     fn specialize(
         _: &MaterialPipeline,
         descriptor: &mut RenderPipelineDescriptor,
-        _: &MeshVertexBufferLayoutRef,
+        layout: &MeshVertexBufferLayoutRef,
         _: MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
         descriptor.primitive.cull_mode = None;
+        descriptor.vertex.buffers = vec![layout.0.get_layout(&[
+            Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
+            geometry::LEAF.at_shader_location(1),
+        ])?];
         Ok(())
     }
 }
 
 #[derive(Component)]
-struct GrassField {
+pub(super) struct GrassField {
     profile: Grass,
-    lods: [Handle<Mesh>; 3],
+    lods: [[Handle<Mesh>; 3]; 4],
     image: Handle<Image>,
     height_min: f32,
     height_range: f32,
@@ -90,7 +145,9 @@ struct GrassField {
 }
 
 #[derive(Component)]
-struct GrassTile;
+struct GrassTile {
+    bucket: usize,
+}
 
 pub(super) fn install(app: &mut App) {
     interaction::install(app);
@@ -105,46 +162,43 @@ pub(super) fn install(app: &mut App) {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn spawn(
+pub(crate) fn spawn<'a>(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     images: &mut Assets<Image>,
     materials: &mut Assets<GrassMaterial>,
-    packs: &GraphicsPacks,
-    stage: &str,
+    packs: &'a GraphicsPacks,
+    stage: &'a str,
     source: &meteor_asset::gmdl::GmdlMesh,
     description: Option<&meteor_asset::des::StageDescription>,
     faces: &std::collections::BTreeSet<u32>,
     support: Option<&crate::plugins::stage_collider::StageMeshCollider>,
     center: [f32; 3],
-) {
+) -> Option<&'a Grass> {
     let Some(profile) = packs
         .scenes(stage)
         .filter_map(|(_, scene)| scene.grass.as_ref())
         .last()
     else {
-        return;
+        return None;
     };
     if !profile.enabled {
-        return;
+        return None;
     }
     let support = support.map(|mesh| mesh as &dyn meteor_physics::collision::MeshCollider);
     let tiles = match placement::place(profile, source, description, faces, support, center) {
         Ok(tiles) if !tiles.is_empty() => tiles,
         Ok(_) => {
             warn!("{stage}: grass area contains no eligible ground");
-            return;
+            return None;
         }
         Err(error) => {
             warn!("{stage}: {error}");
-            return;
+            return None;
         }
     };
-    let wind = packs
-        .scenes(stage)
-        .filter_map(|(_, scene)| scene.wind.as_ref())
-        .last()
-        .map_or_else(super::config::Wind::default, Clone::clone);
+    let fallback = super::config::Wind::default();
+    let wind = packs.wind(stage).unwrap_or(&fallback);
     let mut bytes = Vec::with_capacity(tiles.len() * ROOTS_PER_TILE * 16);
     for tile in &tiles {
         for root in &tile.roots {
@@ -178,7 +232,23 @@ pub(crate) fn spawn(
         + 1.0;
     let height_range = height_max - height_min;
     let wind_direction = Vec2::from_array(wind.direction).normalize_or_zero();
-    let material = materials.add(GrassMaterial {
+    let (flow, wind_environment) = wind.response.map_or_else(
+        || {
+            (
+                wind_direction
+                    .extend(profile.wind_strength)
+                    .extend(wind.frequency.max(0.2)),
+                Vec4::ZERO,
+            )
+        },
+        |response| {
+            (
+                super::wind_flow(wind, response.grass * profile.wind_strength),
+                Vec4::new(wind.spatial_scale, 1.0, wind_direction.x, wind_direction.y),
+            )
+        },
+    );
+    let material = materials.add(GrassMaterial(GrassBindings {
         roots,
         bend: bend.clone(),
         field: GrassUniform {
@@ -194,7 +264,7 @@ pub(crate) fn spawn(
                 profile.near_distance,
                 profile.mid_distance,
                 profile.max_distance,
-                0.0,
+                profile.clump_radius,
             ),
             contact: Vec4::new(
                 height_min,
@@ -202,22 +272,17 @@ pub(crate) fn spawn(
                 interaction::SPACING,
                 interaction::RANGE,
             ),
-            wind: Vec4::new(
-                wind_direction.x,
-                wind_direction.y,
-                profile.wind_strength,
-                wind.frequency.max(0.2),
-            ),
+            wind: flow,
+            wind_environment,
         },
+    }));
+    let lods: [[Handle<Mesh>; 3]; 4] = std::array::from_fn(|bucket| {
+        LODS.each_ref()
+            .map(|lod| meshes.add(lod.mesh(clump_capacity(bucket))))
     });
-    let lods = [
-        meshes.add(blades(ROOTS_PER_TILE, true)),
-        meshes.add(blades(MID_ROOTS, true)),
-        meshes.add(blades(FAR_ROOTS, false)),
-    ];
     let root_count: usize = tiles.iter().map(|tile| tile.roots.len()).sum();
     info!(
-        "{stage}: interactive grass placed {root_count} blades in {} tiles",
+        "{stage}: interactive grass placed {root_count} clumps in {} tiles",
         tiles.len()
     );
     commands
@@ -237,12 +302,14 @@ pub(crate) fn spawn(
             Visibility::Inherited,
         ))
         .with_children(|parent| {
-            let pad = Vec3::splat(profile.height[1] * 2.1 + profile.width[1]);
+            let pad =
+                Vec3::splat(profile.height[1] * 4.1 + profile.width[1] + profile.clump_radius);
             for (i, tile) in tiles.into_iter().enumerate() {
+                let bucket = (tile.roots.len() - 1) / CLUMP_BUCKET_SIZE;
                 parent.spawn((
-                    GrassTile,
+                    GrassTile { bucket },
                     MeshTag(i as u32),
-                    Mesh3d(lods[0].clone()),
+                    Mesh3d(lods[bucket][2].clone()),
                     MeshMaterial3d(material.clone()),
                     Aabb::from_min_max(tile.min - pad, tile.max + pad),
                     NoAutoAabb,
@@ -252,39 +319,42 @@ pub(crate) fn spawn(
                 ));
             }
         });
+    Some(profile)
 }
 
-fn blades(count: usize, curved: bool) -> Mesh {
-    let mut vertices = Vec::with_capacity(count * if curved { 5 } else { 3 });
-    let mut indices = Vec::with_capacity(count * if curved { 9 } else { 3 });
-    for i in 0..count {
-        let first = vertices.len() as u16;
-        let blade = i as f32;
-        vertices.extend([[blade, 0.0, -1.0], [blade, 0.0, 1.0]]);
-        if curved {
-            vertices.extend([[blade, 0.52, -1.0], [blade, 0.52, 1.0]]);
-            indices.extend([
-                first,
-                first + 1,
-                first + 2,
-                first + 2,
-                first + 1,
-                first + 3,
-                first + 2,
-                first + 3,
-                first + 4,
-            ]);
-        } else {
-            indices.extend([first, first + 1, first + 2]);
+fn clump_capacity(bucket: usize) -> usize {
+    (bucket + 1) * CLUMP_BUCKET_SIZE
+}
+
+fn upgrade_lod(desired: usize, bucket: usize, remaining: &mut usize) -> usize {
+    let capacity = clump_capacity(bucket);
+    let baseline = LODS[2].triangles(capacity);
+    for (level, lod) in LODS.iter().enumerate().take(2).skip(desired) {
+        let extra = lod.triangles(capacity) - baseline;
+        if extra <= *remaining {
+            *remaining -= extra;
+            return level;
         }
-        vertices.push([blade, 1.0, 0.0]);
     }
-    Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::RENDER_WORLD,
-    )
-    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, vertices)
-    .with_inserted_indices(Indices::U16(indices))
+    2
+}
+
+pub(crate) fn ground_material(
+    profile: &Grass,
+    object: &str,
+    texture: &str,
+    material: &mut crate::plugins::stage_material::GmdlMaterial,
+) {
+    if !profile
+        .surfaces
+        .iter()
+        .any(|target| target.matches(object, texture))
+    {
+        return;
+    }
+    let [min, max] = profile.bounds.unwrap_or([[-65536.0; 2], [65536.0; 2]]);
+    material.grass_ground = Vec3::from_array(profile.tip_color).extend(profile.ground_cover);
+    material.grass_bounds = Vec4::new(min[0], min[1], max[0], max[1]);
 }
 
 fn update(
@@ -293,7 +363,7 @@ fn update(
     time: Res<Time>,
     camera: Query<(&GlobalTransform, &Frustum), With<GameplayCamera>>,
     mut field: Query<&mut GrassField>,
-    mut tiles: Query<(Entity, &Aabb, &mut Visibility, &mut Mesh3d), With<GrassTile>>,
+    mut tiles: Query<(Entity, &Aabb, &GrassTile, &mut Visibility, &mut Mesh3d)>,
     actors: Query<
         (
             Entity,
@@ -308,7 +378,9 @@ fn update(
     mut upload: ResMut<BendUpload>,
 ) {
     let Ok(mut field) = field.single_mut() else {
-        upload.data = None;
+        if upload.data.is_some() {
+            upload.data = None;
+        }
         return;
     };
     let Ok((camera, frustum)) = camera.single() else {
@@ -328,7 +400,7 @@ fn update(
         field.profile.max_distance,
     ];
     visible.clear();
-    for (entity, aabb, mut visibility, _) in &mut tiles {
+    for (entity, aabb, _, mut visibility, _) in &mut tiles {
         let distance = ((eye - Vec3::from(aabb.center)).abs() - Vec3::from(aabb.half_extents))
             .max(Vec3::ZERO)
             .length_squared();
@@ -341,29 +413,37 @@ fn update(
             visibility.set_if_neq(Visibility::Hidden);
         }
     }
-    if visible.len() > max_tiles {
-        visible.select_nth_unstable_by(max_tiles, |(a, e), (b, f)| {
-            a.total_cmp(b).then_with(|| e.to_bits().cmp(&f.to_bits()))
-        });
-    }
+    visible.sort_unstable_by(|(a, e), (b, f)| {
+        a.total_cmp(b).then_with(|| e.to_bits().cmp(&f.to_bits()))
+    });
+    let mut budget = if compact {
+        field.profile.max_triangles.min(COMPACT_TRIANGLE_BUDGET)
+    } else {
+        field.profile.max_triangles
+    };
+    let far_cost = LODS[2].triangles(CLUMP_BUCKET_SIZE);
+    let drawn_tiles = visible.len().min(max_tiles).min(budget / far_cost);
+    budget -= drawn_tiles * far_cost;
     for (i, &(distance, entity)) in visible.iter().enumerate() {
-        let Ok((_, _, mut visibility, mut mesh)) = tiles.get_mut(entity) else {
+        let Ok((_, _, tile, mut visibility, mut mesh)) = tiles.get_mut(entity) else {
             continue;
         };
-        if i >= max_tiles {
+        if i >= drawn_tiles {
             visibility.set_if_neq(Visibility::Hidden);
+            continue;
+        }
+        let desired = if distance >= mid * mid {
+            2
+        } else if compact || distance >= near * near {
+            1
         } else {
-            visibility.set_if_neq(Visibility::Inherited);
-            let level = if distance >= mid * mid {
-                2
-            } else if compact || distance >= near * near {
-                1
-            } else {
-                0
-            };
-            if mesh.0 != field.lods[level] {
-                mesh.0 = field.lods[level].clone();
-            }
+            0
+        };
+        let level = upgrade_lod(desired, tile.bucket, &mut budget);
+        let lod = &field.lods[tile.bucket][level];
+        visibility.set_if_neq(Visibility::Inherited);
+        if mesh.0 != *lod {
+            mesh.0 = lod.clone();
         }
     }
     if !enabled || !state.is_some_and(|state| *state.get() == AppState::Playing) {

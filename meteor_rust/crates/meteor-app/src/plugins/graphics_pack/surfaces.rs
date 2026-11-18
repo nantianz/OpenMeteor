@@ -139,6 +139,7 @@ impl<'a> SceneGraphics<'a> {
             normals,
             tangents,
             profile: w,
+            last_wind: None,
         })
     }
     pub(super) fn apply_pbr(
@@ -223,6 +224,7 @@ pub struct WindMesh {
     normals: Vec<[f32; 3]>,
     tangents: Vec<[f32; 4]>,
     pub profile: config::WindSurface,
+    last_wind: Option<(Vec2, GlobalTransform)>,
 }
 
 pub(super) fn update_wind(
@@ -235,7 +237,7 @@ pub(super) fn update_wind(
     mut elapsed: Local<f64>,
     mut accumulated: Local<f32>,
     mut meshes: ResMut<Assets<Mesh>>,
-    query: Query<(&Mesh3d, &GlobalTransform, &WindMesh)>,
+    mut query: Query<(&Mesh3d, &GlobalTransform, &mut WindMesh)>,
 ) {
     if state.is_none_or(|s| *s.get() != crate::app_state::AppState::Playing) {
         return;
@@ -253,32 +255,35 @@ pub(super) fn update_wind(
     let Some(loaded) = loaded else {
         return;
     };
-    let wind = packs
-        .scenes(&loaded.stage_id)
-        .filter_map(|(_, s)| s.wind.as_ref())
-        .last();
-    for (handle, transform, w) in &query {
-        let Some(mut mesh) = meshes.get_mut(&handle.0) else {
-            continue;
-        };
+    let wind = packs.wind(&loaded.stage_id);
+    for (handle, transform, mut w) in &mut query {
         let breeze = wind.map_or(Vec2::ZERO, |wind| {
             wind_at(
                 wind,
                 transform.transform_point(w.center),
                 frame.as_ref().map_or(*elapsed, |f| f.seconds),
-            )
+            ) * wind.response.map_or(1.0, |response| response.cloth)
         });
+        let wind_pose = (breeze, *transform);
+        if w.last_wind == Some(wind_pose) {
+            continue;
+        }
+        let Some(mut mesh) = meshes.get_mut(&handle.0) else {
+            continue;
+        };
+        w.last_wind = Some(wind_pose);
         let matrix = transform.affine().matrix3;
         let inverse = matrix.inverse();
 
         let height_axis = matrix.transpose() * Vec3::Y;
         let direction = inverse * Vec3::new(breeze.x, 0., breeze.y) * w.profile.amplitude;
         let span = w.profile.end_height - w.profile.start_height;
+        let bend = |u: f32| if w.profile.anchor_top { 1.0 - u } else { u };
         let slope = |p: [f32; 3]| {
             let y = transform.transform_point(Vec3::from_array(p)).y;
             let u = (y - w.profile.start_height) / span;
             if u > 0. && u < 1. {
-                2. * u / span
+                2. * bend(u) / span * if w.profile.anchor_top { -1.0 } else { 1.0 }
             } else {
                 0.
             }
@@ -290,7 +295,7 @@ pub(super) fn update_wind(
                 let p = Vec3::from_array(*p);
                 let y = transform.transform_point(p).y;
                 let u = ((y - w.profile.start_height) / span).clamp(0., 1.);
-                (p + direction * u * u).to_array()
+                (p + direction * bend(u).powi(2)).to_array()
             })
             .collect();
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);

@@ -90,6 +90,11 @@ pub struct Grass {
     pub mid_distance: f32,
     pub max_distance: f32,
     pub max_visible_tiles: usize,
+    pub max_triangles: usize,
+    pub clump_radius: f32,
+    pub patch_size: f32,
+    pub ground_cover: f32,
+    pub species: GrassSpecies,
     pub wind_strength: f32,
     pub interaction_radius: f32,
     pub recovery_seconds: f32,
@@ -100,6 +105,30 @@ pub struct Grass {
 pub struct GrassSurface {
     pub object: String,
     pub texture: String,
+}
+
+impl GrassSurface {
+    pub fn matches(&self, object: &str, texture: &str) -> bool {
+        self.object.eq_ignore_ascii_case(object) && self.texture.eq_ignore_ascii_case(texture)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GrassSpecies {
+    pub grass: f32,
+    pub plumes: f32,
+    pub broadleaf: f32,
+}
+
+impl Default for GrassSpecies {
+    fn default() -> Self {
+        Self {
+            grass: 0.67,
+            plumes: 0.18,
+            broadleaf: 0.15,
+        }
+    }
 }
 
 impl Default for Grass {
@@ -119,6 +148,11 @@ impl Default for Grass {
             mid_distance: 33.0,
             max_distance: 56.0,
             max_visible_tiles: 96,
+            max_triangles: 104_000,
+            clump_radius: 0.26,
+            patch_size: 3.8,
+            ground_cover: 0.90,
+            species: GrassSpecies::default(),
             wind_strength: 0.23,
             interaction_radius: 1.05,
             recovery_seconds: 1.45,
@@ -167,6 +201,23 @@ impl Grass {
         if !(4..=128).contains(&self.max_visible_tiles) {
             return Err("grass max_visible_tiles must be 4..=128".into());
         }
+        if !(8_000..=180_000).contains(&self.max_triangles) {
+            return Err("grass max_triangles must be 8000..=180000".into());
+        }
+        range("grass clump radius", self.clump_radius, 0.05, 0.6)?;
+        range("grass patch size", self.patch_size, 0.5, 16.0)?;
+        range("grass ground cover", self.ground_cover, 0.0, 1.0)?;
+        let species = [
+            self.species.grass,
+            self.species.plumes,
+            self.species.broadleaf,
+        ];
+        for weight in species {
+            range("grass species weight", weight, 0.0, 1.0)?;
+        }
+        if species.into_iter().sum::<f32>() <= 0.0 {
+            return Err("grass species must include a positive weight".into());
+        }
         range("grass wind", self.wind_strength, 0.0, 0.55)?;
         range(
             "grass interaction radius",
@@ -200,6 +251,11 @@ pub struct Sky {
     pub scale: f32,
     pub wind: [f32; 2],
     pub steps: u32,
+    pub cloud_update_hz: u32,
+    pub sun: Option<SkySun>,
+    pub fixed_time: Option<String>,
+    pub ambient_strength: f32,
+    pub ground_bounce: f32,
 }
 
 impl Default for Sky {
@@ -218,6 +274,11 @@ impl Default for Sky {
             scale: 0.017,
             wind: [1.7, 0.6],
             steps: 24,
+            cloud_update_hz: 15,
+            sun: None,
+            fixed_time: None,
+            ambient_strength: 1.0,
+            ground_bounce: 0.24,
         }
     }
 }
@@ -227,6 +288,14 @@ impl Default for Sky {
 pub struct SkyIdentity {
     pub object: String,
     pub texture: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkySun {
+    pub direction: [f32; 3],
+    pub color: [f32; 3],
+    pub intensity: f32,
 }
 
 impl Sky {
@@ -249,6 +318,18 @@ impl Sky {
         if !(8..=48).contains(&self.steps) {
             return Err(format!("{stage}: sky steps must be 8..=48"));
         }
+        if !(1..=30).contains(&self.cloud_update_hz) {
+            return Err(format!("{stage}: cloud_update_hz must be 1..=30"));
+        }
+        if self
+            .fixed_time
+            .as_deref()
+            .is_some_and(|value| sky_minutes(value).is_none())
+        {
+            return Err(format!(
+                "{stage}: fixed_time must be HH:mm in 00:00..=23:59"
+            ));
+        }
         color("sky horizon", self.horizon)?;
         color("sky zenith", self.zenith)?;
         color("cloud color", self.cloud_color)?;
@@ -257,11 +338,28 @@ impl Sky {
         range("cloud density", self.density, 0., 1.)?;
         range("cloud coverage", self.coverage, 0., 1.)?;
         range("cloud scale", self.scale, 0.0001, 1.)?;
+        range("sky ambient strength", self.ambient_strength, 0., 2.)?;
+        range("sky ground bounce", self.ground_bounce, 0., 1.)?;
+        if let Some(sun) = &self.sun {
+            validate_sun_direction(sun.direction)?;
+            color("sky sun color", sun.color)?;
+            range("sky sun intensity", sun.intensity, 0., 32.)?;
+        }
         for speed in self.wind {
             range("cloud wind", speed, -40., 40.)?;
         }
         Ok(())
     }
+}
+
+pub(super) fn sky_minutes(value: &str) -> Option<u16> {
+    let [h0, h1, b':', m0, m1] = *value.as_bytes() else {
+        return None;
+    };
+    let digit = |byte: u8| byte.is_ascii_digit().then(|| u16::from(byte - b'0'));
+    let hours = 10 * digit(h0)? + digit(h1)?;
+    let minutes = 10 * digit(m0)? + digit(m1)?;
+    (hours < 24 && minutes < 60).then_some(hours * 60 + minutes)
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -334,6 +432,7 @@ pub struct Wind {
     pub gust: f32,
     pub frequency: f32,
     pub spatial_scale: f32,
+    pub response: Option<WindResponse>,
 }
 impl Default for Wind {
     fn default() -> Self {
@@ -343,6 +442,25 @@ impl Default for Wind {
             gust: 0.25,
             frequency: 0.7,
             spatial_scale: 0.08,
+            response: None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WindResponse {
+    pub cloud: f32,
+    pub water: f32,
+    pub grass: f32,
+    pub cloth: f32,
+}
+impl Default for WindResponse {
+    fn default() -> Self {
+        Self {
+            cloud: 1.0,
+            water: 1.0,
+            grass: 1.0,
+            cloth: 1.0,
         }
     }
 }
@@ -431,6 +549,8 @@ pub struct WindSurface {
 
     pub start_height: f32,
     pub end_height: f32,
+    #[serde(default)]
+    pub anchor_top: bool,
 }
 impl Surface {
     pub fn matches(&self, object: &str, texture: Option<&str>) -> bool {
@@ -461,6 +581,14 @@ fn range(name: &str, v: f32, min: f32, max: f32) -> Result<(), String> {
 fn color(name: &str, v: [f32; 3]) -> Result<(), String> {
     for x in v {
         range(name, x, 0., 16.)?;
+    }
+    Ok(())
+}
+fn validate_sun_direction(direction: [f32; 3]) -> Result<(), String> {
+    if direction.iter().any(|v| !v.is_finite() || v.abs() > 10000.)
+        || direction.iter().map(|v| v * v).sum::<f32>() < 0.001
+    {
+        return Err("invalid sun direction".into());
     }
     Ok(())
 }
@@ -563,13 +691,7 @@ impl Pack {
                 range("sun intensity", e.sun_intensity, 0., 32.)?;
                 range("exposure", e.exposure, 0.01, 8.)?;
                 range("rotation", e.rotation_degrees, -360., 360.)?;
-                if e.sun_direction
-                    .iter()
-                    .any(|v| !v.is_finite() || v.abs() > 10000.)
-                    || e.sun_direction.iter().map(|v| v * v).sum::<f32>() < 0.001
-                {
-                    return Err("invalid sun direction".into());
-                }
+                validate_sun_direction(e.sun_direction)?;
                 if let Some(id) = &e.diffuse {
                     resource(id)?;
                 }
@@ -592,6 +714,16 @@ impl Pack {
                 range("wind gust", w.gust, 0., 1.)?;
                 range("wind frequency", w.frequency, 0., 4.)?;
                 range("wind spatial_scale", w.spatial_scale, 0., 1.)?;
+                if let Some(response) = w.response {
+                    for gain in [
+                        response.cloud,
+                        response.water,
+                        response.grass,
+                        response.cloth,
+                    ] {
+                        range("wind response", gain, 0., 4.)?;
+                    }
+                }
             }
             if let Some(c) = &s.clothing {
                 range("clothing density", c.density, 0.05, 2.)?;

@@ -30,7 +30,10 @@
         "diffuse": "studio_diffuse",
         "specular_mips": ["studio_spec_0", "studio_spec_1", "studio_spec_2", "studio_spec_3", "studio_spec_4", "studio_spec_5"]
       },
-      "wind": {"direction": [1.0, 0.3], "strength": 0.35, "gust": 0.3},
+      "wind": {
+        "direction": [1.0, 0.3], "strength": 0.35, "gust": 0.3,
+        "response": {"cloud": 2.0, "water": 1.0, "grass": 1.5, "cloth": 1.0}
+      },
       "clothing": {"density": 0.25, "stretch_compliance": 0.0000001, "bend_compliance": 100.0, "damping": 2.0, "wind_drag": 0.6, "thickness": 0.008, "motion_limit": 0.4, "iterations": 4, "self_collision": false},
       "contact_shadows": {"strength": 0.25, "radius": 1.2, "max_height": 2.5}
     },
@@ -43,22 +46,31 @@
       "stage": "sn03",
       "grass": {
         "surfaces": [{"object": "ground", "texture": "sn302.jpg"}],
-        "density": 3.0,
-        "tile_size": 8.0,
-        "height": [0.36, 1.08],
-        "width": [0.075, 0.17],
-        "root_color": [0.040, 0.072, 0.024],
-        "tip_color": [0.32, 0.42, 0.12],
-        "near_distance": 18.0,
-        "mid_distance": 33.0,
-        "max_distance": 56.0,
+        "density": 7.0,
+        "tile_size": 5.5,
+        "height": [0.48, 1.28],
+        "width": [0.085, 0.175],
+        "root_color": [0.020, 0.061, 0.016],
+        "tip_color": [0.19, 0.36, 0.105],
+        "near_distance": 16.0,
+        "mid_distance": 31.0,
+        "max_distance": 54.0,
         "max_visible_tiles": 96,
-        "interaction_radius": 1.05,
+        "max_triangles": 104000,
+        "clump_radius": 0.29,
+        "patch_size": 3.1,
+        "ground_cover": 0.95,
+        "species": {"grass": 0.70, "plumes": 0.17, "broadleaf": 0.13},
+        "interaction_radius": 1.35,
         "recovery_seconds": 1.45
       }
     },
     {
       "stage": "sn13",
+      "wind": {
+        "direction": [1.0, 0.38], "strength": 0.7, "gust": 0.25,
+        "response": {"cloud": 2.0, "water": 1.0, "grass": 1.5, "cloth": 1.0}
+      },
       "sky": {
         "enabled": true,
         "replace_skybox": true,
@@ -69,17 +81,25 @@
           {"object": "Sphere02", "texture": "am2sky1.jpg"},
           {"object": "Sphere03", "texture": "am2sky1.jpg"}
         ],
-        "horizon": [0.54, 0.64, 0.78],
-        "zenith": [0.09, 0.23, 0.49],
-        "cloud_color": [0.90, 0.94, 1.0],
-        "base_height": 100.0,
-        "thickness": 38.0,
-        "density": 0.13,
-        "coverage": 0.57,
-        "scale": 0.017,
-        "wind": [1.7, 0.6],
-        "steps": 24
+        "horizon": [0.48, 0.61, 0.78],
+        "zenith": [0.055, 0.17, 0.43],
+        "cloud_color": [1.0, 0.97, 0.94],
+        "base_height": 91.0,
+        "thickness": 55.0,
+        "density": 0.26,
+        "coverage": 0.59,
+        "scale": 0.036,
+        "steps": 24,
+        "sun": {"direction": [-0.58, 0.52, -0.64], "color": [1.0, 0.91, 0.77], "intensity": 1.75},
+        "ambient_strength": 1.15,
+        "ground_bounce": 0.27
       }
+    },
+    {
+      "stage": "sn18",
+      "surfaces": [
+        {"texture": "km3cloth.jpg", "wind": {"amplitude": 1.25, "start_height": 33.76, "end_height": 36.65, "anchor_top": true}}
+      ]
     }
   ]
 }

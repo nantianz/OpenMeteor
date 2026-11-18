@@ -63,7 +63,7 @@ config/
 | `scenes[].stage` | 关卡 ID，例如 `sn06`。`*` 适用于所有关卡 |
 | `scenes[].surfaces` | 用 `object` 或 `texture` 精确匹配原版物件或贴图名，至少填一项。两者同时填写时必须同时匹配。`material` 指向同包材质 ID |
 | `scenes[].environment` | 调整环境光强、曝光、旋转和太阳光。提供环境图时使用 2:1 等距柱状 PNG，`specular_mips` 按宽高逐级减半排列 |
-| `scenes[].wind` | 风向使用世界 X/Z，`strength` 范围 0–4，`gust` 范围 0–1。表面的 `wind` 可单独指定幅度及起止高度 |
+| `scenes[].wind` | 关卡风。添加 `response` 后，云、清水、草地和布料使用同一风源 |
 | `scenes[].clothing` | 调整布料密度、拉伸、弯折、阻尼、风阻和模拟范围。`iterations` 范围 1–8，提高迭代次数或开启 `self_collision` 会增加 CPU 开销 |
 | `scenes[].contact_shadows` | 接地阴影强度、半径和距离。`strength` 范围 0–0.8，设为 0 可停用 |
 | `scenes[].fog` | 每关最多 8 个球形雾区，中心使用 Bevy 世界坐标，密度范围 0–0.5。设为 `[]` 可清除之前的雾配置 |
@@ -74,6 +74,29 @@ PBR 适用于匹配到的不透明场景批次，原版水面和透明特效由�
 
 修改后重启生效。若启动页提示加载失败，按错误信息检查 JSON 版本、键名和图片路径，或改回 `"enabled": false`。入口 JSON 如已损坏，可以先从 GitHub 恢复模板。
 
+## 关卡风
+
+Starter 的 `stage: "*"` 提供默认风，金华城（`sn13`）有自己的覆盖条目。风向是吹向的世界 X/Z。
+`strength` 的范围是 0～4（世界单位/秒），`gust` 是 0～1，`frequency` 是 0～4（弧度/秒），`spatial_scale` 是 0～1。
+`response.cloud`、`water`、`grass` 和 `cloth` 默认为 1，范围 0～4。旧包省略整个 `response` 时继续沿用原风动参数。
+
+```json
+{
+  "stage": "sn13",
+  "wind": {
+    "direction": [1.0, 0.38],
+    "strength": 0.7,
+    "gust": 0.25,
+    "frequency": 0.7,
+    "spatial_scale": 0.08,
+    "response": {"cloud": 2.0, "water": 1.0, "grass": 1.5, "cloth": 1.0}
+  }
+}
+```
+
+设 `strength` 为 `0` 可停风，踩草、入水涟漪和飞溅仍可触发。把 `direction` 的两个数取反并重启，可以对照云的漂移和水面的主浪方向。
+圆满楼（`sn18`）示例以 `km3cloth.jpg` 选中四处布面。场景布面在 `surfaces[].wind` 写入 `amplitude`、`start_height`、`end_height`，挂布加 `"anchor_top": true` 固定上沿。高度使用世界 Y。角色衣物通过各自的 `wind_drag` 调节风压。
+
 ## 可交互草地
 
 开启图形增强包后进入一线天（`sn03`）。示例在 `ground / sn302.jpg` 的泥地铺草。沿底层泥地跑过，脚边的草会弯倒，走开后回弹。局内通过设置里的「可交互草地」切换。测帧耗时，用相同分辨率、画质和机位分别记录开启和关闭后的帧时间。
@@ -83,28 +106,33 @@ PBR 适用于匹配到的不透明场景批次，原版水面和透明特效由�
 | 字段 | 用法 |
 | --- | --- |
 | `enabled`、`surfaces`、`bounds` | 关卡开关、精确的对象名与贴图名，以及可选的 `[[minX,minZ],[maxX,maxZ]]` 世界坐标范围 |
-| `density`、`tile_size`、`min_up` | 每平方世界单位的目标叶片数、草块边长和最小向上法线分量 |
+| `density`、`tile_size`、`min_up` | 每平方世界单位的目标草簇数、草块边长和最小向上法线分量 |
 | `height`、`width`、`root_color`、`tip_color` | 叶片高宽范围及根部、叶尖的线性 RGB |
 | `near_distance`、`mid_distance`、`max_distance` | 三档距离阈值。越远越稀疏，超过最远距离裁剪 |
-| `max_visible_tiles` | 每帧可见草块上限。本例为 96。调低可减少渲染开销 |
+| `max_visible_tiles`、`max_triangles` | 可见草块和三角形上限。Starter 分别为 96 和 104,000 |
+| `species`、`patch_size`、`clump_radius`、`ground_cover` | 植被类型权重、成片变化尺寸、草簇半径和地表覆盖强度 |
 | `wind_strength`、`interaction_radius`、`recovery_seconds` | 风弯曲量、脚边影响范围和回弹时间 |
 
-三档每块最多绘制 192、72、24 片草。踩踏只更新相机附近的 64×64 交互纹理，最多跟踪 8 个落地角色。参考 [Grassworks](https://grassworks.techredux.co/docs/performance) 的分块和 LOD 方法。
+远景优先保留基本覆盖，再分配近景细节。踩踏只更新相机附近的 64×64 交互纹理，最多跟踪 8 个落地角色。参考 [Grassworks](https://grassworks.techredux.co/docs/performance) 的分块和 LOD 方法。
 
 ## 体积云和天空盒
 
 开启图形增强包后进入金华城（`sn13`）。在 `scenes[].sky` 指定 `enabled` 和 `replace_skybox`。后者开启时，`skybox` 里每组 `{"object":"Sphere01","texture":"sky1.bmp"}` 都要匹配，才会隐藏指定的原版材质批次。关闭替换会保留原天空盒，原天空面可能遮挡后方的体积云。游戏内的「天空增强」设置在下一局生效。
 
-`horizon`、`zenith` 和 `cloud_color` 是线性 RGB。可用 `base_height`、`thickness`、`coverage`、`density`、`scale`、`wind` 调整云层。`steps` 是采样步数，默认 24，范围 8–48。Windows 上使用 DX12 或 Vulkan。参考 [HPVolumeCloud](https://github.com/AshenOneArt/HPVolumeCloud) 的散射模型说明。
+`horizon`、`zenith` 和 `cloud_color` 是线性 RGB。可用 `base_height`、`thickness`、`coverage`、`density` 和 `scale` 调整云层。`steps` 是每条视线的采样上限，默认 24，范围 8～48。`sky.wind` 用于未设置共享风的旧包。
+`cloud_update_hz` 是全景缓存更新频率上限，默认 15，范围 1～30。每帧只刷新一部分缓存，按当前相机方向取样。
+成功替换天空盒后，场景和角色使用新天空的补光，共用 `sun` 的颜色和方向。`ambient_strength` 和 `ground_bounce` 用于调整天空漫射光和地表反弹。
+在 `scenes[].sky` 中加入 `"fixed_time": "23:30"` 可锁定时刻。推荐对照 `07:00`、`12:00`、`18:30`、`23:30`。每次修改后重新启动，进入金华城在同一位置观察云和城墙。省略时使用原关卡预设。
+Windows 上使用 DX12 或 Vulkan。参考 [HPVolumeCloud](https://github.com/AshenOneArt/HPVolumeCloud) 的散射模型说明。
 
 ## 深水和浅水
 
-水面通过 `config/water-enhancement.json` 的 `surfaces` 选择。每条规则用 `stage`、`object`、`texture` 精确匹配清水表面。省略 `profile` 时使用 `deep`。旧配置的 `legacy` 也按 `deep` 处理。金华城使用 `shallow`。两种预设均保留触水波纹和飞溅。配置编辑后重启。
+水面通过 `config/water-enhancement.json` 的 `surfaces` 选择。每条规则用 `stage`、`object`、`texture` 精确匹配清水表面。省略 `profile` 时使用 `deep`。旧配置的 `legacy` 也按 `deep` 处理。金华城默认使用 `deep`，两种预设均保留触水波纹和飞溅。配置编辑后重启。
 
 | `profile` | 配置文件 | 随包示例 |
 | --- | --- | --- |
-| `deep` | `config/water-deep.json` | `sn06 / Cylinder01 / sn06w.jpg`、`sn09 / Plane37 / sn914.jpg` |
-| `shallow` | `config/water-shallow.json` | 金华城 `sn13 / Plane02 / sn13w01.jpg` |
+| `deep` | `config/water-deep.json` | `sn06 / Cylinder01 / sn06w.jpg`、`sn09 / Plane37 / sn914.jpg`、`sn13 / Plane02 / sn13w01.jpg` |
+| `shallow` | `config/water-shallow.json` | 将所选清水表层的 `profile` 改成 `shallow` |
 
 两份配置的 `optics` 独立控制 `absorption`、`scattering`、`anisotropy`、`ior`、`roughness` 和 `max_path`。`refraction_strength` 设为 0 可关闭屏幕空间折射。浅水另有 `simulation`，用于调整重力、阻尼、模拟水深范围和网格大小。角色触水时，扰动沿河床范围传播。
 

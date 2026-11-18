@@ -1,4 +1,5 @@
 use crate::app_state::{AppState, Settings};
+use crate::plugins::graphics_pack::{config::Wind, wind_at};
 use crate::plugins::stage_material::FrameUniforms;
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
@@ -38,6 +39,35 @@ pub(crate) struct WaterWaveMesh {
     active: bool,
     physics: super::physics::WaveField,
     dynamics: Option<Handle<Image>>,
+    weather: Option<WeatherWaves>,
+}
+
+struct WeatherWaves {
+    spectrum: Vec<Wave>,
+    wind: Wind,
+    response: f32,
+    sample_position: Vec3,
+}
+
+fn orient_spectrum(waves: &[Wave], target: Vec2) -> Vec<Wave> {
+    let Some(dominant) = waves
+        .iter()
+        .max_by(|a, b| a.amplitude.total_cmp(&b.amplitude))
+    else {
+        return Vec::new();
+    };
+
+    let reference = Vec2::from_array(dominant.direction).normalize_or_zero()
+        * if dominant.speed >= 0.0 { -1.0 } else { 1.0 };
+    let rotation = Vec2::new(reference.dot(target), reference.perp_dot(target));
+    waves
+        .iter()
+        .map(|wave| Wave {
+            direction: rotation.rotate(Vec2::from_array(wave.direction)).to_array(),
+            warp: rotation.rotate(Vec2::from_array(wave.warp)).to_array(),
+            ..*wave
+        })
+        .collect()
 }
 
 fn basis_at(point: Vec2, wave: Wave) -> Basis {
@@ -53,36 +83,31 @@ fn basis_at(point: Vec2, wave: Wave) -> Basis {
     }
 }
 
-fn bases_at(point: Vec2) -> [Basis; MAX_WAVES] {
+fn bases_at(point: Vec2, spectrum: &[Wave]) -> [Basis; MAX_WAVES] {
     std::array::from_fn(|i| {
-        config::get()
-            .wind_waves
+        spectrum
             .get(i)
             .map_or(Basis::default(), |&wave| basis_at(point, wave))
     })
 }
 
-fn coefficients(seconds: f64) -> [(f32, f32); MAX_WAVES] {
+fn coefficients(seconds: f64, spectrum: &[Wave], amplitude: f32) -> [(f32, f32); MAX_WAVES] {
     std::array::from_fn(|i| {
-        config::get().wind_waves.get(i).map_or((0.0, 1.0), |wave| {
+        spectrum.get(i).map_or((0.0, 0.0), |wave| {
             let (sine, cosine) = (seconds * f64::from(wave.speed)).sin_cos();
-            (sine as f32, cosine as f32)
+            let gain = wave.amplitude * amplitude;
+            (sine as f32 * gain, cosine as f32 * gain)
         })
     })
 }
 
-fn sample_basis(
-    basis: &[Basis; MAX_WAVES],
-    shore: f32,
-    time: &[(f32, f32); MAX_WAVES],
-) -> WaveSample {
+fn sample_basis(basis: &[Basis; MAX_WAVES], shore: f32, time: &[(f32, f32)]) -> WaveSample {
     let mut result = WaveSample::default();
-    for (i, wave) in config::get().wind_waves.iter().enumerate() {
-        let (time_sin, time_cos) = time[i];
-        let sin_phase = basis[i].sine * time_cos + basis[i].cosine * time_sin;
-        let cos_phase = basis[i].cosine * time_cos - basis[i].sine * time_sin;
-        result.height += wave.amplitude * sin_phase;
-        result.gradient += basis[i].gradient * (wave.amplitude * cos_phase);
+    for (basis, &(time_sin, time_cos)) in basis.iter().zip(time) {
+        let sin_phase = basis.sine * time_cos + basis.cosine * time_sin;
+        let cos_phase = basis.cosine * time_cos - basis.sine * time_sin;
+        result.height += sin_phase;
+        result.gradient += basis.gradient * cos_phase;
     }
     result.height *= shore;
     result.gradient *= shore;
@@ -177,7 +202,17 @@ impl WaterWaveMesh {
         });
     }
 
+    #[cfg(test)]
     pub(crate) fn refine(mesh: &Mesh, faces: &[u32]) -> Option<(Mesh, Self)> {
+        Self::refine_with_wind(mesh, faces, None, &Transform::IDENTITY)
+    }
+
+    pub(crate) fn refine_with_wind(
+        mesh: &Mesh,
+        faces: &[u32],
+        wind: Option<&Wind>,
+        transform: &Transform,
+    ) -> Option<(Mesh, Self)> {
         let VertexAttributeValues::Float32x3(source_positions) =
             mesh.attribute(Mesh::ATTRIBUTE_POSITION)?
         else {
@@ -217,6 +252,29 @@ impl WaterWaveMesh {
                 })
             })
             .collect();
+        let weather = wind.and_then(|wind| {
+            let response = wind.response?.water;
+            let target = Vec2::from_array(wind.direction);
+            let local_direction = (Self::local_point(target, Some(transform))
+                - Self::local_point(Vec2::ZERO, Some(transform)))
+            .normalize_or_zero();
+            let (min, max) = triangles.iter().flatten().copied().fold(
+                (Vec2::splat(f32::INFINITY), Vec2::splat(f32::NEG_INFINITY)),
+                |(min, max), point| (min.min(point), max.max(point)),
+            );
+            let midpoint = (min + max) * (0.5 / MODEL_SCALE);
+            Some(WeatherWaves {
+                spectrum: orient_spectrum(&config::get().wind_waves, local_direction),
+                wind: wind.clone(),
+                response,
+                sample_position: transform.transform_point(Vec3::new(midpoint.x, -midpoint.y, 0.0)),
+            })
+        });
+        let spectrum = weather
+            .as_ref()
+            .map_or(config::get().wind_waves.as_slice(), |weather| {
+                &weather.spectrum
+            });
         let physics = super::physics::WaveField::new(&triangles);
         let shoreline = boundary_edges(source_positions, faces);
         if shoreline.is_empty() {
@@ -264,7 +322,7 @@ impl WaterWaveMesh {
                         position,
                         normal,
                         shore: shore_weight(world, &shoreline),
-                        basis: bases_at(world),
+                        basis: bases_at(world, spectrum),
                     };
                     positions.push(position);
                     normals.push(normal);
@@ -314,19 +372,38 @@ impl WaterWaveMesh {
                 active: false,
                 physics,
                 dynamics: None,
+                weather,
             },
         ))
     }
 
     pub(crate) fn height_at(&self, point: Vec2, seconds: f64) -> f32 {
-        let basis = bases_at(point);
+        let spectrum = self.spectrum();
+        let basis = bases_at(point, spectrum);
+        let shore = shore_weight(point, &self.shoreline);
         sample_basis(
             &basis,
-            shore_weight(point, &self.shoreline),
-            &coefficients(seconds),
+            shore,
+            &self.wind_coefficients(seconds)[..spectrum.len()],
         )
         .height
-            + self.physics.sample(point).0 * shore_weight(point, &self.shoreline)
+            + self.physics.sample(point).0 * shore
+    }
+
+    fn spectrum(&self) -> &[Wave] {
+        self.weather
+            .as_ref()
+            .map_or(config::get().wind_waves.as_slice(), |weather| {
+                &weather.spectrum
+            })
+    }
+
+    fn wind_coefficients(&self, seconds: f64) -> [(f32, f32); MAX_WAVES] {
+        let amplitude = self.weather.as_ref().map_or(1.0, |weather| {
+            (wind_at(&weather.wind, weather.sample_position, seconds).length() * weather.response)
+                .min(1.0)
+        });
+        coefficients(seconds, self.spectrum(), amplitude)
     }
 
     fn local_point(point: Vec2, transform: Option<&Transform>) -> Vec2 {
@@ -470,10 +547,11 @@ pub(super) fn update(
             }
         }
 
-        let time = coefficients(frame.seconds);
+        let time = wave.wind_coefficients(frame.seconds);
+        let time = &time[..wave.spectrum().len()];
         for i in 0..wave.vertices.len() {
             let seed = wave.vertices[i];
-            let mut sample = sample_basis(&seed.basis, seed.shore, &time);
+            let mut sample = sample_basis(&seed.basis, seed.shore, time);
             let point = Vec2::new(seed.position[0], -seed.position[1]) * MODEL_SCALE;
             let (height, gradient) = wave.physics.sample(point);
             sample.height += height * seed.shore;
@@ -520,6 +598,19 @@ pub(super) fn install(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reoriented_dominant_wave_travels_with_the_wind() {
+        for wind in [Vec2::X, Vec2::NEG_X, Vec2::Y] {
+            let spectrum = orient_spectrum(&config::get().wind_waves, wind);
+            let dominant = spectrum
+                .iter()
+                .max_by(|a, b| a.amplitude.total_cmp(&b.amplitude))
+                .unwrap();
+            let flow = -dominant.speed.signum() * Vec2::from_array(dominant.direction).normalize();
+            assert!((flow - wind).length() < 1e-5);
+        }
+    }
 
     #[test]
     fn sn13_tessellation_is_bounded_and_shore_stays_level() {
@@ -617,8 +708,16 @@ mod tests {
                 .with_scale(Vec3::splat(MODEL_SCALE))
                 .with_translation(Vec3::new(50.0, 3.0, 70.0));
         let mut entities = Vec::new();
+        let calm = Wind {
+            strength: 0.0,
+            response: Some(Default::default()),
+            ..default()
+        };
         for _ in 0..2 {
-            let (mesh, wave) = WaterWaveMesh::refine(&mesh, &[0, 1, 2]).unwrap();
+            let (mesh, wave) =
+                WaterWaveMesh::refine_with_wind(&mesh, &[0, 1, 2], Some(&calm), &transform)
+                    .unwrap();
+            assert_eq!(wave.height_at(Vec2::new(6.0, -6.0), 3.0), 0.0);
             let handle = app.world_mut().resource_mut::<Assets<Mesh>>().add(mesh);
             entities.push(
                 app.world_mut()

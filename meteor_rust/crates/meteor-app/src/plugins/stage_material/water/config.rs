@@ -312,18 +312,20 @@ fn load() -> Result<Snapshot, String> {
 mod tests {
     use super::*;
     #[test]
-    fn clear_water_defaults_to_deep_and_preserves_the_shallow_selection() {
+    fn bundled_clear_water_is_deep_and_explicit_shallow_remains_supported() {
         let config = WaterConfig::bundled();
         for surface in config.surfaces {
-            let expected = if surface.kind != 1 {
-                None
-            } else if surface.stage == "sn13" {
-                Some(WaterProfile::Shallow)
-            } else {
-                Some(WaterProfile::Deep)
-            };
+            let expected = (surface.kind == 1).then_some(WaterProfile::Deep);
             assert_eq!(surface.clear_profile(), expected);
         }
+        let text = BUNDLED.replace("\"profile\": \"deep\"", "\"profile\": \"shallow\"");
+        let config = WaterConfig::from_json(&text).unwrap();
+        let sn13 = config
+            .surfaces
+            .iter()
+            .find(|surface| surface.stage == "sn13")
+            .unwrap();
+        assert_eq!(sn13.clear_profile(), Some(WaterProfile::Shallow));
         let text = BUNDLED.replace("\"profile\": \"deep\"", "\"profile\": \"legacy\"");
         let config = WaterConfig::from_json(&text).unwrap();
         let old = config

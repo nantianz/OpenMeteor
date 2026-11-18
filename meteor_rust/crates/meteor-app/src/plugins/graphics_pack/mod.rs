@@ -49,13 +49,49 @@ fn show_error(
         });
     }
 }
+impl GraphicsPacks {
+    pub(crate) fn wind<'a>(&'a self, stage: &'a str) -> Option<&'a config::Wind> {
+        self.scenes(stage)
+            .filter_map(|(_, scene)| scene.wind.as_ref())
+            .last()
+    }
+}
+
+pub(super) fn wind_flow(wind: &config::Wind, response: f32) -> Vec4 {
+    let mean = Vec2::from_array(wind.direction).normalize_or_zero() * (wind.strength * response);
+    Vec4::new(mean.x, mean.y, wind.gust, wind.frequency)
+}
+
 pub fn wind_at(wind: &config::Wind, position: Vec3, seconds: f64) -> Vec2 {
-    let direction = Vec2::from_array(wind.direction).normalize_or_zero();
-    let phase = seconds * wind.frequency as f64
-        + f64::from((position.x + position.z * 0.73) * wind.spatial_scale);
+    let flow = wind_flow(wind, 1.0);
+    let spatial = if wind.response.is_some() {
+        -position
+            .xz()
+            .dot(Vec2::from_array(wind.direction).normalize_or_zero())
+    } else {
+        position.x + position.z * 0.73
+    };
+    let phase = seconds * wind.frequency as f64 + f64::from(spatial * wind.spatial_scale);
     let wave = phase.rem_euclid(std::f64::consts::TAU).sin() * 0.7
         + (phase * 1.91).rem_euclid(std::f64::consts::TAU).sin() * 0.3;
-    direction * wind.strength * (1.0 + wind.gust * wave as f32)
+    flow.xy() * (1.0 + wind.gust * wave as f32)
+}
+
+fn wind_travel(wind: &config::Wind, seconds: f64, response: f32) -> bevy::math::DVec2 {
+    wind_travel_for_flow(wind_flow(wind, response), seconds)
+}
+
+fn wind_travel_for_flow(flow: Vec4, seconds: f64) -> bevy::math::DVec2 {
+    let rate = f64::from(flow.w);
+    let integral = |frequency: f64| {
+        if frequency == 0.0 {
+            return 0.0;
+        }
+        2.0 * (0.5 * frequency * seconds).sin().powi(2) / frequency
+    };
+    let elapsed =
+        seconds + f64::from(flow.z) * (0.7 * integral(rate) + 0.3 * integral(1.91 * rate));
+    flow.xy().as_dvec2() * elapsed
 }
 #[cfg(test)]
 mod tests;

@@ -213,6 +213,46 @@ fn frame_configuration_clears_on_scene_exit_and_keeps_gameplay_resources_read_on
         before
     );
 }
+
+#[test]
+fn atmosphere_lighting_requires_the_replaced_sky_and_restores_pack_lighting() {
+    use crate::app_state::{AppState, LoadedStageInfo, Settings};
+    let packs = starter();
+    let (profile, light) = sky::scene(&packs, "sn13").unwrap();
+    let atmosphere = sky::atmosphere_lighting(&profile, &light);
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+        .insert_state(AppState::Playing)
+        .insert_resource(packs)
+        .insert_resource(Settings {
+            environment_lighting: false,
+            ..default()
+        })
+        .insert_resource(LoadedStageInfo {
+            stage_id: "sn13".into(),
+            ..default()
+        })
+        .init_resource::<FrameUniforms>()
+        .add_systems(Update, runtime::update_frame);
+
+    let dome = app.world_mut().spawn(sky::CloudSky(None)).id();
+    app.update();
+    let baseline = app.world().resource::<FrameUniforms>().graphics;
+    assert_eq!(baseline.counts.w, 0.0);
+    app.world_mut()
+        .entity_mut(dome)
+        .insert(sky::CloudSky(Some(atmosphere)));
+    app.update();
+    let applied = app.world().resource::<FrameUniforms>().graphics;
+    assert_eq!(applied.counts.w, 1.0);
+    assert_eq!(applied.sky.truncate(), atmosphere.sky);
+    assert_eq!(applied.sun, atmosphere.sun);
+    assert_ne!(applied.sky, baseline.sky);
+    assert_ne!(applied.sun, baseline.sun);
+    app.world_mut().despawn(dome);
+    app.update();
+    assert_eq!(app.world().resource::<FrameUniforms>().graphics, baseline);
+}
 #[test]
 fn wind_is_bounded_and_shared_across_display_consumers() {
     let wind = config::Wind::default();
@@ -231,6 +271,150 @@ fn wind_is_bounded_and_shared_across_display_consumers() {
         wind_at(&wind, Vec3::ZERO, 12.),
         wind_at(&wind, Vec3::ZERO, 12.)
     );
+}
+
+#[test]
+fn stage_wind_overrides_and_cumulative_drift_follow_the_same_gust() {
+    let mut packs = starter();
+    let wind = packs.wind("sn13").unwrap();
+    assert_eq!(wind.strength, 0.7);
+    assert_eq!(packs.wind("sn03").unwrap().strength, 0.35);
+    let (time, step) = (1.25, 0.0001);
+    let derivative = ((wind_travel(wind, time + step, 1.0) - wind_travel(wind, time - step, 1.0))
+        / (2.0 * step))
+        .as_vec2();
+    assert!((derivative - wind_at(wind, Vec3::ZERO, time)).length() < 1e-5);
+    let mut reverse = wind.clone();
+    reverse.direction = wind.direction.map(|value| -value);
+    assert_eq!(
+        wind_travel(&reverse, time, 2.0),
+        -wind_travel(wind, time, 2.0)
+    );
+    reverse.strength = 0.0;
+    assert_eq!(wind_travel(&reverse, time, 2.0), bevy::math::DVec2::ZERO);
+    let scene = packs.packs[0]
+        .config
+        .scenes
+        .iter_mut()
+        .find(|scene| scene.stage == "sn13")
+        .unwrap();
+    scene
+        .wind
+        .as_mut()
+        .unwrap()
+        .response
+        .as_mut()
+        .unwrap()
+        .cloud = 4.01;
+    assert!(packs.packs[0].config.validate().is_err());
+}
+
+#[cfg(feature = "original-assets")]
+#[test]
+fn sn18_cloth_stays_anchored_and_reverses_with_level_wind() {
+    use crate::app_state::{AppState, LoadedStageInfo};
+    use crate::plugins::render_plugin::build_scene_mesh;
+    use bevy::mesh::VertexAttributeValues;
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+    let bytes = match std::fs::read(root.join("sn18/sn18.gmb")) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => panic!("{error}"),
+    };
+    let model = meteor_asset::gmdl::decode_gmdl(&bytes).unwrap();
+    let packs = starter();
+    let mut scene = SceneGraphics::new(Some(&packs), "sn18");
+    let object = model
+        .objects
+        .iter()
+        .find(|object| object.name == "Plane72")
+        .unwrap();
+    let faces: Vec<u32> = object
+        .face_mat
+        .iter()
+        .zip(object.indices.chunks_exact(3))
+        .filter(|(material, _)| {
+            model
+                .resolve_texture_name(&model.materials[**material as usize])
+                .is_some_and(|name| name.eq_ignore_ascii_case("km3cloth.jpg"))
+        })
+        .flat_map(|(_, face)| face.iter().copied())
+        .collect();
+    assert_eq!(faces.len(), 30);
+    let (mut mesh, transform) = build_scene_mesh(object, &faces, [0.0; 3], None);
+    let cloth = scene
+        .configure(
+            &object.name,
+            Some("km3cloth.jpg"),
+            &mut plain(),
+            &mut mesh,
+            false,
+            true,
+            &mut Assets::default(),
+        )
+        .unwrap();
+    let read = |mesh: &Mesh| {
+        let Some(VertexAttributeValues::Float32x3(values)) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("sn18 positions")
+        };
+        values.clone()
+    };
+    let baseline = read(&mesh);
+    let mut app = App::new();
+    app.insert_resource(packs)
+        .insert_resource(State::new(AppState::Playing))
+        .insert_resource(LoadedStageInfo {
+            stage_id: "sn18".into(),
+            ..default()
+        })
+        .insert_resource(Time::<()>::default())
+        .init_resource::<FrameUniforms>()
+        .init_resource::<Assets<Mesh>>()
+        .add_systems(Update, surfaces::update_wind);
+    let handle = app.world_mut().resource_mut::<Assets<Mesh>>().add(mesh);
+    app.world_mut().spawn((
+        Mesh3d(handle.clone()),
+        GlobalTransform::from(transform),
+        cloth,
+    ));
+    let capture = |app: &mut App| {
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_millis(40));
+        app.update();
+        read(app.world().resource::<Assets<Mesh>>().get(&handle).unwrap())
+    };
+    let blown = capture(&mut app);
+    let mut pack = app.world_mut().resource_mut::<GraphicsPacks>();
+    let wind = pack.packs[0].config.scenes[0].wind.as_mut().unwrap();
+    wind.direction = wind.direction.map(|axis| -axis);
+    let reversed = capture(&mut app);
+    let mut anchored = 0;
+    let mut bent = 0;
+    for vertex in faces.into_iter().map(|i| i as usize) {
+        let original = Vec3::from_array(baseline[vertex]);
+        let first = Vec3::from_array(blown[vertex]) - original;
+        let second = Vec3::from_array(reversed[vertex]) - original;
+        if transform.transform_point(original).y >= 36.65 {
+            assert_eq!((first, second), (Vec3::ZERO, Vec3::ZERO));
+            anchored += 1;
+        } else if first.length() > 0.05 {
+            assert!(first.normalize_or_zero().dot(second.normalize_or_zero()) < -0.999);
+            bent += 1;
+        }
+    }
+    assert!(anchored > 0 && bent > 0);
+    app.world_mut().resource_mut::<GraphicsPacks>().packs[0]
+        .config
+        .scenes[0]
+        .wind
+        .as_mut()
+        .unwrap()
+        .strength = 0.0;
+    assert_eq!(capture(&mut app), baseline);
 }
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 mod gpu;

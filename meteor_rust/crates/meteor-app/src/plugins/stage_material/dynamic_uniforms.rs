@@ -9,7 +9,7 @@ use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderSystems};
 use std::collections::{HashMap, HashSet};
 
-type ParamKey = [u32; 63];
+type ParamKey = [u32; 71];
 
 #[derive(Resource, Default, Clone)]
 pub(crate) struct FrameUniforms {
@@ -43,6 +43,8 @@ struct GpuParams {
     pbr_tint: Vec4,
     pbr_textures: Vec4,
     water_optics: WaterOptics,
+    grass_ground: Vec4,
+    grass_bounds: Vec4,
 }
 
 impl GmdlMaterial {
@@ -100,7 +102,7 @@ impl GmdlMaterial {
             self.pbr_textures.z.to_bits(),
             self.pbr_textures.w.to_bits(),
         ];
-        let mut key = [0; 63];
+        let mut key = [0; 71];
         key[..50].copy_from_slice(&existing);
         key[50] = self.water_screen_refraction as u32;
         key[51..55].copy_from_slice(
@@ -112,6 +114,8 @@ impl GmdlMaterial {
         );
         key[55..59].copy_from_slice(&self.water_optics.scattering_g.to_array().map(f32::to_bits));
         key[59..63].copy_from_slice(&self.water_optics.control.to_array().map(f32::to_bits));
+        key[63..67].copy_from_slice(&self.grass_ground.to_array().map(f32::to_bits));
+        key[67..71].copy_from_slice(&self.grass_bounds.to_array().map(f32::to_bits));
         key
     }
 }
@@ -127,6 +131,15 @@ pub struct SharedBuffers {
     lighting: UniformBuffer<Vec4>,
     liquid_contacts: UniformBuffer<LiquidContacts>,
     graphics: UniformBuffer<crate::plugins::graphics_pack::GraphicsFrame>,
+}
+
+impl SharedBuffers {
+    pub(in crate::plugins) fn clock(&self) -> Result<Buffer, AsBindGroupError> {
+        self.clock
+            .buffer()
+            .cloned()
+            .ok_or(AsBindGroupError::RetryNextUpdate)
+    }
 }
 
 #[derive(Resource, Default)]
@@ -156,6 +169,8 @@ impl ParamBuffers {
                     first_person_clip: material.first_person_clip,
                     water_dynamics_bounds: material.water_dynamics_bounds,
                     water_optics: material.water_optics,
+                    grass_ground: material.grass_ground,
+                    grass_bounds: material.grass_bounds,
                     detail: Vec4::new(
                         if material.normal_texture.is_some() {
                             1.0
@@ -233,11 +248,7 @@ impl AsBindGroup for GmdlMaterial {
             .buffer()
             .ok_or(AsBindGroupError::RetryNextUpdate)?
             .clone();
-        let clock = shared
-            .clock
-            .buffer()
-            .ok_or(AsBindGroupError::RetryNextUpdate)?
-            .clone();
+        let clock = shared.clock()?;
         let lighting = shared
             .lighting
             .buffer()

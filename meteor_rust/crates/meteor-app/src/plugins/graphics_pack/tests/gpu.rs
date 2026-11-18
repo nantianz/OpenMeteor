@@ -10,7 +10,12 @@ use bevy::{
     },
 };
 use std::sync::{Arc, Mutex};
+#[cfg(feature = "original-assets")]
+mod sky_benchmark;
 fn capture(app: &mut App, pixels: &Arc<Mutex<Vec<u8>>>) -> Vec<u8> {
+    capture_size(app, pixels, 128, 128)
+}
+fn capture_size(app: &mut App, pixels: &Arc<Mutex<Vec<u8>>>, width: u32, height: u32) -> Vec<u8> {
     for _ in 0..24 {
         app.update();
         app.world()
@@ -30,7 +35,7 @@ fn capture(app: &mut App, pixels: &Arc<Mutex<Vec<u8>>>) -> Vec<u8> {
         }
     }
     let data = pixels.lock().unwrap().clone();
-    assert_eq!(data.len(), 128 * 128 * 4);
+    assert_eq!(data.len(), (width * height * 4) as usize);
     data
 }
 fn changed(a: &[u8], b: &[u8]) -> usize {
@@ -42,6 +47,7 @@ fn changed(a: &[u8], b: &[u8]) -> usize {
 
 #[test]
 fn headless_cloud_sky_renders_and_respects_opaque_depth() {
+    use crate::app_state::{AppState, LoadedStageInfo, Settings};
     use crate::plugins::graphics_pack::{config, sky};
 
     let mut app = App::new();
@@ -61,6 +67,20 @@ fn headless_cloud_sky_renders_and_respects_opaque_depth() {
             .disable::<bevy::audio::AudioPlugin>(),
     );
     sky::install(&mut app);
+    app.add_plugins(crate::plugins::stage_material::GmdlMaterialPlugin)
+        .add_systems(PostUpdate, runtime::update_frame)
+        .insert_state(AppState::Playing)
+        .insert_resource(Settings {
+            environment_lighting: false,
+            ..default()
+        })
+        .insert_resource(LoadedStageInfo {
+            stage_id: "sn13".into(),
+            ..default()
+        });
+    crate::plugins::frame_work::install(&mut app);
+    let packs = starter();
+    app.insert_resource(starter());
     let mut image = Image::new_target_texture(128, 128, TextureFormat::Rgba8UnormSrgb, None);
     image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
     let target = app.world_mut().resource_mut::<Assets<Image>>().add(image);
@@ -75,39 +95,49 @@ fn headless_cloud_sky_renders_and_respects_opaque_depth() {
         bevy::core_pipeline::tonemapping::Tonemapping::None,
         Transform::IDENTITY.looking_at(Vec3::new(0., 0.65, -1.), Vec3::Y),
     ));
+    let (configured, light) = sky::scene(&packs, "sn13").unwrap();
     let profile = config::Sky {
         density: 0.0,
-        coverage: 1.0,
-        ..default()
+        ..configured.clone()
     };
-    let light = config::Environment::default();
+    let noise = app
+        .world_mut()
+        .resource_scope(|world, mut noise: Mut<sky::CloudNoise>| {
+            noise.get(&mut world.resource_mut::<Assets<Image>>())
+        });
     let cloud = app
         .world_mut()
         .resource_mut::<Assets<sky::CloudSkyMaterial>>()
-        .add(sky::material(&profile, &light));
+        .add(sky::material(
+            &profile,
+            &light,
+            noise.clone(),
+            packs.wind("sn13"),
+        ));
     let shell = app
         .world_mut()
         .resource_mut::<Assets<Mesh>>()
         .add(Sphere::new(1.).mesh().uv(24, 12));
-    app.world_mut().spawn((
-        sky::CloudSky,
-        bevy::camera::visibility::NoFrustumCulling,
-        Mesh3d(shell),
-        MeshMaterial3d(cloud.clone()),
-        Transform::IDENTITY,
-    ));
+    let dome = app
+        .world_mut()
+        .spawn((
+            sky::CloudSky(None),
+            bevy::camera::visibility::NoFrustumCulling,
+            Mesh3d(shell),
+            MeshMaterial3d(cloud.clone()),
+            Transform::IDENTITY,
+        ))
+        .id();
     let solid = app
         .world_mut()
-        .resource_mut::<Assets<StandardMaterial>>()
-        .add(StandardMaterial {
-            base_color: Color::srgb(1., 0., 0.),
-            unlit: true,
-            ..default()
-        });
-    let mesh = app
-        .world_mut()
-        .resource_mut::<Assets<Mesh>>()
-        .add(Cuboid::new(0.6, 0.6, 0.6));
+        .resource_mut::<Assets<GmdlMaterial>>()
+        .add(plain());
+    let mut mesh = Cuboid::new(0.6, 0.6, 0.6).mesh().build();
+    mesh.insert_attribute(
+        Mesh::ATTRIBUTE_COLOR,
+        vec![[0.45, 0.45, 0.45, 1.0]; mesh.count_vertices()],
+    );
+    let mesh = app.world_mut().resource_mut::<Assets<Mesh>>().add(mesh);
     app.world_mut().spawn((
         Mesh3d(mesh),
         MeshMaterial3d(solid),
@@ -129,22 +159,285 @@ fn headless_cloud_sky_renders_and_respects_opaque_depth() {
     app.finish();
     app.cleanup();
     let clear_sky = capture(&mut app, &pixels);
-    let cloudy = config::Sky {
-        density: 0.4,
-        ..profile
-    };
     *app.world_mut()
         .resource_mut::<Assets<sky::CloudSkyMaterial>>()
         .get_mut(&cloud)
-        .unwrap() = sky::material(&cloudy, &light);
+        .unwrap() = sky::material(&configured, &light, noise.clone(), packs.wind("sn13"));
     let cloudy_sky = capture(&mut app, &pixels);
+    assert!(
+        sky::cache_ready(&app),
+        "cloud panorama must publish, not stay on direct rendering"
+    );
     assert!(changed(&clear_sky, &cloudy_sky) > 1024);
     let middle = (64 * 128 + 64) * 4;
-    assert_eq!(&clear_sky[middle..middle + 3], &[255, 0, 0]);
+    assert_eq!(clear_sky[middle], clear_sky[middle + 2]);
+    assert!((90..230).contains(&clear_sky[middle]));
     assert_eq!(
         &clear_sky[middle..middle + 4],
         &cloudy_sky[middle..middle + 4]
     );
+    app.world_mut()
+        .entity_mut(dome)
+        .insert(sky::CloudSky(Some(sky::atmosphere_lighting(
+            &configured,
+            &light,
+        ))));
+    let lit = capture(&mut app, &pixels);
+    assert!(
+        lit[middle + 2] > lit[middle] + 8,
+        "sky must tint the opaque material"
+    );
+    app.world_mut().resource_mut::<FrameUniforms>().seconds = 14.0;
+    let moved = capture(&mut app, &pixels);
+    assert!(
+        changed(&lit, &moved) > 1024,
+        "shared clock must move the clouds"
+    );
+    assert_eq!(lit[middle..middle + 4], moved[middle..middle + 4]);
+    let mut calm = packs.wind("sn13").unwrap().clone();
+    calm.strength = 0.0;
+    *app.world_mut()
+        .resource_mut::<Assets<sky::CloudSkyMaterial>>()
+        .get_mut(&cloud)
+        .unwrap() = sky::material(&configured, &light, noise, Some(&calm));
+    let still = capture(&mut app, &pixels);
+    app.world_mut().resource_mut::<FrameUniforms>().seconds = 28.0;
+    assert_eq!(
+        capture(&mut app, &pixels),
+        still,
+        "calm cloud cache must stay still"
+    );
+    app.world_mut().resource_mut::<FrameUniforms>().seconds = 0.0;
+
+    #[cfg(feature = "original-assets")]
+    let dir = std::env::var_os("METEOR_SKY_CAPTURE_DIR").map(Into::into);
+    #[cfg(feature = "original-assets")]
+    let times = std::env::var_os("METEOR_SKY_TIME_CAPTURE").is_some();
+    #[cfg(feature = "original-assets")]
+    let benchmark = std::env::var_os("METEOR_SKY_BENCH").is_some();
+    #[cfg(feature = "original-assets")]
+    if dir.is_some() || benchmark {
+        run_sn13(&mut app, dir, benchmark, times);
+    }
+}
+
+#[cfg(feature = "original-assets")]
+fn run_sn13(app: &mut App, dir: Option<std::path::PathBuf>, benchmark: bool, times: bool) {
+    use crate::app_state::{LoadedStageAssets, LoadedStageInfo};
+    use crate::plugins::{
+        escort_assets::LoadedEscort, hazard_plugin::StageHazardRuntime,
+        render_plugin::StageCollision, stage_collider::StageCollider,
+        stage_plugin::StageScriptRuntime,
+    };
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+    let src = root.join("sn13");
+    let read = |name: &str| std::fs::read(src.join(name)).unwrap();
+    let wp = crate::text_codec::decode_text(&std::fs::read(root.join("Level/sn13.wp")).unwrap());
+    let center = meteor_scene::stage_loader::get_stage_center("sn13", Some(&wp));
+    let mut init = app
+        .world_mut()
+        .query_filtered::<Entity, Or<(With<Camera3d>, With<Mesh3d>, With<Readback>)>>();
+    for e in init.iter(app.world()).collect::<Vec<_>>() {
+        app.world_mut().despawn(e);
+    }
+    app.insert_resource(LoadedStageInfo {
+        stage_id: "sn13".into(),
+        center,
+        ..default()
+    })
+    .insert_resource(LoadedStageAssets {
+        gmb: Some(read("sn13.gmb")),
+        des: Some(read("sn13.des")),
+        cob: Some(read("sn13.cob")),
+        ..default()
+    })
+    .init_resource::<LoadedEscort>()
+    .init_resource::<StageHazardRuntime>()
+    .init_resource::<StageCollision>()
+    .init_resource::<StageCollider>()
+    .init_resource::<StageScriptRuntime>();
+
+    let width = 960;
+    let height = 576;
+    let mut image = Image::new_target_texture(width, height, TextureFormat::Rgba8UnormSrgb, None);
+    image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
+    let target = app.world_mut().resource_mut::<Assets<Image>>().add(image);
+    let to_world = |p: Vec3| {
+        let p = p - Vec3::from_array(center);
+        Vec3::new(p.x, p.z, -p.y) * 0.12
+    };
+    let camera = app
+        .world_mut()
+        .spawn((
+            Camera3d::default(),
+            Camera::default(),
+            RenderTarget::Image(target.clone().into()),
+            Msaa::Off,
+            bevy::core_pipeline::tonemapping::Tonemapping::None,
+            Transform::IDENTITY,
+        ))
+        .id();
+    if let Some(dir) = dir {
+        capture_sn13(app, dir, camera, &target, to_world, width, height, times);
+    }
+    if benchmark {
+        sky_benchmark::run(app, camera, &target, to_world);
+    }
+}
+
+#[cfg(feature = "original-assets")]
+fn load_sn13_variant(app: &mut App, enabled: bool) {
+    use crate::app_state::Settings;
+    use crate::plugins::render_plugin::{setup_stage_scene, PlayingSceneEntity};
+    use bevy::ecs::system::RunSystemOnce;
+
+    app.insert_resource(Settings {
+        sky_enhance: enabled,
+        ..default()
+    });
+    let old = app
+        .world_mut()
+        .query_filtered::<Entity, With<PlayingSceneEntity>>()
+        .iter(app.world())
+        .collect::<Vec<_>>();
+    for entity in old {
+        app.world_mut().despawn(entity);
+    }
+    app.world_mut().run_system_once(setup_stage_scene).unwrap();
+    let activated = app
+        .world_mut()
+        .query::<&sky::CloudSky>()
+        .iter(app.world())
+        .any(|sky| sky.0.is_some());
+    assert_eq!(activated, enabled);
+}
+
+#[cfg(feature = "original-assets")]
+fn capture_sn13(
+    app: &mut App,
+    dir: std::path::PathBuf,
+    camera: Entity,
+    target: &Handle<Image>,
+    to_world: impl Fn(Vec3) -> Vec3,
+    width: u32,
+    height: u32,
+    times: bool,
+) {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::render::render_resource::{Extent3d, TextureDimension};
+
+    let pixels = Arc::new(Mutex::new(Vec::new()));
+    let output = pixels.clone();
+    let readback = app
+        .world_mut()
+        .spawn(Readback::texture(target.clone()))
+        .observe(move |e: On<ReadbackComplete>| {
+            *output.lock().unwrap() = e.data.clone();
+        })
+        .id();
+    std::fs::create_dir_all(&dir).unwrap();
+    let save = |name: &str, data| {
+        Image::new(
+            Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            data,
+            TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::MAIN_WORLD,
+        )
+        .try_into_dynamic()
+        .unwrap()
+        .save(dir.join(name))
+        .unwrap();
+    };
+    if times {
+        let eye = Vec3::new(-794., -178., 63.);
+        let look = Vec3::new(-0.58, 0.81, 0.37);
+        *app.world_mut().get_mut::<Transform>(camera).unwrap() =
+            Transform::from_translation(to_world(eye)).looking_at(to_world(eye + look), Vec3::Y);
+        let scenes = &app.world().resource::<GraphicsPacks>().packs[0]
+            .config
+            .scenes;
+        let index = scenes
+            .iter()
+            .position(|scene| scene.stage == "sn13")
+            .unwrap();
+        let previous = scenes[index].sky.as_ref().unwrap().fixed_time.clone();
+        for time in ["07:00", "12:00", "18:30", "23:30"] {
+            app.world_mut().resource_mut::<GraphicsPacks>().packs[0]
+                .config
+                .scenes[index]
+                .sky
+                .as_mut()
+                .unwrap()
+                .fixed_time = Some(time.to_owned());
+            app.world().resource::<GraphicsPacks>().packs[0]
+                .config
+                .validate()
+                .unwrap();
+            load_sn13_variant(app, true);
+            let data = capture_size(app, &pixels, width, height);
+            assert!(
+                sky::cache_ready(app),
+                "time preview must use the cloud cache"
+            );
+            let (profile, light) =
+                sky::scene(app.world().resource::<GraphicsPacks>(), "sn13").unwrap();
+            let expected = sky::atmosphere_lighting(&profile, &light);
+            let graphics = app.world().resource::<FrameUniforms>().graphics;
+            assert_eq!(graphics.sun, expected.sun);
+            assert_eq!(graphics.sky.truncate(), expected.sky);
+            if time == "23:30" {
+                assert_eq!(graphics.sun.w, 0.0, "deep night has no direct sunlight");
+                assert!(
+                    graphics.sky.truncate().min_element() > 0.0,
+                    "night keeps sky fill"
+                );
+            }
+            save(&format!("sn13-{}.png", time.replace(':', "-")), data);
+        }
+        app.world_mut().resource_mut::<GraphicsPacks>().packs[0]
+            .config
+            .scenes[index]
+            .sky
+            .as_mut()
+            .unwrap()
+            .fixed_time = previous;
+        app.world_mut().despawn(readback);
+        return;
+    }
+    for enabled in [false, true] {
+        load_sn13_variant(app, enabled);
+        for (index, (eye, direction)) in [
+            (Vec3::new(-794., -178., 63.), Vec3::new(-0.58, 0.81, 0.50)),
+            (Vec3::new(24., -964., 60.), Vec3::new(-0.17, 0.98, 0.48)),
+            (Vec3::new(-550., -145., 365.), Vec3::new(0.78, -0.63, 0.56)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            *app.world_mut().get_mut::<Transform>(camera).unwrap() =
+                Transform::from_translation(to_world(eye))
+                    .looking_at(to_world(eye + direction), Vec3::Y);
+            let data = capture_size(app, &pixels, width, height);
+            assert_eq!(
+                app.world().resource::<FrameUniforms>().graphics.counts.w,
+                f32::from(enabled)
+            );
+            save(
+                &format!(
+                    "sn13-{}-{index}.png",
+                    if enabled { "enhanced" } else { "original" }
+                ),
+                data,
+            );
+        }
+    }
+    app.world_mut().despawn(readback);
 }
 
 #[test]

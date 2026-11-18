@@ -2452,7 +2452,7 @@ fn spawn_stage_sky(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn setup_stage_scene(
+pub(super) fn setup_stage_scene(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<GmdlMaterial>>,
@@ -2468,8 +2468,9 @@ fn setup_stage_scene(
     mut hazards: ResMut<super::hazard_plugin::StageHazardRuntime>,
     graphics: Option<Res<super::graphics_pack::GraphicsPacks>>,
     render_adapter: Option<Res<bevy::render::renderer::RenderAdapterInfo>>,
-    (mut cloud_materials, mut grass_materials): (
+    (mut cloud_materials, mut cloud_noise, mut grass_materials): (
         Option<ResMut<Assets<super::graphics_pack::sky::CloudSkyMaterial>>>,
+        Option<ResMut<super::graphics_pack::sky::CloudNoise>>,
         Option<ResMut<Assets<super::graphics_pack::grass::GrassMaterial>>>,
     ),
 ) {
@@ -2617,6 +2618,9 @@ fn setup_stage_scene(
 
     use super::graphics_pack::sky;
     use bevy::render::settings::Backends;
+    let stage_wind = graphics
+        .as_deref()
+        .and_then(|packs| packs.wind(&loaded.stage_id));
     let mut sky_replacements = HashSet::new();
     let mut enhanced_sky = false;
     let native_sky = !cfg!(any(target_arch = "wasm32", target_os = "android"))
@@ -2628,19 +2632,26 @@ fn setup_stage_scene(
         .as_deref()
         .filter(|_| settings.sky_enhance && native_sky)
         .and_then(|packs| sky::scene(packs, &loaded.stage_id));
-    if let (Some(materials), Some((profile, lighting))) =
-        (cloud_materials.as_deref_mut(), sky_profile)
-    {
-        match sky::replacements(profile, &gmdl, &skip_render) {
+    if let (Some(materials), Some(noise), Some((profile, lighting))) = (
+        cloud_materials.as_deref_mut(),
+        cloud_noise.as_deref_mut(),
+        sky_profile,
+    ) {
+        match sky::replacements(&profile, &gmdl, &skip_render) {
             Ok(replacements) => {
                 sky_replacements = replacements;
-                enhanced_sky = true;
+                enhanced_sky = profile.replace_skybox;
+                let sky_lighting =
+                    enhanced_sky.then(|| sky::atmosphere_lighting(&profile, &lighting));
+                let noise = noise.get(&mut images);
                 commands.spawn((
                     PlayingSceneEntity,
-                    sky::CloudSky,
+                    sky::CloudSky(sky_lighting),
                     bevy::camera::visibility::NoFrustumCulling,
                     Mesh3d(meshes.add(Sphere::new(1.0).mesh().uv(24, 12))),
-                    MeshMaterial3d(materials.add(sky::material(profile, &lighting))),
+                    MeshMaterial3d(
+                        materials.add(sky::material(&profile, &lighting, noise, stage_wind)),
+                    ),
                     Transform::IDENTITY,
                 ));
             }
@@ -2657,7 +2668,9 @@ fn setup_stage_scene(
             &loaded.stage_id,
         );
     }
-    if let (Some(packs), Some(materials)) = (graphics.as_deref(), grass_materials.as_deref_mut()) {
+    let grass_ground = if let (Some(packs), Some(materials)) =
+        (graphics.as_deref(), grass_materials.as_deref_mut())
+    {
         super::graphics_pack::grass::spawn(
             &mut commands,
             &mut meshes,
@@ -2670,8 +2683,10 @@ fn setup_stage_scene(
             &collision.face_ids,
             stage_collider.mesh.as_ref(),
             loaded.center,
-        );
-    }
+        )
+    } else {
+        None
+    };
 
     for (obj_idx, object) in gmdl.objects.iter().enumerate() {
         if skip_render.contains(object.name.as_str()) {
@@ -2895,7 +2910,9 @@ fn setup_stage_scene(
             }
             let wave_mesh = if liquid_surface.as_ref().is_some_and(|s| s.is_clear_water()) {
                 if let Some((refined, mut wave)) =
-                    super::stage_material::water::waves::WaterWaveMesh::refine(&mesh, &indices)
+                    super::stage_material::water::waves::WaterWaveMesh::refine_with_wind(
+                        &mesh, &indices, stage_wind, &transform,
+                    )
                 {
                     wave.configure_shallow(
                         materials.get(&material_handle).unwrap(),
@@ -2927,9 +2944,26 @@ fn setup_stage_scene(
                     && scene_obj.is_none_or(|o| o.billboard != 1),
                 &mut images,
             );
+            if mode == GmdlMode::Opaque && alpha_cutoff == 0.0 && liquid_surface.is_none() {
+                if let (Some(profile), Some(texture)) =
+                    (grass_ground, gmdl.resolve_texture_name(mat))
+                {
+                    super::graphics_pack::grass::ground_material(
+                        profile,
+                        &object.name,
+                        texture,
+                        &mut materials.get_mut(&material_handle).unwrap(),
+                    );
+                }
+            }
             let wind_bounds = wind.as_ref().map(|w| {
                 use bevy::camera::primitives::Aabb;
-                let pad = Vec3::splat(w.profile.amplitude * 8.0)
+                let gust_max = stage_wind.map_or(0.0, |wind| {
+                    wind.strength
+                        * (1.0 + wind.gust)
+                        * wind.response.map_or(1.0, |response| response.cloth)
+                });
+                let pad = Vec3::splat(w.profile.amplitude * gust_max)
                     / transform.scale.abs().max(Vec3::splat(0.0001));
                 let min = w
                     .positions

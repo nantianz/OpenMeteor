@@ -3,6 +3,152 @@ use bevy::ecs::system::RunSystemOnce;
 use meteor_asset::gmdl::{GmdlMaterial, GmdlMesh, GmdlObject, GmdlTexture};
 use std::collections::BTreeSet;
 
+fn save_preview(dir: &std::path::Path, name: &str, data: Vec<u8>, width: u32, height: u32) {
+    std::fs::create_dir_all(dir).unwrap();
+    Image::new(
+        Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::MAIN_WORLD,
+    )
+    .try_into_dynamic()
+    .unwrap()
+    .save(dir.join(name))
+    .unwrap();
+}
+
+fn spawn_stock_preview(app: &mut App) -> Option<[Transform; 2]> {
+    use crate::plugins::stage_material::{
+        GmdlMaterial as StageMaterial, GmdlMaterialParams, GmdlMode,
+    };
+    use crate::plugins::{pak_textures, render_plugin, stage_collider::StageMeshCollider};
+    use meteor_physics::collision::MeshCollider;
+    use std::collections::HashMap;
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+    let read = |path: &str| std::fs::read(root.join(path)).unwrap();
+    let source =
+        meteor_asset::gmdl::decode_gmdl(&std::fs::read(root.join("sn03/sn03.gmb")).ok()?).unwrap();
+    let desc = meteor_asset::des::parse_stage_description(&crate::text_codec::decode_text(&read(
+        "sn03/sn03.des",
+    )));
+    let cob = meteor_asset::cob::parse_cob(&read("sn03/sn03.cob")).unwrap();
+    let center = meteor_scene::stage_loader::get_stage_center(
+        "sn03",
+        Some(&crate::text_codec::decode_text(&read("Level/sn03.wp"))),
+    );
+    let support = StageMeshCollider::from_gmdl(&source, &desc, Some(&cob.face_ids), center);
+    let cameras = [
+        (Vec2::new(-84.4, -49.2), Vec2::new(-68.4, -44.7)),
+        (Vec2::new(118.1, -0.9), Vec2::new(117.9, 36.5)),
+    ]
+    .map(|(eye, target)| {
+        let height = support
+            .sample_ground_hit(eye.x, eye.y, -6.0, 2.0)
+            .map_or(0., |hit| hit.y);
+        Transform::from_xyz(eye.x, height + 3.4, eye.y)
+            .looking_at(Vec3::new(target.x, height - 0.5, target.y), Vec3::Y)
+    });
+    let packs = super::super::tests::starter();
+    app.world_mut()
+        .run_system_once(
+            move |mut commands: Commands,
+                  old: Query<Entity, With<PlayingSceneEntity>>,
+                  mut meshes: ResMut<Assets<Mesh>>,
+                  mut images: ResMut<Assets<Image>>,
+                  mut grass: ResMut<Assets<GrassMaterial>>,
+                  mut materials: ResMut<Assets<StageMaterial>>| {
+                for entity in &old {
+                    commands.entity(entity).despawn();
+                }
+                let profile = spawn(
+                    &mut commands,
+                    &mut meshes,
+                    &mut images,
+                    &mut grass,
+                    &packs,
+                    "sn03",
+                    &source,
+                    Some(&desc),
+                    &cob.face_ids,
+                    Some(&support),
+                    center,
+                )
+                .expect("stock grass profile");
+                let mut cache = pak_textures::PakCache::default();
+                let mut textures = HashMap::new();
+                for object in &source.objects {
+                    let description = desc
+                        .scene_objects
+                        .iter()
+                        .find(|value| value.name == object.name);
+                    if description.is_some_and(|value| value.skip_render() || value.billboard == 1)
+                    {
+                        continue;
+                    }
+                    let mut groups = std::collections::BTreeMap::<usize, Vec<u32>>::new();
+                    for (&face, indices) in
+                        object.face_mat.iter().zip(object.indices.chunks_exact(3))
+                    {
+                        if face >= 0 {
+                            groups
+                                .entry(face as usize)
+                                .or_default()
+                                .extend_from_slice(indices);
+                        }
+                    }
+                    for (index, indices) in groups {
+                        let raw = &source.materials[index];
+                        let (mode, opacity, alpha_cutoff) =
+                            render_plugin::classify_gmdl_material(raw);
+                        if mode != GmdlMode::Opaque {
+                            continue;
+                        }
+                        let name = source.resolve_texture_name(raw).unwrap_or_default();
+                        let texture = textures
+                            .entry(name)
+                            .or_insert_with(|| {
+                                cache.resolve(&root, "sn03", name).and_then(|bytes| {
+                                    pak_textures::image_handle_with_quality(&mut images, &bytes, 0)
+                                })
+                            })
+                            .clone();
+                        let mut material = StageMaterial::new_scene(
+                            GmdlMaterialParams {
+                                opacity,
+                                alpha_cutoff,
+                                mode: mode.as_u32(),
+                                has_texture: u32::from(texture.is_some()),
+                                uv_offset: Vec2::ZERO,
+                            },
+                            texture,
+                            raw.two_side,
+                            mode,
+                        );
+                        if alpha_cutoff == 0.0 {
+                            ground_material(profile, &object.name, name, &mut material);
+                        }
+                        let (mesh, transform) =
+                            render_plugin::build_scene_mesh(object, &indices, center, description);
+                        commands.spawn((
+                            PlayingSceneEntity,
+                            Mesh3d(meshes.add(mesh)),
+                            MeshMaterial3d(materials.add(material)),
+                            transform,
+                        ));
+                    }
+                }
+            },
+        )
+        .unwrap();
+    Some(cameras)
+}
+
 #[test]
 fn stock_grass_uses_the_authored_ground_and_stays_inside_the_budget() {
     use meteor_physics::collision::MeshCollider;
@@ -41,7 +187,12 @@ fn stock_grass_uses_the_authored_ground_and_stays_inside_the_budget() {
     )
     .unwrap();
     let count: usize = tiles.iter().map(|tile| tile.roots.len()).sum();
-    assert!(count > 500 && tiles.len() <= 512);
+    assert!(count > 32_000 && tiles.len() <= 512);
+    let mut species = [0; 3];
+    for root in tiles.iter().flat_map(|tile| &tile.roots) {
+        species[((root.w as u32 - 1) >> 8 & 3) as usize] += 1;
+    }
+    assert!(species.into_iter().all(|count| count > 1000));
     let waypoints_near_grass = wp
         .lines()
         .filter_map(|line| {
@@ -86,8 +237,7 @@ fn stock_grass_uses_the_authored_ground_and_stays_inside_the_budget() {
         }
     }
     eprintln!(
-        "sn03 grass: {count} roots in {} tiles, near {waypoints_near_grass} waypoints",
-        tiles.len()
+        "sn03 grass: {count} clumps in {} tiles, near {waypoints_near_grass} waypoints, species {species:?}", tiles.len()
     );
 }
 
@@ -129,12 +279,14 @@ fn fixture_ground() -> GmdlMesh {
 
 #[test]
 fn grass_gpu_draws_tracks_recovers_and_honors_visible_tile_limit() {
+    use crate::plugins::stage_material::{
+        FrameUniforms, GmdlMaterial as GroundMaterial, GmdlMaterialParams, GmdlMaterialPlugin,
+        GmdlMode,
+    };
     use bevy::{
         app::PluginsState,
         camera::RenderTarget,
-        diagnostic::{DiagnosticPath, DiagnosticsStore},
         render::{
-            diagnostic::RenderDiagnosticsPlugin,
             gpu_readback::{Readback, ReadbackComplete},
             render_resource::{CachedPipelineState, PipelineCache, PollType, TextureUsages},
             renderer::RenderDevice,
@@ -162,12 +314,19 @@ fn grass_gpu_draws_tracks_recovers_and_honors_visible_tile_limit() {
     )
     .insert_state(AppState::Playing)
     .insert_resource(Settings::default())
-    .init_resource::<DiagnosticsStore>()
-    .add_plugins(RenderDiagnosticsPlugin)
+    .add_plugins(GmdlMaterialPlugin)
     .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
         Duration::from_millis(34),
     ));
     install(&mut app);
+    crate::plugins::frame_work::install(&mut app);
+    app.add_systems(
+        PostUpdate,
+        (|settings: Res<Settings>, mut frame: ResMut<FrameUniforms>| {
+            frame.graphics.counts.z = f32::from(settings.grass_enhance);
+        })
+        .after(bevy::transform::TransformSystems::Propagate),
+    );
     let mut target = Image::new_target_texture(WIDTH, HEIGHT, TextureFormat::Rgba8UnormSrgb, None);
     target.texture_descriptor.usage |= TextureUsages::COPY_SRC;
     let target = app.world_mut().resource_mut::<Assets<Image>>().add(target);
@@ -188,11 +347,13 @@ fn grass_gpu_draws_tracks_recovers_and_honors_visible_tile_limit() {
         .id();
     let pixels = Arc::new(Mutex::new(Vec::new()));
     let output = pixels.clone();
-    app.world_mut()
-        .spawn(Readback::texture(target))
+    let readback = app
+        .world_mut()
+        .spawn(Readback::texture(target.clone()))
         .observe(move |event: On<ReadbackComplete>| {
             *output.lock().unwrap() = event.data.clone();
-        });
+        })
+        .id();
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     while app.plugins_state() != PluginsState::Ready {
         assert!(std::time::Instant::now() < deadline);
@@ -202,15 +363,48 @@ fn grass_gpu_draws_tracks_recovers_and_honors_visible_tile_limit() {
     app.finish();
     app.cleanup();
     let mut pack = super::super::tests::starter();
+    pack.packs[0].config.scenes[0]
+        .wind
+        .as_mut()
+        .unwrap()
+        .strength = 0.0;
     let profile = pack.packs[0]
         .config
         .scenes
         .iter_mut()
         .find_map(|scene| scene.grass.as_mut())
         .unwrap();
-    profile.wind_strength = 0.0;
     profile.tile_size = 6.0;
     profile.max_visible_tiles = 12;
+    let mut ground = GroundMaterial::new_scene(
+        GmdlMaterialParams {
+            opacity: 1.0,
+            alpha_cutoff: 0.0,
+            mode: GmdlMode::Opaque.as_u32(),
+            has_texture: 0,
+            uv_offset: Vec2::ZERO,
+        },
+        None,
+        true,
+        GmdlMode::Opaque,
+    );
+    ground_material(profile, "ground", "sn302.jpg", &mut ground);
+    let ground = app
+        .world_mut()
+        .resource_mut::<Assets<GroundMaterial>>()
+        .add(ground);
+    let mut terrain = Plane3d::default().mesh().size(36., 36.).build();
+    terrain.insert_attribute(
+        Mesh::ATTRIBUTE_COLOR,
+        vec![[0.30, 0.24, 0.17, 1.]; terrain.count_vertices()],
+    );
+    let terrain = app.world_mut().resource_mut::<Assets<Mesh>>().add(terrain);
+    app.world_mut().spawn((
+        PlayingSceneEntity,
+        Mesh3d(terrain),
+        MeshMaterial3d(ground),
+        Transform::IDENTITY,
+    ));
     app.world_mut()
         .run_system_once(
             move |mut commands: Commands,
@@ -253,30 +447,8 @@ fn grass_gpu_draws_tracks_recovers_and_honors_visible_tile_limit() {
         data
     };
     let baseline = capture(&mut app, 20);
-    let gpu_time = |app: &mut App| {
-        let path = DiagnosticPath::new("render/main_opaque_pass_3d/elapsed_gpu");
-        let mut samples = Vec::new();
-        let mut previous = None;
-        for _ in 0..36 {
-            app.update();
-            app.world()
-                .resource::<RenderDevice>()
-                .poll(PollType::Poll)
-                .unwrap();
-            if let Some(sample) = app
-                .world()
-                .resource::<DiagnosticsStore>()
-                .get_measurement(&path)
-            {
-                if previous.replace(sample.time) != Some(sample.time) {
-                    samples.push(sample.value);
-                }
-            }
-        }
-        samples.sort_by(f64::total_cmp);
-        samples.get(samples.len() / 2).copied()
-    };
-    let on_ms = gpu_time(&mut app);
+    app.world_mut().resource_mut::<FrameUniforms>().seconds = 19.0;
+    assert_eq!(capture(&mut app, 8), baseline, "calm field must stay still");
     let count = |world: &mut World| {
         world
             .query_filtered::<&Visibility, With<GrassTile>>()
@@ -285,8 +457,42 @@ fn grass_gpu_draws_tracks_recovers_and_honors_visible_tile_limit() {
             .count()
     };
     assert_eq!(count(app.world_mut()), 12);
-    let grass_pixels = baseline.chunks_exact(4).filter(|p| p[1] > 50).count();
-    assert!(grass_pixels > 2500, "grass pixels: {grass_pixels}");
+    let green_pixels = |frame: &[u8]| {
+        frame
+            .chunks_exact(4)
+            .filter(|p| p[1] > 45 && p[1] > p[0].saturating_add(8))
+            .count()
+    };
+    let greens = green_pixels(&baseline);
+    assert!(
+        greens > (WIDTH * HEIGHT / 2) as usize,
+        "grass pixels: {greens}"
+    );
+    let submitted = |world: &mut World| {
+        let current: Vec<_> = world
+            .query::<(&GrassTile, &Visibility, &Mesh3d)>()
+            .iter(world)
+            .filter(|(_, visible, _)| **visible != Visibility::Hidden)
+            .map(|(tile, _, mesh)| (tile.bucket, mesh.0.clone()))
+            .collect();
+        let mut query = world.query::<&GrassField>();
+        let field = query.single(world).unwrap();
+        current
+            .iter()
+            .map(|(bucket, mesh)| {
+                let level = field.lods[*bucket]
+                    .iter()
+                    .position(|handle| handle == mesh)
+                    .unwrap();
+                LODS[level].triangles(clump_capacity(*bucket))
+            })
+            .sum::<usize>()
+    };
+    let triangles = submitted(app.world_mut());
+    assert!(
+        triangles > 20_000 && triangles <= 104_000,
+        "{triangles} submitted triangles"
+    );
     let fighter = app
         .world_mut()
         .spawn((
@@ -316,7 +522,7 @@ fn grass_gpu_draws_tracks_recovers_and_honors_visible_tile_limit() {
     };
     let contact_pixels = changed(&baseline, &pressed);
     assert!(
-        contact_pixels > 60 && contact_pixels < 6000,
+        contact_pixels > 60 && contact_pixels < (WIDTH * HEIGHT / 15) as usize,
         "contact pixels: {contact_pixels}"
     );
     app.world_mut().despawn(fighter);
@@ -324,9 +530,19 @@ fn grass_gpu_draws_tracks_recovers_and_honors_visible_tile_limit() {
     assert_eq!(recovered, baseline);
     app.world_mut().resource_mut::<Settings>().grass_enhance = false;
     let off = capture(&mut app, 16);
-    let off_ms = gpu_time(&mut app);
     assert_eq!(count(app.world_mut()), 0);
-    assert!(off.chunks_exact(4).all(|p| p[1] == 0));
+    assert_eq!(green_pixels(&off), 0);
+    if let Some(dir) = std::env::var_os("METEOR_GRASS_CAPTURE_DIR") {
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, data) in [
+            ("meadow.png", baseline),
+            ("meadow-pressed.png", pressed),
+            ("meadow-disabled.png", off),
+        ] {
+            save_preview(&dir, name, data, WIDTH, HEIGHT);
+        }
+    }
     app.world_mut().resource_mut::<Settings>().grass_enhance = true;
     app.world_mut()
         .get_mut::<Transform>(camera)
@@ -339,5 +555,90 @@ fn grass_gpu_draws_tracks_recovers_and_honors_visible_tile_limit() {
         "grass interaction changed {contact_pixels} of {} pixels",
         WIDTH * HEIGHT
     );
-    eprintln!("{WIDTH}x{HEIGHT} opaque GPU median with 12 visible tiles: on={on_ms:?} ms, off={off_ms:?} ms");
+    eprintln!(
+        "{triangles} submitted triangles, greens on {greens}/{} pixels",
+        WIDTH * HEIGHT
+    );
+    if std::env::var_os("METEOR_GRASS_BENCH").is_some() {
+        app.world_mut().entity_mut(readback).remove::<Readback>();
+        app.world_mut()
+            .resource_mut::<Assets<Image>>()
+            .get_mut(&target)
+            .unwrap()
+            .resize(Extent3d {
+                width: 1920,
+                height: 1080,
+                depth_or_array_layers: 1,
+            });
+        app.world_mut()
+            .get_mut::<Transform>(camera)
+            .unwrap()
+            .translation
+            .x -= 150.0;
+        let mut fields = app.world_mut().query::<&mut GrassField>();
+        fields
+            .single_mut(app.world_mut())
+            .unwrap()
+            .profile
+            .max_visible_tiles = 96;
+        let mut times = [Vec::new(), Vec::new()];
+        for enabled in [false, true, true, false] {
+            app.world_mut().resource_mut::<Settings>().grass_enhance = enabled;
+            for sample in 0..48 {
+                let start = std::time::Instant::now();
+                app.update();
+                app.world()
+                    .resource::<RenderDevice>()
+                    .poll(PollType::Wait {
+                        submission_index: None,
+                        timeout: Some(Duration::from_secs(5)),
+                    })
+                    .unwrap();
+                if sample >= 12 {
+                    times[usize::from(enabled)].push(start.elapsed().as_secs_f64() * 1000.0);
+                }
+            }
+            if enabled {
+                let count = submitted(app.world_mut());
+                assert!(count > 0 && count <= 104_000);
+                eprintln!("1080p benchmark submits {count} grass triangles");
+            }
+        }
+        for (enabled, data) in times.iter_mut().enumerate() {
+            data.sort_by(f64::total_cmp);
+            eprintln!(
+                "1080p CPU + GPU completion enabled={enabled}: median {:.3} ms, p95 {:.3} ms ({} frames)",
+                data[data.len() / 2], data[data.len() * 95 / 100], data.len(),
+            );
+        }
+    }
+    if let Some(dir) = std::env::var_os("METEOR_GRASS_CAPTURE_DIR") {
+        if let Some(cameras) = spawn_stock_preview(&mut app) {
+            let dir = std::path::PathBuf::from(dir);
+            app.world_mut()
+                .resource_mut::<Assets<Image>>()
+                .get_mut(&target)
+                .unwrap()
+                .resize(Extent3d {
+                    width: WIDTH,
+                    height: HEIGHT,
+                    depth_or_array_layers: 1,
+                });
+            app.world_mut()
+                .entity_mut(readback)
+                .insert(Readback::texture(target));
+            app.world_mut().resource_mut::<Settings>().grass_enhance = true;
+            for (i, transform) in cameras.into_iter().enumerate() {
+                *app.world_mut().get_mut::<Transform>(camera).unwrap() = transform;
+                let pixels = capture(&mut app, 28);
+                save_preview(
+                    &dir,
+                    &format!("sn03-meadow-{}.png", i + 1),
+                    pixels,
+                    WIDTH,
+                    HEIGHT,
+                );
+            }
+        }
+    }
 }

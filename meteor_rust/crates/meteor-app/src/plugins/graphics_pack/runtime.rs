@@ -21,6 +21,9 @@ pub struct GraphicsFrame {
     pub contact_normals: [Vec4; 16],
 
     pub counts: Vec4,
+
+    pub water_wind: Vec4,
+    pub water_wind_cross: Vec4,
 }
 pub(super) fn update_frame(
     packs: Res<GraphicsPacks>,
@@ -38,6 +41,8 @@ pub(super) fn update_frame(
         With<Fighter>,
     >,
     camera: Query<&GlobalTransform, With<crate::plugins::camera_plugin::GameplayCamera>>,
+    grass: Query<(), With<super::grass::GrassField>>,
+    sky: Query<&super::sky::CloudSky>,
     mut frame: Option<ResMut<FrameUniforms>>,
 ) {
     let Some(frame) = frame.as_deref_mut() else {
@@ -50,6 +55,27 @@ pub(super) fn update_frame(
     let Some(loaded) = loaded else {
         return;
     };
+    if let Some((wind, response)) = packs
+        .wind(&loaded.stage_id)
+        .and_then(|wind| wind.response.map(|response| (wind, response.water)))
+    {
+        let travel = -wind_travel(wind, frame.seconds, response) * 0.035;
+        let gain = (wind_at(wind, Vec3::ZERO, frame.seconds).length() * response).min(1.0);
+        let cross = bevy::math::DVec2::new(
+            travel.x * 0.54 - travel.y * 0.84,
+            travel.x * 0.84 + travel.y * 0.54,
+        ) * 1.47;
+        let wrap = |phase: bevy::math::DVec2| {
+            Vec2::new(
+                phase.x.rem_euclid(1.0) as f32,
+                phase.y.rem_euclid(1.0) as f32,
+            )
+        };
+        frame.graphics.water_wind = wrap(travel).extend(gain).extend(1.0);
+        frame.graphics.water_wind_cross = wrap(cross).extend(0.0).extend(0.0);
+    }
+    frame.graphics.counts.z =
+        f32::from(!grass.is_empty() && settings.as_ref().is_none_or(|s| s.grass_enhance));
     let mut environment = None;
     let mut fog = None;
     let mut contact = None;
@@ -86,6 +112,13 @@ pub(super) fn update_frame(
             .extend(e.sun_intensity);
         frame.graphics.sun_color = Vec3::from_array(e.sun_color).extend(0.);
         frame.graphics.environment = Vec4::new(e.intensity, 0., e.exposure, 0.);
+    }
+    if let Some(light) = sky.iter().find_map(|sky| sky.0) {
+        frame.graphics.sky = light.sky.extend(0.0);
+        frame.graphics.ground = light.ground.extend(0.0);
+        frame.graphics.sun = light.sun;
+        frame.graphics.sun_color = light.sun_color.extend(0.0);
+        frame.graphics.counts.w = 1.0;
     }
     if let Some(fog) = fog.filter(|_| settings.as_ref().is_none_or(|s| s.volumetric_fog)) {
         frame.graphics.counts.x = fog.len() as f32;

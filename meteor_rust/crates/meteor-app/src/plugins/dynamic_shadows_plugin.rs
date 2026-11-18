@@ -40,6 +40,7 @@ fn sync_dynamic_sun(
     mut existing: Query<(Entity, &mut DirectionalLight, &mut Transform), With<MeteorDynamicSun>>,
     graphics: Option<Res<crate::plugins::graphics_pack::GraphicsPacks>>,
     loaded: Option<Res<crate::app_state::LoadedStageInfo>>,
+    sky: Query<&crate::plugins::graphics_pack::sky::CloudSky>,
     mut frame: ResMut<FrameUniforms>,
 ) {
     frame.lighting = Vec4::new(
@@ -58,23 +59,23 @@ fn sync_dynamic_sun(
             .filter_map(|(_, s)| s.environment.as_ref())
             .last()
     });
-    let direction = environment
-        .map_or(Vec3::new(40.0, 80.0, 30.0), |e| {
-            Vec3::from_array(e.sun_direction)
-        })
-        .normalize();
-    let sun_transform = if environment.is_some() {
-        Transform::from_translation(direction * 100.0).looking_at(
-            Vec3::ZERO,
-            if direction.dot(Vec3::Y).abs() > 0.99 {
-                Vec3::Z
-            } else {
-                Vec3::Y
-            },
-        )
-    } else {
-        Transform::from_xyz(40.0, 80.0, 30.0).looking_at(Vec3::ZERO, Vec3::Y)
-    };
+    let atmosphere = sky.iter().find_map(|sky| sky.0);
+    let direction = atmosphere
+        .map(|light| light.sun.truncate())
+        .or_else(|| environment.map(|e| Vec3::from_array(e.sun_direction).normalize()));
+    let sun_transform = direction.map_or_else(
+        || Transform::from_xyz(40.0, 80.0, 30.0).looking_at(Vec3::ZERO, Vec3::Y),
+        |direction| {
+            Transform::from_translation(direction * 100.0).looking_at(
+                Vec3::ZERO,
+                if direction.y.abs() > 0.99 {
+                    Vec3::Z
+                } else {
+                    Vec3::Y
+                },
+            )
+        },
+    );
     let want = settings.dynamic_shadows || settings.environment_lighting;
     let have = existing.iter().next().map(|(entity, _, _)| entity);
     match sun_action(want, have.is_some()) {

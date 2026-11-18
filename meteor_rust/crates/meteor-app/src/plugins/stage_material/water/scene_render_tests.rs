@@ -171,6 +171,12 @@ fn render_original_liquid(stage: &str, eye: Vec3, aim: Vec3, live_reflection: bo
                     [0.0; 3],
                     &mut app.world_mut().resource_mut::<Assets<Image>>()
                 ));
+                if stage == "sn13" {
+                    assert_eq!(
+                        material.water_optics.control.w, 1.0,
+                        "sn13 uses deep optics"
+                    );
+                }
                 material.water_live_reflection = live_reflection && material.water.x == 1.0;
                 water_count += 1;
             }
@@ -361,25 +367,20 @@ fn render_original_liquid(stage: &str, eye: Vec3, aim: Vec3, live_reflection: bo
             "banks/bridge must remain unchanged"
         );
 
-        let contrast = |frame: &[u8]| {
+        let average = |frame: &[u8]| {
             let mut sum = 0.0_f64;
-            let mut squares = 0.0_f64;
-            let mut count = 0.0_f64;
             for y in 190..280 {
                 for x in 50..460 {
                     let pixel = &frame[(y * 512 + x) * 4..][..3];
-                    let value = pixel.iter().map(|v| *v as f64).sum::<f64>() / 3.0;
-                    sum += value;
-                    squares += value * value;
-                    count += 1.0;
+                    sum += pixel.iter().map(|v| f64::from(*v)).sum::<f64>();
                 }
             }
-            (squares / count - (sum / count).powi(2)).sqrt()
+            sum / (3.0 * 90.0 * 410.0)
         };
         if !live_reflection {
             assert!(
-                contrast(&on) < contrast(&off) * 1.05,
-                "clearer water must not amplify the original bed contrast"
+                average(&on) < average(&off) * 0.95,
+                "deep water must attenuate the bright riverbed"
             );
         }
     } else {
