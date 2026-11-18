@@ -50,6 +50,41 @@ fn disabled_never_reads_assets_and_invalid_schema_is_diagnostic() {
     let invalid = json!({"schema_version":1,"id":"bad","scenes":[{"stage":"*","fog":[{"center":[0,0,0],"radius":-1,"color":[1,1,1],"density":0.1}]}]});
     assert!(load_with_reader(index, |_| Ok(invalid.to_string().into_bytes())).is_err());
 }
+
+#[test]
+fn sky_time_config_accepts_only_complete_and_unambiguous_modes() {
+    let load = |sky| {
+        let pack = json!({
+            "schema_version": 1, "id": "time", "scenes": [{"stage": "sn13", "sky": sky}]
+        });
+        load_with_reader(
+            br#"{"schema_version":1,"enabled":true,"packs":["p.json"]}"#,
+            |_| Ok(pack.to_string().into_bytes()),
+        )
+    };
+    for source in [
+        json!({"enabled":true, "time":{"mode":"cycle", "start_time":"06:00", "time_scale":60}}),
+        json!({"enabled":true, "time":{"mode":"system"}}),
+        json!({"enabled":true, "time":{"mode":"fixed", "time":"23:30"}}),
+        json!({"enabled":true, "fixed_time":"23:30"}),
+    ] {
+        assert!(
+            sky::scene(&load(source.clone()).unwrap(), "sn13").is_some(),
+            "{source}"
+        );
+    }
+    for source in [
+        json!({"time":{"mode":"cycle", "start_time":"24:00", "time_scale":60}}),
+        json!({"time":{"mode":"cycle", "start_time":"06:00", "time_scale":0}}),
+        json!({"time":{"mode":"cycle", "start_time":"06:00", "time_scale":-1}}),
+        json!({"time":{"mode":"cycle", "start_time":"06:00"}}),
+        json!({"time":{"mode":"system", "time":"06:00"}}),
+        json!({"time":{"mode":"fixed", "time":"12:60"}}),
+        json!({"time":{"mode":"system"}, "fixed_time":"06:00"}),
+    ] {
+        assert!(load(source.clone()).is_err(), "{source}");
+    }
+}
 #[test]
 fn starter_resources_are_real_and_surface_scope_and_color_spaces_are_correct() {
     let packs = starter();
@@ -218,7 +253,7 @@ fn frame_configuration_clears_on_scene_exit_and_keeps_gameplay_resources_read_on
 fn atmosphere_lighting_requires_the_replaced_sky_and_restores_pack_lighting() {
     use crate::app_state::{AppState, LoadedStageInfo, Settings};
     let packs = starter();
-    let (profile, light) = sky::scene(&packs, "sn13").unwrap();
+    let (profile, light, _) = sky::scene(&packs, "sn13").unwrap();
     let atmosphere = sky::atmosphere_lighting(&profile, &light);
     let mut app = App::new();
     app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))

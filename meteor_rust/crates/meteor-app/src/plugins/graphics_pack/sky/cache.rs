@@ -29,6 +29,20 @@ struct Profile {
     material: AssetId<CloudSkyMaterial>,
     sky: SkyUniform,
     noise: Handle<Image>,
+    cycling: bool,
+}
+
+impl Profile {
+    fn preserves_panorama(&self, next: &Self) -> bool {
+        self.cycling
+            && next.cycling
+            && self.material == next.material
+            && self.noise == next.noise
+            && self.sky.layer == next.sky.layer
+            && self.sky.motion == next.sky.motion
+            && self.sky.wind == next.sky.wind
+            && self.sky.sun.w == next.sky.sun.w
+    }
 }
 
 #[derive(Resource, Default)]
@@ -125,16 +139,17 @@ pub(super) fn install(app: &mut App) {
 fn extract(
     mut commands: Commands,
     materials: Extract<Res<Assets<CloudSkyMaterial>>>,
-    domes: Extract<Query<&MeshMaterial3d<CloudSkyMaterial>, With<CloudSky>>>,
+    domes: Extract<Query<(&MeshMaterial3d<CloudSkyMaterial>, Has<SkyCycle>), With<CloudSky>>>,
     cameras: Extract<Query<(&GlobalTransform, &Camera, Has<GameplayCamera>), With<Camera3d>>>,
     frame: Extract<Option<Res<FrameUniforms>>>,
 ) {
-    let profile = domes.iter().find_map(|handle| {
+    let profile = domes.iter().find_map(|(handle, cycling)| {
         let material = materials.get(&handle.0)?;
         Some(Profile {
             material: handle.0.id(),
             sky: material.0.params.clone(),
             noise: material.0.noise.clone(),
+            cycling,
         })
     });
     let eye = cameras
@@ -230,11 +245,18 @@ fn update(
 ) {
     let Some(gpu) = &mut cache.0 else { return };
     if gpu.profile != source.profile {
-        gpu.profile = source.profile.clone();
-        gpu.bake = None;
-        gpu.published = None;
-        gpu.view.set(CacheView::default());
-        gpu.view.write_buffer(&device, &queue);
+        let preserve = gpu
+            .profile
+            .as_ref()
+            .zip(source.profile.as_ref())
+            .is_some_and(|(current, next)| current.preserves_panorama(next));
+        gpu.profile.clone_from(&source.profile);
+        if !preserve {
+            gpu.bake = None;
+            gpu.published = None;
+            gpu.view.set(CacheView::default());
+            gpu.view.write_buffer(&device, &queue);
+        }
     }
     let Some(profile) = gpu
         .profile
@@ -273,6 +295,7 @@ fn update(
             .is_some_and(|published| published.elapsed() < interval)
             || (previous.state.x != 0
                 && previous.origin_time.truncate() == source.eye_time.truncate()
+                && gpu.sky.get() == &profile.sky
                 && (previous.origin_time.w == source.eye_time.w
                     || profile.sky.wind.xy() == Vec2::ZERO))
         {

@@ -1,6 +1,6 @@
 # 图形增强包
 
-OpenMeteor 的图形增强包可以按关卡配置 PBR 材质、环境光、风场、接地阴影和局部雾。合适的装饰网格可以随风摆动，已制作衣料区域的 P0 重制模型可以使用布料模拟。增强包只影响画面，碰撞、命中判定、移动及联机协议沿用游戏原有逻辑。
+OpenMeteor 的图形增强包可以按关卡配置 PBR 材质、环境光、风场、接地阴影和局部雾。装饰布面可随风摆动，人物可挂载布料。增强包只影响画面，碰撞、命中判定、移动及联机协议沿用游戏原有逻辑。
 
 ## 启用示例
 
@@ -32,7 +32,7 @@ config/
 }
 ```
 
-示例在 `sn06` 为原版贴图 `sn064.jpg` 对应的不透明表面应用石材 PBR。打开游戏内的「体积雾」后，可以看到该关卡的局部雾。通用条目提供风场和接地阴影。衣物效果需要打开「角色衣物摆动」，使用带布料网格的 P0 重制模型，并且贴图质量高于最低档。只使用原版资源时，可以查看场景增强，原版角色不会自动获得布料网格。
+示例在 `sn06` 为原版贴图 `sn064.jpg` 对应的不透明表面应用石材 PBR。打开「体积雾」可看到关卡的局部雾。通用条目提供风场、接地阴影和 P0 斗篷。斗篷使用「角色衣物摆动」开关，贴图质量需高于最低档。
 
 将 `enabled` 改回 `false` 并重启即可停用包内配置。水面由独立的 `config/water-enhancement.json` 控制。锐化、动态阴影继续由游戏图形设置控制。
 
@@ -99,7 +99,7 @@ Starter 的 `stage: "*"` 提供默认风，金华城（`sn13`）有自己的覆�
 
 ## 可交互草地
 
-开启图形增强包后进入一线天（`sn03`）。示例在 `ground / sn302.jpg` 的泥地铺草。沿底层泥地跑过，脚边的草会弯倒，走开后回弹。局内通过设置里的「可交互草地」切换。测帧耗时，用相同分辨率、画质和机位分别记录开启和关闭后的帧时间。
+开启图形增强包后可在一线天（`sn03`）和四方阵（`sn06`）测试。前者匹配 `ground / sn302.jpg`，后者覆盖 `Box02 / sn06mian5.jpg` 主庭院。细长草叶、芒穗、阔叶及枯黄叶尖成片混合。跑过时草会弯倒，离开后回弹。天空替换生效后，草叶随天空补光和太阳变亮或变暗。局内可切换「可交互草地」，在同一机位和分辨率对比帧时间。
 
 在 `config/graphics-packs/starter/pack.json` 的 `scenes[].grass` 调整以下参数。修改后重启。
 
@@ -108,12 +108,12 @@ Starter 的 `stage: "*"` 提供默认风，金华城（`sn13`）有自己的覆�
 | `enabled`、`surfaces`、`bounds` | 关卡开关、精确的对象名与贴图名，以及可选的 `[[minX,minZ],[maxX,maxZ]]` 世界坐标范围 |
 | `density`、`tile_size`、`min_up` | 每平方世界单位的目标草簇数、草块边长和最小向上法线分量 |
 | `height`、`width`、`root_color`、`tip_color` | 叶片高宽范围及根部、叶尖的线性 RGB |
-| `near_distance`、`mid_distance`、`max_distance` | 三档距离阈值。越远越稀疏，超过最远距离裁剪 |
-| `max_visible_tiles`、`max_triangles` | 可见草块和三角形上限。Starter 分别为 96 和 104,000 |
+| `near_distance`、`mid_distance`、`max_distance` | 近、中和最远可见范围，最远可设到 240 世界单位，四方阵示例为 180 |
+| `max_visible_tiles`、`max_triangles` | 草块和三角形硬上限。一线天为 96 块、104,000 个三角形，四方阵高密度预设为 512 块、168,000 个三角形 |
 | `species`、`patch_size`、`clump_radius`、`ground_cover` | 植被类型权重、成片变化尺寸、草簇半径和地表覆盖强度 |
 | `wind_strength`、`interaction_radius`、`recovery_seconds` | 风弯曲量、脚边影响范围和回弹时间 |
 
-远景优先保留基本覆盖，再分配近景细节。踩踏只更新相机附近的 64×64 交互纹理，最多跟踪 8 个落地角色。参考 [Grassworks](https://grassworks.techredux.co/docs/performance) 的分块和 LOD 方法。
+最远一档每草块最多提交 80 个单三角形草叶。草叶宽度随距离增加以维持覆盖，地表草毯衔接最远处。踩踏只更新相机附近的 64×64 交互纹理，最多跟踪 8 个落地角色。远景覆盖补偿参考 [AMD GPUOpen 的草地渲染实现](https://gpuopen.com/learn/mesh_shaders/mesh_shaders-procedural_grass_rendering/#level-of-detail)。
 
 ## 体积云和天空盒
 
@@ -122,8 +122,32 @@ Starter 的 `stage: "*"` 提供默认风，金华城（`sn13`）有自己的覆�
 `horizon`、`zenith` 和 `cloud_color` 是线性 RGB。可用 `base_height`、`thickness`、`coverage`、`density` 和 `scale` 调整云层。`steps` 是每条视线的采样上限，默认 24，范围 8～48。`sky.wind` 用于未设置共享风的旧包。
 `cloud_update_hz` 是全景缓存更新频率上限，默认 15，范围 1～30。每帧只刷新一部分缓存，按当前相机方向取样。
 成功替换天空盒后，场景和角色使用新天空的补光，共用 `sun` 的颜色和方向。`ambient_strength` 和 `ground_bounce` 用于调整天空漫射光和地表反弹。
-在 `scenes[].sky` 中加入 `"fixed_time": "23:30"` 可锁定时刻。推荐对照 `07:00`、`12:00`、`18:30`、`23:30`。每次修改后重新启动，进入金华城在同一位置观察云和城墙。省略时使用原关卡预设。
 Windows 上使用 DX12 或 Vulkan。参考 [HPVolumeCloud](https://github.com/AshenOneArt/HPVolumeCloud) 的散射模型说明。
+
+在关卡的 `sky` 对象中添加一种时间模式，重启生效。旧的 `fixed_time` 字段也可继续用，配新模式时移除旧字段。
+
+| 模式 | 配置 |
+| --- | --- |
+| 自动循环 | `"time": {"mode":"cycle","start_time":"07:00","time_scale":60}` |
+| 进图时的本机时间 | `"time": {"mode":"system"}` |
+| 指定时刻 | `"time": {"mode":"fixed","time":"23:30"}` |
+
+`60` 倍表示现实 1 分钟推进关卡 1 小时。单机暂停冻结，重新进图从指定起点开始。要快速看过午夜，从 `23:30` 开始，约 30 秒后到午夜。
+
+## 人物布料
+
+Starter 的 `scenes[].character_cloth` 默认给 P0 的原版或重制模型挂载红色金属光泽斗篷。开启「角色衣物摆动」及图形增强包后生效。
+`{"character":"p0","enabled":false}` 可在某个关卡关闭斗篷。
+
+| 字段 | 用法 |
+| --- | --- |
+| `bones` | 依次为颈部、骨盆、左肩、右肩骨骼名 |
+| `grid`、`width`、`length`、`back_offset` | 网格尺寸默认 7×9，宽度、长度和背向偏移使用世界单位 |
+| `collision_margin` | 人体胶囊额外留空 |
+| `material` | 同包材质 ID，支持 `tint`、`metallic`、`roughness` 与 PBR 贴图 |
+| `physics` | 可选的每件布料参数，支持 `density`、`stretch_compliance`、`bend_compliance`、`damping`、`wind_drag`、`gravity_scale`、`collision_friction`、`thickness`、`motion_limit`、`iterations`、`self_collision`、`max_characters`、`max_distance` |
+
+斗篷使用 XPBD、共享风和人体胶囊。每帧检查整片斗篷，重叠时回到安全姿态，仍重叠的帧会隐藏。快速翻滚和极端姿态建议用 P0 实测。场景墙面及地形未接入斗篷碰撞。
 
 ## 深水和浅水
 
@@ -135,6 +159,8 @@ Windows 上使用 DX12 或 Vulkan。参考 [HPVolumeCloud](https://github.com/As
 | `shallow` | `config/water-shallow.json` | 将所选清水表层的 `profile` 改成 `shallow` |
 
 两份配置的 `optics` 独立控制 `absorption`、`scattering`、`anisotropy`、`ior`、`roughness` 和 `max_path`。`refraction_strength` 设为 0 可关闭屏幕空间折射。浅水另有 `simulation`，用于调整重力、阻尼、模拟水深范围和网格大小。角色触水时，扰动沿河床范围传播。
+
+折射颜色会按水下深度过滤，包括 MSAA 像素边缘。命中水面前景时，改用当前水面像素下方的透射颜色。
 
 两份水体预设与 `water-enhancement.json` 放在同一目录。缺少的预设使用内置默认值。清水光学参考 [HPWater](https://github.com/AshenOneArt/HPWater/wiki/BSDF%E2%80%90Model)，浅水模拟参考 [Unity-SWE](https://github.com/AshenOneArt/Unity-SWE)。
 

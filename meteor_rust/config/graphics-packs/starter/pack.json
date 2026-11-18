@@ -21,6 +21,12 @@
       "roughness": 0.85,
       "metallic": 0.0,
       "vertex_color": 0.2
+    },
+    "red_cape": {
+      "tint": [0.58, 0.026, 0.036],
+      "metallic": 0.62,
+      "roughness": 0.34,
+      "vertex_color": 0.22
     }
   },
   "scenes": [
@@ -35,12 +41,28 @@
         "response": {"cloud": 2.0, "water": 1.0, "grass": 1.5, "cloth": 1.0}
       },
       "clothing": {"density": 0.25, "stretch_compliance": 0.0000001, "bend_compliance": 100.0, "damping": 2.0, "wind_drag": 0.6, "thickness": 0.008, "motion_limit": 0.4, "iterations": 4, "self_collision": false},
+      "character_cloth": [{
+        "character": "p0", "material": "red_cape",
+        "grid": [7, 9], "width": 0.94, "length": 1.25, "back_offset": 0.33,
+        "physics": {"density": 0.32, "damping": 2.6, "wind_drag": 0.65, "collision_friction": 0.18,
+                    "motion_limit": 0.48, "thickness": 0.012, "self_collision": true}
+      }],
       "contact_shadows": {"strength": 0.25, "radius": 1.2, "max_height": 2.5}
     },
     {
       "stage": "sn06",
       "surfaces": [{"texture": "sn064.jpg", "material": "stone"}],
-      "fog": [{"center": [0.0, 6.0, 0.0], "radius": 30.0, "color": [0.58, 0.65, 0.72], "density": 0.008}]
+      "fog": [{"center": [0.0, 6.0, 0.0], "radius": 30.0, "color": [0.58, 0.65, 0.72], "density": 0.008}],
+      "grass": {
+        "surfaces": [{"object": "Box02", "texture": "sn06mian5.jpg"}],
+        "density": 8.0, "tile_size": 6.0,
+        "height": [0.43, 1.15], "width": [0.048, 0.122],
+        "root_color": [0.023, 0.044, 0.013], "tip_color": [0.135, 0.191, 0.050],
+        "near_distance": 18.0, "mid_distance": 40.0, "max_distance": 180.0,
+        "max_visible_tiles": 512, "max_triangles": 168000,
+        "clump_radius": 0.29, "patch_size": 4.6, "ground_cover": 1.0,
+        "species": {"grass": 0.79, "plumes": 0.075, "broadleaf": 0.135}
+      }
     },
     {
       "stage": "sn03",
@@ -48,19 +70,19 @@
         "surfaces": [{"object": "ground", "texture": "sn302.jpg"}],
         "density": 7.0,
         "tile_size": 5.5,
-        "height": [0.48, 1.28],
-        "width": [0.085, 0.175],
-        "root_color": [0.020, 0.061, 0.016],
-        "tip_color": [0.19, 0.36, 0.105],
+        "height": [0.36, 1.05],
+        "width": [0.036, 0.105],
+        "root_color": [0.022, 0.047, 0.014],
+        "tip_color": [0.13, 0.195, 0.055],
         "near_distance": 16.0,
         "mid_distance": 31.0,
-        "max_distance": 54.0,
+        "max_distance": 105.0,
         "max_visible_tiles": 96,
         "max_triangles": 104000,
         "clump_radius": 0.29,
         "patch_size": 3.1,
         "ground_cover": 0.95,
-        "species": {"grass": 0.70, "plumes": 0.17, "broadleaf": 0.13},
+        "species": {"grass": 0.78, "plumes": 0.09, "broadleaf": 0.13},
         "interaction_radius": 1.35,
         "recovery_seconds": 1.45
       }

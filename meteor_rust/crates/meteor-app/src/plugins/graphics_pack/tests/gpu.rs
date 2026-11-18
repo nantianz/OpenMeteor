@@ -79,7 +79,7 @@ fn headless_cloud_sky_renders_and_respects_opaque_depth() {
             ..default()
         });
     crate::plugins::frame_work::install(&mut app);
-    let packs = starter();
+    let mut packs = starter();
     app.insert_resource(starter());
     let mut image = Image::new_target_texture(128, 128, TextureFormat::Rgba8UnormSrgb, None);
     image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
@@ -95,7 +95,7 @@ fn headless_cloud_sky_renders_and_respects_opaque_depth() {
         bevy::core_pipeline::tonemapping::Tonemapping::None,
         Transform::IDENTITY.looking_at(Vec3::new(0., 0.65, -1.), Vec3::Y),
     ));
-    let (configured, light) = sky::scene(&packs, "sn13").unwrap();
+    let (configured, light, _) = sky::scene(&packs, "sn13").unwrap();
     let profile = config::Sky {
         density: 0.0,
         ..configured.clone()
@@ -199,7 +199,7 @@ fn headless_cloud_sky_renders_and_respects_opaque_depth() {
     *app.world_mut()
         .resource_mut::<Assets<sky::CloudSkyMaterial>>()
         .get_mut(&cloud)
-        .unwrap() = sky::material(&configured, &light, noise, Some(&calm));
+        .unwrap() = sky::material(&configured, &light, noise.clone(), Some(&calm));
     let still = capture(&mut app, &pixels);
     app.world_mut().resource_mut::<FrameUniforms>().seconds = 28.0;
     assert_eq!(
@@ -207,6 +207,44 @@ fn headless_cloud_sky_renders_and_respects_opaque_depth() {
         still,
         "calm cloud cache must stay still"
     );
+
+    packs.packs[0]
+        .config
+        .scenes
+        .iter_mut()
+        .find(|scene| scene.stage == "sn13")
+        .unwrap()
+        .sky
+        .as_mut()
+        .unwrap()
+        .time = Some(config::SkyTime::Cycle {
+        start_time: "00:00".into(),
+        time_scale: 60.0,
+    });
+    let (midnight, light, cycle) = sky::scene(&packs, "sn13").unwrap();
+    *app.world_mut()
+        .resource_mut::<Assets<sky::CloudSkyMaterial>>()
+        .get_mut(&cloud)
+        .unwrap() = sky::material(&midnight, &light, noise, Some(&calm));
+    app.world_mut().entity_mut(dome).insert((
+        sky::CloudSky(Some(sky::atmosphere_lighting(&midnight, &light))),
+        cycle.unwrap(),
+    ));
+    let night = capture(&mut app, &pixels);
+    assert!(sky::cache_ready(&app));
+    app.world_mut().resource_mut::<FrameUniforms>().seconds += 720.0;
+    app.update();
+    assert!(
+        sky::cache_ready(&app),
+        "a lighting change must retain the existing cloud panorama"
+    );
+    let noon = capture(&mut app, &pixels);
+    assert!(changed(&night, &noon) > 1024);
+    assert!(
+        noon[middle + 2] > night[middle + 2] + 8,
+        "the cycle must update scene fill"
+    );
+    app.world_mut().entity_mut(dome).remove::<sky::SkyCycle>();
     app.world_mut().resource_mut::<FrameUniforms>().seconds = 0.0;
 
     #[cfg(feature = "original-assets")]
@@ -385,7 +423,7 @@ fn capture_sn13(
                 sky::cache_ready(app),
                 "time preview must use the cloud cache"
             );
-            let (profile, light) =
+            let (profile, light, _) =
                 sky::scene(app.world().resource::<GraphicsPacks>(), "sn13").unwrap();
             let expected = sky::atmosphere_lighting(&profile, &light);
             let graphics = app.world().resource::<FrameUniforms>().graphics;

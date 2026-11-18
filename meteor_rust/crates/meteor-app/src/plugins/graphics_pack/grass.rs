@@ -28,7 +28,7 @@ use bevy::render::{
     renderer::RenderDevice,
 };
 use bevy::shader::{Shader, ShaderRef};
-use geometry::LODS;
+use geometry::{DISTANT, LODS};
 use interaction::{BendMap, BendUpload};
 use meteor_core::types::MovementMode;
 use placement::ROOTS_PER_TILE;
@@ -90,6 +90,9 @@ impl AsBindGroup for GrassMaterial {
         result
             .bindings
             .push((4, OwnedBindingResource::Buffer(buffers.clock()?)));
+        result
+            .bindings
+            .push((5, OwnedBindingResource::Buffer(buffers.grass_light()?)));
         Ok(result)
     }
 
@@ -99,6 +102,7 @@ impl AsBindGroup for GrassMaterial {
     ) -> Vec<BindGroupLayoutEntry> {
         let mut entries = GrassBindings::bind_group_layout_entries(device, force_no_bindless);
         entries.push(uniform_buffer::<Vec4>(false).build(4, ShaderStages::VERTEX));
+        entries.push(uniform_buffer::<Vec4>(false).build(5, ShaderStages::VERTEX));
         entries
     }
 }
@@ -135,7 +139,7 @@ impl Material for GrassMaterial {
 #[derive(Component)]
 pub(super) struct GrassField {
     profile: Grass,
-    lods: [[Handle<Mesh>; 3]; 4],
+    lods: [[Handle<Mesh>; LODS.len()]; 4],
     image: Handle<Image>,
     height_min: f32,
     height_range: f32,
@@ -252,7 +256,7 @@ pub(crate) fn spawn<'a>(
         roots,
         bend: bend.clone(),
         field: GrassUniform {
-            root_color: Vec3::from_array(profile.root_color).extend(0.0),
+            root_color: Vec3::from_array(profile.root_color).extend(profile.clump_radius),
             tip_color: Vec3::from_array(profile.tip_color).extend(0.0),
             blade: Vec4::new(
                 profile.height[0],
@@ -260,12 +264,7 @@ pub(crate) fn spawn<'a>(
                 profile.width[0],
                 profile.width[1],
             ),
-            distances: Vec4::new(
-                profile.near_distance,
-                profile.mid_distance,
-                profile.max_distance,
-                profile.clump_radius,
-            ),
+            distances: Vec4::from_array(profile.lod_distances()),
             contact: Vec4::new(
                 height_min,
                 height_range,
@@ -276,7 +275,7 @@ pub(crate) fn spawn<'a>(
             wind_environment,
         },
     }));
-    let lods: [[Handle<Mesh>; 3]; 4] = std::array::from_fn(|bucket| {
+    let lods: [[Handle<Mesh>; LODS.len()]; 4] = std::array::from_fn(|bucket| {
         LODS.each_ref()
             .map(|lod| meshes.add(lod.mesh(clump_capacity(bucket))))
     });
@@ -309,7 +308,7 @@ pub(crate) fn spawn<'a>(
                 parent.spawn((
                     GrassTile { bucket },
                     MeshTag(i as u32),
-                    Mesh3d(lods[bucket][2].clone()),
+                    Mesh3d(lods[bucket][DISTANT].clone()),
                     MeshMaterial3d(material.clone()),
                     Aabb::from_min_max(tile.min - pad, tile.max + pad),
                     NoAutoAabb,
@@ -328,15 +327,15 @@ fn clump_capacity(bucket: usize) -> usize {
 
 fn upgrade_lod(desired: usize, bucket: usize, remaining: &mut usize) -> usize {
     let capacity = clump_capacity(bucket);
-    let baseline = LODS[2].triangles(capacity);
-    for (level, lod) in LODS.iter().enumerate().take(2).skip(desired) {
+    let baseline = LODS[DISTANT].triangles(capacity);
+    for (level, lod) in LODS.iter().enumerate().take(DISTANT).skip(desired) {
         let extra = lod.triangles(capacity) - baseline;
         if extra <= *remaining {
             *remaining -= extra;
             return level;
         }
     }
-    2
+    DISTANT
 }
 
 pub(crate) fn ground_material(
@@ -374,7 +373,7 @@ fn update(
         ),
         With<Fighter>,
     >,
-    mut visible: Local<Vec<(f32, Entity)>>,
+    mut visible: Local<Vec<(f32, Entity, usize)>>,
     mut upload: ResMut<BendUpload>,
 ) {
     let Ok(mut field) = field.single_mut() else {
@@ -394,13 +393,9 @@ fn update(
     } else {
         field.profile.max_visible_tiles
     };
-    let [near, mid, far] = [
-        field.profile.near_distance,
-        field.profile.mid_distance,
-        field.profile.max_distance,
-    ];
+    let [near, mid, detail, far] = field.profile.lod_distances();
     visible.clear();
-    for (entity, aabb, _, mut visibility, _) in &mut tiles {
+    for (entity, aabb, tile, mut visibility, _) in &mut tiles {
         let distance = ((eye - Vec3::from(aabb.center)).abs() - Vec3::from(aabb.half_extents))
             .max(Vec3::ZERO)
             .length_squared();
@@ -408,12 +403,12 @@ fn update(
             && distance < far * far
             && frustum.intersects_obb(aabb, &bevy::math::Affine3A::IDENTITY, false, false)
         {
-            visible.push((distance, entity));
+            visible.push((distance, entity, tile.bucket));
         } else {
             visibility.set_if_neq(Visibility::Hidden);
         }
     }
-    visible.sort_unstable_by(|(a, e), (b, f)| {
+    visible.sort_unstable_by(|(a, e, _), (b, f, _)| {
         a.total_cmp(b).then_with(|| e.to_bits().cmp(&f.to_bits()))
     });
     let mut budget = if compact {
@@ -421,26 +416,48 @@ fn update(
     } else {
         field.profile.max_triangles
     };
-    let far_cost = LODS[2].triangles(CLUMP_BUCKET_SIZE);
+    let far_cost = LODS[DISTANT].triangles(ROOTS_PER_TILE);
     let drawn_tiles = visible.len().min(max_tiles).min(budget / far_cost);
-    budget -= drawn_tiles * far_cost;
-    for (i, &(distance, entity)) in visible.iter().enumerate() {
-        let Ok((_, _, tile, mut visibility, mut mesh)) = tiles.get_mut(entity) else {
+    let foreground = if drawn_tiles == visible.len() {
+        drawn_tiles
+    } else {
+        drawn_tiles * 3 / 4
+    };
+    let coverage_slots = drawn_tiles - foreground;
+    let coverage_candidates = visible.len() - foreground;
+    let selected = |i: usize| {
+        if i < foreground {
+            return true;
+        }
+        let rank = i - foreground;
+        rank * coverage_slots / coverage_candidates
+            != (rank + 1) * coverage_slots / coverage_candidates
+    };
+    budget -= visible
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| selected(*i))
+        .map(|(_, &(_, _, bucket))| LODS[DISTANT].triangles(clump_capacity(bucket)))
+        .sum::<usize>();
+    for (i, &(distance, entity, bucket)) in visible.iter().enumerate() {
+        let Ok((_, _, _, mut visibility, mut mesh)) = tiles.get_mut(entity) else {
             continue;
         };
-        if i >= drawn_tiles {
+        if !selected(i) {
             visibility.set_if_neq(Visibility::Hidden);
             continue;
         }
-        let desired = if distance >= mid * mid {
+        let desired = if distance >= detail * detail {
+            DISTANT
+        } else if distance >= mid * mid {
             2
         } else if compact || distance >= near * near {
             1
         } else {
             0
         };
-        let level = upgrade_lod(desired, tile.bucket, &mut budget);
-        let lod = &field.lods[tile.bucket][level];
+        let level = upgrade_lod(desired, bucket, &mut budget);
+        let lod = &field.lods[bucket][level];
         visibility.set_if_neq(Visibility::Inherited);
         if mesh.0 != *lod {
             mesh.0 = lod.clone();

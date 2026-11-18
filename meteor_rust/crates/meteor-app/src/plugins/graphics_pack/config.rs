@@ -64,6 +64,8 @@ pub struct Scene {
     #[serde(default)]
     pub clothing: Option<Clothing>,
     #[serde(default)]
+    pub character_cloth: Vec<CharacterCloth>,
+    #[serde(default)]
     pub contact_shadows: Option<ContactShadows>,
     #[serde(default)]
     pub fog: Option<Vec<Fog>>,
@@ -161,6 +163,15 @@ impl Default for Grass {
 }
 
 impl Grass {
+    pub(super) fn lod_distances(&self) -> [f32; 4] {
+        [
+            self.near_distance,
+            self.mid_distance,
+            self.mid_distance + (self.max_distance - self.mid_distance) * 0.38,
+            self.max_distance,
+        ]
+    }
+
     fn validate(&self, stage: &str) -> Result<(), String> {
         let mut seen = std::collections::HashSet::new();
         if stage == "*"
@@ -196,10 +207,10 @@ impl Grass {
             "grass view distance",
             self.max_distance,
             self.mid_distance + 3.0,
-            90.0,
+            240.0,
         )?;
-        if !(4..=128).contains(&self.max_visible_tiles) {
-            return Err("grass max_visible_tiles must be 4..=128".into());
+        if !(4..=512).contains(&self.max_visible_tiles) {
+            return Err("grass max_visible_tiles must be 4..=512".into());
         }
         if !(8_000..=180_000).contains(&self.max_triangles) {
             return Err("grass max_triangles must be 8000..=180000".into());
@@ -253,6 +264,7 @@ pub struct Sky {
     pub steps: u32,
     pub cloud_update_hz: u32,
     pub sun: Option<SkySun>,
+    pub time: Option<SkyTime>,
     pub fixed_time: Option<String>,
     pub ambient_strength: f32,
     pub ground_bounce: f32,
@@ -276,11 +288,20 @@ impl Default for Sky {
             steps: 24,
             cloud_update_hz: 15,
             sun: None,
+            time: None,
             fixed_time: None,
             ambient_strength: 1.0,
             ground_bounce: 0.24,
         }
     }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SkyTime {
+    Cycle { start_time: String, time_scale: f64 },
+    System {},
+    Fixed { time: String },
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -321,6 +342,9 @@ impl Sky {
         if !(1..=30).contains(&self.cloud_update_hz) {
             return Err(format!("{stage}: cloud_update_hz must be 1..=30"));
         }
+        if self.time.is_some() && self.fixed_time.is_some() {
+            return Err(format!("{stage}: specify either sky.time or fixed_time"));
+        }
         if self
             .fixed_time
             .as_deref()
@@ -329,6 +353,29 @@ impl Sky {
             return Err(format!(
                 "{stage}: fixed_time must be HH:mm in 00:00..=23:59"
             ));
+        }
+        match &self.time {
+            Some(SkyTime::Cycle {
+                start_time,
+                time_scale,
+            }) => {
+                if sky_minutes(start_time).is_none() {
+                    return Err(format!(
+                        "{stage}: sky.time.start_time must be HH:mm in 00:00..=23:59"
+                    ));
+                }
+                if !time_scale.is_finite() || *time_scale <= 0.0 {
+                    return Err(format!(
+                        "{stage}: sky.time.time_scale must be finite and positive"
+                    ));
+                }
+            }
+            Some(SkyTime::Fixed { time }) if sky_minutes(time).is_none() => {
+                return Err(format!(
+                    "{stage}: sky.time.time must be HH:mm in 00:00..=23:59"
+                ));
+            }
+            _ => {}
         }
         color("sky horizon", self.horizon)?;
         color("sky zenith", self.zenith)?;
@@ -475,6 +522,8 @@ pub struct Clothing {
 
     pub damping: f32,
     pub wind_drag: f32,
+    pub gravity_scale: f32,
+    pub collision_friction: f32,
     pub thickness: f32,
     pub motion_limit: f32,
     pub iterations: u32,
@@ -491,6 +540,8 @@ impl Default for Clothing {
             bend_compliance: 100.,
             damping: 2.,
             wind_drag: 0.6,
+            gravity_scale: 1.0,
+            collision_friction: 0.0,
             thickness: 0.008,
             motion_limit: 0.4,
             iterations: 4,
@@ -501,6 +552,70 @@ impl Default for Clothing {
                 4
             },
             max_distance: 55.,
+        }
+    }
+}
+
+impl Clothing {
+    fn validate(&self) -> Result<(), String> {
+        range("clothing density", self.density, 0.05, 2.)?;
+        range(
+            "clothing stretch_compliance",
+            self.stretch_compliance,
+            0.,
+            0.0001,
+        )?;
+        range("clothing bend_compliance", self.bend_compliance, 0., 10000.)?;
+        range("clothing damping", self.damping, 0., 20.)?;
+        range("clothing wind_drag", self.wind_drag, 0., 3.)?;
+        range("clothing gravity_scale", self.gravity_scale, 0., 3.)?;
+        range(
+            "clothing collision_friction",
+            self.collision_friction,
+            0.,
+            1.,
+        )?;
+        range("clothing thickness", self.thickness, 0.001, 0.03)?;
+        range("clothing motion_limit", self.motion_limit, 0.02, 0.8)?;
+        if !(1..=8).contains(&self.iterations) {
+            return Err("clothing iterations must be 1–8".into());
+        }
+        if !(1..=16).contains(&self.max_characters) {
+            return Err("clothing max_characters must be 1–16".into());
+        }
+        range("clothing max_distance", self.max_distance, 5., 100.)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CharacterCloth {
+    pub character: String,
+    pub material: String,
+    pub enabled: bool,
+    pub bones: [String; 4],
+    pub grid: [usize; 2],
+    pub width: f32,
+    pub length: f32,
+    pub back_offset: f32,
+    pub collision_margin: f32,
+    pub physics: Option<Clothing>,
+}
+
+impl Default for CharacterCloth {
+    fn default() -> Self {
+        Self {
+            character: String::new(),
+            material: String::new(),
+            enabled: true,
+            bones: ["bau_Neck", "bad_Pelvis", "bau_L_UpperArm", "bau_R_UpperArm"]
+                .map(str::to_owned),
+            grid: [7, 9],
+            width: 0.95,
+            length: 1.2,
+            back_offset: 0.33,
+            collision_margin: 0.016,
+            physics: None,
         }
     }
 }
@@ -726,25 +841,59 @@ impl Pack {
                 }
             }
             if let Some(c) = &s.clothing {
-                range("clothing density", c.density, 0.05, 2.)?;
+                c.validate()?;
+            }
+            let mut characters = std::collections::HashSet::new();
+            if s.character_cloth.len() > 16 {
+                return Err("at most 16 character_cloth entries per scene".into());
+            }
+            for cloth in &s.character_cloth {
+                let character = cloth.character.to_ascii_lowercase();
+                if !character.strip_prefix('p').is_some_and(|id| {
+                    !id.is_empty() && id.len() <= 3 && id.bytes().all(|b| b.is_ascii_digit())
+                }) || !characters.insert(character)
+                {
+                    return Err(format!(
+                        "invalid or duplicate character_cloth character {}",
+                        cloth.character
+                    ));
+                }
+                if !cloth.enabled {
+                    continue;
+                }
+                if !self.materials.contains_key(&cloth.material) {
+                    return Err(format!(
+                        "unknown character_cloth material: {}",
+                        cloth.material
+                    ));
+                }
+                if cloth
+                    .bones
+                    .iter()
+                    .any(|name| name.is_empty() || name.len() > 80)
+                    || cloth
+                        .bones
+                        .iter()
+                        .collect::<std::collections::HashSet<_>>()
+                        .len()
+                        != 4
+                    || !(3..=12).contains(&cloth.grid[0])
+                    || !(3..=16).contains(&cloth.grid[1])
+                {
+                    return Err("invalid character_cloth bones or grid".into());
+                }
+                range("character_cloth width", cloth.width, 0.25, 1.8)?;
+                range("character_cloth length", cloth.length, 0.25, 2.)?;
+                range("character_cloth back_offset", cloth.back_offset, 0.1, 0.7)?;
                 range(
-                    "clothing stretch_compliance",
-                    c.stretch_compliance,
-                    0.,
-                    0.0001,
+                    "character_cloth collision_margin",
+                    cloth.collision_margin,
+                    0.0,
+                    0.08,
                 )?;
-                range("clothing bend_compliance", c.bend_compliance, 0., 10000.)?;
-                range("clothing damping", c.damping, 0., 20.)?;
-                range("clothing wind_drag", c.wind_drag, 0., 3.)?;
-                range("clothing thickness", c.thickness, 0.001, 0.03)?;
-                range("clothing motion_limit", c.motion_limit, 0.02, 0.8)?;
-                if !(1..=8).contains(&c.iterations) {
-                    return Err("clothing iterations must be 1–8".into());
+                if let Some(c) = &cloth.physics {
+                    c.validate()?;
                 }
-                if !(1..=16).contains(&c.max_characters) {
-                    return Err("clothing max_characters must be 1–16".into());
-                }
-                range("clothing max_distance", c.max_distance, 5., 100.)?;
             }
             if let Some(c) = &s.contact_shadows {
                 range("contact strength", c.strength, 0., 0.8)?;

@@ -18,7 +18,10 @@ impl Plugin for DynamicShadowsPlugin {
         app.init_resource::<FrameUniforms>()
             .add_systems(
                 Update,
-                (sync_dynamic_sun, sync_gmdl_shadow_flags)
+                (
+                    sync_dynamic_sun.after(super::graphics_pack::sky::update_cycle),
+                    sync_gmdl_shadow_flags,
+                )
                     .run_if(in_state(AppState::Playing).or_else(in_state(AppState::Paused))),
             )
             .add_systems(

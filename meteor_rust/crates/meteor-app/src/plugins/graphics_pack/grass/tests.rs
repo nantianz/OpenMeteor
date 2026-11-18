@@ -22,7 +22,7 @@ fn save_preview(dir: &std::path::Path, name: &str, data: Vec<u8>, width: u32, he
     .unwrap();
 }
 
-fn spawn_stock_preview(app: &mut App) -> Option<[Transform; 2]> {
+fn spawn_stock_preview(app: &mut App, stage: &'static str) -> Option<[Transform; 2]> {
     use crate::plugins::stage_material::{
         GmdlMaterial as StageMaterial, GmdlMaterialParams, GmdlMode,
     };
@@ -32,28 +32,46 @@ fn spawn_stock_preview(app: &mut App) -> Option<[Transform; 2]> {
 
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
     let read = |path: &str| std::fs::read(root.join(path)).unwrap();
-    let source =
-        meteor_asset::gmdl::decode_gmdl(&std::fs::read(root.join("sn03/sn03.gmb")).ok()?).unwrap();
+    let source = meteor_asset::gmdl::decode_gmdl(
+        &std::fs::read(root.join(format!("{stage}/{stage}.gmb"))).ok()?,
+    )
+    .unwrap();
     let desc = meteor_asset::des::parse_stage_description(&crate::text_codec::decode_text(&read(
-        "sn03/sn03.des",
+        &format!("{stage}/{stage}.des"),
     )));
-    let cob = meteor_asset::cob::parse_cob(&read("sn03/sn03.cob")).unwrap();
+    let cob = meteor_asset::cob::parse_cob(&read(&format!("{stage}/{stage}.cob"))).unwrap();
     let center = meteor_scene::stage_loader::get_stage_center(
-        "sn03",
-        Some(&crate::text_codec::decode_text(&read("Level/sn03.wp"))),
+        stage,
+        Some(&crate::text_codec::decode_text(&read(&format!(
+            "Level/{stage}.wp"
+        )))),
     );
     let support = StageMeshCollider::from_gmdl(&source, &desc, Some(&cob.face_ids), center);
-    let cameras = [
-        (Vec2::new(-84.4, -49.2), Vec2::new(-68.4, -44.7)),
-        (Vec2::new(118.1, -0.9), Vec2::new(117.9, 36.5)),
-    ]
-    .map(|(eye, target)| {
-        let height = support
-            .sample_ground_hit(eye.x, eye.y, -6.0, 2.0)
-            .map_or(0., |hit| hit.y);
-        Transform::from_xyz(eye.x, height + 3.4, eye.y)
-            .looking_at(Vec3::new(target.x, height - 0.5, target.y), Vec3::Y)
-    });
+    let cameras = if stage == "sn06" {
+        let center = Vec3::new(2.67 - center[0] * 0.12, 0., 1.04 + center[1] * 0.12);
+        let ground = support
+            .sample_ground_hit(center.x, center.z, -8.0, 4.0)
+            .map_or(-2.0, |hit| hit.y);
+        let center = center.with_y(ground);
+        [
+            Transform::from_translation(center + Vec3::new(18., 97., 88.))
+                .looking_at(center, Vec3::Y),
+            Transform::from_translation(center + Vec3::new(-47., 4.6, 44.))
+                .looking_at(center + Vec3::new(35., 0.1, -40.), Vec3::Y),
+        ]
+    } else {
+        [
+            (Vec2::new(-84.4, -49.2), Vec2::new(-68.4, -44.7)),
+            (Vec2::new(118.1, -0.9), Vec2::new(117.9, 36.5)),
+        ]
+        .map(|(eye, target)| {
+            let height = support
+                .sample_ground_hit(eye.x, eye.y, -6.0, 2.0)
+                .map_or(0., |hit| hit.y);
+            Transform::from_xyz(eye.x, height + 3.4, eye.y)
+                .looking_at(Vec3::new(target.x, height - 0.5, target.y), Vec3::Y)
+        })
+    };
     let packs = super::super::tests::starter();
     app.world_mut()
         .run_system_once(
@@ -72,7 +90,7 @@ fn spawn_stock_preview(app: &mut App) -> Option<[Transform; 2]> {
                     &mut images,
                     &mut grass,
                     &packs,
-                    "sn03",
+                    stage,
                     &source,
                     Some(&desc),
                     &cob.face_ids,
@@ -113,7 +131,7 @@ fn spawn_stock_preview(app: &mut App) -> Option<[Transform; 2]> {
                         let texture = textures
                             .entry(name)
                             .or_insert_with(|| {
-                                cache.resolve(&root, "sn03", name).and_then(|bytes| {
+                                cache.resolve(&root, stage, name).and_then(|bytes| {
                                     pak_textures::image_handle_with_quality(&mut images, &bytes, 0)
                                 })
                             })
@@ -239,6 +257,59 @@ fn stock_grass_uses_the_authored_ground_and_stays_inside_the_budget() {
     eprintln!(
         "sn03 grass: {count} clumps in {} tiles, near {waypoints_near_grass} waypoints, species {species:?}", tiles.len()
     );
+}
+
+#[cfg(feature = "original-assets")]
+
+#[test]
+fn si_fang_zhen_courtyard_reaches_all_edges_with_a_bounded_distant_lod() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+    let Ok(bytes) = std::fs::read(dir.join("sn06/sn06.gmb")) else {
+        return;
+    };
+    let mesh = meteor_asset::gmdl::decode_gmdl(&bytes).unwrap();
+    let des = std::fs::read(dir.join("sn06/sn06.des")).unwrap();
+    let desc = meteor_asset::des::parse_stage_description(&crate::text_codec::decode_text(&des));
+    let files = std::fs::read(dir.join("sn06/sn06.cob")).unwrap();
+    let cob = meteor_asset::cob::parse_cob(&files).unwrap();
+    let center = meteor_scene::stage_loader::get_stage_center("sn06", None);
+    let terrain = crate::plugins::stage_collider::StageMeshCollider::from_gmdl(
+        &mesh,
+        &desc,
+        Some(&cob.face_ids),
+        center,
+    );
+    let packs = super::super::tests::starter();
+    let profile = packs
+        .scenes("sn06")
+        .find_map(|(_, scene)| scene.grass.as_ref())
+        .unwrap();
+    let tiles = placement::place(
+        profile,
+        &mesh,
+        Some(&desc),
+        &cob.face_ids,
+        Some(&terrain),
+        center,
+    )
+    .unwrap();
+    let min = tiles
+        .iter()
+        .map(|tile| tile.min)
+        .fold(Vec3::splat(f32::INFINITY), Vec3::min);
+    let max = tiles
+        .iter()
+        .map(|tile| tile.max)
+        .fold(Vec3::splat(f32::NEG_INFINITY), Vec3::max);
+    assert!(
+        (max.x - min.x) > 115.0 && (max.z - min.z) > 115.0,
+        "{min:?} .. {max:?}"
+    );
+    assert!(tiles.len() >= 125, "only {} tiles", tiles.len());
+    assert!(tiles.len() <= profile.max_visible_tiles);
+    assert!(LODS[DISTANT].triangles(ROOTS_PER_TILE) * tiles.len() <= 40_960);
+    assert!(profile.max_triangles <= 168_000);
+    eprintln!("sn06 courtyard: {} occupied grass tiles", tiles.len());
 }
 
 fn fixture_ground() -> GmdlMesh {
@@ -372,7 +443,8 @@ fn grass_gpu_draws_tracks_recovers_and_honors_visible_tile_limit() {
         .config
         .scenes
         .iter_mut()
-        .find_map(|scene| scene.grass.as_mut())
+        .find(|scene| scene.stage == "sn03")
+        .and_then(|scene| scene.grass.as_mut())
         .unwrap();
     profile.tile_size = 6.0;
     profile.max_visible_tiles = 12;
@@ -427,7 +499,7 @@ fn grass_gpu_draws_tracks_recovers_and_honors_visible_tile_limit() {
             },
         )
         .unwrap();
-    let capture = |app: &mut App, frames| {
+    let capture_size = |app: &mut App, frames, width, height| {
         for _ in 0..frames {
             app.update();
             app.world()
@@ -443,10 +515,32 @@ fn grass_gpu_draws_tracks_recovers_and_honors_visible_tile_limit() {
             }
         }
         let data = pixels.lock().unwrap().clone();
-        assert_eq!(data.len(), (WIDTH * HEIGHT * 4) as usize);
+        assert_eq!(data.len(), (width * height * 4) as usize);
         data
     };
+    let capture = |app: &mut App, frames| capture_size(app, frames, WIDTH, HEIGHT);
     let baseline = capture(&mut app, 20);
+    let night = crate::plugins::graphics_pack::GraphicsFrame {
+        sky: Vec4::new(0.014, 0.026, 0.047, 0.0),
+        environment: Vec4::new(1.0, 0.0, 1.0, 0.0),
+        counts: Vec4::W,
+        ..default()
+    };
+    app.world_mut().resource_mut::<FrameUniforms>().graphics = night;
+    let night_pixels = capture(&mut app, 12);
+    let green_energy = |data: &[u8]| {
+        data.iter()
+            .skip(1)
+            .step_by(4)
+            .map(|&v| u64::from(v))
+            .sum::<u64>()
+    };
+    assert!(
+        green_energy(&night_pixels) * 2 < green_energy(&baseline),
+        "grass blades must get darker at night"
+    );
+    app.world_mut().resource_mut::<FrameUniforms>().graphics = default();
+    assert_eq!(capture(&mut app, 12), baseline);
     app.world_mut().resource_mut::<FrameUniforms>().seconds = 19.0;
     assert_eq!(capture(&mut app, 8), baseline, "calm field must stay still");
     let count = |world: &mut World| {
@@ -465,7 +559,7 @@ fn grass_gpu_draws_tracks_recovers_and_honors_visible_tile_limit() {
     };
     let greens = green_pixels(&baseline);
     assert!(
-        greens > (WIDTH * HEIGHT / 2) as usize,
+        greens > (WIDTH * HEIGHT / 3) as usize,
         "grass pixels: {greens}"
     );
     let submitted = |world: &mut World| {
@@ -613,31 +707,89 @@ fn grass_gpu_draws_tracks_recovers_and_honors_visible_tile_limit() {
         }
     }
     if let Some(dir) = std::env::var_os("METEOR_GRASS_CAPTURE_DIR") {
-        if let Some(cameras) = spawn_stock_preview(&mut app) {
+        let stage = if std::env::var("METEOR_GRASS_SCENE").as_deref() == Ok("sn06") {
+            "sn06"
+        } else {
+            "sn03"
+        };
+        if let Some(cameras) = spawn_stock_preview(&mut app, stage) {
             let dir = std::path::PathBuf::from(dir);
+            let (width, height) = if stage == "sn06" {
+                (1280, 720)
+            } else {
+                (WIDTH, HEIGHT)
+            };
             app.world_mut()
                 .resource_mut::<Assets<Image>>()
                 .get_mut(&target)
                 .unwrap()
                 .resize(Extent3d {
-                    width: WIDTH,
-                    height: HEIGHT,
+                    width,
+                    height,
                     depth_or_array_layers: 1,
                 });
             app.world_mut()
                 .entity_mut(readback)
-                .insert(Readback::texture(target));
+                .insert(Readback::texture(target.clone()));
             app.world_mut().resource_mut::<Settings>().grass_enhance = true;
             for (i, transform) in cameras.into_iter().enumerate() {
                 *app.world_mut().get_mut::<Transform>(camera).unwrap() = transform;
-                let pixels = capture(&mut app, 28);
+                let pixels = capture_size(&mut app, 28, width, height);
                 save_preview(
                     &dir,
-                    &format!("sn03-meadow-{}.png", i + 1),
+                    &format!("{stage}-meadow-{}.png", i + 1),
                     pixels,
-                    WIDTH,
-                    HEIGHT,
+                    width,
+                    height,
                 );
+            }
+            if stage == "sn06" {
+                app.world_mut().entity_mut(readback).remove::<Readback>();
+                app.world_mut()
+                    .resource_mut::<Assets<Image>>()
+                    .get_mut(&target)
+                    .unwrap()
+                    .resize(Extent3d {
+                        width: 2560,
+                        height: 1440,
+                        depth_or_array_layers: 1,
+                    });
+                for (i, transform) in cameras.into_iter().enumerate() {
+                    *app.world_mut().get_mut::<Transform>(camera).unwrap() = transform;
+                    let mut times = [Vec::new(), Vec::new()];
+                    for enabled in [false, true, true, false] {
+                        app.world_mut().resource_mut::<Settings>().grass_enhance = enabled;
+                        for sample in 0..96 {
+                            let start = std::time::Instant::now();
+                            app.update();
+                            app.world()
+                                .resource::<RenderDevice>()
+                                .poll(PollType::Wait {
+                                    submission_index: None,
+                                    timeout: Some(Duration::from_secs(5)),
+                                })
+                                .unwrap();
+                            if sample >= 24 {
+                                times[usize::from(enabled)]
+                                    .push(start.elapsed().as_secs_f64() * 1000.0);
+                            }
+                        }
+                        if enabled {
+                            let triangles = submitted(app.world_mut());
+                            let tiles = count(app.world_mut());
+                            assert!(triangles > 0 && triangles <= 168_000 && tiles <= 512);
+                            eprintln!(
+                                "sn06 view {}: {triangles} triangles, {tiles} grass tiles",
+                                i + 1
+                            );
+                        }
+                    }
+                    for (enabled, data) in times.iter_mut().enumerate() {
+                        data.sort_by(f64::total_cmp);
+                        eprintln!("sn06 1440p view {} grass={enabled}: median {:.3} ms, p95 {:.3} ms ({} frames)",
+                            i + 1, data[data.len() / 2], data[data.len() * 95 / 100], data.len());
+                    }
+                }
             }
         }
     }

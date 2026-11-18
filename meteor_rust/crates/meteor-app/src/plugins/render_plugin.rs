@@ -2632,7 +2632,7 @@ pub(super) fn setup_stage_scene(
         .as_deref()
         .filter(|_| settings.sky_enhance && native_sky)
         .and_then(|packs| sky::scene(packs, &loaded.stage_id));
-    if let (Some(materials), Some(noise), Some((profile, lighting))) = (
+    if let (Some(materials), Some(noise), Some((profile, lighting, cycle))) = (
         cloud_materials.as_deref_mut(),
         cloud_noise.as_deref_mut(),
         sky_profile,
@@ -2644,7 +2644,7 @@ pub(super) fn setup_stage_scene(
                 let sky_lighting =
                     enhanced_sky.then(|| sky::atmosphere_lighting(&profile, &lighting));
                 let noise = noise.get(&mut images);
-                commands.spawn((
+                let mut dome = commands.spawn((
                     PlayingSceneEntity,
                     sky::CloudSky(sky_lighting),
                     bevy::camera::visibility::NoFrustumCulling,
@@ -2654,6 +2654,9 @@ pub(super) fn setup_stage_scene(
                     ),
                     Transform::IDENTITY,
                 ));
+                if let Some(cycle) = cycle {
+                    dome.insert(cycle);
+                }
             }
             Err(error) => warn!("{} sky enhancement skipped: {error}", loaded.stage_id),
         }

@@ -37,7 +37,7 @@ The package does not enable optional DLSS or ANGLE backends.
 包内已附带 fonts/ui.ttf 中文字体及 licenses/ 中的字体许可。
 启动 Logo、主界面标题与背景、战役地图和光晕已内置于 OpenMeteor.exe，
 不需要另行下载界面图片。
-随包附带关卡风、可交互草地、固定天空时刻和深浅水的配置与示例，请查阅 GRAPHICS-README.md。
+随包附带关卡风、交互草地、昼夜时钟、P0 斗篷和深浅水的配置，请查阅 GRAPHICS-README.md。
 """
 
 

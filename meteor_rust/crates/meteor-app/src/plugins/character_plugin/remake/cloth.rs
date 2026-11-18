@@ -130,8 +130,8 @@ impl Simulation {
                 self.positions[i] = anchors[i];
                 continue;
             }
-            let acceleration =
-                Vec3::NEG_Y * 9.81 + (forces[i] * inverse_mass[i]).clamp_length_max(100.);
+            let acceleration = Vec3::NEG_Y * (9.81 * config.gravity_scale)
+                + (forces[i] * inverse_mass[i]).clamp_length_max(100.);
             self.velocities[i] *= (-config.damping * dt).exp();
             self.positions[i] += self.velocities[i] * dt + acceleration * dt * dt;
         }
@@ -195,7 +195,7 @@ impl Simulation {
                     + (self.positions[i] - anchors[i])
                         .clamp_length_max(config.motion_limit * data.freedom[i]);
                 for capsule in capsules {
-                    project_capsule(&mut self.positions[i], *capsule, config.thickness);
+                    let _ = project_capsule(&mut self.positions[i], *capsule, config.thickness);
                 }
             }
         }
@@ -203,15 +203,25 @@ impl Simulation {
             self.collide_self(data, &inverse_mass, config.thickness, scale);
         }
         for i in 0..previous.len() {
+            let mut contact = Vec3::ZERO;
             if inverse_mass[i] > 0. {
                 for capsule in capsules {
-                    project_capsule(&mut self.positions[i], *capsule, config.thickness);
+                    if let Some(normal) =
+                        project_capsule(&mut self.positions[i], *capsule, config.thickness)
+                    {
+                        contact += normal;
+                    }
                 }
             }
             if !self.positions[i].is_finite() {
                 self.positions[i] = anchors[i];
             }
             self.velocities[i] = ((self.positions[i] - previous[i]) / dt).clamp_length_max(25.);
+            if let Some(normal) = contact.try_normalize() {
+                let velocity = self.velocities[i];
+                self.velocities[i] -=
+                    (velocity - normal * velocity.dot(normal)) * config.collision_friction;
+            }
             if inverse_mass[i] == 0. {
                 self.velocities[i] = Vec3::ZERO;
             }
@@ -289,18 +299,24 @@ fn dihedral([a, b, c, d]: [Vec3; 4]) -> Option<(f32, [Vec3; 4])> {
     let gb = -gc * ((c - a).dot(e) / l2) - gd * ((d - a).dot(e) / l2);
     Some((angle, [-gb - gc - gd, gb, gc, gd]))
 }
-fn project_capsule(p: &mut Vec3, c: Capsule, thickness: f32) {
+fn project_capsule(p: &mut Vec3, c: Capsule, thickness: f32) -> Option<Vec3> {
     let ab = c.b - c.a;
     let t = ((*p - c.a).dot(ab) / ab.length_squared().max(1e-12)).clamp(0., 1.);
     let closest = c.a + ab * t;
     let delta = *p - closest;
     let radius = c.radius + thickness;
-    if delta.length_squared() < radius * radius {
+    let distance_squared = delta.length_squared();
+    if distance_squared <= (radius + 1e-5).powi(2) {
         let normal = if delta.length_squared() > 1e-12 {
             delta.normalize()
         } else {
             ab.normalize_or(Vec3::Y).any_orthonormal_vector()
         };
-        *p = closest + normal * radius;
+        if distance_squared < radius * radius {
+            *p = closest + normal * radius;
+        }
+        Some(normal)
+    } else {
+        None
     }
 }

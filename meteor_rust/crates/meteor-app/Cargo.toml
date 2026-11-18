@@ -64,6 +64,9 @@ webrtc = "0.20.3"
 async-trait = "0.1"
 bytes = "1"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 
 
 
@@ -128,6 +131,7 @@ dlss5 = ["dep:bevy_dlss5"]
 angle-dx11 = ["dep:wgpu-hal", "wgpu/gles", "bevy_pbr/native-gles"]
 
 [target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_SystemInformation"] }
 wgpu-hal = { version = "=29.0.4", optional = true, default-features = false, features = ["windows-angle"] }
 
 [target.'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'.dependencies]

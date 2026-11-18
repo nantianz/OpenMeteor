@@ -4474,6 +4474,7 @@ dependencies = [
  "icu_segmenter",
  "jni 0.21.1",
  "js-sys",
+ "libc",
  "meteor-ai",
  "meteor-anim",
  "meteor-asset",
@@ -4498,6 +4499,7 @@ dependencies = [
  "web-sys",
  "webrtc",
  "wgpu",
+ "windows-sys 0.61.2",
  "winit",
  "winresource",
 ]

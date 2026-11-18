@@ -25,6 +25,19 @@ pub struct GraphicsFrame {
     pub water_wind: Vec4,
     pub water_wind_cross: Vec4,
 }
+
+impl GraphicsFrame {
+    pub(crate) fn grass_light(&self) -> Vec4 {
+        if self.counts.w <= 0.5 {
+            return Vec4::ONE;
+        }
+        let diffuse = self.sky.truncate() * 1.45;
+        let sun = self.sun_color.truncate() * (self.sun.w * self.sun.y.max(0.0) * 0.45);
+        ((diffuse + sun) * self.environment.z)
+            .clamp(Vec3::ZERO, Vec3::splat(1.4))
+            .extend(1.0)
+    }
+}
 pub(super) fn update_frame(
     packs: Res<GraphicsPacks>,
     settings: Option<Res<crate::app_state::Settings>>,

@@ -14,7 +14,9 @@ pub(super) struct Lod {
     stem: &'static [f32],
 }
 
-pub(super) const LODS: [Lod; 3] = [
+pub(super) const DISTANT: usize = 3;
+
+pub(super) const LODS: [Lod; 4] = [
     Lod {
         clumps: ROOTS_PER_TILE,
         leaves: 9,
@@ -22,16 +24,22 @@ pub(super) const LODS: [Lod; 3] = [
         stem: &[0., 0.42, 0.67, 0.82, 0.94],
     },
     Lod {
-        clumps: 96,
+        clumps: 144,
         leaves: 4,
         curved_leaves: 2,
         stem: &[0., 0.65, 0.84, 0.94],
     },
     Lod {
-        clumps: 36,
+        clumps: 96,
         leaves: 2,
         curved_leaves: 1,
         stem: &[0., 0.79],
+    },
+    Lod {
+        clumps: 80,
+        leaves: 1,
+        curved_leaves: 1,
+        stem: &[0.],
     },
 ];
 
@@ -50,7 +58,9 @@ impl Lod {
         for leaf in 0..self.leaves {
             let angle = leaf as f32 * 2.399_963_1;
             let (sin, cos) = angle.sin_cos();
-            let spread = if leaf == 0 {
+            let spread = if self.stem.len() == 1 {
+                -1.0
+            } else if leaf == 0 {
                 0.02
             } else {
                 0.32 + 0.075 * leaf as f32

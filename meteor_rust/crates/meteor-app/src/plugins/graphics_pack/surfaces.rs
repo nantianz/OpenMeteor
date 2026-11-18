@@ -142,7 +142,7 @@ impl<'a> SceneGraphics<'a> {
             last_wind: None,
         })
     }
-    pub(super) fn apply_pbr(
+    pub(in crate::plugins) fn apply_pbr(
         &mut self,
         i: usize,
         id: &str,

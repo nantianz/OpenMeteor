@@ -1,5 +1,8 @@
-use super::config::{Environment, Sky};
+use super::config::{sky_minutes, Environment, Sky, SkyTime};
 use super::GraphicsPacks;
+use crate::plugins::{
+    render_plugin::update_uv_scroll, simulation_play_now, stage_material::FrameUniforms, FrameClock,
+};
 use bevy::ecs::system::SystemParamItem;
 use bevy::mesh::MeshVertexBufferLayoutRef;
 use bevy::pbr::{MaterialPipeline, MaterialPipelineKey};
@@ -14,6 +17,7 @@ use meteor_asset::gmdl::GmdlMesh;
 use std::collections::HashSet;
 
 mod cache;
+mod clock;
 mod noise;
 
 const SHADER: Handle<Shader> = bevy::asset::uuid_handle!("1c5ee9c3-0985-436a-b829-287a3b623efb");
@@ -121,6 +125,12 @@ pub(crate) struct SkyLighting {
 #[derive(Component)]
 pub(crate) struct CloudSky(pub Option<SkyLighting>);
 
+#[derive(Component)]
+pub(crate) struct SkyCycle {
+    base: (Sky, Environment),
+    clock: clock::Cycle,
+}
+
 #[derive(Resource, Default)]
 pub(crate) struct CloudNoise(Option<Handle<Image>>);
 
@@ -134,7 +144,8 @@ impl CloudNoise {
 
 pub(crate) fn install(app: &mut App) {
     app.add_plugins(MaterialPlugin::<CloudSkyMaterial>::default())
-        .init_resource::<CloudNoise>();
+        .init_resource::<CloudNoise>()
+        .add_systems(Update, update_cycle.after(update_uv_scroll));
     bevy::asset::load_internal_asset!(app, SHADER, "cloud_sky.wgsl", Shader::from_wgsl);
     cache::install(app);
 }
@@ -144,7 +155,10 @@ pub(crate) fn cache_ready(app: &App) -> bool {
     cache::ready(app)
 }
 
-pub(crate) fn scene(packs: &GraphicsPacks, stage: &str) -> Option<(Sky, Environment)> {
+pub(crate) fn scene(
+    packs: &GraphicsPacks,
+    stage: &str,
+) -> Option<(Sky, Environment, Option<SkyCycle>)> {
     let mut profile = packs
         .scenes(stage)
         .filter_map(|(_, scene)| scene.sky.as_ref())
@@ -164,18 +178,64 @@ pub(crate) fn scene(packs: &GraphicsPacks, stage: &str) -> Option<(Sky, Environm
         lighting.sun_color = sun.color;
         lighting.sun_intensity = sun.intensity;
     }
-    if let Some(minutes) = profile
-        .fixed_time
-        .as_deref()
-        .and_then(super::config::sky_minutes)
-    {
-        sample_fixed_time(&mut profile, &mut lighting, minutes);
+    let (minutes, cycle) = match &profile.time {
+        Some(SkyTime::Cycle {
+            start_time,
+            time_scale,
+        }) => {
+            let minutes = sky_minutes(start_time)?;
+            let cycle = SkyCycle {
+                base: (profile.clone(), lighting.clone()),
+                clock: clock::Cycle::new(minutes, *time_scale, profile.cloud_update_hz),
+            };
+            (Some(minutes), Some(cycle))
+        }
+        Some(SkyTime::Fixed { time }) => (sky_minutes(time), None),
+        Some(SkyTime::System {}) => {
+            let minutes = clock::local_minutes();
+            if minutes.is_none() {
+                warn!("{stage}: could not read the local time for the sky");
+            }
+            (minutes, None)
+        }
+        None => (profile.fixed_time.as_deref().and_then(sky_minutes), None),
+    };
+    if let Some(minutes) = minutes {
+        sample_time(&mut profile, &mut lighting, f32::from(minutes));
     }
-    Some((profile, lighting))
+    Some((profile, lighting, cycle))
 }
 
-fn sample_fixed_time(sky: &mut Sky, lighting: &mut Environment, minutes: u16) {
-    let hour_angle = (f32::from(minutes) - 720.0) * (std::f32::consts::TAU / 1440.0);
+pub(crate) fn update_cycle(
+    frame_clock: Option<Res<FrameClock>>,
+    frame: Option<Res<FrameUniforms>>,
+    mut domes: Query<(
+        &MeshMaterial3d<CloudSkyMaterial>,
+        &mut CloudSky,
+        &mut SkyCycle,
+    )>,
+    mut materials: ResMut<Assets<CloudSkyMaterial>>,
+) {
+    let fallback = frame.as_ref().map_or(0.0, |frame| frame.seconds);
+    let now = simulation_play_now(frame_clock.as_deref(), fallback);
+    for (handle, mut sky, mut cycle) in &mut domes {
+        let Some(minutes) = cycle.clock.sample(now) else {
+            continue;
+        };
+        let Some(mut material) = materials.get_mut(&handle.0) else {
+            continue;
+        };
+        let (mut profile, mut light) = cycle.base.clone();
+        sample_time(&mut profile, &mut light, minutes);
+        material.0.params.set_lighting(&profile, &light);
+        if sky.0.is_some() {
+            sky.0 = Some(atmosphere_lighting(&profile, &light));
+        }
+    }
+}
+
+fn sample_time(sky: &mut Sky, lighting: &mut Environment, minutes: f32) {
+    let hour_angle = (minutes - 720.0) * (std::f32::consts::TAU / 1440.0);
     let (across, height) = hour_angle.sin_cos();
     let authored = Vec3::from_array(lighting.sun_direction);
     let meridian = Vec3::new(authored.x, 0.0, authored.z)
@@ -188,7 +248,7 @@ fn sample_fixed_time(sky: &mut Sky, lighting: &mut Environment, minutes: u16) {
     let twilight = smoothstep(-0.26, 0.07, elevation);
     let mut horizon = Vec3::new(0.012, 0.022, 0.047);
     let mut zenith = Vec3::new(0.003, 0.008, 0.023);
-    let dawn = minutes < 720;
+    let dawn = minutes < 720.0;
     let warm = if dawn {
         Vec3::new(0.82, 0.44, 0.24)
     } else {
@@ -299,21 +359,26 @@ pub(crate) fn material(
                 .map(|response| super::wind_flow(wind, response.cloud))
         })
         .unwrap_or_else(|| Vec2::from_array(sky.wind).extend(0.0).extend(0.0));
-    CloudSkyMaterial(SkyBindings {
-        params: SkyUniform {
-            horizon: Vec3::from_array(sky.horizon).extend(0.0),
-            zenith: Vec3::from_array(sky.zenith).extend(0.0),
-            cloud_color: Vec3::from_array(sky.cloud_color).extend(0.0),
-            layer: Vec4::new(sky.base_height, sky.thickness, sky.density, sky.coverage),
-            motion: Vec4::new(0.0, 0.0, sky.scale, sky.cloud_update_hz as f32),
-            wind: flow,
-            sun: Vec3::from_array(light.sun_direction)
-                .normalize_or_zero()
-                .extend(sky.steps as f32),
-            sun_color: Vec3::from_array(light.sun_color).extend(light.sun_intensity),
-        },
-        noise,
-    })
+    let mut params = SkyUniform {
+        layer: Vec4::new(sky.base_height, sky.thickness, sky.density, sky.coverage),
+        motion: Vec4::new(0.0, 0.0, sky.scale, sky.cloud_update_hz as f32),
+        wind: flow,
+        ..default()
+    };
+    params.set_lighting(sky, light);
+    CloudSkyMaterial(SkyBindings { params, noise })
+}
+
+impl SkyUniform {
+    fn set_lighting(&mut self, sky: &Sky, light: &Environment) {
+        self.horizon = Vec3::from_array(sky.horizon).extend(0.0);
+        self.zenith = Vec3::from_array(sky.zenith).extend(0.0);
+        self.cloud_color = Vec3::from_array(sky.cloud_color).extend(0.0);
+        self.sun = Vec3::from_array(light.sun_direction)
+            .normalize_or_zero()
+            .extend(sky.steps as f32);
+        self.sun_color = Vec3::from_array(light.sun_color).extend(light.sun_intensity);
+    }
 }
 
 #[cfg(test)]
@@ -331,7 +396,7 @@ mod tests {
         };
         let mesh = meteor_asset::gmdl::decode_gmdl(&bytes).unwrap();
         let packs = super::super::tests::starter();
-        let (sky, _) = scene(&packs, "sn13").unwrap();
+        let (sky, _, _) = scene(&packs, "sn13").unwrap();
         let batches = replacements(&sky, &mesh, &HashSet::new()).unwrap();
         assert!(batches.len() >= 5);
         assert!(batches.iter().all(|(object, _)| matches!(
@@ -349,7 +414,7 @@ mod tests {
     #[test]
     fn fixed_times_move_the_sun_and_follow_the_daylight_curve() {
         let mut packs = super::super::tests::starter();
-        let (_, authored) = scene(&packs, "sn13").unwrap();
+        let (_, authored, _) = scene(&packs, "sn13").unwrap();
         let across = Vec3::Y
             .cross(Vec3::from_array(authored.sun_direction))
             .normalize();
@@ -365,7 +430,7 @@ mod tests {
                 .as_mut()
                 .unwrap()
                 .fixed_time = Some(time.to_owned());
-            let (profile, environment) = scene(&packs, "sn13").unwrap();
+            let (profile, environment, _) = scene(&packs, "sn13").unwrap();
             lighting.push(atmosphere_lighting(&profile, &environment));
         }
         let [dawn, noon, dusk, night] = lighting.as_slice() else {

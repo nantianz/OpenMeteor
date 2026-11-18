@@ -1,6 +1,7 @@
 use super::*;
 use serde::Deserialize;
 use std::sync::{Arc, OnceLock};
+mod cape;
 mod cloth;
 mod cloth_runtime;
 use cloth_runtime::update;
@@ -437,6 +438,7 @@ pub(super) fn install(app: &mut App) {
             .after(super::hit_sway::HitSwaySet)
             .before(crate::plugins::rebalance_plugin::sync_afterimage),
     );
+    cape::install(app);
 }
 
 #[cfg(test)]

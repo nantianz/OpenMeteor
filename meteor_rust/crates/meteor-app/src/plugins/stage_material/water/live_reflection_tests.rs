@@ -271,4 +271,36 @@ fn on_screen_wall_and_actor_contribute_to_clear_water() {
         reflected_changes(&undistorted_bed, &refracted_bed, 190, 310) > 100,
         "enhanced refraction must change how the submerged bed appears"
     );
+
+    let refraction = |app: &mut App, enabled| {
+        let mut materials = app.world_mut().resource_mut::<Assets<GmdlMaterial>>();
+        let mut material = materials.get_mut(&water).unwrap();
+        material.water_screen_refraction = enabled;
+        material.water_live_reflection = false;
+    };
+    let mut stand = app.world_mut().get_mut::<Transform>(actor).unwrap();
+    stand.translation = Vec3::new(0.24, 0.83, 1.4);
+    stand.rotation = Quat::from_rotation_y(0.45);
+    refraction(&mut app, false);
+    let flat = capture(&mut app, &pixels);
+    *app.world_mut().get_mut::<Visibility>(actor).unwrap() = Visibility::Visible;
+    let actor_flat = capture(&mut app, &pixels);
+    refraction(&mut app, true);
+    let actor_bent = capture(&mut app, &pixels);
+    *app.world_mut().get_mut::<Visibility>(actor).unwrap() = Visibility::Hidden;
+    let bent = capture(&mut app, &pixels);
+    let actors_alone = flat.chunks_exact(4).zip(actor_flat.chunks_exact(4));
+    let ghosts = bent
+        .chunks_exact(4)
+        .zip(actor_bent.chunks_exact(4))
+        .zip(actors_alone)
+        .filter(|((bent, actor_bent), (flat, actor_flat))| {
+            flat == actor_flat && (0..3).any(|i| bent[i].abs_diff(actor_bent[i]) > 15)
+        })
+        .count();
+    eprintln!("refraction changed {ghosts} pixels outside the directly visible actor silhouette");
+    assert!(
+        ghosts <= 10,
+        "the water must not reproduce a foreground actor silhouette"
+    );
 }

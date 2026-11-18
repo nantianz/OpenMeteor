@@ -211,6 +211,29 @@ fn sample_screen_ray(world: vec3<f32>, ray: vec3<f32>, distance_along: f32) -> S
     let pixel = vec2<i32>(clamp(uv * dimensions, vec2<f32>(0.0), dimensions - 1.0));
     return ScreenRaySample(uv, ndc, textureLoad(depth_prepass_texture, pixel, 0), true);
 }
+
+fn water_refraction_color(world: vec3<f32>, uv: vec2<f32>, confidence: f32) -> vec4<f32> {
+    let color_size = vec2<f32>(textureDimensions(view_transmission_texture));
+    let color_pixel = vec2<i32>(clamp(uv * color_size, vec2<f32>(0.0), color_size - 1.0));
+    let center = (vec2<f32>(color_pixel) + 0.5) / color_size;
+    let depth_size = vec2<f32>(textureDimensions(depth_prepass_texture));
+    let depth_pixel = vec2<i32>(clamp(center * depth_size, vec2<f32>(0.0), depth_size - 1.0));
+    var closest = textureLoad(depth_prepass_texture, depth_pixel, 0);
+    if (closest <= 0.0) { return vec4<f32>(0.0); }
+#ifdef MULTISAMPLED
+    for (var sample = 1u; sample < textureNumSamples(depth_prepass_texture); sample += 1u) {
+        let depth = textureLoad(depth_prepass_texture, depth_pixel, i32(sample));
+        if (depth <= 0.0) { return vec4<f32>(0.0); }
+        closest = max(closest, depth);
+    }
+#endif
+    let ndc = vec2<f32>(center.x * 2.0 - 1.0, 1.0 - center.y * 2.0);
+    let position = view.world_from_clip * vec4<f32>(ndc, closest, 1.0);
+    if (abs(position.w) < 0.0001 || position.y / position.w >= world.y - 0.025) {
+        return vec4<f32>(0.0);
+    }
+    return vec4<f32>(textureLoad(view_transmission_texture, color_pixel, 0).rgb, confidence);
+}
 #endif
 
 fn water_screen_reflection(world: vec3<f32>, normal: vec3<f32>, view_dir: vec3<f32>) -> vec4<f32> {
@@ -270,37 +293,41 @@ fn water_screen_refraction(world: vec3<f32>, ray: vec3<f32>, path: f32) -> vec4<
     if (material.detail.y < 2.0 || ray.y >= -0.02 || path <= 0.06) { return vec4<f32>(0.0); }
     var near = 0.04;
     let start = sample_screen_ray(world, ray, near);
-    if (!start.valid || (start.depth > 0.0 && start.ndc.z <= start.depth)) {
-        return vec4<f32>(0.0);
-    }
-    for (var step = 1u; step <= 8u; step += 1u) {
-        let t = f32(step) / 8.0;
-        var far = mix(0.04, path * 1.2, t * t);
-        var hit = sample_screen_ray(world, ray, far);
-        if (!hit.valid) { break; }
-        if (hit.depth <= 0.0 || hit.ndc.z > hit.depth) {
-            near = far;
-            continue;
-        }
-        for (var i = 0u; i < 3u; i += 1u) {
-            let middle = (near + far) * 0.5;
-            let sample = sample_screen_ray(world, ray, middle);
-            if (sample.valid && sample.depth > 0.0 && sample.ndc.z <= sample.depth) {
-                hit = sample;
-                far = middle;
-            } else {
-                near = middle;
+    if (start.valid && (start.depth <= 0.0 || start.ndc.z > start.depth)) {
+        for (var step = 1u; step <= 8u; step += 1u) {
+            let t = f32(step) / 8.0;
+            var far = mix(0.04, path * 1.2, t * t);
+            var hit = sample_screen_ray(world, ray, far);
+            if (!hit.valid) { break; }
+            if (hit.depth <= 0.0 || hit.ndc.z > hit.depth) {
+                near = far;
+                continue;
             }
+            for (var i = 0u; i < 3u; i += 1u) {
+                let middle = (near + far) * 0.5;
+                let sample = sample_screen_ray(world, ray, middle);
+                if (sample.valid && sample.depth > 0.0 && sample.ndc.z <= sample.depth) {
+                    hit = sample;
+                    far = middle;
+                } else {
+                    near = middle;
+                }
+            }
+            let position = view.world_from_clip * vec4<f32>(hit.ndc.xy, hit.depth, 1.0);
+            if (abs(position.w) < 0.0001) { break; }
+            let delta = position.xyz / position.w - world;
+            let along = dot(delta, ray);
+            if (delta.y >= -0.025 || along <= 0.0
+                || length(delta - ray * along) > max(0.12, 0.08 * along)) { break; }
+            let edge = max(abs(hit.uv.x * 2.0 - 1.0), abs(hit.uv.y * 2.0 - 1.0));
+            let color = water_refraction_color(world, hit.uv, 1.0 - smoothstep(0.8, 0.98, edge));
+            if (color.a > 0.0) { return color; }
+            break;
         }
-        let position = view.world_from_clip * vec4<f32>(hit.ndc.xy, hit.depth, 1.0);
-        if (abs(position.w) < 0.0001) { break; }
-        let delta = position.xyz / position.w - world;
-        let along = dot(delta, ray);
-        if (delta.y >= -0.025 || along <= 0.0
-            || length(delta - ray * along) > max(0.12, 0.08 * along)) { break; }
-        let edge = max(abs(hit.uv.x * 2.0 - 1.0), abs(hit.uv.y * 2.0 - 1.0));
-        let confidence = 1.0 - smoothstep(0.8, 0.98, edge);
-        return vec4<f32>(textureSampleLevel(view_transmission_texture, view_transmission_sampler, hit.uv, 0.0).rgb, confidence);
+    }
+    let direct = sample_screen_ray(world, ray, 0.0);
+    if (direct.valid) {
+        return water_refraction_color(world, direct.uv, 1.0);
     }
 #endif
     return vec4<f32>(0.0);
@@ -489,6 +516,22 @@ fn scene_detail_factor(in: VertexOutput, normal: vec3<f32>) -> f32 {
     return clamp(1.0 + material.detail.w * (perturbed - base), 1.0 - limit, 1.0 + limit);
 }
 
+fn grass_patch_hash(cell: vec2<f32>) -> f32 {
+    let basis = fract(cell.xyx * 0.1031);
+    let value = basis + dot(basis, basis.yzx + 33.33);
+    return fract((value.x + value.y) * value.z);
+}
+
+fn grass_patch(point: vec2<f32>) -> f32 {
+    let cell = floor(point);
+    let fraction = fract(point);
+    let weight = fraction * fraction * (3.0 - 2.0 * fraction);
+    return mix(
+        mix(grass_patch_hash(cell), grass_patch_hash(cell + vec2<f32>(1.0, 0.0)), weight.x),
+        mix(grass_patch_hash(cell + vec2<f32>(0.0, 1.0)), grass_patch_hash(cell + 1.0), weight.x),
+        weight.y);
+}
+
 fn scene_lighting(in: VertexOutput, detail_normal: vec3<f32>) -> vec3<f32> {
 
     if (material.base.mode == 2u || material.base.mode == 3u || material.base.mode == 4u) {
@@ -654,10 +697,11 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         let high = material.grass_bounds.zw - point;
         let edge = min(min(low.x, low.y), min(high.x, high.y));
         let slope = smoothstep(0.50, 0.82, normalize(in.world_normal).y);
-        let soil = dot(color.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
-        let variation = 0.80 + 0.12 * sin(dot(point, vec2<f32>(0.29, 0.44)))
-            + 0.08 * sin(dot(point, vec2<f32>(0.53, -0.38)));
-        let turf = material.grass_ground.rgb * mix(0.20, 0.53, soil) * variation;
+        let meadow_variation = 2.0 * grass_patch(point * 0.19) - 1.0;
+        let tuft = sin(dot(point, vec2<f32>(2.4, 2.9)) + meadow_variation) * sin(dot(point, vec2<f32>(-3.3, 2.1)));
+        let distance_gain = 1.0 - smoothstep(20.0, 105.0, distance(in.world_position.xyz, view.world_position));
+        let variation = 0.58 + 0.12 * meadow_variation + 0.13 * tuft * distance_gain;
+        let turf = material.grass_ground.rgb * variation * vec3<f32>(1.06, 0.91, 0.78);
         color = vec4<f32>(mix(color.rgb, turf, material.grass_ground.w * slope
             * smoothstep(0.0, 1.4, edge)), color.a);
     }

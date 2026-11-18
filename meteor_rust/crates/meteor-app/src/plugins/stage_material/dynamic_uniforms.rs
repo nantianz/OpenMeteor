@@ -131,11 +131,19 @@ pub struct SharedBuffers {
     lighting: UniformBuffer<Vec4>,
     liquid_contacts: UniformBuffer<LiquidContacts>,
     graphics: UniformBuffer<crate::plugins::graphics_pack::GraphicsFrame>,
+    grass_light: UniformBuffer<Vec4>,
 }
 
 impl SharedBuffers {
     pub(in crate::plugins) fn clock(&self) -> Result<Buffer, AsBindGroupError> {
         self.clock
+            .buffer()
+            .cloned()
+            .ok_or(AsBindGroupError::RetryNextUpdate)
+    }
+
+    pub(in crate::plugins) fn grass_light(&self) -> Result<Buffer, AsBindGroupError> {
+        self.grass_light
             .buffer()
             .cloned()
             .ok_or(AsBindGroupError::RetryNextUpdate)
@@ -395,6 +403,11 @@ fn upload_frame(
     if shared.graphics.buffer().is_none() || *shared.graphics.get() != frame.graphics {
         shared.graphics.set(frame.graphics);
         shared.graphics.write_buffer(&device, &queue);
+    }
+    let grass_light = frame.graphics.grass_light();
+    if shared.grass_light.buffer().is_none() || *shared.grass_light.get() != grass_light {
+        shared.grass_light.set(grass_light);
+        shared.grass_light.write_buffer(&device, &queue);
     }
     let clock = split_time(frame.seconds)
         .extend(if frame.scene_normal_maps { 1.0 } else { 0.0 })
