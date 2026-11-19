@@ -1517,7 +1517,7 @@ impl CombatView<'_> {
 
 impl FighterView for CombatView<'_> {
     fn can_guard(&self) -> bool {
-        meteor_combat::weapon_strategy::weapon_can_guard(self.strategy_id)
+        !self.air.air.airborne && meteor_combat::weapon_strategy::weapon_can_guard(self.strategy_id)
     }
     fn guard_held(&self) -> bool {
         self.guard_held_input
@@ -21292,6 +21292,125 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn hold_guard_after_air_attack(h: &mut GameplayHarness, fps: u32) -> bool {
+        let keys = crate::app_state::Keymap::default();
+        let dt = 1.0 / fps as f32;
+        h.press_binding(keys.jump);
+        for _ in 0..fps / 5 {
+            h.step_dt(dt);
+        }
+        h.release_binding(keys.jump);
+        h.step_dt(dt);
+        assert!(h.airborne());
+        h.press_binding(keys.attack);
+        h.step_dt(dt);
+        assert!(is_attacking_state(h.state()));
+        h.release_binding(keys.attack);
+        h.press_binding(keys.guard);
+        let mut guarded_in_air = false;
+        for _ in 0..fps * 5 {
+            h.step_dt(dt);
+            if h.state() == FighterState::Guard && !h.airborne() {
+                break;
+            }
+            guarded_in_air |= h.state() == FighterState::Guard;
+        }
+        guarded_in_air
+    }
+
+    #[test]
+    fn production_air_attack_held_guard_releases_after_landing() {
+        let mut failures = Vec::new();
+        for weapon in [DAGGER, 4, 6, 7, 8, 9, 10, 11, 12] {
+            for fps in [30, 60, 120] {
+                let mut h = spawn_gameplay_harness_with_order(weapon, true)
+                    .expect("original character resources");
+                install_guard_test_animation(&mut h);
+                let keys = crate::app_state::Keymap::default();
+                let dt = 1.0 / fps as f32;
+                let premature_guard = hold_guard_after_air_attack(&mut h, fps);
+                let landed_guard = h.state() == FighterState::Guard && !h.airborne();
+                let mode = h
+                    .app
+                    .world()
+                    .get::<FighterAir>(h.fighter)
+                    .unwrap()
+                    .air
+                    .motion_mode;
+                h.release_binding(keys.guard);
+                h.step_dt(dt);
+                let released_guard = h.state() == FighterState::Name;
+                let start = h.position();
+                h.press_binding(keys.move_up);
+                for _ in 0..fps / 3 {
+                    h.step_dt(dt);
+                }
+                let moved = (h.position() - start).length();
+                if premature_guard || !landed_guard || !released_guard || moved <= 0.05 {
+                    failures.push(format!(
+                        "weapon={weapon}, fps={fps}, premature={premature_guard}, landed={landed_guard}, landed_mode={mode:?}, released={released_guard}, moved={moved}, state={:?}, pose={}, air={:?}",
+                        h.state(), h.pose_id(), h.app.world().get::<FighterAir>(h.fighter).unwrap().air
+                    ));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    #[test]
+    fn production_air_attack_guard_blocks_attack_until_release_and_recovers() {
+        let mut failures = Vec::new();
+        for weapon in [DAGGER, 4, 6, 7, 8, 9, 10, 11, 12] {
+            for fps in [30, 60, 120] {
+                let mut h = spawn_gameplay_harness_with_order(weapon, true)
+                    .expect("original character resources");
+                install_guard_test_animation(&mut h);
+                let keys = crate::app_state::Keymap::default();
+                let dt = 1.0 / fps as f32;
+                let context = format!("weapon={weapon}, fps={fps}");
+                hold_guard_after_air_attack(&mut h, fps);
+                assert_eq!(h.state(), FighterState::Guard, "{context}");
+                assert!(!h.airborne(), "{context}");
+
+                let guard_pose = h.pose_id();
+                h.press_binding(keys.attack);
+                h.step_dt(dt);
+                assert_eq!(h.state(), FighterState::Guard, "{context}");
+                assert_eq!(h.pose_id(), guard_pose, "{context}");
+                h.release_binding(keys.attack);
+                h.step_dt(dt);
+
+                h.release_binding(keys.guard);
+                h.press_binding(keys.attack);
+                h.step_dt(dt);
+                let attack_pose = h.pose_id();
+                assert!(is_attacking_state(h.state()), "{context}");
+                h.release_binding(keys.attack);
+                for _ in 0..fps * 5 {
+                    h.step_dt(dt);
+                    if h.state() == FighterState::Name && !h.airborne() {
+                        break;
+                    }
+                }
+                let recovered = h.state() == FighterState::Name && !h.airborne();
+
+                let start = h.position();
+                h.press_binding(keys.move_up);
+                for _ in 0..fps / 3 {
+                    h.step_dt(dt);
+                }
+                let moved = (h.position() - start).length();
+                if !recovered || moved <= 0.05 {
+                    failures.push(format!(
+                        "{context}, attack={attack_pose}, recovered={recovered}, moved={moved}, state={:?}, pose={}",
+                        h.state(), h.pose_id()
+                    ));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
     }
 
     #[test]
