@@ -30,12 +30,16 @@ fn headless_sn06_scan_enhancement_preview() {
     let read = |name: &str| std::fs::read(root.join(name)).unwrap();
     let wp = crate::text_codec::decode_text(&read("Level/sn06.wp"));
     let center = meteor_scene::stage_loader::get_stage_center("sn06", Some(&wp));
-    let packs = loader::load_with_reader(
+    let mut packs = loader::load_catalog_with_reader(
         &std::fs::read(base.join("graphics-enhancement-sn06.json")).unwrap(),
         |name| std::fs::read(base.join(name)).map_err(|e| e.to_string()),
     )
     .unwrap()
     .with_test_loose_root(base);
+    assert!(packs.packs.is_empty());
+    packs.prepare_stage("sn03");
+    assert_eq!(packs.packs.len(), 1, "sn03 must not load the sn06 pack");
+    packs.prepare_stage("sn06");
     let pack = &packs.packs[1];
     let scene = &pack.config.scenes[0];
     let original = meteor_asset::gmdl::decode_gmdl(&read("sn06/sn06.gmb")).unwrap();

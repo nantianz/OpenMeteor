@@ -1,0 +1,1029 @@
+{
+  "schema_version": 2,
+  "id": "sn03-mist-ravine",
+  "resources": {
+    "a-base": "textures/a-base.png",
+    "a-normal": "textures/a-normal.png",
+    "a-orm": "textures/a-orm.png",
+    "b-base": "textures/b-base.png",
+    "b-normal": "textures/b-normal.png",
+    "b-orm": "textures/b-orm.png",
+    "c-base": "textures/c-base.png",
+    "c-normal": "textures/c-normal.png",
+    "c-orm": "textures/c-orm.png",
+    "fill-base": "textures/fill-base.png",
+    "fill-normal": "textures/fill-normal.png",
+    "fill-orm": "textures/fill-orm.png",
+    "d-base": "textures/d-base.png",
+    "d-normal": "textures/d-normal.png",
+    "d-orm": "textures/d-orm.png",
+    "wall-base": "textures/wall-base.png",
+    "wall-normal": "textures/wall-normal.png",
+    "wall-orm": "textures/wall-orm.png",
+    "floor-base": "textures/floor-base.png",
+    "floor-normal": "textures/floor-normal.png",
+    "floor-orm": "textures/floor-orm.png",
+    "spire-siuw3-0-base": "textures/spire-siuw3-0-base.png",
+    "spire-siuw3-0-normal": "textures/spire-siuw3-0-normal.png",
+    "spire-siuw3-0-orm": "textures/spire-siuw3-0-orm.png",
+    "cliff-qkofq-0-base": "textures/cliff-qkofq-0-base.png",
+    "cliff-qkofq-0-normal": "textures/cliff-qkofq-0-normal.png",
+    "cliff-qkofq-0-orm": "textures/cliff-qkofq-0-orm.png"
+  },
+  "materials": {
+    "middle-a": {
+      "base_color": "a-base",
+      "normal": "a-normal",
+      "orm": "a-orm",
+      "tint": [
+        0.73,
+        0.85,
+        0.9
+      ],
+      "normal_strength": 0.77,
+      "roughness": 1,
+      "direct_light": 1.3,
+      "ambient_light": 0.83,
+      "fog_strength": 0.92
+    },
+    "middle-b": {
+      "base_color": "b-base",
+      "normal": "b-normal",
+      "orm": "b-orm",
+      "tint": [
+        0.73,
+        0.85,
+        0.9
+      ],
+      "normal_strength": 0.77,
+      "roughness": 1,
+      "direct_light": 1.3,
+      "ambient_light": 0.83,
+      "fog_strength": 0.92
+    },
+    "near-c": {
+      "base_color": "c-base",
+      "normal": "c-normal",
+      "orm": "c-orm",
+      "tint": [
+        0.92,
+        0.94,
+        0.91
+      ],
+      "normal_strength": 0.92,
+      "roughness": 1,
+      "direct_light": 1.36,
+      "ambient_light": 0.76,
+      "fog_strength": 0.66,
+      "vertex_color": 0.0
+    },
+    "middle-c": {
+      "base_color": "c-base",
+      "normal": "c-normal",
+      "orm": "c-orm",
+      "tint": [
+        0.73,
+        0.85,
+        0.9
+      ],
+      "normal_strength": 0.77,
+      "roughness": 1,
+      "direct_light": 1.3,
+      "ambient_light": 0.83,
+      "fog_strength": 0.92
+    },
+    "near-fill": {
+      "base_color": "fill-base",
+      "normal": "fill-normal",
+      "orm": "fill-orm",
+      "tint": [
+        0.9,
+        0.91,
+        0.85
+      ],
+      "normal_strength": 1.02,
+      "roughness": 1,
+      "direct_light": 1.3,
+      "ambient_light": 0.82,
+      "fog_strength": 0.54,
+      "vertex_color": 0.67
+    },
+    "near-d": {
+      "base_color": "d-base",
+      "normal": "d-normal",
+      "orm": "d-orm",
+      "tint": [
+        0.92,
+        0.94,
+        0.91
+      ],
+      "normal_strength": 0.92,
+      "roughness": 1,
+      "direct_light": 1.36,
+      "ambient_light": 0.76,
+      "fog_strength": 0.66,
+      "vertex_color": 0.0
+    },
+    "near-wall": {
+      "base_color": "wall-base",
+      "normal": "wall-normal",
+      "orm": "wall-orm",
+      "tint": [
+        0.94,
+        0.98,
+        1.03
+      ],
+      "normal_strength": 1.16,
+      "roughness": 1,
+      "direct_light": 1.21,
+      "ambient_light": 0.86,
+      "fog_strength": 0.43,
+      "vertex_color": 0.91
+    },
+    "ravine-floor": {
+      "base_color": "floor-base",
+      "normal": "floor-normal",
+      "orm": "floor-orm",
+      "tint": [
+        0.89,
+        0.94,
+        0.98
+      ],
+      "normal_strength": 1.43,
+      "roughness": 1.0,
+      "direct_light": 1.05,
+      "ambient_light": 1.13,
+      "fog_strength": 0.6,
+      "vertex_color": 1.0
+    },
+    "slate-chips": {
+      "base_color": "fill-base",
+      "normal": "fill-normal",
+      "orm": "fill-orm",
+      "tint": [
+        0.88,
+        0.89,
+        0.87
+      ],
+      "normal_strength": 0.69,
+      "roughness": 1.0,
+      "direct_light": 1.11,
+      "ambient_light": 1.01,
+      "fog_strength": 0.58,
+      "vertex_color": 0.54
+    },
+    "landmark-a": {
+      "base_color": "a-base",
+      "normal": "a-normal",
+      "orm": "a-orm",
+      "tint": [
+        0.95,
+        1.12,
+        0.88
+      ],
+      "normal_strength": 0.92,
+      "roughness": 1,
+      "direct_light": 1.52,
+      "ambient_light": 0.84,
+      "fog_strength": 0.65,
+      "vertex_color": 0.75
+    },
+    "horizon-a": {
+      "base_color": "a-base",
+      "normal": "a-normal",
+      "orm": "a-orm",
+      "tint": [
+        0.72,
+        0.84,
+        0.98
+      ],
+      "normal_strength": 0.63,
+      "roughness": 1,
+      "direct_light": 0.68,
+      "ambient_light": 0.97,
+      "fog_strength": 1.41,
+      "vertex_color": 0.5
+    },
+    "landmark-b": {
+      "base_color": "b-base",
+      "normal": "b-normal",
+      "orm": "b-orm",
+      "tint": [
+        0.95,
+        1.12,
+        0.88
+      ],
+      "normal_strength": 0.92,
+      "roughness": 1,
+      "direct_light": 1.52,
+      "ambient_light": 0.84,
+      "fog_strength": 0.65,
+      "vertex_color": 0.75
+    },
+    "framing-b": {
+      "base_color": "b-base",
+      "normal": "b-normal",
+      "orm": "b-orm",
+      "tint": [
+        0.82,
+        0.94,
+        0.8
+      ],
+      "normal_strength": 0.92,
+      "roughness": 1,
+      "direct_light": 1.23,
+      "ambient_light": 0.76,
+      "fog_strength": 0.74,
+      "vertex_color": 0.75
+    },
+    "horizon-b": {
+      "base_color": "b-base",
+      "normal": "b-normal",
+      "orm": "b-orm",
+      "tint": [
+        0.72,
+        0.84,
+        0.98
+      ],
+      "normal_strength": 0.63,
+      "roughness": 1,
+      "direct_light": 0.68,
+      "ambient_light": 0.97,
+      "fog_strength": 1.41,
+      "vertex_color": 0.5
+    },
+    "landmark-c": {
+      "base_color": "c-base",
+      "normal": "c-normal",
+      "orm": "c-orm",
+      "tint": [
+        1.05,
+        0.99,
+        0.91
+      ],
+      "normal_strength": 0.92,
+      "roughness": 1,
+      "direct_light": 1.52,
+      "ambient_light": 0.84,
+      "fog_strength": 0.65,
+      "vertex_color": 0.75
+    },
+    "framing-c": {
+      "base_color": "c-base",
+      "normal": "c-normal",
+      "orm": "c-orm",
+      "tint": [
+        0.82,
+        0.94,
+        0.8
+      ],
+      "normal_strength": 0.92,
+      "roughness": 1,
+      "direct_light": 1.23,
+      "ambient_light": 0.76,
+      "fog_strength": 0.74,
+      "vertex_color": 0.75
+    },
+    "horizon-c": {
+      "base_color": "c-base",
+      "normal": "c-normal",
+      "orm": "c-orm",
+      "tint": [
+        0.72,
+        0.84,
+        0.98
+      ],
+      "normal_strength": 0.63,
+      "roughness": 1,
+      "direct_light": 0.68,
+      "ambient_light": 0.97,
+      "fog_strength": 1.41,
+      "vertex_color": 0.5
+    },
+    "weathered-spire": {
+      "tint": [
+        1.1,
+        1.02,
+        0.91
+      ],
+      "metallic": 0.0,
+      "roughness": 1,
+      "base_color": "spire-siuw3-0-base",
+      "normal": "spire-siuw3-0-normal",
+      "normal_strength": 0.9,
+      "orm": "spire-siuw3-0-orm",
+      "direct_light": 1.53,
+      "ambient_light": 0.89,
+      "fog_strength": 0.48,
+      "vertex_color": 0.74
+    },
+    "dolerite-cliff": {
+      "tint": [
+        1.03,
+        1.11,
+        1.0
+      ],
+      "metallic": 0.0,
+      "roughness": 1,
+      "base_color": "cliff-qkofq-0-base",
+      "normal": "cliff-qkofq-0-normal",
+      "normal_strength": 0.91,
+      "orm": "cliff-qkofq-0-orm",
+      "direct_light": 1.46,
+      "ambient_light": 1.04,
+      "fog_strength": 0.63,
+      "vertex_color": 0.49
+    },
+    "rim-boulder": {
+      "base_color": "fill-base",
+      "normal": "fill-normal",
+      "orm": "fill-orm",
+      "tint": [
+        0.9,
+        0.88,
+        0.79
+      ],
+      "normal_strength": 1.02,
+      "roughness": 1,
+      "direct_light": 1.13,
+      "ambient_light": 0.96,
+      "fog_strength": 0.54,
+      "vertex_color": 0.16
+    }
+  },
+  "meshlet_models": {
+    "canyon-west": {
+      "file": "models/canyon-west.mlmesh",
+      "materials": {
+        "ridge-bedrock": "near-wall"
+      }
+    },
+    "canyon-east": {
+      "file": "models/canyon-east.mlmesh",
+      "materials": {
+        "ridge-bedrock": "near-wall"
+      }
+    },
+    "basin-silhouette": {
+      "file": "models/basin-silhouette.mlmesh",
+      "materials": {
+        "rear-a": "horizon-c",
+        "rear-b": "horizon-a",
+        "rear-c": "horizon-b"
+      }
+    },
+    "western-ridges": {
+      "file": "models/western-ridges.mlmesh",
+      "materials": {
+        "cliff-coastal-0": "middle-c",
+        "cliff-panel-a-0": "middle-a",
+        "cliff-panel-b-0": "middle-b"
+      }
+    },
+    "eastern-ridges": {
+      "file": "models/eastern-ridges.mlmesh",
+      "materials": {
+        "cliff-coastal-0": "middle-c",
+        "cliff-panel-a-0": "middle-a",
+        "cliff-panel-b-0": "middle-b"
+      }
+    },
+    "gate-rock-1": {
+      "file": "models/gate-rock-1.mlmesh",
+      "materials": {
+        "cliff-coastal-0": "near-c"
+      }
+    },
+    "gate-rock-2": {
+      "file": "models/gate-rock-2.mlmesh",
+      "materials": {
+        "Japanese_Mossy_Boulder_veqhehl_Low": "near-d"
+      }
+    },
+    "gate-rock-3": {
+      "file": "models/gate-rock-3.mlmesh",
+      "materials": {
+        "Japanese_Mossy_Boulder_veqhehl_Low": "near-d"
+      }
+    },
+    "gate-rock-4": {
+      "file": "models/gate-rock-4.mlmesh",
+      "materials": {
+        "cliff-coastal-0": "near-c"
+      }
+    },
+    "gate-rock-5": {
+      "file": "models/gate-rock-5.mlmesh",
+      "materials": {
+        "Japanese_Mossy_Boulder_veqhehl_Low": "near-d"
+      }
+    },
+    "gate-rock-6": {
+      "file": "models/gate-rock-6.mlmesh",
+      "materials": {
+        "cliff-coastal-0": "near-c"
+      }
+    },
+    "gate-rock-7": {
+      "file": "models/gate-rock-7.mlmesh",
+      "materials": {
+        "Japanese_Mossy_Boulder_veqhehl_Low": "near-d"
+      }
+    },
+    "ravine-floor": {
+      "file": "models/ravine-floor.mlmesh",
+      "materials": {
+        "ravine-floor": "ravine-floor"
+      }
+    },
+    "slate-chips": {
+      "file": "models/slate-chips.mlmesh",
+      "materials": {
+        "ravine-floor": "slate-chips"
+      }
+    },
+    "south-rim": {
+      "file": "models/south-rim.mlmesh",
+      "materials": {
+        "east-face": "framing-c",
+        "east-joint": "dolerite-cliff",
+        "east-terrace": "landmark-a",
+        "low-shelf": "landmark-a",
+        "west-face": "framing-c",
+        "west-joint": "dolerite-cliff",
+        "west-terrace": "landmark-b"
+      }
+    },
+    "split-summit": {
+      "file": "models/split-summit.mlmesh",
+      "materials": {
+        "back-rock": "framing-c",
+        "high-spur": "weathered-spire",
+        "lower-spur": "landmark-c",
+        "near-scree": "landmark-b",
+        "succession": "framing-b"
+      }
+    }
+  },
+  "scenes": [
+    {
+      "stage": "sn03",
+      "sky": {
+        "enabled": true,
+        "replace_skybox": true,
+        "skybox": [
+          {
+            "object": "Sphere01",
+            "texture": "sn3sky.jpg"
+          },
+          {
+            "object": "mou",
+            "texture": "asn354.jpg"
+          },
+          {
+            "object": "Line06",
+            "texture": "asn3wu.jpg"
+          },
+          {
+            "object": "Line11",
+            "texture": "asn3wu.jpg"
+          },
+          {
+            "object": "Line12",
+            "texture": "asn3wu.jpg"
+          },
+          {
+            "object": "Line16",
+            "texture": "asn3wu.jpg"
+          },
+          {
+            "object": "Line17",
+            "texture": "asn3wu.jpg"
+          },
+          {
+            "object": "Line18",
+            "texture": "asn3wu.jpg"
+          },
+          {
+            "object": "wu",
+            "texture": "asn3wu.jpg"
+          }
+        ],
+        "horizon": [
+          0.66,
+          0.73,
+          0.76
+        ],
+        "zenith": [
+          0.12,
+          0.3,
+          0.51
+        ],
+        "cloud_color": [
+          1.0,
+          0.91,
+          0.77
+        ],
+        "base_height": 190,
+        "thickness": 65,
+        "density": 0.042,
+        "coverage": 0.47,
+        "scale": 0.019,
+        "steps": 16,
+        "cloud_update_hz": 6,
+        "ambient_strength": 0.73,
+        "ground_bounce": 0.34,
+        "sun": {
+          "direction": [
+            -0.68,
+            0.46,
+            0.57
+          ],
+          "color": [
+            1.0,
+            0.82,
+            0.6
+          ],
+          "intensity": 3.35
+        }
+      },
+      "environment": {
+        "exposure": 1.02
+      },
+      "fog": [
+        {
+          "center": [
+            21,
+            -23,
+            -218
+          ],
+          "radius": 130,
+          "color": [
+            0.52,
+            0.61,
+            0.65
+          ],
+          "density": 0.00091
+        },
+        {
+          "center": [
+            15,
+            23,
+            -492
+          ],
+          "radius": 387,
+          "color": [
+            0.39,
+            0.55,
+            0.71
+          ],
+          "density": 0.00153
+        }
+      ],
+      "surfaces": [
+        {
+          "object": "mou01",
+          "texture": "sn316.jpg",
+          "material": "near-fill"
+        },
+        {
+          "object": "mou01",
+          "texture": "sn317.jpg",
+          "material": "near-fill"
+        },
+        {
+          "object": "mou2",
+          "texture": "sn316.jpg",
+          "material": "near-fill"
+        },
+        {
+          "object": "mou2",
+          "texture": "sn317.jpg",
+          "material": "near-fill"
+        },
+        {
+          "object": "Object39",
+          "texture": "sn316.jpg",
+          "material": "near-fill"
+        },
+        {
+          "object": "Object39",
+          "texture": "sn317.jpg",
+          "material": "near-fill"
+        },
+        {
+          "object": "Object40",
+          "texture": "sn316.jpg",
+          "material": "near-fill"
+        },
+        {
+          "object": "Object40",
+          "texture": "sn317.jpg",
+          "material": "near-fill"
+        },
+        {
+          "object": "Box06",
+          "texture": "sn316.jpg",
+          "material": "near-fill"
+        },
+        {
+          "object": "Box06",
+          "texture": "sn317.jpg",
+          "material": "near-fill"
+        },
+        {
+          "object": "Line01",
+          "texture": "sn301.jpg",
+          "material": "near-fill"
+        },
+        {
+          "object": "Line02",
+          "texture": "sn301.jpg",
+          "material": "near-fill"
+        },
+        {
+          "object": "Line03",
+          "texture": "sn301.jpg",
+          "material": "near-fill"
+        },
+        {
+          "object": "Line04",
+          "texture": "sn301.jpg",
+          "material": "near-fill"
+        },
+        {
+          "object": "Line05",
+          "texture": "sn301.jpg",
+          "material": "near-fill"
+        },
+        {
+          "object": "Line10",
+          "texture": "sn301.jpg",
+          "material": "near-fill"
+        },
+        {
+          "object": "Line20",
+          "texture": "sn301.jpg",
+          "material": "near-fill"
+        },
+        {
+          "object": "Line21",
+          "texture": "sn301.jpg",
+          "material": "near-fill"
+        },
+        {
+          "object": "Line22",
+          "texture": "sn301.jpg",
+          "material": "near-fill"
+        },
+        {
+          "object": "Line23",
+          "texture": "sn301.jpg",
+          "material": "near-fill"
+        },
+        {
+          "object": "Line24",
+          "texture": "sn301.jpg",
+          "material": "near-fill"
+        },
+        {
+          "object": "Line25",
+          "texture": "sn301.jpg",
+          "material": "near-fill"
+        },
+        {
+          "object": "Line26",
+          "texture": "sn301.jpg",
+          "material": "near-fill"
+        },
+        {
+          "object": "moustone",
+          "texture": "sn308.jpg",
+          "material": "near-fill"
+        },
+        {
+          "object": "Object12",
+          "texture": "sn308.jpg",
+          "material": "rim-boulder"
+        },
+        {
+          "object": "Object13",
+          "texture": "sn308.jpg",
+          "material": "rim-boulder"
+        },
+        {
+          "object": "Object14",
+          "texture": "sn308.jpg",
+          "material": "rim-boulder"
+        },
+        {
+          "object": "Object15",
+          "texture": "sn308.jpg",
+          "material": "rim-boulder"
+        },
+        {
+          "object": "Object18",
+          "texture": "sn308.jpg",
+          "material": "rim-boulder"
+        },
+        {
+          "object": "Object19",
+          "texture": "sn308.jpg",
+          "material": "rim-boulder"
+        },
+        {
+          "object": "Object20",
+          "texture": "sn308.jpg",
+          "material": "rim-boulder"
+        },
+        {
+          "object": "Object22",
+          "texture": "sn308.jpg",
+          "material": "rim-boulder"
+        },
+        {
+          "object": "Object23",
+          "texture": "sn308.jpg",
+          "material": "rim-boulder"
+        },
+        {
+          "object": "Object26",
+          "texture": "sn308.jpg",
+          "material": "rim-boulder"
+        },
+        {
+          "object": "Object27",
+          "texture": "sn308.jpg",
+          "material": "rim-boulder"
+        },
+        {
+          "object": "tone01",
+          "texture": "sn308.jpg",
+          "material": "rim-boulder"
+        }
+      ],
+      "meshlet_props": [
+        {
+          "model": "canyon-west",
+          "source_sha256": "3628fdeb2c97aad4235d59451ab243d7750df1d809e2b6fff8e4c91cc6cbafa2",
+          "placements": [
+            {
+              "offset": [
+                -86.22684,
+                -1.3237,
+                -17.93624
+              ]
+            }
+          ]
+        },
+        {
+          "model": "canyon-east",
+          "source_sha256": "3628fdeb2c97aad4235d59451ab243d7750df1d809e2b6fff8e4c91cc6cbafa2",
+          "placements": [
+            {
+              "offset": [
+                17.95052,
+                -4.9358,
+                -8.94659
+              ]
+            }
+          ]
+        },
+        {
+          "model": "basin-silhouette",
+          "source_sha256": "3628fdeb2c97aad4235d59451ab243d7750df1d809e2b6fff8e4c91cc6cbafa2",
+          "placements": [
+            {
+              "offset": [
+                7.30223,
+                3.0,
+                -109.02078
+              ]
+            }
+          ]
+        },
+        {
+          "model": "ravine-floor",
+          "source_sha256": "3628fdeb2c97aad4235d59451ab243d7750df1d809e2b6fff8e4c91cc6cbafa2",
+          "placements": [
+            {
+              "offset": [
+                1.90662,
+                -1.2397,
+                -98.27987
+              ]
+            }
+          ]
+        },
+        {
+          "model": "slate-chips",
+          "source_sha256": "3628fdeb2c97aad4235d59451ab243d7750df1d809e2b6fff8e4c91cc6cbafa2",
+          "placements": [
+            {
+              "offset": [
+                7.98059,
+                -0.48078,
+                -94.19083
+              ]
+            }
+          ]
+        },
+        {
+          "model": "south-rim",
+          "source_sha256": "3628fdeb2c97aad4235d59451ab243d7750df1d809e2b6fff8e4c91cc6cbafa2",
+          "placements": [
+            {
+              "offset": [
+                15.01911,
+                -21.0,
+                -315.22269
+              ]
+            }
+          ]
+        },
+        {
+          "model": "split-summit",
+          "source_sha256": "3628fdeb2c97aad4235d59451ab243d7750df1d809e2b6fff8e4c91cc6cbafa2",
+          "placements": [
+            {
+              "offset": [
+                86.99356,
+                -14.0,
+                -382.63839
+              ]
+            }
+          ]
+        }
+      ],
+      "meshlet_replacements": [
+        {
+          "object": "Object11",
+          "model": "western-ridges",
+          "source_sha256": "3628fdeb2c97aad4235d59451ab243d7750df1d809e2b6fff8e4c91cc6cbafa2",
+          "placement": {
+            "offset": [
+              -91.73051,
+              -7.04817,
+              47.9446
+            ]
+          }
+        },
+        {
+          "object": "Object01",
+          "model": "eastern-ridges",
+          "source_sha256": "3628fdeb2c97aad4235d59451ab243d7750df1d809e2b6fff8e4c91cc6cbafa2",
+          "placement": {
+            "offset": [
+              40.22387,
+              -10.82025,
+              24.90244
+            ]
+          }
+        },
+        {
+          "object": "Line05",
+          "model": "gate-rock-1",
+          "source_sha256": "3628fdeb2c97aad4235d59451ab243d7750df1d809e2b6fff8e4c91cc6cbafa2",
+          "placement": {
+            "offset": [
+              1.20762,
+              0.37957,
+              -0.46167
+            ]
+          }
+        },
+        {
+          "object": "Line15",
+          "model": "gate-rock-2",
+          "source_sha256": "3628fdeb2c97aad4235d59451ab243d7750df1d809e2b6fff8e4c91cc6cbafa2",
+          "placement": {
+            "offset": [
+              0.51887,
+              0.0,
+              -0.53182
+            ]
+          }
+        },
+        {
+          "object": "Line22",
+          "model": "gate-rock-3",
+          "source_sha256": "3628fdeb2c97aad4235d59451ab243d7750df1d809e2b6fff8e4c91cc6cbafa2",
+          "placement": {
+            "offset": [
+              0.67944,
+              0.0,
+              0.0688
+            ]
+          }
+        },
+        {
+          "object": "Line23",
+          "model": "gate-rock-4",
+          "source_sha256": "3628fdeb2c97aad4235d59451ab243d7750df1d809e2b6fff8e4c91cc6cbafa2",
+          "placement": {
+            "offset": [
+              1.03069,
+              0.3808,
+              -0.15633
+            ]
+          }
+        },
+        {
+          "object": "Line24",
+          "model": "gate-rock-5",
+          "source_sha256": "3628fdeb2c97aad4235d59451ab243d7750df1d809e2b6fff8e4c91cc6cbafa2",
+          "placement": {
+            "offset": [
+              0.89456,
+              0.0,
+              -0.78099
+            ]
+          }
+        },
+        {
+          "object": "Line25",
+          "model": "gate-rock-6",
+          "source_sha256": "3628fdeb2c97aad4235d59451ab243d7750df1d809e2b6fff8e4c91cc6cbafa2",
+          "placement": {
+            "offset": [
+              2.40434,
+              0.47896,
+              -0.46103
+            ]
+          }
+        },
+        {
+          "object": "Line26",
+          "model": "gate-rock-7",
+          "source_sha256": "3628fdeb2c97aad4235d59451ab243d7750df1d809e2b6fff8e4c91cc6cbafa2",
+          "placement": {
+            "offset": [
+              1.28575,
+              0.0,
+              -1.15916
+            ]
+          }
+        }
+      ],
+      "contact_shadows": {
+        "strength": 0.36,
+        "radius": 1.05,
+        "max_height": 3.0,
+        "max_distance": 80.0
+      },
+      "grass": {
+        "surfaces": [
+          {
+            "object": "ground",
+            "texture": "sn302.jpg"
+          },
+          {
+            "object": "ground",
+            "texture": "sn309.jpg"
+          },
+          {
+            "object": "ground",
+            "texture": "sn320.jpg"
+          }
+        ],
+        "density": 2.85,
+        "tile_size": 7.2,
+        "height": [
+          0.29,
+          0.91
+        ],
+        "width": [
+          0.047,
+          0.14
+        ],
+        "root_color": [
+          0.043,
+          0.071,
+          0.024
+        ],
+        "tip_color": [
+          0.196,
+          0.267,
+          0.088
+        ],
+        "near_distance": 16.0,
+        "mid_distance": 34.0,
+        "max_distance": 112.0,
+        "max_visible_tiles": 120,
+        "max_triangles": 106000,
+        "clump_radius": 0.36,
+        "patch_size": 8.9,
+        "patch_variation": 1.0,
+        "ground_cover": 0.22,
+        "wind_strength": 0.29,
+        "species": {
+          "grass": 0.82,
+          "plumes": 0.025,
+          "broadleaf": 0.155
+        },
+        "interaction_radius": 1.23,
+        "recovery_seconds": 1.45
+      }
+    }
+  ]
+}

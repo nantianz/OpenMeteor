@@ -7,6 +7,7 @@ pub(crate) mod meshlets;
 mod runtime;
 pub(crate) mod sky;
 mod surfaces;
+use crate::app_state::AppState;
 use bevy::prelude::*;
 #[cfg(test)]
 pub(crate) use loader::load_with_reader;
@@ -20,10 +21,17 @@ pub fn install(app: &mut App) {
     app.init_resource::<GraphicsPacks>()
         .add_systems(Startup, show_error)
         .add_systems(
+            OnExit(AppState::Playing),
+            release_stage_assets.run_if(super::ends_playing_session),
+        )
+        .add_systems(
             PostUpdate,
             (runtime::update_frame, surfaces::update_wind)
                 .after(bevy::transform::TransformSystems::Propagate),
         );
+}
+fn release_stage_assets(mut packs: ResMut<GraphicsPacks>) {
+    packs.packs.clear();
 }
 fn show_error(
     mut commands: Commands,

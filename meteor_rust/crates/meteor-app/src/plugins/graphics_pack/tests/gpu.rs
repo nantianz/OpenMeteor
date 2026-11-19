@@ -13,6 +13,8 @@ use std::sync::{Arc, Mutex};
 #[cfg(feature = "original-assets")]
 mod sky_benchmark;
 #[cfg(feature = "original-assets")]
+mod sn03_preview;
+#[cfg(feature = "original-assets")]
 mod sn06_preview;
 fn capture(app: &mut App, pixels: &Arc<Mutex<Vec<u8>>>) -> Vec<u8> {
     capture_size(app, pixels, 128, 128)

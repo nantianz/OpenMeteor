@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "enabled": true,
+  "packs": [
+    "graphics-packs/starter/pack.json",
+    "graphics-packs/sn03-mist-ravine/pack.json"
+  ]
+}

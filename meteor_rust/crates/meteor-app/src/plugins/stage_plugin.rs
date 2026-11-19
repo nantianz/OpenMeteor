@@ -686,6 +686,7 @@ struct PreparedStage {
     mission: StageMissionRuntime,
     waypoints: WaypointGraph,
     escort: super::escort_assets::LoadedEscort,
+    graphics: Option<super::graphics_pack::GraphicsPacks>,
     #[cfg(target_os = "android")]
     android: crate::android_assets::AndroidAssetLoader,
 }
@@ -697,6 +698,7 @@ fn begin_stage_load(
     custom: Res<CustomStages>,
     net: Res<crate::plugins::network_plugin::NetState>,
     mut info: ResMut<LoadedStageInfo>,
+    graphics: Option<Res<super::graphics_pack::GraphicsPacks>>,
     #[cfg(target_os = "android")] android: Res<crate::android_assets::AndroidAssetLoader>,
 ) {
     use bevy::ecs::system::RunSystemOnce;
@@ -706,6 +708,9 @@ fn begin_stage_load(
     let room = room.as_deref().cloned().unwrap_or_default();
     let members = net.members.clone();
     let escort_definition = net.escort_definition.clone();
+    let mut graphics = graphics
+        .as_deref()
+        .map(super::graphics_pack::GraphicsPacks::catalog_snapshot);
     #[cfg(target_os = "android")]
     let android = android.clone();
     let task = bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
@@ -748,15 +753,20 @@ fn begin_stage_load(
                 info.error = Some("人物或公共动作库加载失败，请返回后重试".into());
             }
         }
+        let info = world.remove_resource::<LoadedStageInfo>().unwrap();
+        if let Some(graphics) = graphics.as_mut().filter(|_| info.ready) {
+            graphics.prepare_stage(&info.stage_id);
+        }
         PreparedStage {
             characters: world.remove_resource(),
             common: world.remove_resource(),
-            info: world.remove_resource().unwrap(),
+            info,
             assets: world.remove_resource().unwrap(),
             script: world.remove_resource().unwrap(),
             mission: world.remove_resource().unwrap(),
             waypoints: world.remove_resource().unwrap_or_default(),
             escort: world.remove_resource().unwrap_or_default(),
+            graphics,
             #[cfg(target_os = "android")]
             android: world.remove_resource().unwrap(),
         }
@@ -791,6 +801,9 @@ fn poll_stage_load(
     }
     if let Some(common) = stage.common {
         commands.insert_resource(common);
+    }
+    if let Some(graphics) = stage.graphics {
+        commands.insert_resource(graphics);
     }
     if stage.info.ready {
         meteor_asset::runtime_assets::retain_stage(&stage.info.stage_id);
@@ -1196,6 +1209,9 @@ fn load_selected_stage(
     mut script_runtime: ResMut<StageScriptRuntime>,
     mut mission_runtime: ResMut<StageMissionRuntime>,
     mut next_state: ResMut<NextState<AppState>>,
+    #[cfg(target_arch = "wasm32")] mut graphics: Option<
+        ResMut<super::graphics_pack::GraphicsPacks>,
+    >,
     #[cfg(target_os = "android")] android_loader: Res<crate::android_assets::AndroidAssetLoader>,
 ) {
     #[cfg(target_os = "android")]
@@ -1442,6 +1458,10 @@ fn load_selected_stage(
     loaded.collision_face_count = stage.collision_face_count;
     loaded.center = stage.center;
     loaded.error = (!stage.ready).then(|| "关卡资源不完整：需要 GMB、DES、COB 文件".to_string());
+    #[cfg(target_arch = "wasm32")]
+    if let Some(graphics) = graphics.as_deref_mut().filter(|_| loaded.ready) {
+        graphics.prepare_stage(&loaded.stage_id);
+    }
     next_state.set(if stage.ready {
         AppState::Playing
     } else {
