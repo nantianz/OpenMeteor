@@ -164,6 +164,43 @@ fn moving_landing_stopping_teleport_and_pool_budget() {
 }
 
 #[test]
+fn clear_water_entry_tracks_the_crossing_and_ignores_small_surface_separations() {
+    let mut state = LiquidInteractions::default();
+    let mut feet = Vec3::new(1.0, 0.7, 1.0);
+    state.step(&[sample(feet)], 0.05);
+    feet = Vec3::new(1.1, 0.10, 1.0);
+    state.step(&[sample(feet)], 0.05);
+    assert!(
+        state.ripples.is_empty(),
+        "approaching from above is still dry"
+    );
+    feet = Vec3::new(1.3, -0.10, 1.0);
+    state.step(&[sample(feet)], 0.05);
+    assert_eq!(state.ripples.len(), 1);
+    assert!((state.ripples[0].center.x - 1.2).abs() < 0.0001);
+    assert_eq!(state.ripples[0].center.y, 0.0);
+    for y in [0.09, -0.03, 0.15, -0.05, 0.13, -0.04] {
+        feet.y = y;
+        state.step(&[sample(feet)], 0.05);
+    }
+    assert_eq!(
+        state.ripples.len(),
+        1,
+        "small wave motion must not replay entry"
+    );
+
+    feet.y = 0.8;
+    state.step(&[sample(feet)], 0.05);
+    feet.y = -0.30;
+    state.step(&[sample(feet)], 0.05);
+    assert_eq!(
+        state.ripples.len(),
+        2,
+        "a new landing can produce another impact"
+    );
+}
+
+#[test]
 fn animated_liquid_contacts_follow_current_mesh_vertices() {
     use bevy::asset::RenderAssetUsages;
     use bevy::mesh::PrimitiveTopology;

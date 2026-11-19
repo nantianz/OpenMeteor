@@ -3158,6 +3158,22 @@ pub(super) fn setup_stage_scene(
         drawn_objects, drawn_faces, textured_faces, ifl_materials, ifl_frames_total
     );
     meshlets.warn_unmatched();
+    for props in meshlets.prepare_props(&mut surfaces, &mut images) {
+        for (clusters, material) in props.primitives {
+            let material = materials.add(material);
+            for mesh in clusters {
+                let mesh = meshes.add(mesh);
+                for &transform in &props.transforms {
+                    commands.spawn((
+                        PlayingSceneEntity,
+                        Mesh3d(mesh.clone()),
+                        MeshMaterial3d(material.clone()),
+                        transform,
+                    ));
+                }
+            }
+        }
+    }
 
     if let Some(mesh) = stage_collider.mesh.as_mut() {
         spawn_stage_props_with_hd(

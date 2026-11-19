@@ -154,6 +154,7 @@ impl<'a> SceneGraphics<'a> {
         let p = self.packs.unwrap().packs[i].config.materials[id].clone();
         material.pbr = Vec4::new(1., p.metallic, p.roughness, p.vertex_color);
         material.pbr_tint = Vec3::from_array(p.tint).extend(0.);
+        material.pbr_lighting = Vec3::new(p.direct_light, p.ambient_light, p.fog_strength);
         if let Some(id) = p.base_color {
             material.texture = Some(self.texture(i, &id, true, false, images));
             material.params.has_texture = 1;

@@ -36,6 +36,9 @@ pub struct Pbr {
     pub roughness: f32,
     pub normal_strength: f32,
     pub vertex_color: f32,
+    pub direct_light: f32,
+    pub ambient_light: f32,
+    pub fog_strength: f32,
 }
 impl Default for Pbr {
     fn default() -> Self {
@@ -48,6 +51,9 @@ impl Default for Pbr {
             roughness: 0.8,
             normal_strength: 1.,
             vertex_color: 0.,
+            direct_light: 1.,
+            ambient_light: 1.,
+            fog_strength: 1.,
         }
     }
 }
@@ -75,6 +81,8 @@ pub struct Scene {
     pub surfaces: Vec<Surface>,
     #[serde(default)]
     pub meshlet_replacements: Vec<MeshletReplacement>,
+    #[serde(default)]
+    pub meshlet_props: Vec<MeshletProp>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -97,8 +105,10 @@ pub struct Grass {
     pub max_triangles: usize,
     pub clump_radius: f32,
     pub patch_size: f32,
+    pub patch_variation: f32,
     pub ground_cover: f32,
     pub species: GrassSpecies,
+    pub plume_color: Option<[f32; 3]>,
     pub wind_strength: f32,
     pub interaction_radius: f32,
     pub recovery_seconds: f32,
@@ -155,8 +165,10 @@ impl Default for Grass {
             max_triangles: 104_000,
             clump_radius: 0.26,
             patch_size: 3.8,
+            patch_variation: 0.0,
             ground_cover: 0.90,
             species: GrassSpecies::default(),
+            plume_color: None,
             wind_strength: 0.23,
             interaction_radius: 1.05,
             recovery_seconds: 1.45,
@@ -219,7 +231,11 @@ impl Grass {
         }
         range("grass clump radius", self.clump_radius, 0.05, 0.6)?;
         range("grass patch size", self.patch_size, 0.5, 16.0)?;
+        range("grass patch variation", self.patch_variation, 0., 1.)?;
         range("grass ground cover", self.ground_cover, 0.0, 1.0)?;
+        if let Some(plume) = self.plume_color {
+            color("grass plume color", plume)?;
+        }
         let species = [
             self.species.grass,
             self.species.plumes,
@@ -427,6 +443,14 @@ pub struct MeshletReplacement {
     pub source_sha256: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MeshletProp {
+    pub model: String,
+    pub placements: Vec<Placement>,
+    #[serde(default)]
+    pub source_sha256: Option<String>,
+}
+#[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Placement {
     pub offset: [f32; 3],
@@ -441,6 +465,20 @@ impl Default for Placement {
             scale: 1.,
         }
     }
+}
+
+impl Placement {
+    fn validate(&self) -> Result<(), String> {
+        for offset in self.offset {
+            range("meshlet offset", offset, -1000., 1000.)?;
+        }
+        range("meshlet yaw", self.yaw_degrees, -360., 360.)?;
+        range("meshlet scale", self.scale, 0.01, 100.)
+    }
+}
+
+fn valid_source_hash(hash: Option<&str>) -> bool {
+    hash.is_none_or(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -827,7 +865,7 @@ impl Pack {
             || self
                 .scenes
                 .iter()
-                .any(|s| !s.meshlet_replacements.is_empty());
+                .any(|s| !s.meshlet_replacements.is_empty() || !s.meshlet_props.is_empty());
         if has_meshlets && self.schema_version != 2 {
             return Err("meshlet replacements require pack schema_version 2".into());
         }
@@ -848,12 +886,18 @@ impl Pack {
             }
         }
         for scene in &self.scenes {
-            if scene.meshlet_replacements.is_empty() {
-                continue;
-            }
-            if scene.stage == "*" || scene.meshlet_replacements.len() > 32 {
+            let props: usize = scene
+                .meshlet_props
+                .iter()
+                .map(|prop| prop.placements.len())
+                .sum();
+            if (scene.stage == "*"
+                && (!scene.meshlet_replacements.is_empty() || !scene.meshlet_props.is_empty()))
+                || scene.meshlet_replacements.len() > 32
+                || props > 32
+            {
                 return Err(
-                    "meshlet replacements require an exact stage and at most 32 targets".into(),
+                    "meshlets require an exact stage and at most 32 targets of each kind".into(),
                 );
             }
             for target in &scene.meshlet_replacements {
@@ -861,17 +905,22 @@ impl Pack {
                     || target.object.len() > 120
                     || target.object.contains('*')
                     || !self.meshlet_models.contains_key(&target.model)
-                    || target.source_sha256.as_ref().is_some_and(|hash| {
-                        hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
-                    })
+                    || !valid_source_hash(target.source_sha256.as_deref())
                 {
                     return Err(format!("invalid meshlet target {}", target.object));
                 }
-                for offset in target.placement.offset {
-                    range("meshlet offset", offset, -1000., 1000.)?;
+                target.placement.validate()?;
+            }
+            for prop in &scene.meshlet_props {
+                if !self.meshlet_models.contains_key(&prop.model)
+                    || prop.placements.is_empty()
+                    || !valid_source_hash(prop.source_sha256.as_deref())
+                {
+                    return Err(format!("invalid meshlet prop {}", prop.model));
                 }
-                range("meshlet yaw", target.placement.yaw_degrees, -360., 360.)?;
-                range("meshlet scale", target.placement.scale, 0.01, 100.)?;
+                for placement in &prop.placements {
+                    placement.validate()?;
+                }
             }
         }
         let resource = |id: &str| {
@@ -890,6 +939,9 @@ impl Pack {
             range("roughness", p.roughness, 0.045, 1.)?;
             range("normal_strength", p.normal_strength, 0., 4.)?;
             range("vertex_color", p.vertex_color, 0., 1.)?;
+            range("direct_light", p.direct_light, 0., 4.)?;
+            range("ambient_light", p.ambient_light, 0., 4.)?;
+            range("fog_strength", p.fog_strength, 0., 4.)?;
         }
         for s in &self.scenes {
             if s.stage.is_empty() || s.surfaces.len() > 256 {

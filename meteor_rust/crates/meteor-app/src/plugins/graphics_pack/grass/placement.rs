@@ -155,6 +155,21 @@ fn root_style(species: u32, slope: Vec2, seed: u32) -> f32 {
     (1 + (random | (species << 8) | (quantize(slope.x) << 10) | (quantize(slope.y) << 17))) as f32
 }
 
+fn density_noise(point: Vec2) -> f32 {
+    let cell = point.floor();
+    let frac = point - cell;
+    let weight = frac * frac * (Vec2::splat(3.0) - frac * 2.0);
+    let cell = cell.as_ivec2();
+    let sample = |dx, dz| {
+        let x = (cell.x + dx) as u32;
+        let z = (cell.y + dz) as u32;
+        unit(x.wrapping_mul(0x9e3779b9) ^ z.rotate_left(17))
+    };
+    let row0 = sample(0, 0) + (sample(1, 0) - sample(0, 0)) * weight.x;
+    let row1 = sample(0, 1) + (sample(1, 1) - sample(0, 1)) * weight.x;
+    row0 + (row1 - row0) * weight.y
+}
+
 fn distribute(
     grass: &Grass,
     triangles: &[[Vec3; 3]],
@@ -195,7 +210,13 @@ fn distribute(
     let target = (grass.density * size * size)
         .round()
         .clamp(1.0, ROOTS_PER_TILE as f32) as u32;
-    let side = (target as f32).sqrt().ceil() as u32;
+
+    let candidates = if grass.patch_variation > 0.0 {
+        target * 2
+    } else {
+        target
+    };
+    let side = (candidates as f32).sqrt().ceil() as u32;
     let mut tiles = Vec::new();
     for ((x, y), faces) in table {
         let start = Vec2::new(x as f32, y as f32) * size;
@@ -208,6 +229,16 @@ fn distribute(
             let cell = Vec2::new((n % side) as f32, (n / side) as f32);
             let jitter = Vec2::new(unit(key ^ 11), unit(key ^ 37));
             let point = start + (cell + jitter) * (size / side as f32);
+            if grass.patch_variation > 0.0 {
+                let patch = point / (grass.patch_size * 0.46);
+                let growth = 0.73 * density_noise(patch)
+                    + 0.27 * density_noise(patch * 2.37 + Vec2::new(4.0, -2.0));
+                let coverage = (0.12 + growth * 0.92).clamp(0.16, 0.94);
+                let acceptance = 0.53 + (coverage - 0.53) * grass.patch_variation;
+                if unit(key ^ 617) > acceptance {
+                    continue;
+                }
+            }
             if bounds.is_some_and(|[lo, hi]| !point.cmpge(lo).all() || !point.cmplt(hi).all()) {
                 continue;
             }

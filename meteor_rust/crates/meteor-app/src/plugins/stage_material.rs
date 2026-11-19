@@ -102,6 +102,8 @@ pub struct GmdlMaterial {
 
     pub pbr_textures: Vec4,
 
+    pub(crate) pbr_lighting: Vec3,
+
     pub normal_strength: f32,
     pub normal_contrast: f32,
 
@@ -154,6 +156,7 @@ impl GmdlMaterial {
             pbr: Vec4::ZERO,
             pbr_tint: Vec4::ZERO,
             pbr_textures: Vec4::ZERO,
+            pbr_lighting: Vec3::ONE,
             normal_strength: 1.0,
             normal_contrast: 0.8,
             uv_scroll: Vec4::ZERO,

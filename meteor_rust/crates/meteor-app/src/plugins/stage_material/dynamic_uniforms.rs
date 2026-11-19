@@ -9,7 +9,7 @@ use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderSystems};
 use std::collections::{HashMap, HashSet};
 
-type ParamKey = [u32; 71];
+type ParamKey = [u32; 74];
 
 #[derive(Resource, Default, Clone)]
 pub(crate) struct FrameUniforms {
@@ -45,6 +45,7 @@ struct GpuParams {
     water_optics: WaterOptics,
     grass_ground: Vec4,
     grass_bounds: Vec4,
+    pbr_lighting: Vec3,
 }
 
 impl GmdlMaterial {
@@ -102,7 +103,7 @@ impl GmdlMaterial {
             self.pbr_textures.z.to_bits(),
             self.pbr_textures.w.to_bits(),
         ];
-        let mut key = [0; 71];
+        let mut key = [0; 74];
         key[..50].copy_from_slice(&existing);
         key[50] = self.water_screen_refraction as u32;
         key[51..55].copy_from_slice(
@@ -116,6 +117,7 @@ impl GmdlMaterial {
         key[59..63].copy_from_slice(&self.water_optics.control.to_array().map(f32::to_bits));
         key[63..67].copy_from_slice(&self.grass_ground.to_array().map(f32::to_bits));
         key[67..71].copy_from_slice(&self.grass_bounds.to_array().map(f32::to_bits));
+        key[71..].copy_from_slice(&self.pbr_lighting.to_array().map(f32::to_bits));
         key
     }
 }
@@ -179,6 +181,7 @@ impl ParamBuffers {
                     water_optics: material.water_optics,
                     grass_ground: material.grass_ground,
                     grass_bounds: material.grass_bounds,
+                    pbr_lighting: material.pbr_lighting,
                     detail: Vec4::new(
                         if material.normal_texture.is_some() {
                             1.0

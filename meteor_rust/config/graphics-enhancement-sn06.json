@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "enabled": true,
+  "packs": [
+    "graphics-packs/starter/pack.json",
+    "graphics-packs/sn06-moss-valley/pack.json"
+  ]
+}

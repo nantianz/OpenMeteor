@@ -8,11 +8,13 @@ struct GrassUniform {
     contact: vec4<f32>,
     wind: vec4<f32>,
     wind_environment: vec4<f32>,
+    meadow: vec4<f32>,
 }
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) color: vec3<f32>,
+    @location(1) plume: vec3<f32>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> field: GrassUniform;
@@ -32,6 +34,7 @@ fn vertex(
     var out: VertexOutput;
     out.position = vec4<f32>(2.0, 2.0, 0.0, 1.0);
     out.color = vec3<f32>(0.0);
+    out.plume = vec3<f32>(0.0);
     if (source.w == 0.0) {
         return out;
     }
@@ -42,13 +45,12 @@ fn vertex(
     let slope = vec2<f32>(f32((pattern >> 10u) & 127u), f32((pattern >> 17u) & 127u))
         * (3.04 / 127.0) - 1.52;
     let distance_to_camera = distance(root, view.world_position);
-    let distant = leaf.w < 0.0;
     var fade_at = field.distances.w;
     if (blade.x >= 144.0 || leaf.z >= 4.0) {
         fade_at = field.distances.x;
     } else if (blade.x >= 96.0 || leaf.z >= 2.0) {
         fade_at = field.distances.y;
-    } else if (blade.x >= 80.0 || leaf.z >= 1.0) {
+    } else if (leaf.z >= 1.0) {
         fade_at = field.distances.z;
     }
     let fade = 1.0 - smoothstep(fade_at - max(fade_at * 0.075, 2.0), fade_at, distance_to_camera);
@@ -63,9 +65,13 @@ fn vertex(
     let t = blade.y;
     let individual = fract(seed * 13.79 + leaf.z * 0.618034);
     let growth = 0.76 + 0.24 * sin(dot(root.xz, vec2<f32>(0.44, -0.27)));
+    let patch_height = sin(dot(root.xz, vec2<f32>(0.20, 0.112))
+        + 0.8 * sin(dot(root.xz, vec2<f32>(-0.09, 0.24))));
     var height = mix(field.blade.x, field.blade.y, individual)
-        * (0.72 + growth * 0.45) * fade;
+        * (0.72 + growth * 0.45) * (1.0 + patch_height * 0.26 * field.meadow.w) * fade;
     var width = mix(field.blade.z, field.blade.w, fract(seed * 7.17 + leaf.z * 0.377)) * fade;
+
+    width *= mix(1.0, 1.85, smoothstep(field.distances.y, field.distances.z, distance_to_camera));
     var lean = 0.18 + 0.36 * individual;
     var taper = (0.90 + 0.10 * t) * (1.0 - t * t);
     var rise = t;
@@ -73,23 +79,21 @@ fn vertex(
     var tip = field.tip_color.rgb * mix(vec3<f32>(0.83, 0.97, 1.04), vec3<f32>(1.37, 1.00, 0.68), drying);
     var bottom = field.root_color.rgb * (0.80 + 0.26 * seed);
     let plume = species == 1u && leaf.z == 0.0;
-    if (distant) {
-        let across = normalize(view.world_position.xz - root.xz + vec2<f32>(0.0001, 0.0));
-        let compensate = mix(1.9, 3.0, smoothstep(field.distances.y, field.distances.w, distance_to_camera));
-        let lateral = vec2<f32>(-across.y, across.x) * blade.z * width * compensate;
-        let offset = lateral + facing * (height * t * lean);
-        let silhouette = root + vec3<f32>(offset.x, height * t + dot(slope, lateral), offset.y);
-        out.position = view.clip_from_world * vec4<f32>(silhouette, 1.0);
-        out.color = mix(bottom, tip, 0.44 + t * 0.56) * grass_light.rgb;
-        return out;
-    }
+    let painted_plume = plume && field.tip_color.w > 0.5;
     if (plume) {
         height *= 1.34;
         lean *= 0.72;
-        let head = smoothstep(0.62, 0.83, t) * (1.0 - smoothstep(0.86, 1.0, t));
-        taper = 0.13 * (1.0 - t) + 0.63 * head;
-        tip = mix(tip, mix(vec3<f32>(0.23, 0.16, 0.089), vec3<f32>(0.44, 0.35, 0.21), seed),
-            smoothstep(0.65, 0.84, t));
+        if (painted_plume) {
+
+            taper = 1.0 - t;
+            width *= 3.25;
+            out.plume = vec3<f32>(blade.z * taper, t, 1.0);
+        } else {
+            let head = smoothstep(0.62, 0.83, t) * (1.0 - smoothstep(0.86, 1.0, t));
+            taper = 0.13 * (1.0 - t) + 0.63 * head;
+            tip = mix(tip, mix(vec3<f32>(0.23, 0.16, 0.089), vec3<f32>(0.44, 0.35, 0.21), seed),
+                smoothstep(0.65, 0.84, t));
+        }
     } else if (species == 2u) {
         height *= 0.58;
         width *= 1.9;
@@ -105,12 +109,18 @@ fn vertex(
             let phase = (wind_clock.x + wind_clock.y) * field.wind.w
                 - dot(root.xz, field.wind_environment.zw) * field.wind_environment.x;
             let gust = 0.7 * sin(phase) + 0.3 * sin(phase * 1.91);
-            wind = field.wind.xy * (1.0 + field.wind.z * gust);
+            let flexibility = 1.0 + field.meadow.w * (0.24 * patch_height + 0.16 * (2.0 * seed - 1.0));
+            wind = field.wind.xy * ((1.0 + field.wind.z * gust) * flexibility);
             wind /= max(1.0, length(wind) / 0.55);
         } else {
             let swell = dot(root.xz, vec2<f32>(0.26, 0.17)) - globals.time * (2.0 + field.wind.w);
             wind = field.wind.xy * field.wind.z * (0.53 + 0.47 * sin(swell + seed * 0.4));
         }
+    }
+    let light = 0.61 + 0.25 * growth + 0.13 * abs(dot(facing, vec2<f32>(0.78, 0.63)));
+    out.color = mix(bottom, tip, t * (1.34 - 0.34 * t)) * light * grass_light.rgb;
+    if (painted_plume) {
+        out.color = light * grass_light.rgb * mix(0.82, 1.22, seed);
     }
     var bend = vec2<f32>(0.0);
     var pressure = 0.0;
@@ -125,16 +135,37 @@ fn vertex(
     let clump = facing * (field.root_color.w * leaf.w);
     let curved = (facing * lean + wind + bend * 1.13) * (t * t * height);
     let lateral = side * (blade.z * width * 0.5 * taper);
-    let y = height * rise * (1.0 - pressure * 0.76 * t) + dot(slope, clump + lateral) + width * 0.08 * t * blade.z;
+    let y = height * rise * (1.0 - pressure * 0.76 * t) + dot(slope, clump + lateral)
+        + select(width * 0.08 * t * blade.z, 0.0, painted_plume);
     let offset = clump + curved + lateral;
     let displaced = root + vec3<f32>(offset.x, y, offset.y);
     out.position = view.clip_from_world * vec4<f32>(displaced, 1.0);
-    let light = 0.61 + 0.25 * growth + 0.13 * abs(dot(facing, vec2<f32>(0.78, 0.63)));
-    out.color = mix(bottom, tip, t * (1.34 - 0.34 * t)) * light * grass_light.rgb;
     return out;
 }
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
+    let plume_height_step = fwidth(in.plume.y);
+#ifdef MULTISAMPLED
+    let plume_width_step = fwidth(in.plume.x);
+#endif
+    if (in.plume.z > 0.5) {
+        let t = in.plume.y;
+        let head = smoothstep(0.56, 0.70, t) * (1.0 - smoothstep(0.78, 0.99, t));
+        let feather = mix(1.0, 0.86 + cos(t * 93.0) * 0.14,
+            1.0 - smoothstep(0.004, 0.025, plume_height_step));
+        let limit = max(0.047 * (1.0 - t), min(0.30 * head * feather, (1.0 - t) * 0.94));
+        let edge = limit - abs(in.plume.x);
+#ifdef MULTISAMPLED
+        let coverage = clamp(0.5 + edge / max(plume_width_step, 0.001), 0.0, 1.0);
+        if (coverage <= 0.0) { discard; }
+#else
+        let coverage = 1.0;
+        if (edge < 0.0) { discard; }
+#endif
+        let shaft = mix(field.root_color.rgb, field.tip_color.rgb, t);
+        let bristle = field.meadow.rgb * mix(0.74, 1.15, smoothstep(0.62, 0.94, t));
+        return vec4<f32>(mix(shaft, bristle, smoothstep(0.54, 0.74, t)) * in.color, coverage);
+    }
     return vec4<f32>(in.color, 1.0);
 }

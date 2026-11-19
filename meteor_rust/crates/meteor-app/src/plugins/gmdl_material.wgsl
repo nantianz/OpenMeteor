@@ -60,6 +60,7 @@ struct GmdlGpuParams {
     water_optics: WaterOptics,
     grass_ground: vec4<f32>,
     grass_bounds: vec4<f32>,
+    pbr_lighting: vec3<f32>,
 };
 
 struct WaterOptics {
@@ -198,6 +199,22 @@ struct ScreenRaySample {
     valid: bool,
 };
 
+fn screen_ray_pixel(uv: vec2<f32>) -> vec2<i32> {
+    return vec2<i32>(floor(view.viewport.xy + uv * view.viewport.zw));
+}
+
+fn opaque_depth_range(pixel: vec2<i32>) -> vec2<f32> {
+    let first = textureLoad(depth_prepass_texture, pixel, 0);
+    var depths = vec2<f32>(first);
+#ifdef MULTISAMPLED
+    for (var sample = 1u; sample < textureNumSamples(depth_prepass_texture); sample += 1u) {
+        let depth = textureLoad(depth_prepass_texture, pixel, i32(sample));
+        depths = vec2<f32>(min(depths.x, depth), max(depths.y, depth));
+    }
+#endif
+    return depths;
+}
+
 fn sample_screen_ray(world: vec3<f32>, ray: vec3<f32>, distance_along: f32) -> ScreenRaySample {
     let clip = view.clip_from_world * vec4<f32>(world + ray * distance_along, 1.0);
     if (clip.w <= 0.0) { return ScreenRaySample(vec2<f32>(0.0), vec3<f32>(0.0), 0.0, false); }
@@ -207,32 +224,21 @@ fn sample_screen_ray(world: vec3<f32>, ray: vec3<f32>, distance_along: f32) -> S
         || any(uv <= vec2<f32>(0.01)) || any(uv >= vec2<f32>(0.99))) {
         return ScreenRaySample(uv, ndc, 0.0, false);
     }
-    let dimensions = vec2<f32>(textureDimensions(depth_prepass_texture));
-    let pixel = vec2<i32>(clamp(uv * dimensions, vec2<f32>(0.0), dimensions - 1.0));
-    return ScreenRaySample(uv, ndc, textureLoad(depth_prepass_texture, pixel, 0), true);
+    return ScreenRaySample(uv, ndc,
+        textureLoad(depth_prepass_texture, screen_ray_pixel(uv), 0), true);
 }
 
-fn water_refraction_color(world: vec3<f32>, uv: vec2<f32>, confidence: f32) -> vec4<f32> {
-    let color_size = vec2<f32>(textureDimensions(view_transmission_texture));
-    let color_pixel = vec2<i32>(clamp(uv * color_size, vec2<f32>(0.0), color_size - 1.0));
-    let center = (vec2<f32>(color_pixel) + 0.5) / color_size;
-    let depth_size = vec2<f32>(textureDimensions(depth_prepass_texture));
-    let depth_pixel = vec2<i32>(clamp(center * depth_size, vec2<f32>(0.0), depth_size - 1.0));
-    var closest = textureLoad(depth_prepass_texture, depth_pixel, 0);
-    if (closest <= 0.0) { return vec4<f32>(0.0); }
-#ifdef MULTISAMPLED
-    for (var sample = 1u; sample < textureNumSamples(depth_prepass_texture); sample += 1u) {
-        let depth = textureLoad(depth_prepass_texture, depth_pixel, i32(sample));
-        if (depth <= 0.0) { return vec4<f32>(0.0); }
-        closest = max(closest, depth);
-    }
-#endif
+fn water_refraction_color(world: vec3<f32>, pixel: vec2<i32>, depths: vec2<f32>,
+    confidence: f32) -> vec4<f32> {
+
+    if (depths.x <= 0.0) { return vec4<f32>(0.0); }
+    let center = (vec2<f32>(pixel) + 0.5 - view.viewport.xy) / view.viewport.zw;
     let ndc = vec2<f32>(center.x * 2.0 - 1.0, 1.0 - center.y * 2.0);
-    let position = view.world_from_clip * vec4<f32>(ndc, closest, 1.0);
+    let position = view.world_from_clip * vec4<f32>(ndc, depths.y, 1.0);
     if (abs(position.w) < 0.0001 || position.y / position.w >= world.y - 0.025) {
         return vec4<f32>(0.0);
     }
-    return vec4<f32>(textureLoad(view_transmission_texture, color_pixel, 0).rgb, confidence);
+    return vec4<f32>(textureLoad(view_transmission_texture, pixel, 0).rgb, confidence);
 }
 #endif
 
@@ -275,8 +281,7 @@ fn water_screen_reflection(world: vec3<f32>, normal: vec3<f32>, view_dir: vec3<f
                 let edge = max(abs(hit.uv.x * 2.0 - 1.0), abs(hit.uv.y * 2.0 - 1.0));
                 let confidence = (1.0 - smoothstep(0.80, 0.98, edge))
                     * (1.0 - smoothstep(8.0, 20.0, along));
-                let rgb = textureSampleLevel(view_transmission_texture,
-                    view_transmission_sampler, hit.uv, 0.0).rgb;
+                let rgb = textureLoad(view_transmission_texture, screen_ray_pixel(hit.uv), 0).rgb;
                 return vec4<f32>(rgb, confidence);
             }
         }
@@ -288,9 +293,14 @@ fn water_screen_reflection(world: vec3<f32>, normal: vec3<f32>, view_dir: vec3<f
     return vec4<f32>(0.0);
 }
 
-fn water_screen_refraction(world: vec3<f32>, ray: vec3<f32>, path: f32) -> vec4<f32> {
+fn water_screen_refraction(world: vec3<f32>, frag_coord: vec3<f32>,
+    ray: vec3<f32>, path: f32) -> vec4<f32> {
 #ifdef DEPTH_PREPASS
     if (material.detail.y < 2.0 || ray.y >= -0.02 || path <= 0.06) { return vec4<f32>(0.0); }
+    let source_pixel = vec2<i32>(frag_coord.xy);
+    let source_depths = opaque_depth_range(source_pixel);
+
+    if (source_depths.y > frag_coord.z + 0.000001) { return vec4<f32>(0.0); }
     var near = 0.04;
     let start = sample_screen_ray(world, ray, near);
     if (start.valid && (start.depth <= 0.0 || start.ndc.z > start.depth)) {
@@ -320,15 +330,14 @@ fn water_screen_refraction(world: vec3<f32>, ray: vec3<f32>, path: f32) -> vec4<
             if (delta.y >= -0.025 || along <= 0.0
                 || length(delta - ray * along) > max(0.12, 0.08 * along)) { break; }
             let edge = max(abs(hit.uv.x * 2.0 - 1.0), abs(hit.uv.y * 2.0 - 1.0));
-            let color = water_refraction_color(world, hit.uv, 1.0 - smoothstep(0.8, 0.98, edge));
+            let pixel = screen_ray_pixel(hit.uv);
+            let color = water_refraction_color(world, pixel, opaque_depth_range(pixel),
+                1.0 - smoothstep(0.8, 0.98, edge));
             if (color.a > 0.0) { return color; }
             break;
         }
     }
-    let direct = sample_screen_ray(world, ray, 0.0);
-    if (direct.valid) {
-        return water_refraction_color(world, direct.uv, 1.0);
-    }
+    return water_refraction_color(world, source_pixel, source_depths, 1.0);
 #endif
     return vec4<f32>(0.0);
 }
@@ -340,7 +349,7 @@ fn water_fresnel(cosine: f32, ior: f32) -> f32 {
 }
 
 fn enhanced_water(
-    world: vec3<f32>, surface_normal: vec3<f32>, normal: vec3<f32>, view_dir: vec3<f32>,
+    world: vec3<f32>, frag_coord: vec3<f32>, surface_normal: vec3<f32>, normal: vec3<f32>, view_dir: vec3<f32>,
     light_dir: vec3<f32>, reflection: vec3<f32>, reflection_valid: f32,
     depth: f32, coverage: f32, shade: f32, foam: f32,
 ) -> vec4<f32> {
@@ -375,7 +384,7 @@ fn enhanced_water(
         * (0.10 * (1.0 - abs(n_dot_l)) + 0.18 * max(-n_dot_l, 0.0) * exp(-path));
     let volume = albedo * ((1.0 - transmission) * ambient
         + sun * light_entry * (transmitted_light + shallow_scatter * angular) * shade);
-    let refracted = water_screen_refraction(world, ray, path);
+    let refracted = water_screen_refraction(world, frag_coord, ray, path);
     let seen = refracted.a;
     let reflected = f * reflection_valid;
     let absorbed = 1.0 - dot(transmission, vec3<f32>(0.2126, 0.7152, 0.0722));
@@ -439,7 +448,7 @@ fn shade_water(in: VertexOutput, normal: vec3<f32>, color: vec4<f32>, shade: f32
         if (material.water_optics.control.w < 0.5) { return color; }
         if (graphics.counts.w > 0.5 || graphics.sun.w > 0.001) { light_dir = graphics.sun.xyz; }
         let optical_depth = mix(material.water.w, depth, valid_bed);
-        return enhanced_water(in.world_position.xyz, surface_normal, normal, view_dir,
+        return enhanced_water(in.world_position.xyz, in.position.xyz, surface_normal, normal, view_dir,
             light_dir, reflected_rgb, reflection_valid, optical_depth, coverage, shade, dynamic.z);
     }
     let air_cos = clamp(abs(dot(surface_normal, view_dir)), 0.0, 1.0);
@@ -623,7 +632,8 @@ fn pack_pbr(in: VertexOutput, n: vec3<f32>, texel: vec3<f32>, vertex: vec3<f32>,
     let a004 = min(coeff.x*coeff.x,exp2(-9.28*nv))*coeff.x+coeff.y;
     let ab = vec2<f32>(-1.04,1.04)*a004+coeff.zw;
     let ambient = ((1.0-metal)*base*irradiance + radiance*(f0*ab.x+vec3<f32>(ab.y))) * graphics.environment.x * orm.r;
-    let x = max((direct+ambient)*graphics.environment.z,vec3<f32>(0.0));
+    let x = max((direct * material.pbr_lighting.x + ambient * material.pbr_lighting.y)
+        * graphics.environment.z, vec3<f32>(0.0));
     let mapped = clamp((x*(2.51*x+0.03))/(x*(2.43*x+0.59)+0.14),vec3<f32>(0.0),vec3<f32>(1.0));
     return pack_linear_to_srgb(mapped);
 }
@@ -655,7 +665,7 @@ fn pack_fog(position: vec3<f32>, color: vec3<f32>) -> vec3<f32> {
             optical_depth+=depth;tint+=fog.rgb*depth;
         }
     }
-    let transmittance=exp(-min(optical_depth,16.0));
+    let transmittance=exp(-min(optical_depth * material.pbr_lighting.z,16.0));
     return color*transmittance+tint/max(optical_depth,0.0001)*(1.0-transmittance);
 }
 
@@ -735,7 +745,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
 
-    if (fade_view && material.first_person_clip.w <= 0.0
+    if (!(water && material.water.x == 1.0) && fade_view && material.first_person_clip.w <= 0.0
         && occlusion.eye.w > 0.0 && camera_fade(in.world_position.xyz, in.position.xy)) {
         discard;
     }

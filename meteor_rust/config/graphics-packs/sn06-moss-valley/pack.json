@@ -1,0 +1,477 @@
+{
+  "schema_version": 2,
+  "id": "sn06-moss-valley",
+  "resources": {
+    "cliff-base": "textures/cliff-base.png",
+    "cliff-normal": "textures/cliff-normal.png",
+    "cliff-orm": "textures/cliff-orm.png",
+    "boulder-base": "textures/boulder-base.png",
+    "boulder-normal": "textures/boulder-normal.png",
+    "boulder-orm": "textures/boulder-orm.png",
+    "ridge-bedrock-base": "textures/ridge-bedrock-base.png",
+    "ridge-bedrock-normal": "textures/ridge-bedrock-normal.png",
+    "ridge-bedrock-orm": "textures/ridge-bedrock-orm.png",
+    "cliff-panel-a-0-base": "textures/cliff-panel-a-0-base.png",
+    "cliff-panel-a-0-normal": "textures/cliff-panel-a-0-normal.png",
+    "cliff-panel-a-0-orm": "textures/cliff-panel-a-0-orm.png",
+    "cliff-panel-b-0-base": "textures/cliff-panel-b-0-base.png",
+    "cliff-panel-b-0-normal": "textures/cliff-panel-b-0-normal.png",
+    "cliff-panel-b-0-orm": "textures/cliff-panel-b-0-orm.png"
+  },
+  "materials": {
+    "cliff": {
+      "base_color": "cliff-base",
+      "normal": "cliff-normal",
+      "orm": "cliff-orm",
+      "tint": [
+        0.92,
+        0.99,
+        0.96
+      ],
+      "normal_strength": 0.84,
+      "roughness": 1.0,
+      "vertex_color": 0.22,
+      "direct_light": 1.36,
+      "ambient_light": 0.7,
+      "fog_strength": 0.53
+    },
+    "boulder": {
+      "base_color": "boulder-base",
+      "normal": "boulder-normal",
+      "orm": "boulder-orm",
+      "tint": [
+        0.84,
+        0.95,
+        0.85
+      ],
+      "normal_strength": 0.9,
+      "roughness": 1.0
+    },
+    "ridge-bedrock": {
+      "base_color": "ridge-bedrock-base",
+      "normal": "ridge-bedrock-normal",
+      "orm": "ridge-bedrock-orm",
+      "tint": [
+        0.49,
+        0.63,
+        0.46
+      ],
+      "roughness": 1.0,
+      "normal_strength": 0.56,
+      "direct_light": 1.57,
+      "ambient_light": 0.58,
+      "fog_strength": 0.24
+    },
+    "cliff-panel-a-0": {
+      "tint": [
+        0.92,
+        0.97,
+        0.89
+      ],
+      "metallic": 0.0,
+      "roughness": 1,
+      "base_color": "cliff-panel-a-0-base",
+      "normal": "cliff-panel-a-0-normal",
+      "normal_strength": 0.92,
+      "orm": "cliff-panel-a-0-orm",
+      "direct_light": 1.73,
+      "ambient_light": 0.59,
+      "fog_strength": 0.24
+    },
+    "cliff-panel-b-0": {
+      "tint": [
+        0.92,
+        0.97,
+        0.89
+      ],
+      "metallic": 0.0,
+      "roughness": 1,
+      "base_color": "cliff-panel-b-0-base",
+      "normal": "cliff-panel-b-0-normal",
+      "normal_strength": 0.92,
+      "orm": "cliff-panel-b-0-orm",
+      "direct_light": 1.73,
+      "ambient_light": 0.59,
+      "fog_strength": 0.24
+    },
+    "ridge-a": {
+      "tint": [
+        0.87,
+        0.93,
+        0.93
+      ],
+      "metallic": 0.0,
+      "roughness": 1,
+      "base_color": "cliff-panel-a-0-base",
+      "normal": "cliff-panel-a-0-normal",
+      "normal_strength": 0.72,
+      "orm": "cliff-panel-a-0-orm",
+      "direct_light": 1.02,
+      "ambient_light": 0.74,
+      "fog_strength": 0.66
+    },
+    "skyline-a": {
+      "tint": [
+        0.79,
+        0.89,
+        0.97
+      ],
+      "metallic": 0.0,
+      "roughness": 1,
+      "base_color": "cliff-panel-a-0-base",
+      "normal": "cliff-panel-a-0-normal",
+      "normal_strength": 0.56,
+      "orm": "cliff-panel-a-0-orm",
+      "direct_light": 0.77,
+      "ambient_light": 0.82,
+      "fog_strength": 1.19
+    },
+    "ridge-b": {
+      "tint": [
+        0.87,
+        0.93,
+        0.93
+      ],
+      "metallic": 0.0,
+      "roughness": 1,
+      "base_color": "cliff-panel-b-0-base",
+      "normal": "cliff-panel-b-0-normal",
+      "normal_strength": 0.72,
+      "orm": "cliff-panel-b-0-orm",
+      "direct_light": 1.02,
+      "ambient_light": 0.74,
+      "fog_strength": 0.66
+    },
+    "skyline-b": {
+      "tint": [
+        0.79,
+        0.89,
+        0.97
+      ],
+      "metallic": 0.0,
+      "roughness": 1,
+      "base_color": "cliff-panel-b-0-base",
+      "normal": "cliff-panel-b-0-normal",
+      "normal_strength": 0.56,
+      "orm": "cliff-panel-b-0-orm",
+      "direct_light": 0.77,
+      "ambient_light": 0.82,
+      "fog_strength": 1.19
+    }
+  },
+  "meshlet_models": {
+    "japanese-mossy-boulder": {
+      "file": "models/japanese-mossy-boulder.mlmesh",
+      "materials": {
+        "Japanese_Mossy_Boulder_veqhehl_Low": "boulder"
+      }
+    },
+    "cliff-waterfalls": {
+      "file": "models/cliff-waterfalls.mlmesh",
+      "materials": {
+        "cliff-panel-a-0": "cliff-panel-a-0",
+        "cliff-panel-b-0": "cliff-panel-b-0",
+        "ridge-bedrock": "ridge-bedrock"
+      }
+    },
+    "cliff-ridge": {
+      "file": "models/cliff-ridge.mlmesh",
+      "materials": {
+        "cliff-panel-a-0": "ridge-a",
+        "cliff-panel-b-0": "ridge-b"
+      }
+    },
+    "cliff-skyline": {
+      "file": "models/cliff-skyline.mlmesh",
+      "materials": {
+        "cliff-panel-a-0": "skyline-a",
+        "cliff-panel-b-0": "skyline-b"
+      }
+    }
+  },
+  "scenes": [
+    {
+      "stage": "sn06",
+      "grass": {
+        "surfaces": [
+          {
+            "object": "Box02",
+            "texture": "sn06mian5.jpg"
+          }
+        ],
+        "density": 10.3,
+        "tile_size": 5.5,
+        "height": [
+          1.1,
+          1.8
+        ],
+        "width": [
+          0.155,
+          0.25
+        ],
+        "root_color": [
+          0.085,
+          0.138,
+          0.054
+        ],
+        "tip_color": [
+          0.245,
+          0.409,
+          0.147
+        ],
+        "near_distance": 9.0,
+        "mid_distance": 18.0,
+        "max_distance": 110.0,
+        "max_visible_tiles": 512,
+        "max_triangles": 180000,
+        "clump_radius": 0.56,
+        "patch_size": 4.8,
+        "ground_cover": 1.0,
+        "species": {
+          "grass": 0.9,
+          "plumes": 0.08,
+          "broadleaf": 0.02
+        },
+        "wind_strength": 0.35,
+        "patch_variation": 0.22,
+        "plume_color": [
+          0.49,
+          0.423,
+          0.261
+        ]
+      },
+      "sky": {
+        "enabled": true,
+        "replace_skybox": true,
+        "skybox": [
+          {
+            "object": "Plane02",
+            "texture": "sn06sky1.jpg"
+          },
+          {
+            "object": "Plane29",
+            "texture": "Asn06wu1.jpg"
+          },
+          {
+            "object": "Plane30",
+            "texture": "Asn06wu1.jpg"
+          },
+          {
+            "object": "Object01",
+            "texture": "Asn06wu1.jpg"
+          },
+          {
+            "object": "wu",
+            "texture": "Asn06wu.jpg"
+          },
+          {
+            "object": "wu01",
+            "texture": "Asn06wu.jpg"
+          },
+          {
+            "object": "wu02",
+            "texture": "Asn06wu.jpg"
+          },
+          {
+            "object": "wu03",
+            "texture": "Asn06wu.jpg"
+          }
+        ],
+        "horizon": [
+          0.51,
+          0.62,
+          0.69
+        ],
+        "zenith": [
+          0.098,
+          0.245,
+          0.39
+        ],
+        "cloud_color": [
+          0.93,
+          0.885,
+          0.78
+        ],
+        "base_height": 160.0,
+        "thickness": 54.0,
+        "density": 0.035,
+        "coverage": 0.44,
+        "scale": 0.023,
+        "steps": 16,
+        "cloud_update_hz": 6,
+        "ambient_strength": 1.09,
+        "ground_bounce": 0.32,
+        "sun": {
+          "direction": [
+            -0.82,
+            0.37,
+            0.43
+          ],
+          "color": [
+            1.0,
+            0.87,
+            0.66
+          ],
+          "intensity": 2.05
+        }
+      },
+      "wind": {
+        "direction": [
+          1.0,
+          -0.42
+        ],
+        "strength": 1.5,
+        "gust": 0.45,
+        "frequency": 0.92,
+        "spatial_scale": 0.19,
+        "response": {
+          "cloud": 0.4,
+          "water": 1.0,
+          "grass": 1.0,
+          "cloth": 1.0
+        }
+      },
+      "environment": {
+        "exposure": 1.0
+      },
+      "fog": [
+        {
+          "center": [
+            0.0,
+            8.0,
+            0.0
+          ],
+          "radius": 168.0,
+          "color": [
+            0.43,
+            0.52,
+            0.58
+          ],
+          "density": 0.00122
+        },
+        {
+          "center": [
+            0.0,
+            85.0,
+            0.0
+          ],
+          "radius": 515.0,
+          "color": [
+            0.44,
+            0.55,
+            0.65
+          ],
+          "density": 0.00062
+        }
+      ],
+      "surfaces": [
+        {
+          "object": "Line01",
+          "texture": "sn064.jpg",
+          "material": "cliff"
+        },
+        {
+          "object": "Line02",
+          "texture": "sn064.jpg",
+          "material": "cliff"
+        },
+        {
+          "object": "Line03",
+          "texture": "sn064.jpg",
+          "material": "cliff"
+        }
+      ],
+      "meshlet_props": [
+        {
+          "model": "japanese-mossy-boulder",
+          "source_sha256": "b5dc5b042a338d62b32bb36bf4f6acc1d77be99da3f7a033278813150cd0d685",
+          "placements": [
+            {
+              "offset": [
+                117.0,
+                -44.0,
+                0.0
+              ],
+              "yaw_degrees": 22.0,
+              "scale": 54.0
+            },
+            {
+              "offset": [
+                98.0,
+                -43.9,
+                117.0
+              ],
+              "yaw_degrees": 104.0,
+              "scale": 55.0
+            },
+            {
+              "offset": [
+                -104.0,
+                -44.0,
+                71.0
+              ],
+              "yaw_degrees": -37.0,
+              "scale": 55.0
+            },
+            {
+              "offset": [
+                -94.0,
+                -44.0,
+                -92.0
+              ],
+              "yaw_degrees": 173.0,
+              "scale": 60.0
+            },
+            {
+              "offset": [
+                43.0,
+                -44.1,
+                -120.0
+              ],
+              "yaw_degrees": -78.0,
+              "scale": 54.0
+            }
+          ]
+        }
+      ],
+      "meshlet_replacements": [
+        {
+          "object": "Line01",
+          "model": "cliff-waterfalls",
+          "source_sha256": "b5dc5b042a338d62b32bb36bf4f6acc1d77be99da3f7a033278813150cd0d685",
+          "placement": {
+            "offset": [
+              -5.43077,
+              -15.31568,
+              -1.23745
+            ]
+          }
+        },
+        {
+          "object": "Line02",
+          "model": "cliff-ridge",
+          "source_sha256": "b5dc5b042a338d62b32bb36bf4f6acc1d77be99da3f7a033278813150cd0d685",
+          "placement": {
+            "offset": [
+              9.3154,
+              -9.93536,
+              1.84566
+            ]
+          }
+        },
+        {
+          "object": "Line03",
+          "model": "cliff-skyline",
+          "source_sha256": "b5dc5b042a338d62b32bb36bf4f6acc1d77be99da3f7a033278813150cd0d685",
+          "placement": {
+            "offset": [
+              4.6204,
+              -2.80809,
+              10.8962
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

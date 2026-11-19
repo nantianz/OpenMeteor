@@ -159,3 +159,27 @@ fn meshlet_stage_demo_falls_back_per_object() {
         assert!(meshes.is_empty(), "{invalid}");
     }
 }
+
+#[test]
+fn meshlet_props_add_display_instances_without_replacing_geometry_or_collision() {
+    let (stock, _, original) = scene(GraphicsPacks::default(), wgpu::Backend::Dx12);
+    let props = || {
+        demo_packs(|json| {
+            let stage = &mut json["scenes"][0];
+            stage["meshlet_replacements"] = serde_json::json!([]);
+            stage["meshlet_props"] = serde_json::json!([{
+                "model": "ornament",
+                "placements": [
+                    {"offset": [12.0, 0.0, 15.0]},
+                    {"offset": [-12.0, 0.0, 15.0], "yaw_degrees": 36.0}
+                ]
+            }]);
+        })
+    };
+    let (display, replaced, collider) = scene(props(), wgpu::Backend::Dx12);
+    assert_eq!(display, stock + 2 * 74);
+    assert!(replaced.is_empty());
+    assert_eq!(collider.positions, original.positions);
+    assert_eq!(collider.indices, original.indices);
+    assert_eq!(scene(props(), wgpu::Backend::Gl).0, stock);
+}

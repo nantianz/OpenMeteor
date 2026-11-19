@@ -36,7 +36,7 @@ pub(super) const LODS: [Lod; 4] = [
         stem: &[0., 0.79],
     },
     Lod {
-        clumps: 80,
+        clumps: 96,
         leaves: 1,
         curved_leaves: 1,
         stem: &[0.],
@@ -58,9 +58,7 @@ impl Lod {
         for leaf in 0..self.leaves {
             let angle = leaf as f32 * 2.399_963_1;
             let (sin, cos) = angle.sin_cos();
-            let spread = if self.stem.len() == 1 {
-                -1.0
-            } else if leaf == 0 {
+            let spread = if leaf == 0 {
                 0.02
             } else {
                 0.32 + 0.075 * leaf as f32

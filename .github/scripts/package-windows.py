@@ -75,7 +75,8 @@ def graphics_files():
     for preset in ("water-deep.json", "water-shallow.json"):
         json.loads(add(preset).read_text(encoding="utf-8"))
     demo = "graphics-packs/meshlet-demo/pack.json"
-    for name in dict.fromkeys([*index["packs"], demo]):
+    sn06 = json.loads(add("graphics-enhancement-sn06.json").read_text(encoding="utf-8"))
+    for name in dict.fromkeys([*index["packs"], demo, *sn06["packs"]]):
         manifest = json.loads(add(name).read_text(encoding="utf-8"))
         parent = PurePosixPath(name).parent
         for resource in manifest.get("cloth_meshes", {}).values():

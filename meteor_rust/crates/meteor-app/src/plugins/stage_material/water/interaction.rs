@@ -10,6 +10,9 @@ use std::collections::HashMap;
 pub(crate) const MAX_RIPPLES: usize = 8;
 const LIFETIME: f32 = 2.2;
 const MAX_EVENTS: usize = 24;
+const WATER_ENTRY_HEIGHT: f32 = 0.025;
+const WATER_EXIT_HEIGHT: f32 = 0.18;
+const WATER_APPROACH_HEIGHT: f32 = 1.5;
 
 #[derive(Resource, Default, Clone, Copy, Debug, PartialEq)]
 pub(crate) struct UnderwaterView {
@@ -119,14 +122,14 @@ impl LiquidSurface {
             || feet.x > self.max.x
             || feet.z < self.min.z
             || feet.z > self.max.z
-            || feet.y > self.max.y + 0.15
+            || feet.y > self.max.y + self.contact_margin()
             || feet.y < self.min.y - 4.2
         {
             return None;
         }
         self.triangles
             .iter()
-            .find_map(|t| Self::on_triangle(feet, *t))
+            .find_map(|t| self.on_triangle(feet, *t))
     }
 
     fn height_on_triangle(point: Vec3, [a, b, c]: [Vec3; 3]) -> Option<f32> {
@@ -145,9 +148,18 @@ impl LiquidSurface {
         Some(a.y + s * (b.y - a.y) + t * (c.y - a.y))
     }
 
-    fn on_triangle(feet: Vec3, triangle: [Vec3; 3]) -> Option<Vec3> {
+    fn contact_margin(&self) -> f32 {
+        if self.is_clear_water() {
+            WATER_APPROACH_HEIGHT
+        } else {
+            0.15
+        }
+    }
+
+    fn on_triangle(&self, feet: Vec3, triangle: [Vec3; 3]) -> Option<Vec3> {
         let y = Self::height_on_triangle(feet, triangle)?;
-        (feet.y <= y + 0.15 && feet.y >= y - 4.2).then_some(Vec3::new(feet.x, y, feet.z))
+        (feet.y <= y + self.contact_margin() && feet.y >= y - 4.2)
+            .then_some(Vec3::new(feet.x, y, feet.z))
     }
 
     fn submersion(&self, eye: Vec3, current_mesh: Option<(&Mesh, &Transform)>) -> Option<f32> {
@@ -191,7 +203,7 @@ impl LiquidSurface {
             return None;
         };
         self.indices.iter().find_map(|f| {
-            Self::on_triangle(
+            self.on_triangle(
                 feet,
                 std::array::from_fn(|i| {
                     transform.transform_point(Vec3::from_array(positions[f[i]]))
@@ -207,6 +219,16 @@ struct Contact {
     center: Vec3,
     kind: f32,
 }
+impl Contact {
+    fn touches(self, feet: Vec3, previous_surface: Option<Entity>) -> bool {
+        let margin = if previous_surface == Some(self.surface) {
+            WATER_EXIT_HEIGHT
+        } else {
+            WATER_ENTRY_HEIGHT
+        };
+        self.kind != 1.0 || feet.y - self.center.y <= margin
+    }
+}
 #[derive(Clone, Copy)]
 struct Sample {
     entity: Entity,
@@ -216,6 +238,7 @@ struct Sample {
 struct History {
     feet: Vec3,
     surface: Option<Entity>,
+    candidate: Option<Contact>,
     cooldown: f32,
     distance: f32,
     velocity: Vec3,
@@ -327,13 +350,16 @@ impl LiquidInteractions {
         self.history
             .retain(|id, _| samples.iter().any(|s| s.entity == *id));
         for s in samples {
-            let current = s.contact.map(|c| c.surface);
             let Some(h) = self.history.get_mut(&s.entity) else {
                 self.history.insert(
                     s.entity,
                     History {
                         feet: s.feet,
-                        surface: current,
+                        surface: s
+                            .contact
+                            .filter(|c| c.touches(s.feet, None))
+                            .map(|c| c.surface),
+                        candidate: s.contact,
                         cooldown: 0.0,
                         distance: 0.0,
                         velocity: Vec3::ZERO,
@@ -344,13 +370,17 @@ impl LiquidInteractions {
             let delta = s.feet - h.feet;
             h.cooldown = (h.cooldown - dt).max(0.0);
             let mut event = None;
-            let measured = if dt > 0.0 { delta / dt } else { Vec3::ZERO };
-            if delta.length() < 8.0 && dt > 0.0 && dt <= 0.25 {
-                if let Some(contact) = s.contact {
+            let continuous = delta.length_squared() < 64.0 && dt > 0.0 && dt <= 0.25;
+            let measured = if continuous { delta / dt } else { Vec3::ZERO };
+            let contact = s.contact.filter(|c| c.touches(s.feet, h.surface));
+            let current = contact.map(|c| c.surface);
+            if continuous {
+                if let Some(mut contact) = contact {
                     let entered = h.surface != current;
                     h.distance += delta.xz().length();
-                    if (entered && delta.length() > 0.02)
-                        || (h.distance >= config.step_distance && h.cooldown <= 0.0)
+                    if h.cooldown <= 0.0
+                        && ((entered && measured.length_squared() > 0.0025)
+                            || h.distance >= config.step_distance)
                     {
                         let velocity = if entered {
                             measured.with_y(measured.y.min(h.velocity.y).min(0.0))
@@ -358,10 +388,23 @@ impl LiquidInteractions {
                             measured.with_y(0.0)
                         };
                         let immersion = (contact.center.y - s.feet.y).max(0.0);
+                        if entered {
+                            if let Some(previous) =
+                                h.candidate.filter(|p| p.surface == contact.surface)
+                            {
+                                let old_gap = h.feet.y - previous.center.y;
+                                let new_gap = s.feet.y - contact.center.y;
+                                if old_gap > 0.0 && new_gap < 0.0 {
+                                    contact.center = previous
+                                        .center
+                                        .lerp(contact.center, old_gap / (old_gap - new_gap));
+                                }
+                            }
+                        }
                         let impact = super::spray::Impact {
                             velocity,
                             radius: config.foot_radius * if entered { 0.65 } else { 0.35 },
-                            depth: if entered {
+                            depth: if entered && (contact.kind != 1.0 || velocity.y < -1.0) {
                                 0.45
                             } else {
                                 immersion.clamp(0.03, 0.25)
@@ -383,6 +426,7 @@ impl LiquidInteractions {
             }
             h.feet = s.feet;
             h.surface = current;
+            h.candidate = s.contact;
             h.velocity = measured;
             if let Some((c, impact)) = event {
                 self.disturb(c.surface, c.center, c.kind, impact);

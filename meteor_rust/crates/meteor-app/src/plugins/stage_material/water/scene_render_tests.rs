@@ -251,19 +251,22 @@ fn render_original_liquid(stage: &str, eye: Vec3, aim: Vec3, live_reflection: bo
             player: (point + (point - camera).normalize() * 4.0).extend(3.4),
             ..default()
         };
-        let normal = capture(&mut app, &pixels);
-        app.world_mut()
-            .resource_mut::<Assets<GmdlMaterial>>()
-            .get_mut(water)
-            .unwrap()
-            .camera_occlusion_enabled = true;
-        let pierced = capture(&mut app, &pixels);
+        let enhanced_with_tunnel = capture(&mut app, &pixels);
         app.world_mut()
             .resource_mut::<Assets<GmdlMaterial>>()
             .get_mut(water)
             .unwrap()
             .camera_occlusion_enabled = false;
-        let solid = capture(&mut app, &pixels);
+        let enhanced_without_tunnel = capture(&mut app, &pixels);
+        app.world_mut().resource_mut::<Settings>().water_enhance = false;
+        let authored_without_tunnel = capture(&mut app, &pixels);
+        app.world_mut()
+            .resource_mut::<Assets<GmdlMaterial>>()
+            .get_mut(water)
+            .unwrap()
+            .camera_occlusion_enabled = true;
+        let authored_with_tunnel = capture(&mut app, &pixels);
+        app.world_mut().resource_mut::<Settings>().water_enhance = true;
         app.world_mut().resource_mut::<TestCameraFade>().0 = default();
         let difference = |a: &[u8], b: &[u8]| {
             a.chunks_exact(4)
@@ -271,9 +274,9 @@ fn render_original_liquid(stage: &str, eye: Vec3, aim: Vec3, live_reflection: bo
                 .filter(|(a, b)| a != b)
                 .count()
         };
-        let hole = difference(&pierced, &solid);
-        let regression = difference(&normal, &solid);
-        eprintln!("sn13 camera fade: {hole} water pixels in forced hole, {regression} with configured material");
+        let hole = difference(&authored_with_tunnel, &authored_without_tunnel);
+        let regression = difference(&enhanced_with_tunnel, &enhanced_without_tunnel);
+        eprintln!("sn13 camera fade: {hole} changed pixels on authored water, {regression} on enhanced water");
         assert!(hole > 100, "test camera tunnel must intersect the river");
         assert_eq!(
             regression, 0,

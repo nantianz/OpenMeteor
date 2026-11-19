@@ -1,11 +1,13 @@
-use super::interaction::LiquidInteractions;
-use crate::app_state::AppState;
+use super::interaction::{LiquidInteractions, LiquidSurface};
+use crate::app_state::{AppState, Settings};
+use crate::plugins::camera_plugin::GameplayCamera;
 use crate::plugins::stage_material::{GmdlMaterial, GmdlMaterialParams, GmdlMode};
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::PrimitiveTopology;
 use bevy::prelude::*;
 
 const MAX_DRAWN_DROPS: usize = 2048;
+const PREPARE_FRAMES: u8 = 2;
 
 #[derive(Component)]
 struct SplashDraw;
@@ -15,7 +17,8 @@ struct SplashVisuals {
     mesh: Option<Handle<Mesh>>,
     material: Option<Handle<GmdlMaterial>>,
     entity: Option<Entity>,
-    active: bool,
+    visible: bool,
+    prepare_frames: u8,
 }
 
 pub(super) fn install(app: &mut App) {
@@ -124,39 +127,33 @@ fn build_mesh(splashes: &[(&super::spray::Spray, f32)], eye: Vec3, anchor: Vec3)
 
 fn update(
     mut commands: Commands,
+    settings: Res<Settings>,
     interactions: Res<LiquidInteractions>,
-    cameras: Query<&Transform, With<Camera3d>>,
+    surfaces: Query<&LiquidSurface>,
+    cameras: Query<(&Transform, Has<GameplayCamera>), With<Camera3d>>,
     mut meshes: Option<ResMut<Assets<Mesh>>>,
     mut materials: Option<ResMut<Assets<GmdlMaterial>>>,
     mut draws: Query<(&mut Transform, &mut Visibility), (With<SplashDraw>, Without<Camera3d>)>,
     mut visuals: ResMut<SplashVisuals>,
 ) {
-    let splashes: Vec<_> = interactions.splashes().collect();
-    if splashes.is_empty() {
-        if visuals.active {
-            if let Some(entity) = visuals.entity {
-                if let Ok((_, mut visibility)) = draws.get_mut(entity) {
-                    *visibility = Visibility::Hidden;
-                }
-            }
-            visuals.active = false;
-        }
-        return;
-    }
+    let splashes: Vec<_> = interactions
+        .splashes()
+        .filter(|(spray, age)| {
+            spray
+                .particles
+                .iter()
+                .any(|particle| particle.visible(*age))
+        })
+        .collect();
     let Some(meshes) = meshes.as_deref_mut() else {
         return;
     };
-    let camera = cameras.iter().next();
-    let eye = camera.map_or(Vec3::ZERO, |c| c.translation);
-    let anchor = splashes
-        .iter()
-        .min_by(|a, b| {
-            a.0.center
-                .distance_squared(eye)
-                .total_cmp(&b.0.center.distance_squared(eye))
-        })
-        .map_or(Vec3::ZERO, |s| s.0.center);
     if visuals.mesh.is_none() {
+        if splashes.is_empty()
+            && !(settings.water_enhance && surfaces.iter().any(LiquidSurface::is_clear_water))
+        {
+            return;
+        }
         let Some(materials) = materials.as_deref_mut() else {
             return;
         };
@@ -184,13 +181,44 @@ fn update(
                 Mesh3d(mesh.clone()),
                 MeshMaterial3d(material.clone()),
                 Visibility::Visible,
-                Transform::from_translation(anchor),
+                Transform::IDENTITY,
             ))
             .id();
         visuals.mesh = Some(mesh);
         visuals.material = Some(material);
         visuals.entity = Some(entity);
+        visuals.visible = true;
+
+        visuals.prepare_frames = PREPARE_FRAMES;
     }
+    if splashes.is_empty() {
+        if settings.water_enhance && visuals.prepare_frames > 0 {
+            visuals.prepare_frames -= 1;
+            return;
+        }
+        if visuals.visible {
+            if let Some(entity) = visuals.entity {
+                if let Ok((_, mut visibility)) = draws.get_mut(entity) {
+                    *visibility = Visibility::Hidden;
+                }
+            }
+            visuals.visible = false;
+        }
+        return;
+    }
+    let camera = cameras
+        .iter()
+        .find(|(_, gameplay)| *gameplay)
+        .or_else(|| cameras.iter().next());
+    let eye = camera.map_or(Vec3::ZERO, |(transform, _)| transform.translation);
+    let anchor = splashes
+        .iter()
+        .min_by(|a, b| {
+            a.0.center
+                .distance_squared(eye)
+                .total_cmp(&b.0.center.distance_squared(eye))
+        })
+        .map_or(Vec3::ZERO, |s| s.0.center);
     if let Some(mut mesh) = meshes.get_mut(visuals.mesh.as_ref().unwrap()) {
         *mesh = build_mesh(&splashes, eye, anchor);
     }
@@ -200,7 +228,9 @@ fn update(
             *visibility = Visibility::Visible;
         }
     }
-    visuals.active = true;
+
+    visuals.prepare_frames = 0;
+    visuals.visible = true;
 }
 
 #[cfg(test)]
@@ -227,5 +257,54 @@ mod tests {
             3
         );
         assert!(mesh.attribute(Mesh::ATTRIBUTE_TANGENT).is_some());
+    }
+
+    #[test]
+    fn wet_stage_queues_and_reuses_spray_assets_before_the_first_contact() {
+        let mut app = App::new();
+        app.insert_resource(Settings {
+            water_enhance: true,
+            ..default()
+        })
+        .init_resource::<Assets<Mesh>>()
+        .init_resource::<Assets<GmdlMaterial>>()
+        .init_resource::<LiquidInteractions>()
+        .init_resource::<SplashVisuals>()
+        .add_systems(Update, update);
+        app.update();
+        assert!(app.world().resource::<SplashVisuals>().entity.is_none());
+        app.world_mut().spawn(LiquidSurface::test_pool(0.0));
+        app.update();
+        let draw = app.world().resource::<SplashVisuals>().entity.unwrap();
+        let mesh = app.world().get::<Mesh3d>(draw).unwrap().0.clone();
+        assert_eq!(
+            app.world().get::<Visibility>(draw),
+            Some(&Visibility::Visible)
+        );
+        for _ in 0..PREPARE_FRAMES {
+            app.update();
+        }
+        assert_eq!(
+            app.world().get::<Visibility>(draw),
+            Some(&Visibility::Hidden)
+        );
+        let mut interactions = app.world_mut().resource_mut::<LiquidInteractions>();
+        interactions.emit_with_splash(Vec3::ZERO, 1.0, 1.2, 1.0);
+        interactions.set_latest_age(0.08);
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(draw),
+            Some(&Visibility::Visible)
+        );
+        assert_eq!(app.world().get::<Mesh3d>(draw).unwrap().0, mesh);
+        assert!(
+            app.world()
+                .resource::<Assets<Mesh>>()
+                .get(&mesh)
+                .unwrap()
+                .count_vertices()
+                > 3
+        );
+        assert_eq!(app.world().resource::<Assets<GmdlMaterial>>().len(), 1);
     }
 }

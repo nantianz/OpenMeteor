@@ -111,9 +111,11 @@ Starter 的 `stage: "*"` 提供默认风，金华城（`sn13`）有自己的覆�
 | `near_distance`、`mid_distance`、`max_distance` | 近、中和最远可见范围，最远可设到 240 世界单位，四方阵示例为 180 |
 | `max_visible_tiles`、`max_triangles` | 草块和三角形硬上限。一线天为 96 块、104,000 个三角形，四方阵高密度预设为 512 块、168,000 个三角形 |
 | `species`、`patch_size`、`clump_radius`、`ground_cover` | 植被类型权重、成片变化尺寸、草簇半径和地表覆盖强度 |
+| `patch_variation` | 0–1，控制草簇密度、高度和共享风下弯曲幅度的变化。默认 0 |
+| `plume_color` | 可选线性 RGB，启用后各距离档使用同一套带穗草茎 |
 | `wind_strength`、`interaction_radius`、`recovery_seconds` | 风弯曲量、脚边影响范围和回弹时间 |
 
-最远一档每草块最多提交 80 个单三角形草叶。草叶宽度随距离增加以维持覆盖，地表草毯衔接最远处。踩踏只更新相机附近的 64×64 交互纹理，最多跟踪 8 个落地角色。远景覆盖补偿参考 [AMD GPUOpen 的草地渲染实现](https://gpuopen.com/learn/mesh_shaders/mesh_shaders-procedural_grass_rendering/#level-of-detail)。
+最远一档每草块最多提交 96 个单三角形草叶。远近共用草根、叶片朝向、着色和风动，叶宽随距离过渡。桌面从相机位置分配草块预算，再按视锥裁剪。踩踏只更新相机附近的 64×64 交互纹理，最多跟踪 8 个落地角色。远景覆盖补偿参考 [AMD GPUOpen 的草地渲染实现](https://gpuopen.com/learn/mesh_shaders/mesh_shaders-procedural_grass_rendering/#level-of-detail)。
 
 ## 体积云和天空盒
 
@@ -267,3 +269,13 @@ Windows DX12、桌面 Vulkan 和 macOS Metal 可以使用 v2 清单为静态不�
 移除该包并重启可以恢复原外观。模型缺失、源文件版本不同、目标冲突或渲染后端不支持时，也会保留原版物件。碰撞和联机数据始终来自原版。局域网可用一端启用、一端关闭，核对同一位置的通行和攻击结果。
 
 `meshlet_models` 指定相对清单的 `.mlmesh` 路径及材质槽映射，`scenes[].meshlet_replacements` 用 `object` 和 `model` 绑定静态对象，可用 `placement` 调整世界偏移、绕 Y 轴的角度与统一缩放。v1 材质包仍能使用。Meshlet 文件由桌面客户端在进入对应关卡时读取，Web、Android 和 OpenGL 路径显示原版物件。
+
+## 四方阵苔岩增强
+
+桌面通过 `METEOR_GRAPHICS_CONFIG` 选用 `config/graphics-enhancement-sn06.json`。该预设包含四方阵的草地、天空、风和雾配置，以及运行时 Meshlet 山岩和贴图。
+
+在 `scenes[].meshlet_props` 中填入 `model` 和 `placements` 可以添置静态装饰。摆位的 `offset` 以关卡中心为原点，按世界坐标书写。同组装饰复用网格和材质，每关最多提交 32 个装饰实例，与替换模型共用渲染预算。可通过 `source_sha256` 绑定特定版本的关卡 GMB。
+
+`config/graphics-packs/sn06-moss-valley/pack.json` 将瀑布层、山脊层和天际线分别绑定到 `Line01`、`Line02` 和 `Line03`，并在山脚摆放苔岩。近层加强直射光并减薄雾，中层保留部分雾，外层使用偏冷的材质和较强的雾衰减。可通过 `direct_light`、`ambient_light` 和 `fog_strength` 调整材质，取值均为 0–4，默认 1。原版碰撞和瀑布对象沿用原有数据。
+
+增强清水按前景深度判断折射采样，在人物边缘回退到透明混合。落水冲量按水线交点定位，岸边可传到相邻湿网格。共享水花网格和材质在入场时准备。

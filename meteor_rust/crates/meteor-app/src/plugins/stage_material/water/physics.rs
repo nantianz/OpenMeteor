@@ -137,17 +137,21 @@ impl WaveField {
         if !self.triangles.iter().any(|&t| contains(point, t)) {
             return;
         }
-        let node = ((point - self.origin) / self.spacing).round().as_ivec2();
-        if node.x < 0
-            || node.y < 0
-            || node.x >= self.width as i32
-            || node.y >= self.height as i32
-            || !self.wet[node.y as usize * self.width + node.x as usize]
+        let grid = (point - self.origin) / self.spacing;
+
+        let lower = grid.floor().as_uvec2();
+        if ![UVec2::ZERO, UVec2::X, UVec2::Y, UVec2::ONE]
+            .into_iter()
+            .map(|offset| lower + offset)
+            .any(|node| {
+                node.x < self.width as u32
+                    && node.y < self.height as u32
+                    && self.wet[node.y as usize * self.width + node.x as usize]
+            })
         {
             return;
         }
         let radius = radius.max(self.spacing * 1.2);
-        let grid = (point - self.origin) / self.spacing;
         let reach = (radius * 3.0 / self.spacing).ceil() as isize;
         let along = direction.normalize_or_zero();
         let mut footprint = Vec::new();
@@ -293,9 +297,21 @@ impl WaveField {
     }
 
     pub(super) fn pixels(&self) -> Vec<u8> {
-        let mut out = vec![0; self.width * self.height * 4];
-        for y in 0..self.height {
-            for x in 0..self.width {
+        let mut out = [128, 128, 0, 255].repeat(self.width * self.height);
+        if !self.awake {
+            return out;
+        }
+        let last = UVec2::new(self.width as u32 - 1, self.height as u32 - 1);
+        let (lo, hi) = if self.shallow.is_some() {
+            (UVec2::ZERO, last)
+        } else {
+            (
+                self.active_lo.max(UVec2::ONE) - UVec2::ONE,
+                (self.active_hi + UVec2::ONE).min(last),
+            )
+        };
+        for y in lo.y as usize..=hi.y as usize {
+            for x in lo.x as usize..=hi.x as usize {
                 let i = y * self.width + x;
                 let h = |nx: usize, ny: usize| {
                     let j = ny * self.width + nx;
@@ -312,7 +328,6 @@ impl WaveField {
                 out[i * 4] = (128.0 + dx * 64.0).round().clamp(0.0, 255.0) as u8;
                 out[i * 4 + 1] = (128.0 + dz * 64.0).round().clamp(0.0, 255.0) as u8;
                 out[i * 4 + 2] = (self.foam[i] * 255.0).clamp(0.0, 255.0) as u8;
-                out[i * 4 + 3] = 255;
             }
         }
         out
@@ -428,5 +443,34 @@ mod tests {
         for i in 0..both.displacement.len() {
             assert!((a.displacement[i] + b.displacement[i] - both.displacement[i]).abs() < 1e-4);
         }
+    }
+
+    #[test]
+    fn wet_bank_contact_between_cells_produces_a_texture_disturbance() {
+        let mut field = WaveField::new(&[[Vec2::ZERO, Vec2::X * 4.15, Vec2::Y * 4.15]]);
+        let mut contact = None;
+        for y in 1..field.height - 1 {
+            for x in 1..field.width - 1 {
+                if field.wet[y * field.width + x] {
+                    continue;
+                }
+                let center = field.origin + Vec2::new(x as f32, y as f32) * field.spacing;
+                let point = center - Vec2::splat(0.49 * field.spacing);
+                if contains(point, field.triangles[0]) {
+                    contact = Some(point);
+                    break;
+                }
+            }
+        }
+        let neutral = field.pixels();
+        field.impulse(
+            contact.expect("wet point whose nearest grid cell is dry"),
+            0.8,
+            Vec2::X,
+        );
+        field.advance(STEP);
+        assert_ne!(field.pixels(), neutral);
+        field.clear();
+        assert_eq!(field.pixels(), neutral);
     }
 }

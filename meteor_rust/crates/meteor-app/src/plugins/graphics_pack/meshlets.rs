@@ -1,4 +1,8 @@
-use super::{config::MeshletReplacement, loader::LoadedPack, GraphicsPacks, SceneGraphics};
+use super::{
+    config::{MeshletProp, MeshletReplacement, Placement},
+    loader::LoadedPack,
+    GraphicsPacks, SceneGraphics,
+};
 use crate::plugins::{
     render_plugin::classify_gmdl_material,
     stage_material::{GmdlMaterial, GmdlMaterialParams, GmdlMode},
@@ -17,6 +21,8 @@ use sha2::{Digest, Sha256};
 use std::{cell::OnceCell, collections::BTreeMap};
 
 const MAX_GPU_BYTES: usize = 32 * 1024 * 1024;
+const MAX_PROPS: usize = 32;
+type Primitives = Vec<(Vec<Mesh>, GmdlMaterial)>;
 
 pub(crate) fn supports_backend(backend: wgpu::Backend) -> bool {
     matches!(
@@ -35,6 +41,7 @@ struct Rule<'a> {
 pub(crate) struct SceneMeshlets<'a> {
     packs: Option<&'a GraphicsPacks>,
     rules: BTreeMap<String, Vec<Rule<'a>>>,
+    props: Vec<(usize, &'a LoadedPack, &'a MeshletProp)>,
     stage: &'a str,
     source: &'a [u8],
     source_hash: OnceCell<String>,
@@ -59,6 +66,7 @@ impl<'a> SceneMeshlets<'a> {
             return result;
         };
         let mut rules = BTreeMap::<String, Vec<Rule>>::new();
+        let mut props = Vec::new();
         for (pack_index, pack) in packs.packs.iter().enumerate() {
             for scene in pack
                 .config
@@ -66,6 +74,12 @@ impl<'a> SceneMeshlets<'a> {
                 .iter()
                 .filter(|scene| scene.stage.eq_ignore_ascii_case(stage))
             {
+                props.extend(
+                    scene
+                        .meshlet_props
+                        .iter()
+                        .map(|prop| (pack_index, pack, prop)),
+                );
                 for target in &scene.meshlet_replacements {
                     rules
                         .entry(target.object.to_ascii_lowercase())
@@ -78,9 +92,10 @@ impl<'a> SceneMeshlets<'a> {
                 }
             }
         }
-        if !rules.is_empty() {
+        if !rules.is_empty() || !props.is_empty() {
             if backend.is_some_and(supports_backend) && packs.has_loose_model_root() {
                 result.rules = rules;
+                result.props = props;
             } else {
                 info!("graphics meshlets {stage}: using stock models on backend {backend:?} or without loose configuration");
             }
@@ -156,19 +171,103 @@ impl<'a> SceneMeshlets<'a> {
         if !eligible(gmdl, object, scene_object, graphics) || scripted() {
             return Err("object is not an eligible static, opaque display mesh".into());
         }
-        if let Some(expected) = &rule.target.source_sha256 {
-            let hash = self
-                .source_hash
-                .get_or_init(|| format!("{:x}", Sha256::digest(self.source)));
-            if !hash.eq_ignore_ascii_case(expected) {
-                return Err("stage GMB does not match source_sha256".into());
+        if !self.matches_source(rule.target.source_sha256.as_deref()) {
+            return Err("stage GMB does not match source_sha256".into());
+        }
+        let anchor = source_anchor(object, center).ok_or("invalid original bounds")?;
+        let transform = placed_at(anchor, &rule.target.placement);
+        let primitives = self.prepare_model(
+            (rule.pack_index, rule.pack),
+            &rule.target.model,
+            1,
+            graphics,
+            images,
+        )?;
+        info!(
+            "graphics meshlets {} / {}: {} ({} meshlets)",
+            self.stage,
+            object.name,
+            rule.target.model,
+            primitives
+                .iter()
+                .map(|(meshes, _)| meshes.len())
+                .sum::<usize>()
+        );
+        Ok(Drawable {
+            transform,
+            primitives,
+        })
+    }
+
+    fn matches_source(&self, expected: Option<&str>) -> bool {
+        expected.is_none_or(|expected| {
+            self.source_hash
+                .get_or_init(|| format!("{:x}", Sha256::digest(self.source)))
+                .eq_ignore_ascii_case(expected)
+        })
+    }
+
+    pub(crate) fn prepare_props(
+        &mut self,
+        graphics: &mut SceneGraphics,
+        images: &mut Assets<Image>,
+    ) -> Vec<PlacedProps> {
+        let mut placed = Vec::new();
+        let mut remaining = MAX_PROPS;
+        for (index, pack, prop) in std::mem::take(&mut self.props) {
+            if !self.matches_source(prop.source_sha256.as_deref())
+                || prop.placements.len() > remaining
+            {
+                warn!(
+                    "graphics props {} / {}: source mismatch or instance budget exceeded",
+                    self.stage, prop.model
+                );
+                continue;
+            }
+            match self.prepare_model(
+                (index, pack),
+                &prop.model,
+                prop.placements.len(),
+                graphics,
+                images,
+            ) {
+                Ok(primitives) => {
+                    remaining -= prop.placements.len();
+                    let transforms = prop
+                        .placements
+                        .iter()
+                        .map(|p| placed_at(Vec3::ZERO, p))
+                        .collect();
+                    info!(
+                        "graphics props {} / {}: placed {} instances",
+                        self.stage,
+                        prop.model,
+                        prop.placements.len()
+                    );
+                    placed.push(PlacedProps {
+                        transforms,
+                        primitives,
+                    });
+                }
+                Err(reason) => warn!("graphics props {} / {}: {reason}", self.stage, prop.model),
             }
         }
-        let definition = &rule.pack.config.meshlet_models[&rule.target.model];
+        placed
+    }
+
+    fn prepare_model(
+        &mut self,
+        (pack_index, pack): (usize, &LoadedPack),
+        name: &str,
+        instances: usize,
+        graphics: &mut SceneGraphics,
+        images: &mut Assets<Image>,
+    ) -> Result<Primitives, String> {
+        let definition = &pack.config.meshlet_models[name];
         let bytes = self
             .packs
             .unwrap()
-            .read_meshlet_model(rule.pack, &definition.file)?;
+            .read_meshlet_model(pack, &definition.file)?;
         let model =
             Model::decode(&bytes).map_err(|reason| format!("{}: {reason}", definition.file))?;
         let mut bytes = 0;
@@ -177,7 +276,7 @@ impl<'a> SceneMeshlets<'a> {
             if !definition.materials.contains_key(&p.slot) {
                 return Err(format!("missing mapping for material slot {}", p.slot));
             }
-            count += p.meshlets.len();
+            count += p.meshlets.len() * instances;
             bytes += p
                 .meshlets
                 .iter()
@@ -189,17 +288,10 @@ impl<'a> SceneMeshlets<'a> {
         {
             return Err("scene Meshlet GPU budget exceeded".into());
         }
-        let anchor = source_anchor(object, center).ok_or("invalid original bounds")?;
-        let placement = &rule.target.placement;
-        let transform = Transform::from_translation(anchor + Vec3::from_array(placement.offset))
-            .with_rotation(Quat::from_rotation_y(placement.yaw_degrees.to_radians()))
-            .with_scale(Vec3::splat(placement.scale));
         let mut primitives = Vec::with_capacity(model.primitives.len());
         for mut primitive in model.primitives {
             let material_id = &definition.materials[&primitive.slot];
-            if rule.pack.config.materials[material_id].normal.is_some()
-                && primitive.tangents.is_none()
-            {
+            if pack.config.materials[material_id].normal.is_some() && primitive.tangents.is_none() {
                 primitive.tangents = Some(generate_tangents(&primitive)?);
             }
             let mut meshes = split_meshes(&primitive);
@@ -216,9 +308,9 @@ impl<'a> SceneMeshlets<'a> {
                 GmdlMode::Opaque,
             );
             graphics.apply_pbr(
-                rule.pack_index,
+                pack_index,
                 material_id,
-                &object.name,
+                name,
                 &mut material,
                 &mut meshes[0],
                 images,
@@ -227,20 +319,24 @@ impl<'a> SceneMeshlets<'a> {
         }
         self.allocated_bytes += bytes;
         self.allocated_meshlets += count;
-        info!(
-            "graphics meshlets {} / {}: {} ({count} meshlets)",
-            self.stage, object.name, rule.target.model
-        );
-        Ok(Drawable {
-            transform,
-            primitives,
-        })
+        Ok(primitives)
     }
 }
 
 pub(crate) struct Drawable {
     pub(crate) transform: Transform,
-    pub(crate) primitives: Vec<(Vec<Mesh>, GmdlMaterial)>,
+    pub(crate) primitives: Primitives,
+}
+
+pub(crate) struct PlacedProps {
+    pub(crate) transforms: Vec<Transform>,
+    pub(crate) primitives: Primitives,
+}
+
+fn placed_at(anchor: Vec3, placement: &Placement) -> Transform {
+    Transform::from_translation(anchor + Vec3::from_array(placement.offset))
+        .with_rotation(Quat::from_rotation_y(placement.yaw_degrees.to_radians()))
+        .with_scale(Vec3::splat(placement.scale))
 }
 
 fn eligible(

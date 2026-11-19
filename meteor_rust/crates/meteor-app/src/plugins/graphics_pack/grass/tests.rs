@@ -309,7 +309,7 @@ fn si_fang_zhen_courtyard_reaches_all_edges_with_a_bounded_distant_lod() {
     );
     assert!(tiles.len() >= 125, "only {} tiles", tiles.len());
     assert!(tiles.len() <= profile.max_visible_tiles);
-    assert!(LODS[DISTANT].triangles(ROOTS_PER_TILE) * tiles.len() <= 40_960);
+    assert!(LODS[DISTANT].triangles(ROOTS_PER_TILE) * tiles.len() <= 49_152);
     assert!(profile.max_triangles <= 168_000);
     eprintln!("sn06 courtyard: {} occupied grass tiles", tiles.len());
 }
@@ -552,7 +552,47 @@ fn grass_gpu_draws_tracks_recovers_and_honors_visible_tile_limit() {
             .filter(|visibility| **visibility != Visibility::Hidden)
             .count()
     };
-    assert_eq!(count(app.world_mut()), 12);
+    assert!((1..=12).contains(&count(app.world_mut())));
+    let allocation = |world: &mut World| {
+        let mut entries: Vec<_> = world
+            .query_filtered::<(Entity, &Mesh3d, &Visibility), With<GrassTile>>()
+            .iter(world)
+            .map(|(id, mesh, visibility)| (id, mesh.0.id(), *visibility))
+            .collect();
+        entries.sort_unstable_by_key(|(id, _, _)| *id);
+        entries
+    };
+    let pose = *app.world().get::<Transform>(camera).unwrap();
+    let original = allocation(app.world_mut());
+    let mut changed_visibility = false;
+    for angle in [-1.0, 0.65, 1.4] {
+        let mut rotated = pose;
+        rotated.rotate_y(angle);
+        *app.world_mut().get_mut::<Transform>(camera).unwrap() = rotated;
+        capture(&mut app, 8);
+        let turned = allocation(app.world_mut());
+        assert_eq!(original.len(), turned.len());
+        for ((id, before, visible), (turned_id, after, turned_visible)) in
+            original.iter().zip(turned)
+        {
+            assert_eq!(
+                (*id, *before),
+                (turned_id, after),
+                "turning the camera changed a tile's LOD"
+            );
+            changed_visibility |= *visible != turned_visible;
+        }
+    }
+    assert!(
+        changed_visibility,
+        "the turn fixture must exercise frustum culling"
+    );
+    *app.world_mut().get_mut::<Transform>(camera).unwrap() = pose;
+    assert_eq!(
+        capture(&mut app, 12),
+        baseline,
+        "a calm field must return to the same pixels"
+    );
     let green_pixels = |frame: &[u8]| {
         frame
             .chunks_exact(4)
