@@ -1,7 +1,9 @@
 pub mod hazards;
 pub mod mission_runtime;
 pub mod props;
+pub mod pst_music;
 pub mod pst_runtime;
+pub mod pst_ui;
 pub mod scene_script;
 pub mod scene_script_runtime;
 pub mod stage_loader;

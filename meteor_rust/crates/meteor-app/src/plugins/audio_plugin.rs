@@ -1,4 +1,5 @@
 use crate::app_state::{AppState, LaunchRequest};
+use crate::plugins::stage_plugin::StageScriptMusic;
 use bevy::audio::SpatialScale;
 use bevy::audio::{
     AudioPlayer, AudioSink, AudioSinkPlayback, PlaybackMode, PlaybackSettings, Volume,
@@ -32,7 +33,7 @@ pub const STAGE_MUSIC: [(&str, u32); 22] = [
 ];
 
 #[derive(Resource, Default)]
-struct BgmEntity(Option<Entity>);
+pub(super) struct BgmEntity(Option<Entity>);
 
 #[derive(Component)]
 pub(super) struct StreamingMusic;
@@ -94,7 +95,13 @@ impl Plugin for AudioPlugin {
                     .run_if(crate::plugins::ends_playing_session),
             )
             .add_systems(OnExit(AppState::Menu), stop_bgm)
-            .add_systems(Update, sync_audio_from_settings);
+            .add_systems(Update, sync_audio_from_settings)
+            .add_systems(
+                Update,
+                play_script_music
+                    .after(crate::plugins::FighterFrameSet::PoseResolve)
+                    .run_if(in_state(AppState::Playing)),
+            );
         #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
         app.add_systems(OnEnter(AppState::Menu), play_menu_music);
         #[cfg(target_os = "android")]
@@ -240,13 +247,24 @@ fn play_bgm(
     volume: f32,
     enabled: bool,
 ) {
-    if let Some(entity) = bgm.0.take() {
-        commands.entity(entity).despawn();
-    }
     let Some(handle) = load_music_handle(audio_assets, roots, path) else {
         warn!("bgm missing: {path}");
         return;
     };
+    replace_bgm(commands, bgm, handle, path, volume, enabled);
+}
+
+fn replace_bgm(
+    commands: &mut Commands,
+    bgm: &mut BgmEntity,
+    handle: Handle<AudioSource>,
+    path: &str,
+    volume: f32,
+    enabled: bool,
+) {
+    if let Some(entity) = bgm.0.take() {
+        commands.entity(entity).despawn();
+    }
     let entity = commands
         .spawn((
             AudioPlayer::new(handle),
@@ -261,6 +279,29 @@ fn play_bgm(
         .id();
     bgm.0 = Some(entity);
     info!("bgm playing: {path}");
+}
+
+pub(super) fn play_script_music(
+    mut commands: Commands,
+    music: Option<Res<StageScriptMusic>>,
+    mut bgm: ResMut<BgmEntity>,
+    mut audio_assets: ResMut<Assets<AudioSource>>,
+    settings: Res<crate::app_state::Settings>,
+) {
+    let Some(track) = music.and_then(|music| music.0.take()) else {
+        return;
+    };
+    let handle = audio_assets.add(AudioSource {
+        bytes: track.bytes.into(),
+    });
+    replace_bgm(
+        &mut commands,
+        &mut bgm,
+        handle,
+        &track.path,
+        settings.music_volume_linear(),
+        settings.music_enabled,
+    );
 }
 
 fn stop_bgm(mut commands: Commands, mut bgm: ResMut<BgmEntity>) {
@@ -541,6 +582,80 @@ mod tests {
             .expect("BGM has playback settings");
         assert!(playback.paused);
         assert_eq!(playback.volume.to_linear(), 0.0);
+    }
+
+    #[test]
+    fn pst_music_requests_replace_the_bgm_and_share_the_stage_channel() {
+        use meteor_scene::mission_runtime::MissionScriptRuntime;
+        use meteor_scene::pst_music::PstMusicRequests;
+        use meteor_scene::scene_script_runtime::{PstValue, SceneScriptRuntime};
+
+        let requests = PstMusicRequests::new(|path| match path {
+            "music/s2.mp3" | "music/s8.mp3" => std::fs::read(origin_res().join(path)).ok(),
+            _ => None,
+        });
+        let mut scene = SceneScriptRuntime::load(
+            r#"
+Scene_OnInit() { Print(PlayMusic("MUSIC/s2.MP3")); }
+Retry() { return PlayMusic("music/s8.mp3"); }
+Missing() { return PlayMusic("music/missing.mp3"); }
+Invalid() { return PlayMusic("music/../s2.mp3"); }
+"#,
+            Vec::new(),
+            1000,
+        )
+        .unwrap();
+        scene.host_mut().set_music_requests(requests.clone());
+        let mut mission =
+            MissionScriptRuntime::new(r#"OnStart() { AddNPC("guard"); }"#, Default::default());
+        mission.host_mut().set_music_requests(requests.clone());
+        mission
+            .register_npc_script(
+                "guard",
+                r#"OnInit(int id) { Print(PlayMusic("music/s8.mp3")); }"#,
+            )
+            .unwrap();
+
+        let mut app = App::new();
+        let settings = crate::app_state::Settings {
+            music_enabled: false,
+            ..default()
+        };
+        app.init_resource::<BgmEntity>()
+            .init_resource::<Assets<AudioSource>>()
+            .insert_resource(settings)
+            .insert_resource(StageScriptMusic(requests))
+            .add_systems(Startup, spawn_disabled_menu_bgm_for_test)
+            .add_systems(Update, play_script_music);
+        app.update();
+        let original_bgm = app.world().resource::<BgmEntity>().0.unwrap();
+
+        scene.start().unwrap();
+        mission.start().unwrap();
+        assert_eq!(scene.host().output(), &["1"]);
+        assert_eq!(mission.host().output(), &["1"]);
+        assert_eq!(scene.call("Missing", &[]).unwrap(), PstValue::Num(0.0));
+        assert_eq!(scene.call("Invalid", &[]).unwrap(), PstValue::Num(0.0));
+        app.update();
+
+        let world = app.world();
+        let current_bgm = world.resource::<BgmEntity>().0.unwrap();
+        assert_ne!(current_bgm, original_bgm);
+        assert!(world.get_entity(original_bgm).is_err());
+        let playback = world.get::<PlaybackSettings>(current_bgm).unwrap();
+        assert!(matches!(playback.mode, PlaybackMode::Loop));
+        assert!(playback.paused);
+        let handle = &world.get::<AudioPlayer>(current_bgm).unwrap().0;
+        let track = world.resource::<Assets<AudioSource>>().get(handle).unwrap();
+        assert_eq!(
+            &*track.bytes,
+            std::fs::read(origin_res().join("music/s8.mp3")).unwrap()
+        );
+
+        assert_eq!(scene.call("Retry", &[]).unwrap(), PstValue::Num(1.0));
+        assert_eq!(scene.call("Missing", &[]).unwrap(), PstValue::Num(0.0));
+        app.update();
+        assert_eq!(app.world().resource::<BgmEntity>().0, Some(current_bgm));
     }
 
     #[test]

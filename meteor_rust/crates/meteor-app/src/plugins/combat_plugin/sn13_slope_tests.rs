@@ -1,4 +1,3 @@
-#![cfg(feature = "original-assets")]
 use super::*;
 use crate::plugins::movement_plugin::FighterAttackMotion;
 use serde_json::Value;

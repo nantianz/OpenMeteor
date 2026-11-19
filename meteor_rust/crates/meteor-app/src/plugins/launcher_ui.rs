@@ -3015,6 +3015,7 @@ pub(crate) fn launcher_touch_scroll(
             Or<(
                 With<LauncherStyledButton>,
                 With<crate::plugins::ui_plugin::ResponsiveMenuButton>,
+                With<crate::plugins::pst_ui::PstPanelButton>,
             )>,
         ),
     >,

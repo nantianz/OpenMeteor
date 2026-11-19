@@ -79,6 +79,7 @@ impl Plugin for UiPlugin {
             super::campaign_ui::CampaignUiPlugin,
             super::loading_ui::LoadingUiPlugin,
             super::dialogue_portrait::DialoguePortraitPlugin,
+            super::pst_ui::PstUiPlugin,
         ))
         .configure_sets(
             Update,
@@ -1199,7 +1200,7 @@ fn toggle_radar(
     performance: Option<Res<crate::plugins::stage_plugin::PlayerPerformance>>,
     mut radar: ResMut<RadarState>,
 ) {
-    if !performance.is_some_and(|performance| performance.input_blocked)
+    if !performance.is_some_and(|performance| performance.blocks_input())
         && keymap.radar.just_pressed(&keys, &mouse)
     {
         radar.cycle_range();
@@ -3052,7 +3053,7 @@ struct NetRoomHeader;
 #[derive(Component)]
 struct NetRoomRosterHeading;
 
-fn net_room_action(
+pub(super) fn net_room_action(
     commands: &mut Commands,
     label: &str,
     width: f32,
@@ -4512,7 +4513,7 @@ fn back_to_menu_button(
     }
 }
 
-fn text(
+pub(super) fn text(
     commands: &mut Commands,
     value: &str,
     size: f32,
@@ -5049,6 +5050,17 @@ mod tests {
         use bevy::render::view::screenshot::{save_to_disk, Screenshot, ScreenshotCaptured};
         #[derive(Resource)]
         struct CaptureTarget(Handle<Image>);
+        #[derive(Resource)]
+        struct CapturedPstPanel(meteor_scene::pst_ui::UiPanel);
+        fn setup_pst_panel(
+            mut commands: Commands,
+            panel: Option<Res<CapturedPstPanel>>,
+            font: Res<UiFont>,
+        ) {
+            if let Some(panel) = panel {
+                super::super::pst_ui::spawn_panel(&mut commands, panel.0.clone(), &font);
+            }
+        }
         fn prepare(
             mut commands: Commands,
             mut images: ResMut<Assets<Image>>,
@@ -5101,12 +5113,56 @@ mod tests {
                 )>,
             >,
             labels: Query<(&Text, &ComputedNode, &UiGlobalTransform)>,
+            subtitles: Query<&Text, With<DialogueHudText>>,
+            dialogue_panels: Query<(&Visibility, &ComputedNode), With<DialoguePanelRoot>>,
+            scripted_buttons: Query<&ComputedNode, With<super::super::pst_ui::PstPanelButton>>,
         ) {
             *frame += 1;
             let motion = std::env::var("METEOR_UI_CAPTURE").as_deref() == Ok("hud-motion");
             if (!motion && *frame == 45)
                 || (motion && (30..=90).contains(&*frame) && *frame % 3 == 0)
             {
+                if pst_key_door_mode() {
+                    if result_mode() {
+                        assert!(
+                            !actions.is_empty(),
+                            "the PST result must show settlement actions"
+                        );
+                        assert!(
+                            labels.iter().any(|(text, node, _)| {
+                                text.0 == "胜利" && node.size().cmpgt(Vec2::ZERO).all()
+                            }),
+                            "the PST result must show a laid-out victory title"
+                        );
+                    } else if pst_panel_mode() {
+                        assert!(scripted_buttons
+                            .single()
+                            .unwrap()
+                            .size()
+                            .cmpgt(Vec2::ZERO)
+                            .all());
+                        for value in ["石门", "已拿到钥匙。用它打开石门。", "开门"]
+                        {
+                            assert!(
+                                labels.iter().any(|(text, node, _)| {
+                                    text.0 == value && node.size().cmpgt(Vec2::ZERO).all()
+                                }),
+                                "missing laid-out PST control {value}"
+                            );
+                        }
+                    } else {
+                        assert!(scripted_buttons.is_empty());
+                        let expected = if pst_door_open_mode() {
+                            "门开了。捡起脚边的剑，迎战守卫！"
+                        } else {
+                            "守卫复活了，再击败他一次！"
+                        };
+                        assert_eq!(subtitles.single().unwrap().0, expected);
+                        let (visibility, node) = dialogue_panels.single().unwrap();
+                        assert_eq!(*visibility, Visibility::Visible);
+                        assert!(node.size().cmpgt(Vec2::ZERO).all());
+                    }
+                }
                 if let Ok(window) = windows.single() {
                     for (node, transform, children) in &actions {
                         let rect = Rect::from_center_size(transform.translation, node.size());
@@ -5133,8 +5189,16 @@ mod tests {
                         }
                     }
                 }
-                let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
-                    if std::env::var("METEOR_UI_CAPTURE").as_deref() == Ok("hud") {
+                let path =
+                    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(if pst_panel_mode() {
+                        "../../../artifacts/pst-key-door-panel/panel.png"
+                    } else if pst_door_open_mode() {
+                        "../../../artifacts/pst-key-door-panel/door-open.png"
+                    } else if pst_key_door_mode() && result_mode() {
+                        "../../../artifacts/pst-key-door-ui/victory.png"
+                    } else if pst_key_door_mode() {
+                        "../../../artifacts/pst-key-door-ui/subtitle.png"
+                    } else if std::env::var("METEOR_UI_CAPTURE").as_deref() == Ok("hud") {
                         "../../../output/ui-concepts/A-dialogue-live-desktop.png"
                     } else if std::env::var("METEOR_UI_CAPTURE").as_deref() == Ok("hud-mobile") {
                         "../../../output/ui-concepts/A-dialogue-live-mobile.png"
@@ -5151,8 +5215,7 @@ mod tests {
                         "../../../output/ui-concepts/campaign-map-desktop.png"
                     } else {
                         "../../../output/ui-concepts/A-calligraphy-menu.png"
-                    },
-                );
+                    });
                 let path = std::env::var("METEOR_UI_CAPTURE_PATH")
                     .map(std::path::PathBuf::from)
                     .unwrap_or(path);
@@ -5183,6 +5246,23 @@ mod tests {
         }
         fn result_mode() -> bool {
             std::env::var("METEOR_UI_CAPTURE").is_ok_and(|v| v.starts_with("result"))
+        }
+        fn pst_key_door_mode() -> bool {
+            std::env::var("METEOR_UI_CAPTURE").is_ok_and(|mode| {
+                matches!(
+                    mode.as_str(),
+                    "hud-pst-key-panel"
+                        | "hud-pst-door-open"
+                        | "hud-pst-key-door"
+                        | "result-pst-key-door"
+                )
+            })
+        }
+        fn pst_panel_mode() -> bool {
+            std::env::var("METEOR_UI_CAPTURE").as_deref() == Ok("hud-pst-key-panel")
+        }
+        fn pst_door_open_mode() -> bool {
+            std::env::var("METEOR_UI_CAPTURE").as_deref() == Ok("hud-pst-door-open")
         }
         fn result_fixture(
             mut net: ResMut<crate::plugins::network_plugin::NetState>,
@@ -5449,11 +5529,13 @@ mod tests {
                 prepare,
                 setup_menu.run_if(|| !hud_mode() && !fog_mode() && !lobby_mode() && !result_mode()),
                 lobby_fixture.run_if(lobby_mode),
-                result_fixture.run_if(result_mode),
+                result_fixture.run_if(|| result_mode() && !pst_key_door_mode()),
                 setup_net_room_panel.run_if(lobby_mode),
                 setup_playing_hud.run_if(hud_mode),
-                hud_fixture.run_if(hud_mode),
-                super::super::character_plugin::spawn_live_portrait_fixture.run_if(hud_mode),
+                setup_pst_panel.run_if(pst_panel_mode),
+                hud_fixture.run_if(|| hud_mode() && !pst_key_door_mode()),
+                super::super::character_plugin::spawn_live_portrait_fixture
+                    .run_if(|| hud_mode() && !pst_key_door_mode()),
                 super::super::loading_ui::setup.run_if(fog_mode),
             )
                 .chain(),
@@ -5511,6 +5593,32 @@ mod tests {
         }
         if std::env::var("METEOR_UI_CAPTURE").is_ok_and(|v| v.starts_with("network")) {
             crate::plugins::network_plugin::room_browser::install_capture_fixture(&mut app);
+        }
+        if pst_key_door_mode() {
+            let demo = super::super::combat_plugin::run_pst_key_door_guard_demo();
+            app.insert_resource(demo.request);
+            if result_mode() {
+                app.insert_resource(demo.result)
+                    .insert_resource(demo.kills)
+                    .insert_resource(demo.scores)
+                    .insert_resource(demo.next);
+            } else {
+                let (dialogue, player) = if pst_panel_mode() {
+                    app.insert_resource(CapturedPstPanel(demo.panel));
+                    (DialogueState::default(), demo.panel_player)
+                } else if pst_door_open_mode() {
+                    (demo.door_dialogue, demo.door_player)
+                } else {
+                    (demo.dialogue, demo.player)
+                };
+                app.insert_resource(dialogue)
+                    .insert_resource(NextState::Pending(AppState::Playing));
+                app.world_mut().spawn((
+                    player,
+                    Transform::default(),
+                    super::super::stage_plugin::LocalFighter,
+                ));
+            }
         }
         assert_eq!(app.run(), AppExit::Success);
     }
@@ -7010,6 +7118,80 @@ mod tests {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    pub(in crate::plugins) fn press_pst_panel_button(
+        panel: meteor_scene::pst_ui::UiPanel,
+    ) -> Interaction {
+        use super::super::pst_ui::{spawn_panel, PstPanelButton, PstPanelRoot};
+        use bevy::ecs::system::RunSystemOnce;
+        use bevy::ui::{ui_focus_system, UiStack};
+        use bevy::window::PrimaryWindow;
+
+        let (mut app, font) = hud_text_layout_app(1280, 720);
+        app.init_resource::<ButtonInput<MouseButton>>()
+            .init_resource::<Touches>();
+        app.world_mut()
+            .run_system_once(move |mut commands: Commands| {
+                spawn_panel(&mut commands, panel.clone(), &UiFont(font.clone()));
+            })
+            .unwrap();
+        let window = app
+            .world_mut()
+            .spawn((
+                Window {
+                    resolution: (1280, 720).into(),
+                    ..default()
+                },
+                PrimaryWindow,
+            ))
+            .id();
+        for _ in 0..3 {
+            app.update();
+        }
+        let world = app.world_mut();
+        let button = world
+            .query_filtered::<Entity, With<PstPanelButton>>()
+            .single(world)
+            .unwrap();
+        let center = world.get::<UiGlobalTransform>(button).unwrap().translation;
+        assert!(world
+            .get::<ComputedNode>(button)
+            .unwrap()
+            .size()
+            .cmpgt(Vec2::ZERO)
+            .all());
+        let root = world
+            .query_filtered::<Entity, With<PstPanelRoot>>()
+            .single(world)
+            .unwrap();
+
+        let mut uinodes = vec![root];
+        uinodes.extend(
+            world
+                .query::<&Children>()
+                .query(world)
+                .iter_descendants_depth_first::<Children>(root),
+        );
+        for &node in &uinodes {
+            world.entity_mut(node).insert(InheritedVisibility::VISIBLE);
+        }
+        world.insert_resource(UiStack {
+            partition: vec![0..uinodes.len()],
+            uinodes,
+        });
+        world
+            .get_mut::<Window>(window)
+            .unwrap()
+            .set_physical_cursor_position(Some(center.as_dvec2()));
+        world
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        world.run_system_once(ui_focus_system).unwrap();
+        let interaction = *world.get::<Interaction>(button).unwrap();
+        assert_eq!(interaction, Interaction::Pressed);
+        interaction
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn cinematic_frontend_keeps_real_desktop_and_mobile_actions_bounded() {
         for (width, height, screen) in [
@@ -8202,3 +8384,6 @@ mod tests {
         assert_eq!((flag.width, flag.height), (32, 32));
     }
 }
+
+#[cfg(all(test, feature = "original-assets", not(target_arch = "wasm32")))]
+pub(super) use tests::press_pst_panel_button;

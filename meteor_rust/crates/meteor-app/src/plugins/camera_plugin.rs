@@ -166,6 +166,7 @@ pub(crate) struct GameplayCamera;
 fn sync_pointer_lock(
     state: Res<State<AppState>>,
     dbg: Option<Res<crate::plugins::debug_plugin::DebugConsoleState>>,
+    performance: Option<Res<super::stage_plugin::PlayerPerformance>>,
     mut windows: Query<(&Window, &mut CursorOptions), With<PrimaryWindow>>,
 ) {
     let Ok((window, mut cursor)) = windows.single_mut() else {
@@ -173,9 +174,10 @@ fn sync_pointer_lock(
     };
 
     let playing = matches!(state.get(), AppState::Playing);
-    let debug_capture = dbg.is_some_and(|dbg| dbg.captures_input());
+    let ui_capture = dbg.is_some_and(|dbg| dbg.captures_input())
+        || performance.is_some_and(|performance| performance.ui_modal);
     let focused = window.focused;
-    let lock = playing && !debug_capture && focused && !cfg!(target_os = "android");
+    let lock = playing && !ui_capture && focused && !cfg!(target_os = "android");
     let want_mode = if lock {
         if cfg!(target_os = "windows") {
             CursorGrabMode::Confined
@@ -188,7 +190,7 @@ fn sync_pointer_lock(
     if cursor.grab_mode != want_mode {
         cursor.grab_mode = want_mode;
     }
-    let visible = (!playing || debug_capture || !focused) && !cfg!(target_os = "android");
+    let visible = (!playing || ui_capture || !focused) && !cfg!(target_os = "android");
     if cursor.visible != visible {
         cursor.visible = visible;
     }
@@ -203,6 +205,7 @@ fn update_camera_input_gate(
     state: Res<State<AppState>>,
     mode: Res<CameraMode>,
     debug: Option<Res<crate::plugins::debug_plugin::DebugConsoleState>>,
+    performance: Option<Res<super::stage_plugin::PlayerPerformance>>,
     windows: Query<(&Window, &CursorOptions), With<PrimaryWindow>>,
     mut gate: ResMut<CameraInputGate>,
     mut previous: Local<Option<(bool, bool, CursorGrabMode)>>,
@@ -211,6 +214,7 @@ fn update_camera_input_gate(
     let window = windows.single().ok();
     let enabled = *state.get() == AppState::Playing
         && !debug.is_some_and(|debug| debug.captures_input())
+        && !performance.is_some_and(|performance| performance.ui_modal)
         && window.is_none_or(|(window, _)| window.focused);
     let capture = window.map_or(CursorGrabMode::None, |(_, cursor)| cursor.grab_mode);
     let current = (enabled, mode.fly, capture);

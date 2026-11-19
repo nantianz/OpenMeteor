@@ -1,4 +1,3 @@
-#![cfg(feature = "original-assets")]
 
 use super::*;
 use crate::plugins::fighter_frame::FighterUpdate;

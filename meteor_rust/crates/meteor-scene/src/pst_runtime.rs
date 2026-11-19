@@ -618,6 +618,9 @@ pub trait PstHost {
     fn script_actor_active(&self, _id: i64) -> bool {
         true
     }
+    fn npc_script_id(&self, _name: &str) -> Option<i64> {
+        None
+    }
     fn initialize_script_actor(&mut self, _id: i64, _globals: &HashMap<String, PstValue>) {}
     fn finish_script_actor_initialization(
         &mut self,
@@ -642,19 +645,60 @@ enum Flow {
     Continue,
 }
 
+pub(crate) const SCENE_SCRIPT_ID: i64 = -2;
+pub(crate) const MISSION_SCRIPT_ID: i64 = -3;
+
+type ScriptModule = (Program, HashMap<String, PstValue>);
+
+pub(crate) struct Execution<'a> {
+    steps: usize,
+    max_steps: usize,
+    depth: usize,
+    peer: Option<&'a mut dyn LinkedScript>,
+}
+
+pub(crate) trait LinkedScript {
+    fn resolve_script(&self, selector: &PstValue) -> Option<i64>;
+    fn root_builtin(&mut self, id: i64, name: &str, args: &[PstValue]) -> Option<PstValue>;
+    fn invoke_script(
+        &mut self,
+        id: i64,
+        name: &str,
+        args: &[PstValue],
+        execution: &mut Execution<'_>,
+    ) -> Result<bool, String>;
+}
+
+fn script_id(value: &PstValue) -> Option<i64> {
+    match value {
+        PstValue::Num(n) if n.fract() == 0.0 && n.abs() < (1u64 << 53) as f64 => Some(*n as i64),
+        _ => None,
+    }
+}
+
+fn script_name(path: &str) -> String {
+    let name = path
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(path)
+        .to_ascii_lowercase();
+    name.strip_suffix(".pst").unwrap_or(&name).to_owned()
+}
+
 pub struct Runtime<H: PstHost> {
     program: Program,
     host: H,
     max_steps: usize,
-    steps: usize,
     globals: HashMap<String, PstValue>,
 
     logs: Vec<String>,
-    scripts: std::collections::BTreeMap<i64, (Program, HashMap<String, PstValue>)>,
-    script_templates: std::collections::BTreeMap<i64, (Program, HashMap<String, PstValue>)>,
+    scripts: std::collections::BTreeMap<i64, ScriptModule>,
+    script_templates: std::collections::BTreeMap<i64, ScriptModule>,
     initialized_scripts: std::collections::BTreeSet<i64>,
     active_script: Option<i64>,
-    call_depth: usize,
+    parked_root: Option<ScriptModule>,
+    root_id: Option<i64>,
+    root_name: String,
 }
 
 impl<H: PstHost> Runtime<H> {
@@ -663,20 +707,36 @@ impl<H: PstHost> Runtime<H> {
             program,
             host,
             max_steps,
-            steps: 0,
             globals: HashMap::new(),
             logs: Vec::new(),
             scripts: Default::default(),
             script_templates: Default::default(),
             initialized_scripts: Default::default(),
             active_script: None,
-            call_depth: 0,
+            parked_root: None,
+            root_id: None,
+            root_name: String::new(),
         };
+        let mut execution = runtime.execution(None);
         let globals = runtime.program.globals.clone();
         for declaration in &globals {
-            runtime.declare(declaration, true);
+            runtime.declare(declaration, true, &mut execution);
         }
         runtime
+    }
+
+    pub(crate) fn set_root_script(&mut self, id: i64, name: &str) {
+        self.root_id = Some(id);
+        self.root_name = script_name(name);
+    }
+
+    fn execution<'p>(&self, peer: Option<&'p mut dyn LinkedScript>) -> Execution<'p> {
+        Execution {
+            steps: 0,
+            max_steps: self.max_steps,
+            depth: 0,
+            peer,
+        }
     }
 
     pub fn register_script(&mut self, id: i64, source: &str) -> Result<(), String> {
@@ -701,11 +761,23 @@ impl<H: PstHost> Runtime<H> {
     }
 
     pub fn activate_script(&mut self, id: i64) -> Result<(), String> {
-        self.steps = 0;
-        self.activate_script_inner(id)
+        self.activate_script_with_peer(id, None)
     }
 
-    fn activate_script_inner(&mut self, id: i64) -> Result<(), String> {
+    pub(crate) fn activate_script_with_peer(
+        &mut self,
+        id: i64,
+        peer: Option<&mut dyn LinkedScript>,
+    ) -> Result<(), String> {
+        let mut execution = self.execution(peer);
+        self.activate_script_inner(id, &mut execution)
+    }
+
+    fn activate_script_inner(
+        &mut self,
+        id: i64,
+        execution: &mut Execution<'_>,
+    ) -> Result<(), String> {
         let Some((program, globals)) = self.script_templates.get(&id).cloned() else {
             return Ok(());
         };
@@ -715,7 +787,7 @@ impl<H: PstHost> Runtime<H> {
         self.host.initialize_script_actor(id, &globals);
         self.scripts.insert(id, (program, globals));
         self.initialized_scripts.insert(id);
-        self.call_script_inner(id, "OnInit", &[PstValue::Num(id as f64)])?;
+        self.call_module(Some(id), "OnInit", &[PstValue::Num(id as f64)], execution)?;
 
         if let Some(values) = self.script_values(id).cloned() {
             self.host.finish_script_actor_initialization(id, &values);
@@ -728,49 +800,73 @@ impl<H: PstHost> Runtime<H> {
     }
 
     pub fn call_script(&mut self, id: i64, name: &str, args: &[PstValue]) -> Result<bool, String> {
-        self.steps = 0;
-        self.call_script_inner(id, name, args)
+        self.call_script_with_peer(id, name, args, None)
     }
 
-    fn call_script_inner(
+    pub(crate) fn call_script_with_peer(
         &mut self,
         id: i64,
         name: &str,
         args: &[PstValue],
+        peer: Option<&mut dyn LinkedScript>,
     ) -> Result<bool, String> {
-        if !self.host.script_actor_active(id) {
+        let mut execution = self.execution(peer);
+        self.call_module(Some(id), name, args, &mut execution)
+    }
+
+    fn take_module(&mut self, id: Option<i64>) -> Option<ScriptModule> {
+        match id {
+            Some(id) => self.scripts.remove(&id),
+            None => self.parked_root.take(),
+        }
+    }
+
+    fn park_module(&mut self, id: Option<i64>, module: ScriptModule) {
+        match id {
+            Some(id) => {
+                self.scripts.insert(id, module);
+            }
+            None => self.parked_root = Some(module),
+        }
+    }
+
+    fn call_module(
+        &mut self,
+        id: Option<i64>,
+        name: &str,
+        args: &[PstValue],
+        execution: &mut Execution<'_>,
+    ) -> Result<bool, String> {
+        if id.is_some_and(|id| !self.host.script_actor_active(id)) {
             return Ok(false);
         }
-        if self.active_script == Some(id) {
+        if self.active_script == id {
             if !self.has_function(name) {
                 return Ok(false);
             }
-            self.call_inner(name, args)?;
+            self.call_inner(name, args, execution)?;
             return Ok(true);
         }
-        let Some((program, globals)) = self.scripts.remove(&id) else {
+        let Some((program, globals)) = self.take_module(id) else {
             return Ok(false);
         };
         if !program.functions.contains_key(name) {
-            self.scripts.insert(id, (program, globals));
+            self.park_module(id, (program, globals));
             return Ok(false);
         }
-        let previous_id = self.active_script.replace(id);
+        let previous_id = std::mem::replace(&mut self.active_script, id);
         let previous_program = std::mem::replace(&mut self.program, program);
         let previous_globals = std::mem::replace(&mut self.globals, globals);
 
-        if let Some(caller) = previous_id {
-            self.scripts
-                .insert(caller, (previous_program.clone(), previous_globals.clone()));
-        }
-        let result = self.call_inner(name, args);
-        let (restore_program, restore_globals) = previous_id
-            .and_then(|caller| self.scripts.remove(&caller))
-            .unwrap_or((previous_program, previous_globals));
+        self.park_module(previous_id, (previous_program, previous_globals));
+        let result = self.call_inner(name, args, execution);
+        let (restore_program, restore_globals) = self
+            .take_module(previous_id)
+            .expect("the caller's script remains parked across a nested call");
         let program = std::mem::replace(&mut self.program, restore_program);
         let globals = std::mem::replace(&mut self.globals, restore_globals);
         self.active_script = previous_id;
-        self.scripts.insert(id, (program, globals));
+        self.park_module(id, (program, globals));
         result.map(|_| true)
     }
 
@@ -790,36 +886,58 @@ impl<H: PstHost> Runtime<H> {
         &self.logs
     }
 
-    fn step(&mut self) -> Result<(), String> {
-        self.steps += 1;
-        if self.steps > self.max_steps {
-            return Err(format!("PScript step limit {} exceeded", self.max_steps));
+    fn step(execution: &mut Execution<'_>) -> Result<(), String> {
+        execution.steps += 1;
+        if execution.steps > execution.max_steps {
+            return Err(format!(
+                "PScript step limit {} exceeded",
+                execution.max_steps
+            ));
         }
         Ok(())
     }
 
     pub fn call(&mut self, name: &str, args: &[PstValue]) -> Result<PstValue, String> {
-        self.steps = 0;
-        self.call_inner(name, args)
+        self.call_with_peer(name, args, None)
     }
 
-    fn call_inner(&mut self, name: &str, args: &[PstValue]) -> Result<PstValue, String> {
-        if self.call_depth >= 64 {
+    pub(crate) fn call_with_peer(
+        &mut self,
+        name: &str,
+        args: &[PstValue],
+        peer: Option<&mut dyn LinkedScript>,
+    ) -> Result<PstValue, String> {
+        let mut execution = self.execution(peer);
+        self.call_inner(name, args, &mut execution)
+    }
+
+    fn call_inner(
+        &mut self,
+        name: &str,
+        args: &[PstValue],
+        execution: &mut Execution<'_>,
+    ) -> Result<PstValue, String> {
+        if execution.depth >= 64 {
             return Err("PScript call depth limit exceeded".into());
         }
-        self.call_depth += 1;
-        let result = self.call_inner_body(name, args);
-        self.call_depth -= 1;
+        execution.depth += 1;
+        let result = self.call_inner_body(name, args, execution);
+        execution.depth -= 1;
         result
     }
 
-    fn call_inner_body(&mut self, name: &str, args: &[PstValue]) -> Result<PstValue, String> {
-        self.step()?;
+    fn call_inner_body(
+        &mut self,
+        name: &str,
+        args: &[PstValue],
+        execution: &mut Execution<'_>,
+    ) -> Result<PstValue, String> {
+        Self::step(execution)?;
         if name == "AddNPC" {
             let result = self.host.builtin(name, args);
             let id = result.as_f64() as i64;
             if id > 0 {
-                self.activate_script_inner(id)?;
+                self.activate_script_inner(id, execution)?;
             }
             return Ok(result);
         }
@@ -837,8 +955,35 @@ impl<H: PstHost> Runtime<H> {
                 return Ok(PstValue::Num(0.0));
             };
             return self
-                .call_script_inner(id.as_f64() as i64, function, &args[2..])
+                .call_module(Some(id.as_f64() as i64), function, &args[2..], execution)
                 .map(|called| PstValue::Num(called as u8 as f64));
+        }
+        if name == "ExecuteFunction" {
+            let [target, PstValue::Str(function), parameters @ ..] = args else {
+                return Ok(PstValue::Num(0.0));
+            };
+            let called = self.execute_function(target, function, parameters, execution)?;
+            return Ok(PstValue::Num(f64::from(u8::from(called))));
+        }
+        if matches!(
+            name,
+            "GetSceneScriptId" | "GetLevelScriptId" | "GetNpcScriptId"
+        ) {
+            let default = PstValue::Num(-1.0);
+            let scene = PstValue::Num(SCENE_SCRIPT_ID as f64);
+            let mission = PstValue::Num(MISSION_SCRIPT_ID as f64);
+            let target = match name {
+                "GetSceneScriptId" => &scene,
+                "GetLevelScriptId" => &mission,
+                _ => args
+                    .first()
+                    .filter(|value| script_id(value).is_some_and(|id| id > 0))
+                    .unwrap_or(&default),
+            };
+            let id = self
+                .resolve_script(target)
+                .or_else(|| execution.peer.as_deref()?.resolve_script(target));
+            return Ok(PstValue::Num(id.unwrap_or(-1) as f64));
         }
         if name == "UpdateAIAttrib" {
             let id = args.first().map(PstValue::as_f64).unwrap_or(-1.0) as i64;
@@ -862,11 +1007,27 @@ impl<H: PstHost> Runtime<H> {
                     args.get(index).cloned().unwrap_or(PstValue::Num(0.0)),
                 );
             }
-            let result = self.execute(&fn_def.body, &mut scope)?;
+            let result = self.execute(&fn_def.body, &mut scope, execution)?;
             return Ok(match result {
                 Some(Flow::Return(value)) => value,
                 _ => PstValue::Num(0.0),
             });
+        }
+        let builtin_root = match name {
+            "CreateSceneItem" | "GetSceneItemCount" | "GetSceneItemId" | "GetSceneItemName" => {
+                Some(SCENE_SCRIPT_ID)
+            }
+            "CharSwitchWeapon" | "Reborn" => Some(MISSION_SCRIPT_ID),
+            _ => None,
+        };
+        if let Some(id) = builtin_root.filter(|id| self.root_id != Some(*id)) {
+            if let Some(value) = execution
+                .peer
+                .as_deref_mut()
+                .and_then(|peer| peer.root_builtin(id, name, args))
+            {
+                return Ok(value);
+            }
         }
 
         let lowered = name.to_lowercase();
@@ -883,6 +1044,34 @@ impl<H: PstHost> Runtime<H> {
         })
     }
 
+    fn execute_function(
+        &mut self,
+        target: &PstValue,
+        name: &str,
+        args: &[PstValue],
+        execution: &mut Execution<'_>,
+    ) -> Result<bool, String> {
+        if let Some(id) = self.resolve_script(target) {
+            return self.invoke_script(id, name, args, execution);
+        }
+        let Some(peer) = execution.peer.as_deref_mut() else {
+            return Ok(false);
+        };
+        let Some(id) = peer.resolve_script(target) else {
+            return Ok(false);
+        };
+
+        let mut nested = Execution {
+            steps: execution.steps,
+            max_steps: execution.max_steps,
+            depth: execution.depth,
+            peer: Some(self),
+        };
+        let result = peer.invoke_script(id, name, args, &mut nested);
+        execution.steps = nested.steps;
+        result
+    }
+
     fn host_has(&self, name: &str) -> bool {
         let _ = name;
         true
@@ -896,16 +1085,16 @@ impl<H: PstHost> Runtime<H> {
         }
     }
 
-    fn declare(&mut self, declaration: &Declaration, global: bool) {
+    fn declare(&mut self, declaration: &Declaration, global: bool, execution: &mut Execution<'_>) {
         let value = if let Some(size) = &declaration.size {
             let size = self
-                .evaluate(size, &mut HashMap::new())
+                .evaluate(size, &mut HashMap::new(), execution)
                 .unwrap_or(PstValue::Num(0.0));
             let n = (size.as_f64().max(0.0)) as usize;
             PstValue::Array(vec![Self::default_value(&declaration.value_type); n])
         } else if let Some(init) = &declaration.init {
             let mut scope = HashMap::new();
-            self.evaluate(init, &mut scope)
+            self.evaluate(init, &mut scope, execution)
                 .unwrap_or_else(|_| Self::default_value(&declaration.value_type))
         } else {
             Self::default_value(&declaration.value_type)
@@ -921,9 +1110,10 @@ impl<H: PstHost> Runtime<H> {
         &mut self,
         declaration: &Declaration,
         scope: &mut HashMap<String, PstValue>,
+        execution: &mut Execution<'_>,
     ) -> Result<(), String> {
         if let Some(size) = &declaration.size {
-            let size = self.evaluate(size, scope)?;
+            let size = self.evaluate(size, scope, execution)?;
             let n = size.as_f64().max(0.0) as usize;
             scope.insert(
                 declaration.name.clone(),
@@ -931,7 +1121,7 @@ impl<H: PstHost> Runtime<H> {
             );
         } else {
             let value = match &declaration.init {
-                Some(init) => self.evaluate(init, scope)?,
+                Some(init) => self.evaluate(init, scope, execution)?,
                 None => Self::default_value(&declaration.value_type),
             };
             scope.insert(declaration.name.clone(), value);
@@ -952,6 +1142,7 @@ impl<H: PstHost> Runtime<H> {
         target: &Expr,
         value: PstValue,
         scope: &mut HashMap<String, PstValue>,
+        execution: &mut Execution<'_>,
     ) -> PstValue {
         match target {
             Expr::Ident(name) => {
@@ -963,14 +1154,18 @@ impl<H: PstHost> Runtime<H> {
                 value
             }
             Expr::Index { target, index } => {
-                let array = self.evaluate(target, scope).unwrap_or(PstValue::Num(0.0));
-                let index = self.evaluate(index, scope).unwrap_or(PstValue::Num(0.0));
+                let array = self
+                    .evaluate(target, scope, execution)
+                    .unwrap_or(PstValue::Num(0.0));
+                let index = self
+                    .evaluate(index, scope, execution)
+                    .unwrap_or(PstValue::Num(0.0));
                 if let PstValue::Array(mut items) = array {
                     let idx = index.as_f64() as usize;
                     if let Some(slot) = items.get_mut(idx) {
                         *slot = value.clone();
 
-                        self.set_reference(target, PstValue::Array(items), scope);
+                        self.set_reference(target, PstValue::Array(items), scope, execution);
                     }
                 }
                 value
@@ -983,12 +1178,13 @@ impl<H: PstHost> Runtime<H> {
         &mut self,
         node: &Statement,
         scope: &mut HashMap<String, PstValue>,
+        execution: &mut Execution<'_>,
     ) -> Result<Option<Flow>, String> {
-        self.step()?;
+        Self::step(execution)?;
         match node {
             Statement::Block(statements) => {
                 for statement in statements {
-                    if let Some(flow) = self.execute(statement, scope)? {
+                    if let Some(flow) = self.execute(statement, scope, execution)? {
                         return Ok(Some(flow));
                     }
                 }
@@ -997,12 +1193,12 @@ impl<H: PstHost> Runtime<H> {
             Statement::Empty => Ok(None),
             Statement::Declarations(declarations) => {
                 for declaration in declarations {
-                    self.declare_local(declaration, scope)?;
+                    self.declare_local(declaration, scope, execution)?;
                 }
                 Ok(None)
             }
             Statement::Expression(expression) => {
-                self.evaluate(expression, scope)?;
+                self.evaluate(expression, scope, execution)?;
                 Ok(None)
             }
             Statement::If {
@@ -1010,12 +1206,12 @@ impl<H: PstHost> Runtime<H> {
                 consequent,
                 alternate,
             } => {
-                let test = self.evaluate(test, scope)?;
+                let test = self.evaluate(test, scope, execution)?;
                 if test.truthy() {
-                    self.execute(consequent, scope)
+                    self.execute(consequent, scope, execution)
                 } else {
                     match alternate {
-                        Some(alt) => self.execute(alt, scope),
+                        Some(alt) => self.execute(alt, scope, execution),
                         None => Ok(None),
                     }
                 }
@@ -1027,12 +1223,12 @@ impl<H: PstHost> Runtime<H> {
                 body,
             } => {
                 if let Some(init) = init {
-                    self.execute(init, scope)?;
+                    self.execute(init, scope, execution)?;
                 }
                 let mut guard = 0usize;
                 loop {
                     if let Some(test) = test {
-                        if !self.evaluate(test, scope)?.truthy() {
+                        if !self.evaluate(test, scope, execution)?.truthy() {
                             break;
                         }
                     }
@@ -1040,7 +1236,7 @@ impl<H: PstHost> Runtime<H> {
                     if guard > self.max_steps {
                         return Err("PScript for-loop limit exceeded".into());
                     }
-                    if let Some(flow) = self.execute(body, scope)? {
+                    if let Some(flow) = self.execute(body, scope, execution)? {
                         match flow {
                             Flow::Return(_) => return Ok(Some(flow)),
                             Flow::Break => break,
@@ -1048,19 +1244,19 @@ impl<H: PstHost> Runtime<H> {
                         }
                     }
                     if let Some(update) = update {
-                        self.evaluate(update, scope)?;
+                        self.evaluate(update, scope, execution)?;
                     }
                 }
                 Ok(None)
             }
             Statement::While { test, body } => {
                 let mut guard = 0usize;
-                while self.evaluate(test, scope)?.truthy() {
+                while self.evaluate(test, scope, execution)?.truthy() {
                     guard += 1;
                     if guard > self.max_steps {
                         return Err("PScript while-loop limit exceeded".into());
                     }
-                    if let Some(flow) = self.execute(body, scope)? {
+                    if let Some(flow) = self.execute(body, scope, execution)? {
                         match flow {
                             Flow::Return(_) => return Ok(Some(flow)),
                             Flow::Break => break,
@@ -1072,7 +1268,7 @@ impl<H: PstHost> Runtime<H> {
             }
             Statement::Return(value) => {
                 let value = match value {
-                    Some(expr) => self.evaluate(expr, scope)?,
+                    Some(expr) => self.evaluate(expr, scope, execution)?,
                     None => PstValue::Num(0.0),
                 };
                 Ok(Some(Flow::Return(value)))
@@ -1086,14 +1282,15 @@ impl<H: PstHost> Runtime<H> {
         &mut self,
         node: &Expr,
         scope: &mut HashMap<String, PstValue>,
+        execution: &mut Execution<'_>,
     ) -> Result<PstValue, String> {
-        self.step()?;
+        Self::step(execution)?;
         match node {
             Expr::Literal(value) => Ok(value.clone()),
             Expr::Ident(name) => Ok(self.get(name, scope)),
             Expr::Index { target, index } => {
-                let target = self.evaluate(target, scope)?;
-                let index = self.evaluate(index, scope)?;
+                let target = self.evaluate(target, scope, execution)?;
+                let index = self.evaluate(index, scope, execution)?;
                 match target {
                     PstValue::Array(items) => {
                         let idx = index.as_f64() as usize;
@@ -1103,7 +1300,7 @@ impl<H: PstHost> Runtime<H> {
                 }
             }
             Expr::Unary { op, value } => {
-                let value = self.evaluate(value, scope)?;
+                let value = self.evaluate(value, scope, execution)?;
                 match op.as_str() {
                     "!" => Ok(PstValue::Num(if value.truthy() { 0.0 } else { 1.0 })),
                     "-" => Ok(PstValue::Num(-value.as_f64())),
@@ -1112,28 +1309,28 @@ impl<H: PstHost> Runtime<H> {
             }
             Expr::Binary { op, left, right } => {
                 if op == "&&" {
-                    let left = self.evaluate(left, scope)?;
+                    let left = self.evaluate(left, scope, execution)?;
                     if !left.truthy() {
                         return Ok(PstValue::Num(0.0));
                     }
-                    let right = self.evaluate(right, scope)?;
+                    let right = self.evaluate(right, scope, execution)?;
                     return Ok(PstValue::Num(if right.truthy() { 1.0 } else { 0.0 }));
                 }
                 if op == "||" {
-                    let left = self.evaluate(left, scope)?;
+                    let left = self.evaluate(left, scope, execution)?;
                     if left.truthy() {
                         return Ok(PstValue::Num(1.0));
                     }
-                    let right = self.evaluate(right, scope)?;
+                    let right = self.evaluate(right, scope, execution)?;
                     return Ok(PstValue::Num(if right.truthy() { 1.0 } else { 0.0 }));
                 }
-                let left = self.evaluate(left, scope)?;
-                let right = self.evaluate(right, scope)?;
+                let left = self.evaluate(left, scope, execution)?;
+                let right = self.evaluate(right, scope, execution)?;
                 Ok(binary_op(op, &left, &right))
             }
             Expr::Assign { op, target, value } => {
-                let current = self.evaluate(target, scope)?;
-                let incoming = self.evaluate(value, scope)?;
+                let current = self.evaluate(target, scope, execution)?;
+                let incoming = self.evaluate(value, scope, execution)?;
                 let value = match op.as_str() {
                     "=" => incoming.clone(),
                     "+=" => num_op(&current, &incoming, "+"),
@@ -1149,12 +1346,12 @@ impl<H: PstHost> Runtime<H> {
                     }
                     _ => PstValue::Num(0.0),
                 };
-                Ok(self.set_reference(target, value, scope))
+                Ok(self.set_reference(target, value, scope, execution))
             }
             Expr::Postfix { op, target } => {
-                let before = self.evaluate(target, scope)?.as_f64();
+                let before = self.evaluate(target, scope, execution)?.as_f64();
                 let delta = if op == "++" { 1.0 } else { -1.0 };
-                self.set_reference(target, PstValue::Num(before + delta), scope);
+                self.set_reference(target, PstValue::Num(before + delta), scope, execution);
                 Ok(PstValue::Num(before))
             }
             Expr::Call { callee, args } => {
@@ -1167,7 +1364,7 @@ impl<H: PstHost> Runtime<H> {
                     let value = args[1..]
                         .iter()
                         .map(|arg| {
-                            let v = self.evaluate(arg, scope)?;
+                            let v = self.evaluate(arg, scope, execution)?;
                             Ok(match v {
                                 PstValue::Num(n) if n.fract().abs() < 1e-9 => {
                                     format!("{:02}", n.trunc() as i64)
@@ -1177,20 +1374,60 @@ impl<H: PstHost> Runtime<H> {
                         })
                         .collect::<Result<Vec<String>, String>>()?
                         .join("");
-                    self.set_reference(&args[0], PstValue::Str(value), scope);
+                    self.set_reference(&args[0], PstValue::Str(value), scope, execution);
                     return Ok(PstValue::Num(1.0));
                 }
                 let mut evaluated = Vec::with_capacity(args.len());
                 for arg in args {
-                    evaluated.push(self.evaluate(arg, scope)?);
+                    evaluated.push(self.evaluate(arg, scope, execution)?);
                 }
                 if self.program.functions.contains_key(&name) {
-                    return self.call_inner(&name, &evaluated);
+                    return self.call_inner(&name, &evaluated, execution);
                 }
 
-                self.call_inner(&name, &evaluated)
+                self.call_inner(&name, &evaluated, execution)
             }
         }
+    }
+}
+
+impl<H: PstHost> LinkedScript for Runtime<H> {
+    fn root_builtin(&mut self, id: i64, name: &str, args: &[PstValue]) -> Option<PstValue> {
+        (self.root_id == Some(id)).then(|| self.host.builtin(name, args))
+    }
+
+    fn resolve_script(&self, selector: &PstValue) -> Option<i64> {
+        let id = if let PstValue::Str(name) = selector {
+            let name = script_name(name);
+            match name.as_str() {
+                "scene" => SCENE_SCRIPT_ID,
+                "mission" | "level" => MISSION_SCRIPT_ID,
+                _ if !name.is_empty() && self.root_name == name => self.root_id?,
+                _ => self.host.npc_script_id(&name)?,
+            }
+        } else {
+            script_id(selector)?
+        };
+        (self.root_id == Some(id)
+            || (id > 0
+                && self.initialized_scripts.contains(&id)
+                && self.host.script_actor_active(id)))
+        .then_some(id)
+    }
+
+    fn invoke_script(
+        &mut self,
+        id: i64,
+        name: &str,
+        args: &[PstValue],
+        execution: &mut Execution<'_>,
+    ) -> Result<bool, String> {
+        self.call_module(
+            (self.root_id != Some(id)).then_some(id),
+            name,
+            args,
+            execution,
+        )
     }
 }
 

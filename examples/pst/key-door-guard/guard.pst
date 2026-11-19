@@ -1,0 +1,20 @@
+string Name = "钥匙守卫";
+int Model = 1;
+int Weapon = 5;
+int Weapon2 = 0;
+int Team = 2;
+int HP = 250;
+int Spawn = 6;
+int Think = 100;
+
+int self = -1;
+
+OnInit(int character)
+{
+    self = character;
+}
+
+OnStart()
+{
+    ChangeBehavior(self, "kill", "player");
+}

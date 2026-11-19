@@ -2131,7 +2131,7 @@ fn local_ballistic_air_root_motion(
             .is_some_and(|state| *state.get() != crate::app_state::AppState::Playing)
             || player_performance
                 .as_deref()
-                .is_some_and(|performance| performance.input_blocked);
+                .is_some_and(|performance| performance.blocks_input());
         let raw_input = if input_blocked {
             Vec3::ZERO
         } else {
@@ -3176,7 +3176,7 @@ pub(crate) fn move_local_fighter(
             .is_some_and(|state| *state.get() != crate::app_state::AppState::Playing)
             || player_performance
                 .as_deref()
-                .is_some_and(|performance| performance.input_blocked);
+                .is_some_and(|performance| performance.blocks_input());
         let raw_input = if input_blocked {
             Vec3::ZERO
         } else {

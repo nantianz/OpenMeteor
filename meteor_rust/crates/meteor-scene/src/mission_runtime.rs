@@ -1,4 +1,8 @@
-use crate::pst_runtime::{parse_program, PstHost, PstValue, Runtime};
+use crate::pst_music::PstMusicRequests;
+use crate::pst_runtime::{
+    parse_program, tokenize, LinkedScript, PstHost, PstValue, Runtime, Token, MISSION_SCRIPT_ID,
+};
+use crate::scene_script_runtime::{SceneItemCatalog, SceneScriptRuntime};
 
 #[derive(Debug, Clone, Default)]
 pub struct MissionDefinition {
@@ -12,6 +16,12 @@ pub enum NpcRequest {
     Add { script: String, id: i64 },
 
     Remove { id: i64 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActorRequest {
+    SwitchWeapon(i64),
+    Reborn(i64),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -93,6 +103,10 @@ fn npc_definition_from_values(
 
 #[derive(Default)]
 pub struct MissionHost {
+    scene_items: SceneItemCatalog,
+    music_requests: Option<PstMusicRequests>,
+    actor_requests: Vec<ActorRequest>,
+    spare_weapon_items: std::collections::HashMap<i64, u32>,
     vip_enabled: bool,
     vips: [Option<i64>; 2],
     flag_carrier: Option<i64>,
@@ -151,9 +165,45 @@ pub struct MissionHost {
     player_perform_requests: Vec<(String, Vec<PstValue>)>,
 
     say_requests: Vec<(String, String)>,
+    ui: Option<crate::pst_ui::PstUi>,
 }
 
 impl MissionHost {
+    pub fn set_ui(&mut self, ui: crate::pst_ui::PstUi) {
+        self.ui = Some(ui);
+    }
+
+    pub fn set_music_requests(&mut self, requests: PstMusicRequests) {
+        self.music_requests = Some(requests);
+    }
+
+    pub fn take_actor_requests(&mut self) -> Vec<ActorRequest> {
+        std::mem::take(&mut self.actor_requests)
+    }
+
+    fn request_actor_action(&mut self, name: &str, args: &[PstValue]) -> bool {
+        let [PstValue::Num(id)] = args else {
+            return false;
+        };
+        if *id < 0.0 || *id > f64::from(i32::MAX) || id.fract() != 0.0 {
+            return false;
+        }
+        let id = *id as i64;
+        if !self.in_scene.get(&id).copied().unwrap_or(false) {
+            return false;
+        }
+        let alive = self.active.get(&id).copied().unwrap_or(false);
+        let request = match (name, alive) {
+            ("CharSwitchWeapon", true) => ActorRequest::SwitchWeapon(id),
+            ("Reborn", false) => ActorRequest::Reborn(id),
+            _ => return false,
+        };
+        if !self.actor_requests.contains(&request) {
+            self.actor_requests.push(request);
+        }
+        true
+    }
+
     pub fn vip(&self, team: u8) -> Option<i64> {
         team.checked_sub(1)
             .and_then(|index| self.vips.get(index as usize))
@@ -254,6 +304,24 @@ impl MissionHost {
         }
     }
 
+    pub fn record_script_death(&mut self, id: i64) {
+        if let Some((hp, _, _)) = self.fighters.get_mut(&id) {
+            *hp = 0.0;
+        }
+        self.active.insert(id, false);
+        self.enemies.remove(&id);
+    }
+
+    pub fn begin_spare_weapon_sync(&mut self) {
+        self.spare_weapon_items.clear();
+    }
+
+    pub fn sync_spare_weapon(&mut self, id: i64, item_id: u32) {
+        let item_id =
+            meteor_core::weapon_kind_and_variant_from_item(item_id).map_or(0, |_| item_id);
+        self.spare_weapon_items.insert(id, item_id);
+    }
+
     pub fn sync_enemy(&mut self, id: i64, enemy: Option<i64>) {
         if !self.active.get(&id).copied().unwrap_or(false) {
             self.enemies.remove(&id);
@@ -269,6 +337,7 @@ impl MissionHost {
         self.active.insert(id, false);
         self.enemies.remove(&id);
         self.performing.remove(&id);
+        self.spare_weapon_items.remove(&id);
     }
 
     pub fn sync_performing(&mut self, id: i64, active: bool) {
@@ -463,6 +532,11 @@ impl PstHost for MissionHost {
             .max(1.0);
         let team = globals.get("Team").map(PstValue::as_f64).unwrap_or(2.0);
         self.sync_fighter(id, hp, hp, team);
+        let spare = match globals.get("Weapon2") {
+            Some(PstValue::Num(value)) => *value as u32,
+            _ => 0,
+        };
+        self.sync_spare_weapon(id, spare);
         self.register_vip_candidate(id, team as u8);
     }
 
@@ -478,6 +552,7 @@ impl PstHost for MissionHost {
         }
         let hp = definition.hp.max(1) as f64;
         self.sync_fighter(id, hp, hp, definition.team as f64);
+        self.sync_spare_weapon(id, u32::try_from(definition.weapon2).unwrap_or(0));
         for vip in &mut self.vips {
             if *vip == Some(id) {
                 *vip = None;
@@ -488,6 +563,16 @@ impl PstHost for MissionHost {
 
     fn script_actor_active(&self, id: i64) -> bool {
         self.in_scene.get(&id).copied().unwrap_or(false)
+    }
+
+    fn npc_script_id(&self, name: &str) -> Option<i64> {
+        self.npc_ids.get(name).copied().or_else(|| {
+            self.npc_ids
+                .iter()
+                .filter(|(filename, _)| filename.eq_ignore_ascii_case(name))
+                .map(|(_, &id)| id)
+                .min()
+        })
     }
 
     fn update_ai_attributes(
@@ -506,8 +591,28 @@ impl PstHost for MissionHost {
     }
 
     fn builtin(&mut self, name: &str, args: &[PstValue]) -> PstValue {
+        if let Some(result) = self
+            .ui
+            .as_ref()
+            .and_then(|ui| ui.builtin(crate::pst_ui::UiOwner::Mission, name, args))
+        {
+            return result;
+        }
         let arg = |i: usize| args.get(i).cloned().unwrap_or(PstValue::Num(0.0));
         match name {
+            "CharSwitchWeapon" | "Reborn" => {
+                PstValue::Num(f64::from(u8::from(self.request_actor_action(name, args))))
+            }
+            "CreateSceneItem" => PstValue::Num(-1.0),
+            "PlayMusic" => PstValue::Num(
+                u8::from(
+                    self.music_requests
+                        .as_ref()
+                        .is_some_and(|music| music.play(args)),
+                )
+                .into(),
+            ),
+
             "GameOver" => {
                 self.game_over = Some(arg(0).as_f64() as i64);
                 PstValue::Num(1.0)
@@ -564,6 +669,20 @@ impl PstHost for MissionHost {
                 )
             }
             "GetSelf" => arg(0),
+            "GetWeapon2" | "GetWeaponType2" => {
+                let item = match args.first() {
+                    Some(PstValue::Num(id)) if *id >= 0.0 && id.fract() == 0.0 => {
+                        self.spare_weapon_items.get(&(*id as i64)).copied()
+                    }
+                    _ => None,
+                };
+                PstValue::Num(match (name, item) {
+                    (_, None) => -1.0,
+                    ("GetWeapon2", Some(item)) => f64::from(item),
+                    (_, Some(item)) => meteor_core::weapon_kind_and_variant_from_item(item)
+                        .map_or(0.0, |(kind, _)| f64::from(kind)),
+                })
+            }
             "GetHP" => {
                 let id = arg(0).as_f64() as i64;
                 PstValue::Num(self.roster_fighter(id).map(|f| f.0).unwrap_or(-1.0))
@@ -794,7 +913,10 @@ impl PstHost for MissionHost {
                 }
                 PstValue::Num(1.0)
             }
-            _ => PstValue::Num(0.0),
+            _ => self
+                .scene_items
+                .query(name, args)
+                .unwrap_or(PstValue::Num(0.0)),
         }
     }
 }
@@ -808,9 +930,20 @@ pub struct MissionScriptRuntime {
 
 impl MissionScriptRuntime {
     pub fn new(source: &str, values: std::collections::HashMap<String, PstValue>) -> Self {
+        Self::with_scene_items(source, values, SceneItemCatalog::default())
+    }
+
+    pub fn with_scene_items(
+        source: &str,
+        values: std::collections::HashMap<String, PstValue>,
+        scene_items: SceneItemCatalog,
+    ) -> Self {
         let program = parse_program(source).expect("mission pst parses");
 
-        let mut host = MissionHost::default();
+        let mut host = MissionHost {
+            scene_items,
+            ..Default::default()
+        };
         host.register_char("player", 0);
         host.vip_enabled = values
             .get("Rule")
@@ -822,12 +955,22 @@ impl MissionScriptRuntime {
                 host.npc_ids.insert(script, host.next_char_id);
             }
         }
+        let mut runtime = Runtime::new(program, host, 50_000);
+        runtime.set_root_script(MISSION_SCRIPT_ID, "mission");
         Self {
-            runtime: Runtime::new(program, host, 50_000),
+            runtime,
             values,
             elapsed: 0.0,
             update_accumulator: 0.0,
         }
+    }
+
+    pub fn set_script_name(&mut self, name: &str) {
+        self.runtime.set_root_script(MISSION_SCRIPT_ID, name);
+    }
+
+    pub(crate) fn linked_script(&mut self) -> &mut dyn LinkedScript {
+        &mut self.runtime
     }
 
     pub fn register_npc_script(&mut self, name: &str, source: &str) -> Result<(), String> {
@@ -843,11 +986,28 @@ impl MissionScriptRuntime {
     }
 
     pub fn activate_npc_script(&mut self, id: i64, source: &str) -> Result<(), String> {
+        self.activate_npc_script_linked(id, source, None)
+    }
+
+    pub fn activate_npc_script_linked(
+        &mut self,
+        id: i64,
+        source: &str,
+        scene: Option<&mut SceneScriptRuntime>,
+    ) -> Result<(), String> {
         if !self.runtime.script_initialized(id) {
             self.runtime.register_script(id, source)?;
-            self.runtime.activate_script(id)?;
+            self.runtime
+                .activate_script_with_peer(id, scene.map(SceneScriptRuntime::linked_script))?;
         }
         Ok(())
+    }
+
+    pub fn initialized_npc_definition(&self, id: i64, script_name: &str) -> Option<NpcDefinition> {
+        self.runtime
+            .script_initialized(id)
+            .then(|| self.npc_definition(id, script_name))
+            .flatten()
     }
 
     pub fn npc_definition(&self, id: i64, script_name: &str) -> Option<NpcDefinition> {
@@ -882,6 +1042,14 @@ impl MissionScriptRuntime {
     }
 
     pub fn run_npc_init(&mut self, id: i64) -> Result<bool, String> {
+        self.run_npc_init_linked(id, None)
+    }
+
+    pub fn run_npc_init_linked(
+        &mut self,
+        id: i64,
+        scene: Option<&mut SceneScriptRuntime>,
+    ) -> Result<bool, String> {
         if !self.npc_init_pending(id)
             || (!self
                 .runtime
@@ -895,12 +1063,25 @@ impl MissionScriptRuntime {
             return Ok(false);
         }
         let previous = self.runtime.host_mut().npc_callback_owner.replace(id);
-        let result = self.runtime.call_script(id, "OnStart", &[]);
+        let result = self.runtime.call_script_with_peer(
+            id,
+            "OnStart",
+            &[],
+            scene.map(SceneScriptRuntime::linked_script),
+        );
         self.runtime.host_mut().npc_callback_owner = previous;
         result
     }
 
     pub fn update_npc_script(&mut self, id: i64) -> Result<(), String> {
+        self.update_npc_script_linked(id, None)
+    }
+
+    pub fn update_npc_script_linked(
+        &mut self,
+        id: i64,
+        scene: Option<&mut SceneScriptRuntime>,
+    ) -> Result<(), String> {
         let first_tick = self.runtime.host_mut().npc_first_script_tick.remove(&id);
         if !first_tick
             && !self
@@ -920,7 +1101,12 @@ impl MissionScriptRuntime {
                 .host_mut()
                 .npc_last_update_ms
                 .insert(id, now_ms);
-            self.runtime.call_script(id, "OnUpdate", &[])?;
+            self.runtime.call_script_with_peer(
+                id,
+                "OnUpdate",
+                &[],
+                scene.map(SceneScriptRuntime::linked_script),
+            )?;
         }
         Ok(())
     }
@@ -947,13 +1133,37 @@ impl MissionScriptRuntime {
     }
 
     pub fn start(&mut self) -> Result<(), String> {
-        if self.runtime.has_function("OnStart") {
-            self.runtime.call("OnStart", &[])?;
-        }
+        self.start_linked(None)
+    }
+
+    pub fn start_linked(&mut self, scene: Option<&mut SceneScriptRuntime>) -> Result<(), String> {
+        self.call_linked("OnStart", &[], scene)?;
         Ok(())
     }
 
+    pub fn call_linked(
+        &mut self,
+        name: &str,
+        args: &[PstValue],
+        scene: Option<&mut SceneScriptRuntime>,
+    ) -> Result<PstValue, String> {
+        if self.runtime.has_function(name) {
+            self.runtime
+                .call_with_peer(name, args, scene.map(SceneScriptRuntime::linked_script))
+        } else {
+            Ok(PstValue::Num(0.0))
+        }
+    }
+
     pub fn update(&mut self, dt: f64) -> Result<(), String> {
+        self.update_linked(dt, None)
+    }
+
+    pub fn update_linked(
+        &mut self,
+        dt: f64,
+        scene: Option<&mut SceneScriptRuntime>,
+    ) -> Result<(), String> {
         self.elapsed += dt;
         self.update_accumulator += dt;
 
@@ -961,9 +1171,7 @@ impl MissionScriptRuntime {
 
         if self.update_accumulator >= 0.1 - 1e-9 {
             self.update_accumulator %= 0.1;
-            if self.runtime.has_function("OnUpdate") {
-                self.runtime.call("OnUpdate", &[])?;
-            }
+            self.call_linked("OnUpdate", &[], scene)?;
         }
 
         Ok(())
@@ -1023,9 +1231,7 @@ fn parse_globals(source: &str) -> std::collections::HashMap<String, PstValue> {
 
 fn add_npc_targets(source: &str) -> Vec<String> {
     let clean = strip_comments(source);
-    let Some(body) = function_body(&clean, "OnStart") else {
-        return Vec::new();
-    };
+    let body = function_body(&clean, "OnStart").unwrap_or_default();
     let mut out = Vec::new();
     for (name, args) in find_calls(&body) {
         if !name.eq_ignore_ascii_case("AddNPC") {
@@ -1035,6 +1241,22 @@ fn add_npc_targets(source: &str) -> Vec<String> {
             if !script.is_empty() {
                 out.push(script);
             }
+        }
+    }
+
+    for call in tokenize(source).windows(4) {
+        let [Token::Ident(builtin), Token::Op(open), Token::String(script), Token::Op(close)] =
+            call
+        else {
+            continue;
+        };
+        if builtin == "AddNPC"
+            && open == "("
+            && close == ")"
+            && !script.is_empty()
+            && !out.contains(script)
+        {
+            out.push(script.clone());
         }
     }
     out
@@ -1182,6 +1404,170 @@ fn decode_literal(text: &str) -> PstValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pst_dynamic_pickups_and_actor_requests_share_the_linked_hosts() {
+        let mut scene = SceneScriptRuntime::load(
+            "RequestReborn() { Print(Reborn(7), Reborn(7), Reborn(0), CharSwitchWeapon(7)); }",
+            Vec::new(),
+            1000,
+        )
+        .unwrap();
+        scene.host_mut().enable_dynamic_items();
+        let mut mission = MissionScriptRuntime::new(
+            r#"
+            Spawn() {
+                int id = CreateSceneItem("D_Sword", "pickup", "W0_0", 7);
+                Print(id, GetSceneItemCount(), GetSceneItemName(id), GetSceneItemId("d_sword"));
+                Print(CreateSceneItem("d_sword", "pickup", "W0_0"));
+                Print(CreateSceneItem("D_Path", "pickup", "../W0_0"));
+                Print(CharSwitchWeapon(0), CharSwitchWeapon(0), CharSwitchWeapon(-1));
+            }
+            int Find() { return GetSceneItemId("D_Sword"); }
+            "#,
+            Default::default(),
+        );
+        mission.host_mut().register_char("guard", 7);
+        mission.host_mut().record_script_death(7);
+        mission.call_linked("Spawn", &[], Some(&mut scene)).unwrap();
+        assert_eq!(
+            mission.host().output(),
+            &["0 1 D_Sword 0", "-1", "-1", "1 1 0"]
+        );
+        let spawns = scene.host_mut().take_item_spawns();
+        assert_eq!(spawns.len(), 1);
+        assert_eq!((spawns[0].id, spawns[0].actor), (0, 7));
+        scene.host_mut().exclude_instances([spawns[0].id]);
+        assert_eq!(
+            mission.call_linked("Find", &[], Some(&mut scene)).unwrap(),
+            PstValue::Num(-1.0),
+        );
+        scene
+            .call_linked("RequestReborn", &[], Some(&mut mission))
+            .unwrap();
+        assert_eq!(scene.host().output(), &["1 1 0 0"]);
+        assert_eq!(
+            mission.host_mut().take_actor_requests(),
+            [ActorRequest::SwitchWeapon(0), ActorRequest::Reborn(7)],
+        );
+    }
+
+    #[test]
+    fn execute_function_reenters_the_calling_module_and_preserves_globals() {
+        let mut scene = SceneScriptRuntime::load(
+            r#"
+            int count = 1;
+            Scene_OnInit() { Print(ExecuteFunction(GetLevelScriptId(), "StartGuard", 4)); }
+            AddToScene(int delta) { count += delta; }
+            int Read() { return count; }
+        "#,
+            vec![],
+            1000,
+        )
+        .unwrap();
+        scene.set_script_name("sn01/sn01.pst");
+        let mut mission = MissionScriptRuntime::new(
+            r#"
+            int count = 0;
+            StartGuard(int delta) {
+                int id = AddNPC("guard");
+                Print(ExecuteFunction(GetNpcScriptId(id), "Apply", delta));
+                Print(ExecuteFunction("Level/Guard.pst", "Apply", 2));
+                Print(ExecuteFunction("scene", "Missing"));
+                RemoveNPC(id);
+                Print(GetNpcScriptId(id), ExecuteFunction(id, "Apply", 9));
+            }
+            AddToMission(int delta) { count += delta; }
+            int Read() { return count; }
+        "#,
+            Default::default(),
+        );
+        mission
+            .register_npc_script(
+                "guard",
+                r#"
+            int n = 0;
+            Apply(int delta) {
+                n += delta;
+                ExecuteFunction("SN01/SN01.PST", "AddToScene", n);
+                ExecuteFunction("mission", "AddToMission", n);
+            }
+        "#,
+            )
+            .unwrap();
+        scene.start_linked(Some(&mut mission)).unwrap();
+        assert_eq!(scene.host().output(), &["1"]);
+        assert_eq!(mission.host().output(), &["1", "1", "0", "-1 0"]);
+        assert_eq!(scene.call("Read", &[]).unwrap(), PstValue::Num(11.0));
+        assert_eq!(
+            mission.call_linked("Read", &[], None).unwrap(),
+            PstValue::Num(10.0)
+        );
+    }
+
+    #[test]
+    fn execute_function_shares_recursion_and_step_limits_across_modules() {
+        let source = r#"
+            Again() { ExecuteFunction("mission", "Again"); }
+            StartWork() { ExecuteFunction("mission", "Work"); }
+            int Read() { return 7; }
+        "#;
+        let mut mission = MissionScriptRuntime::new(
+            r#"
+            Again() { ExecuteFunction("scene", "Again"); }
+            Work() { int n = 0; while (n < 500) { n++; } }
+        "#,
+            Default::default(),
+        );
+        let mut scene = SceneScriptRuntime::load(source, vec![], 1000).unwrap();
+        assert!(scene
+            .call_linked("Again", &[], Some(&mut mission))
+            .unwrap_err()
+            .contains("call depth"));
+        assert!(scene
+            .call_linked("StartWork", &[], Some(&mut mission))
+            .unwrap_err()
+            .contains("step limit 1000"));
+        assert_eq!(scene.call("Read", &[]).unwrap(), PstValue::Num(7.0));
+    }
+
+    #[test]
+    fn pst_extension_queries_work_in_mission_and_npc_callbacks() {
+        let scene_items = SceneItemCatalog::new([Some("D_Door01".into())]);
+        let mut mission = MissionScriptRuntime::with_scene_items(
+            r#"
+OnStart()
+{
+    Print(GetSceneItemCount(), GetSceneItemName(GetSceneItemId("D_Door01")));
+    int guard = AddNPC("guard");
+    Print(GetWeapon2(guard), GetWeaponType2(guard));
+    RemoveNPC(guard);
+    Print(GetWeapon2(guard), GetWeaponType2(guard));
+}
+"#,
+            Default::default(),
+            scene_items,
+        );
+        mission
+            .register_npc_script(
+                "guard",
+                r#"
+string Name = "guard";
+int Weapon2 = 47;
+OnInit(int id)
+{
+    Print(GetSceneItemName(0), GetWeapon2(id), GetWeaponType2(id));
+    Weapon2 = 59;
+}
+"#,
+            )
+            .unwrap();
+        mission.start().unwrap();
+        assert_eq!(
+            mission.host().output(),
+            &["1 D_Door01", "D_Door01 47 10", "59 2", "-1 -1"]
+        );
+    }
 
     #[test]
     fn story_vip_follows_spawn_order_and_explicit_query_team() {

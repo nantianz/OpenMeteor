@@ -1,0 +1,21 @@
+SceneObjects 0 DummeyObjects 2
+Object D_DemoKey
+{
+  Position: 915.0 14.4 198.0
+  Quaternion: -1.000 0.000 0.000 0.000
+  Custom:
+  {
+    model="IPItem01"
+    collision=0
+  }
+}
+Object D_DemoDoor
+{
+  Position: 816.0 14.0 155.0
+  Quaternion: -0.707 0.000 0.000 -0.707
+  Custom:
+  {
+    model="Pdoor02"
+    collision=1
+  }
+}

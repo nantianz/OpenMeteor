@@ -1320,7 +1320,7 @@ fn spawn_offline_weapon_drop(
 ) {
     let input_blocked = player_performance
         .as_deref()
-        .is_some_and(|performance| performance.input_blocked);
+        .is_some_and(|performance| performance.blocks_input());
     use crate::plugins::input_plugin::LocalCombatInputEdge as Edge;
     let drop_actions = crate::plugins::input_plugin::ordered_local_discrete_actions(
         combat_input.as_deref(),
@@ -1432,7 +1432,6 @@ fn spawn_network_weapon_drop(
 ) {
     let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let candidates = stage_asset_roots(&root);
-    let pak_root = pak_files_root(&candidates, &loaded.stage_id);
     let stems = model_stems(&drop.model);
     let key = stems[0].to_ascii_lowercase();
     let model_mesh = load_prop_model(&candidates, &stems);
@@ -1488,6 +1487,132 @@ fn spawn_network_weapon_drop(
         warn!("network dropped weapon model missing: {}", drop.model);
         return;
     };
+    attach_pickup_model(
+        commands,
+        (meshes, materials, images),
+        &model_mesh,
+        root_entity,
+        &pak_files_root(&candidates, &loaded.stage_id),
+        &loaded.stage_id,
+    );
+}
+
+#[derive(Component)]
+pub(crate) struct ScriptSpawnedPickup;
+
+pub(super) fn spawn_pst_scene_items(
+    mut commands: Commands,
+    mut script: ResMut<super::stage_plugin::StageScriptRuntime>,
+    loaded: Res<crate::app_state::LoadedStageInfo>,
+    (mut meshes, mut materials, mut images): (
+        ResMut<Assets<Mesh>>,
+        ResMut<Assets<GmdlMaterial>>,
+        ResMut<Assets<bevy::image::Image>>,
+    ),
+    actors: Query<
+        (
+            &Transform,
+            Option<&super::stage_plugin::LocalFighter>,
+            Option<&super::stage_plugin::MissionNpc>,
+        ),
+        With<crate::components::fighter::Fighter>,
+    >,
+) {
+    let Some(scene) = script.script_mut() else {
+        return;
+    };
+    let spawns = scene.host_mut().take_item_spawns();
+    if spawns.is_empty() {
+        return;
+    }
+    let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let candidates = stage_asset_roots(&root);
+    let pak_root = pak_files_root(&candidates, &loaded.stage_id);
+    for spawn in spawns {
+        let anchor = actors.iter().find_map(|(transform, local, npc)| {
+            (if spawn.actor == 0 {
+                local.is_some()
+            } else {
+                npc.is_some_and(|npc| npc.in_scene_roster && npc.id == spawn.actor)
+            })
+            .then_some(transform.translation)
+        });
+        let stems = model_stems(&spawn.model);
+        let Some((position, model_mesh)) = anchor
+            .and_then(|position| load_prop_model(&candidates, &stems).map(|mesh| (position, mesh)))
+        else {
+            warn!(
+                "PST pickup {}: missing actor {} or model {}",
+                spawn.name, spawn.actor, spawn.model
+            );
+            scene.host_mut().exclude_instances([spawn.id]);
+            continue;
+        };
+        let model = stems[0].to_ascii_lowercase();
+        let Some(item) = scene.host_mut().instance_mut(spawn.id) else {
+            continue;
+        };
+        if !super::item_plugin::npc_getitem_model(&model) {
+            item.set(
+                "script_pickup",
+                meteor_scene::scene_script_runtime::PstValue::Num(1.0),
+            );
+        }
+        let active = item.get("active").truthy();
+        let visibility =
+            if super::stage_plugin::script_item_is_rendered(active, item.get("visible").truthy()) {
+                Visibility::Visible
+            } else {
+                Visibility::Hidden
+            };
+        let (center_offset, half_extents) = prop_bounds(&model_mesh, 1.0);
+        let entity = commands
+            .spawn((
+                PlayingSceneEntity,
+                ScriptSpawnedPickup,
+                super::item_plugin::StageProp {
+                    name: spawn.name,
+                    model,
+                    center_offset,
+                    half_extents,
+                    hit_count: 0,
+                    respawn_timer: 0.0,
+                    interactive: active && item.get("interactive").truthy(),
+                    collision_enabled: false,
+                    breakable: false,
+                    broken: false,
+                },
+                visibility,
+                Transform {
+                    translation: position,
+                    rotation: Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+                    scale: Vec3::splat(MODEL_SCALE),
+                },
+            ))
+            .id();
+        attach_pickup_model(
+            &mut commands,
+            (&mut meshes, &mut materials, &mut images),
+            &model_mesh,
+            entity,
+            &pak_root,
+            &loaded.stage_id,
+        );
+    }
+}
+
+fn attach_pickup_model(
+    commands: &mut Commands,
+    (meshes, materials, images): (
+        &mut Assets<Mesh>,
+        &mut Assets<GmdlMaterial>,
+        &mut Assets<bevy::image::Image>,
+    ),
+    model_mesh: &GmdlMesh,
+    root_entity: Entity,
+    pak_root: &std::path::Path,
+    stage_id: &str,
+) {
     let mut pak_cache = PakCache::default();
     let mut image_cache = HashMap::<String, LoadedStageTexture>::new();
     let mut material_cache = HashMap::<i32, Handle<GmdlMaterial>>::new();
@@ -1516,8 +1641,8 @@ fn spawn_network_weapon_drop(
                         images,
                         &mut image_cache,
                         &mut pak_cache,
-                        &pak_root,
-                        &loaded.stage_id,
+                        pak_root,
+                        stage_id,
                         name,
                         material.blend.eq_ignore_ascii_case("COLORKEY"),
                         material.blend.eq_ignore_ascii_case("ALPHACHANNEL"),

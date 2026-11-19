@@ -1,5 +1,7 @@
+use crate::mission_runtime::MissionScriptRuntime;
+use crate::pst_music::PstMusicRequests;
 pub use crate::pst_runtime::PstValue;
-use crate::pst_runtime::{parse_program, PstHost, Runtime};
+use crate::pst_runtime::{parse_program, LinkedScript, PstHost, Runtime, SCENE_SCRIPT_ID};
 use std::collections::{HashMap, VecDeque};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -20,6 +22,14 @@ pub enum SceneNetOp {
 pub struct SceneTransferRequest {
     pub character_id: i64,
     pub destination: String,
+}
+
+#[derive(Debug)]
+pub struct SceneItemSpawn {
+    pub id: usize,
+    pub name: String,
+    pub model: String,
+    pub actor: i64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -55,11 +65,93 @@ impl SceneItemInstance {
     }
 }
 
+#[derive(Clone, Default)]
+pub struct SceneItemCatalog {
+    names: Vec<Option<String>>,
+    by_name: HashMap<String, usize>,
+}
+
+impl SceneItemCatalog {
+    pub fn new(names: impl IntoIterator<Item = Option<String>>) -> Self {
+        let names: Vec<_> = names.into_iter().collect();
+        let by_name = names
+            .iter()
+            .enumerate()
+            .filter_map(|(index, name)| Some((name.as_ref()?.to_lowercase(), index)))
+            .collect();
+        Self { names, by_name }
+    }
+
+    fn exclude(&mut self, index: usize) {
+        if let Some(name) = self.names.get_mut(index).and_then(Option::take) {
+            self.by_name.remove(&name.to_lowercase());
+        }
+    }
+
+    fn append(&mut self, name: &str) {
+        self.by_name.insert(name.to_lowercase(), self.names.len());
+        self.names.push(Some(name.to_owned()));
+    }
+
+    fn name(&self, index: usize) -> Option<&str> {
+        self.names.get(index)?.as_deref()
+    }
+
+    fn resolve_name(&self, key: &str) -> Option<usize> {
+        let lower = key.to_lowercase();
+        if let Some(&index) = self.by_name.get(&lower) {
+            return Some(index);
+        }
+        let start = lower.rfind(|c: char| !c.is_ascii_digit()).map(|i| i + 1)?;
+        if start >= lower.len() {
+            return None;
+        }
+        let (stem, digits) = lower.split_at(start);
+        let n = digits.parse::<i64>().ok()?;
+        for candidate in [
+            format!("{stem}{:02}", n),
+            format!("{stem}{:03}", n),
+            format!("{stem}{n}"),
+        ] {
+            if let Some(&index) = self.by_name.get(&candidate) {
+                return Some(index);
+            }
+        }
+        None
+    }
+
+    pub(crate) fn query(&self, name: &str, args: &[PstValue]) -> Option<PstValue> {
+        Some(match name {
+            "GetSceneItemCount" => PstValue::Num(self.names.len() as f64),
+            "GetSceneItemId" => {
+                let index = match args.first() {
+                    Some(PstValue::Str(name)) => self.resolve_name(name),
+                    _ => None,
+                };
+                PstValue::Num(index.map_or(-1.0, |index| index as f64))
+            }
+            "GetSceneItemName" => {
+                let name = match args.first() {
+                    Some(PstValue::Num(id)) if *id >= 0.0 && id.fract() == 0.0 => {
+                        self.name(*id as usize)
+                    }
+                    _ => None,
+                };
+                PstValue::Str(name.unwrap_or_default().to_owned())
+            }
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Default)]
 pub struct SceneHost {
     instances: Vec<SceneItemInstance>,
-    by_name: HashMap<String, usize>,
-    excluded: std::collections::HashSet<usize>,
+    item_catalog: SceneItemCatalog,
+    music_requests: Option<PstMusicRequests>,
+    ui: Option<crate::pst_ui::PstUi>,
+    dynamic_items: Option<Vec<SceneItemSpawn>>,
+    created_items: usize,
     effects: Vec<SceneNetOp>,
     output: Vec<String>,
     net_event: bool,
@@ -82,13 +174,11 @@ pub struct SceneHost {
 
 impl SceneHost {
     pub fn new(instances: Vec<SceneItemInstance>) -> Self {
-        let mut by_name = HashMap::new();
-        for (index, instance) in instances.iter().enumerate() {
-            by_name.insert(instance.name.to_lowercase(), index);
-        }
+        let item_catalog =
+            SceneItemCatalog::new(instances.iter().map(|item| Some(item.name.clone())));
         Self {
             instances,
-            by_name,
+            item_catalog,
             character_teams: HashMap::from([(0, 0)]),
             game_mode: 1,
             rng: 0x9e3779b97f4a7c15,
@@ -99,11 +189,10 @@ impl SceneHost {
     pub fn exclude_instances(&mut self, indices: impl IntoIterator<Item = usize>) {
         for index in indices {
             if let Some(instance) = self.instances.get_mut(index) {
-                self.by_name.remove(&instance.name.to_lowercase());
+                self.item_catalog.exclude(index);
                 for key in ["active", "visible", "collision", "damage", "interactive"] {
                     instance.set(key, PstValue::Num(0.0));
                 }
-                self.excluded.insert(index);
             }
         }
     }
@@ -112,20 +201,91 @@ impl SceneHost {
         &self.instances
     }
 
+    pub fn set_music_requests(&mut self, requests: PstMusicRequests) {
+        self.music_requests = Some(requests);
+    }
+
+    pub fn set_ui(&mut self, ui: crate::pst_ui::PstUi) {
+        self.ui = Some(ui);
+    }
+
+    pub fn enable_dynamic_items(&mut self) {
+        self.dynamic_items.get_or_insert_with(Vec::new);
+    }
+
+    pub fn take_item_spawns(&mut self) -> Vec<SceneItemSpawn> {
+        self.dynamic_items
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
+    }
+
+    fn create_scene_pickup(&mut self, args: &[PstValue]) -> Option<usize> {
+        let [PstValue::Str(name), PstValue::Str(kind), PstValue::Str(model), rest @ ..] = args
+        else {
+            return None;
+        };
+        let actor = match rest {
+            [] => 0,
+            [PstValue::Num(id)]
+                if *id >= 0.0 && *id <= f64::from(i32::MAX) && id.fract() == 0.0 =>
+            {
+                *id as i64
+            }
+            _ => return None,
+        };
+        let valid_stem = |s: &str| {
+            !s.is_empty()
+                && s.len() <= 80
+                && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        };
+        if kind != "pickup"
+            || !valid_stem(name)
+            || !valid_stem(model)
+            || self.resolve_name(name).is_some()
+            || self
+                .instances
+                .iter()
+                .any(|item| item.name.eq_ignore_ascii_case(name))
+        {
+            return None;
+        }
+        let pending = self.dynamic_items.as_mut()?;
+        if self.created_items >= 256 {
+            return None;
+        }
+        let id = self.instances.len();
+        self.created_items += 1;
+        self.item_catalog.append(name);
+        let props = ["active", "interactive", "visible"]
+            .into_iter()
+            .map(|key| (key.to_owned(), PstValue::Num(1.0)))
+            .collect();
+        self.instances.push(SceneItemInstance {
+            name: name.clone(),
+            index: id,
+            props,
+        });
+        pending.push(SceneItemSpawn {
+            id,
+            name: name.clone(),
+            model: model.clone(),
+            actor,
+        });
+        Some(id)
+    }
+
     pub fn instances_mut(&mut self) -> &mut [SceneItemInstance] {
         &mut self.instances
     }
 
     pub fn instance(&self, index: usize) -> Option<&SceneItemInstance> {
-        self.instances
-            .get(index)
-            .filter(|_| !self.excluded.contains(&index))
+        self.item_catalog.name(index)?;
+        self.instances.get(index)
     }
 
     pub fn instance_mut(&mut self, index: usize) -> Option<&mut SceneItemInstance> {
-        if self.excluded.contains(&index) {
-            return None;
-        }
+        self.item_catalog.name(index)?;
         self.instances.get_mut(index)
     }
 
@@ -209,28 +369,7 @@ impl SceneHost {
     }
 
     pub fn resolve_name(&self, key: &str) -> Option<usize> {
-        let lower = key.to_lowercase();
-        if let Some(&index) = self.by_name.get(&lower) {
-            return Some(index);
-        }
-        let start = lower.rfind(|c: char| !c.is_ascii_digit()).map(|i| i + 1)?;
-        if start >= lower.len() {
-            return None;
-        }
-        let (stem, digits) = lower.split_at(start);
-        let Ok(n) = digits.parse::<i64>() else {
-            return None;
-        };
-        for candidate in [
-            format!("{stem}{:02}", n),
-            format!("{stem}{:03}", n),
-            format!("{stem}{n}"),
-        ] {
-            if let Some(&index) = self.by_name.get(&candidate) {
-                return Some(index);
-            }
-        }
-        None
+        self.item_catalog.resolve_name(key)
     }
 
     fn entry(&self, reference: &PstValue) -> Option<usize> {
@@ -325,7 +464,25 @@ fn field_to_string(value: &PstValue) -> String {
 
 impl PstHost for SceneHost {
     fn builtin(&mut self, name: &str, args: &[PstValue]) -> PstValue {
+        if let Some(result) = self
+            .ui
+            .as_ref()
+            .and_then(|ui| ui.builtin(crate::pst_ui::UiOwner::Scene, name, args))
+        {
+            return result;
+        }
         match name {
+            "CreateSceneItem" => {
+                PstValue::Num(self.create_scene_pickup(args).map_or(-1.0, |id| id as f64))
+            }
+            "PlayMusic" => PstValue::Num(
+                u8::from(
+                    self.music_requests
+                        .as_ref()
+                        .is_some_and(|music| music.play(args)),
+                )
+                .into(),
+            ),
             "GetSceneItem" => {
                 let (reference, field) = (args.first(), args.get(1));
                 match (reference, field) {
@@ -481,7 +638,10 @@ impl PstHost for SceneHost {
                     PstValue::Num((self.next_rand() * (n as i64).max(1) as f64) as i64 as f64)
                 }
             }
-            _ => PstValue::Num(0.0),
+            _ => self
+                .item_catalog
+                .query(name, args)
+                .unwrap_or(PstValue::Num(0.0)),
         }
     }
 }
@@ -499,17 +659,32 @@ impl SceneScriptRuntime {
     ) -> Result<Self, String> {
         let program = parse_program(source)?;
         let host = SceneHost::new(instances);
+        let mut runtime = Runtime::new(program, host, max_steps);
+        runtime.set_root_script(SCENE_SCRIPT_ID, "scene");
         Ok(Self {
-            runtime: Runtime::new(program, host, max_steps),
+            runtime,
             update_accumulator: 0.0,
         })
     }
 
+    pub fn set_script_name(&mut self, name: &str) {
+        self.runtime.set_root_script(SCENE_SCRIPT_ID, name);
+    }
+
+    pub(crate) fn linked_script(&mut self) -> &mut dyn LinkedScript {
+        &mut self.runtime
+    }
+
     pub fn start(&mut self) -> Result<(), String> {
+        self.start_linked(None)
+    }
+
+    pub fn start_linked(
+        &mut self,
+        mut mission: Option<&mut MissionScriptRuntime>,
+    ) -> Result<(), String> {
         for name in ["Scene_OnLoad", "Scene_OnInit"] {
-            if self.runtime.has_function(name) {
-                self.runtime.call(name, &[])?;
-            }
+            self.call_linked(name, &[], mission.as_deref_mut())?;
         }
         Ok(())
     }
@@ -519,8 +694,21 @@ impl SceneScriptRuntime {
     }
 
     pub fn call(&mut self, name: &str, args: &[PstValue]) -> Result<PstValue, String> {
+        self.call_linked(name, args, None)
+    }
+
+    pub fn call_linked(
+        &mut self,
+        name: &str,
+        args: &[PstValue],
+        mission: Option<&mut MissionScriptRuntime>,
+    ) -> Result<PstValue, String> {
         if self.runtime.has_function(name) {
-            self.runtime.call(name, args)
+            self.runtime.call_with_peer(
+                name,
+                args,
+                mission.map(MissionScriptRuntime::linked_script),
+            )
         } else {
             Ok(PstValue::Num(0.0))
         }
@@ -542,6 +730,16 @@ impl SceneScriptRuntime {
         event_name: &str,
         args: &[PstValue],
     ) -> Result<PstValue, String> {
+        self.call_item_linked(name, event_name, args, None)
+    }
+
+    pub fn call_item_linked(
+        &mut self,
+        name: &str,
+        event_name: &str,
+        args: &[PstValue],
+        mission: Option<&mut MissionScriptRuntime>,
+    ) -> Result<PstValue, String> {
         let Some(index) = self.runtime.host().resolve_name(name) else {
             return Ok(PstValue::Num(0.0));
         };
@@ -550,10 +748,35 @@ impl SceneScriptRuntime {
             if self.runtime.has_function(&callback) {
                 let mut call_args = vec![PstValue::Num(index as f64)];
                 call_args.extend_from_slice(args);
-                return self.runtime.call(&callback, &call_args);
+                return self.call_linked(&callback, &call_args, mission);
             }
         }
         Ok(PstValue::Num(0.0))
+    }
+
+    pub fn item_picked_up(
+        &mut self,
+        name: &str,
+        actor: i64,
+        mut mission: Option<&mut MissionScriptRuntime>,
+    ) -> Result<(), String> {
+        let Some(item) = self.host().resolve_name(name) else {
+            return Ok(());
+        };
+        let actor = PstValue::Num(actor as f64);
+        let legacy = self.call_item_linked(
+            name,
+            "OnPickUp",
+            std::slice::from_ref(&actor),
+            mission.as_deref_mut(),
+        );
+        let args = [PstValue::Num(item as f64), actor];
+        let scene = self.call_linked("Item_OnPickUp", &args, mission.as_deref_mut());
+        let task = match mission {
+            Some(mission) => mission.call_linked("Item_OnPickUp", &args, Some(self)),
+            None => Ok(PstValue::Num(0.0)),
+        };
+        legacy.and(scene).and(task).map(|_| ())
     }
 
     pub fn reconcile_item_callback(
@@ -606,15 +829,21 @@ impl SceneScriptRuntime {
     }
 
     pub fn update(&mut self, dt: f64) -> Result<(), String> {
+        self.update_linked(dt, None)
+    }
+
+    pub fn update_linked(
+        &mut self,
+        dt: f64,
+        mut mission: Option<&mut MissionScriptRuntime>,
+    ) -> Result<(), String> {
         self.runtime.host_mut().game_time_ms += dt.max(0.0) * 1000.0;
         self.update_accumulator += dt;
         if self.update_accumulator < 0.1 {
             return Ok(());
         }
         self.update_accumulator %= 0.1;
-        if self.runtime.has_function("Scene_OnIdle") {
-            self.runtime.call("Scene_OnIdle", &[])?;
-        }
+        self.call_linked("Scene_OnIdle", &[], mission.as_deref_mut())?;
         let instance_names: Vec<String> = self
             .runtime
             .host()
@@ -623,7 +852,7 @@ impl SceneScriptRuntime {
             .map(|instance| instance.name.clone())
             .collect();
         for name in instance_names {
-            self.call_item(&name, "OnIdle", &[])?;
+            self.call_item_linked(&name, "OnIdle", &[], mission.as_deref_mut())?;
         }
         Ok(())
     }
@@ -682,6 +911,35 @@ fn ticket_exclusion_blocks_numeric_writes_and_callbacks_without_renumbering() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pst_extension_queries_use_stable_scene_item_slots() {
+        let items = ["D_Box01", "D_Filtered", "D_Box03"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| SceneItemInstance {
+                name: name.into(),
+                index,
+                ..Default::default()
+            })
+            .collect();
+        let mut script = SceneScriptRuntime::load(
+            r#"
+Scene_OnInit()
+{
+    Print(GetSceneItemCount(), GetSceneItemId("d_box3"), GetSceneItemName(2));
+    Print(GetSceneItemId("D_Filtered"), "[" + GetSceneItemName(1) + "]");
+    Print("[" + GetSceneItemName(-1) + "]", "[" + GetSceneItemName(3) + "]");
+}
+"#,
+            items,
+            1000,
+        )
+        .unwrap();
+        script.host_mut().exclude_instances([1]);
+        script.start().unwrap();
+        assert_eq!(script.host().output(), &["3 2 D_Box03", "-1 []", "[] []"]);
+    }
 
     fn instance(name: &str, index: usize) -> SceneItemInstance {
         SceneItemInstance {

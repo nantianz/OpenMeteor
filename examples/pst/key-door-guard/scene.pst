@@ -1,0 +1,10 @@
+Scene_OnInit()
+{
+    SetSceneItem("D_DemoKey", "attribute", "script_pickup", 1);
+}
+
+OpenDemoDoor()
+{
+    SetSceneItem("D_DemoDoor", "attribute", "collision", 0);
+    SetSceneItem("D_DemoDoor", "attribute", "active", 0);
+}

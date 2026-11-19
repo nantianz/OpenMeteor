@@ -1,4 +1,3 @@
-#![cfg(feature = "original-assets")]
 use super::*;
 use crate::plugins::stage_plugin::{MissionNpc, StageMissionRuntime};
 use bevy::ecs::system::RunSystemOnce;

@@ -10,7 +10,7 @@ mod pause_tests;
 mod mission_targets;
 
 use crate::app_state::{AppState, LaunchRequest, LoadedStageAssets, LoadedStageInfo};
-use crate::components::fighter::{CombatState, Fighter, Health, MotionState, Qi};
+use crate::components::fighter::{CombatState, DeathRespawn, Fighter, Health, MotionState, Qi};
 use bevy::asset::RenderAssetUsages;
 use bevy::ecs::system::EntityCommands;
 use bevy::material::AlphaMode;
@@ -18,8 +18,10 @@ use bevy::prelude::*;
 use bevy::render::render_resource::PrimitiveTopology;
 use meteor_core::MovementMode;
 use meteor_scene::mission_runtime::{MissionScriptRuntime, NpcRequest};
+use meteor_scene::pst_music::PstMusicRequests;
 use meteor_scene::scene_script_runtime::{
-    PstValue, SceneItemInstance, SceneNetOp, SceneScriptRuntime, SceneTransferRequest,
+    PstValue, SceneItemCatalog, SceneItemInstance, SceneNetOp, SceneScriptRuntime,
+    SceneTransferRequest,
 };
 use meteor_scene::stage_loader::{
     get_stage_center, load_stage_assets, StageAssetSource, WaypointGraph,
@@ -29,6 +31,9 @@ use std::path::{Path, PathBuf};
 
 #[derive(Resource, Default)]
 pub struct StageScriptRuntime(Option<SceneScriptRuntime>);
+
+#[derive(Resource)]
+pub(super) struct StageScriptMusic(pub PstMusicRequests);
 
 impl StageScriptRuntime {
     #[cfg(test)]
@@ -401,12 +406,19 @@ pub(crate) struct PlayerPerformance {
     pub queue: std::collections::VecDeque<NpcPerformCommand>,
     pub pause_remaining: f32,
     pub input_blocked: bool,
+    pub(super) ui_modal: bool,
     pub crouch_requested: Option<bool>,
     pub use_items: Vec<u32>,
 }
 
+impl PlayerPerformance {
+    pub(super) fn blocks_input(&self) -> bool {
+        self.input_blocked || self.ui_modal
+    }
+}
+
 #[derive(Resource, Default)]
-struct PendingMissionNpcCommands {
+pub(super) struct PendingMissionNpcCommands {
     behaviors: Vec<(
         i64,
         String,
@@ -552,6 +564,7 @@ impl Plugin for StagePlugin {
             .add_systems(
                 OnEnter(AppState::Playing),
                 (sync_mission_spatial, mission_targets::sync_mission_scene_targets,
+                    sync_mission_spare_weapons,
                     start_mission_script, consume_mission_npc_requests)
                     .chain()
                     .after(start_stage_script)
@@ -569,6 +582,13 @@ impl Plugin for StagePlugin {
                     clear_mode_objective_visuals,
                 )
                     .run_if(crate::plugins::ends_playing_session),
+            )
+            .add_systems(
+                Update,
+                super::pst_ui::dispatch_button
+                    .after(crate::plugins::UiTouchActionSet)
+                    .before(tick_stage_script)
+                    .run_if(in_state(AppState::Playing)),
             )
             .add_systems(
                 Update,
@@ -592,10 +612,12 @@ impl Plugin for StagePlugin {
                         sync_mission_spatial,
                         mission_targets::sync_mission_scene_targets,
                         sync_mission_fighters,
+                        sync_mission_spare_weapons,
                         escort_cargo_pickup,
                         mode_objective_tick,
                         tick_mission_script,
                         consume_mission_npc_requests,
+                        super::render_plugin::spawn_pst_scene_items,
                         consume_mission_attribute_updates,
                         consume_mission_say_requests,
                         assign_assassin_vip,
@@ -1279,9 +1301,15 @@ fn load_selected_stage(
         center
     );
     let stage = load_stage_assets(&source, &request.stage_id, center);
+    let music = PstMusicRequests::new(meteor_asset::runtime_assets::read_legacy_path);
+    commands.insert_resource(StageScriptMusic(music.clone()));
+    let ui = (should_load_mission_script(&request)
+        && net.status != super::network_plugin::NetStatus::InRoom)
+        .then(meteor_scene::pst_ui::PstUi::default);
+    commands.insert_resource(super::pst_ui::StagePstUi(ui.clone()));
 
     let (pst_bytes, _) = source.read_with_path(&paths.pst);
-    match pst_bytes.as_deref().map(crate::text_codec::decode_text) {
+    let scene_source = match pst_bytes.as_deref().map(crate::text_codec::decode_text) {
         Some(stage_text) => {
             let (merged, includes, missing) =
                 expand_scene_pst_includes(&paths.pst, &stage_text, &mut |path| {
@@ -1291,55 +1319,60 @@ fn load_selected_stage(
                 warn!("stage PST include unavailable: {path}");
             }
             info!("stage PST includes: {}", includes.join(", "));
-
-            let des_path = format!("{}/{}.des", request.stage_id, request.stage_id);
-            let instances = source
-                .read_with_path(&des_path)
-                .0
-                .map(|bytes| crate::text_codec::decode_text(&bytes))
-                .map(|text| meteor_asset::des::parse_stage_description(&text))
-                .map(|desc| {
-                    desc.dummies
-                        .iter()
-                        .enumerate()
-                        .map(|(index, dummy)| SceneItemInstance {
-                            name: dummy.name.clone(),
-                            index,
-
-                            props: scene_item_props_from_dummy(dummy),
-                        })
-                        .collect::<Vec<_>>()
+            Some(merged)
+        }
+        None => {
+            info!("stage pst unavailable for {}", request.stage_id);
+            should_load_mission_script(&request).then(String::new)
+        }
+    };
+    let descriptor = loaded_assets.des.as_deref().map(|bytes| {
+        meteor_asset::des::parse_stage_description(&crate::text_codec::decode_text(bytes))
+    });
+    if let Some(scene_source) = scene_source {
+        let instances = descriptor.as_ref().map_or_else(Vec::new, |desc| {
+            desc.dummies
+                .iter()
+                .enumerate()
+                .map(|(index, dummy)| SceneItemInstance {
+                    name: dummy.name.clone(),
+                    index,
+                    props: scene_item_props_from_dummy(dummy),
                 })
-                .unwrap_or_default();
-            match SceneScriptRuntime::load(&merged, instances, 250_000) {
-                Ok(mut runtime) => {
-                    if let Some(mask) = loaded_assets.ticket_mask {
-                        if let Some(bytes) = loaded_assets.des.as_deref() {
-                            let desc = meteor_asset::des::parse_stage_description(
-                                &crate::text_codec::decode_text(bytes),
-                            );
-                            runtime.host_mut().exclude_instances(
-                                desc.dummies
-                                    .iter()
-                                    .enumerate()
-                                    .filter(|(_, d)| !d.admits_ticket(mask))
-                                    .map(|(i, _)| i),
-                            );
-                        }
-                    }
-                    info!(
-                        "stage scene script runtime ready ({} instances)",
-                        runtime.host().instances().len()
+                .collect()
+        });
+        match SceneScriptRuntime::load(&scene_source, instances, 250_000) {
+            Ok(mut runtime) => {
+                runtime.set_script_name(&paths.pst);
+                runtime.host_mut().set_music_requests(music.clone());
+                if let Some(ui) = ui.as_ref() {
+                    runtime.host_mut().set_ui(ui.clone());
+                }
+                if should_load_mission_script(&request)
+                    && net.status != super::network_plugin::NetStatus::InRoom
+                {
+                    runtime.host_mut().enable_dynamic_items();
+                }
+                if let Some((mask, desc)) = loaded_assets.ticket_mask.zip(descriptor.as_ref()) {
+                    runtime.host_mut().exclude_instances(
+                        desc.dummies
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, dummy)| !dummy.admits_ticket(mask))
+                            .map(|(index, _)| index),
                     );
-                    script_runtime.0 = Some(runtime);
                 }
-                Err(error) => {
-                    warn!("stage scene script parse failed: {error}");
-                    script_runtime.0 = None;
-                }
+                info!(
+                    "stage scene script runtime ready ({} instances)",
+                    runtime.host().instances().len()
+                );
+                script_runtime.0 = Some(runtime);
+            }
+            Err(error) => {
+                warn!("stage scene script parse failed: {error}");
+                script_runtime.0 = None;
             }
         }
-        None => info!("stage pst unavailable for {}", request.stage_id),
     }
 
     mission_runtime.0 = None;
@@ -1359,7 +1392,25 @@ fn load_selected_stage(
                     definition.npc_scripts.len(),
                     definition.values.len()
                 );
-                let mut runtime = MissionScriptRuntime::new(&mission_text, definition.values);
+                let ticket_mask = loaded_assets.ticket_mask;
+                let scene_items =
+                    SceneItemCatalog::new(descriptor.iter().flat_map(|desc| &desc.dummies).map(
+                        |dummy| {
+                            ticket_mask
+                                .is_none_or(|mask| dummy.admits_ticket(mask))
+                                .then(|| dummy.name.clone())
+                        },
+                    ));
+                let mut runtime = MissionScriptRuntime::with_scene_items(
+                    &mission_text,
+                    definition.values,
+                    scene_items,
+                );
+                runtime.set_script_name(&mission_path);
+                runtime.host_mut().set_music_requests(music);
+                if let Some(ui) = ui {
+                    runtime.host_mut().set_ui(ui);
+                }
                 for npc in definition.npc_scripts {
                     let path = format!("Level/{npc}.pst");
                     if let Some(bytes) = source.read_with_path(&path).0 {
@@ -1916,9 +1967,18 @@ fn despawn_local_fighter(mut commands: Commands, query: Query<Entity, With<Local
     }
 }
 
-fn close_stage_script(mut script: ResMut<StageScriptRuntime>) {
+fn close_stage_script(
+    mut script: ResMut<StageScriptRuntime>,
+    mut mission: Option<ResMut<StageMissionRuntime>>,
+) {
     if let Some(runtime) = script.script_mut() {
-        if let Err(error) = runtime.close() {
+        if let Err(error) = runtime.call_linked(
+            "Scene_OnClose",
+            &[],
+            mission
+                .as_deref_mut()
+                .and_then(StageMissionRuntime::script_mut),
+        ) {
             warn!("scene script close failed: {error}");
         }
     }
@@ -2153,6 +2213,7 @@ fn update_scene_snow_mesh(mesh: &mut Mesh, positions: &[Vec3], size: f32, right:
 pub(crate) fn start_stage_script(
     touch: Option<ResMut<SceneTouchState>>,
     mut script: ResMut<StageScriptRuntime>,
+    mut mission: Option<ResMut<StageMissionRuntime>>,
     mut net: ResMut<crate::plugins::network_plugin::NetState>,
 ) {
     net.pending_objective_end = None;
@@ -2164,7 +2225,11 @@ pub(crate) fn start_stage_script(
             .host_mut()
             .set_character_team(0, local_scene_player_team(&net));
         runtime.host_mut().set_game_mode(scene_game_mode(&net));
-        if let Err(error) = runtime.start() {
+        if let Err(error) = runtime.start_linked(
+            mission
+                .as_deref_mut()
+                .and_then(StageMissionRuntime::script_mut),
+        ) {
             warn!("scene script start failed: {error}");
         }
     }
@@ -2179,6 +2244,7 @@ pub(crate) fn tick_stage_script(
     time: Res<Time>,
     frame_clock: Option<Res<crate::plugins::FrameClock>>,
     mut script: ResMut<StageScriptRuntime>,
+    mut mission: Option<ResMut<StageMissionRuntime>>,
     mut net: ResMut<crate::plugins::network_plugin::NetState>,
     net_tx: Option<Res<crate::plugins::network_plugin::NetTx>>,
     mut scene_effects: MessageWriter<crate::plugins::effect_plugin::SceneEffectEvent>,
@@ -2222,7 +2288,12 @@ pub(crate) fn tick_stage_script(
         }
         if scene_authority {
             let dt = crate::plugins::simulation_dt(frame_clock.as_deref(), time.delta_secs());
-            if let Err(error) = runtime.update(dt as f64) {
+            if let Err(error) = runtime.update_linked(
+                dt as f64,
+                mission
+                    .as_deref_mut()
+                    .and_then(StageMissionRuntime::script_mut),
+            ) {
                 warn!("scene script tick failed: {error}");
             }
         }
@@ -2326,6 +2397,7 @@ fn scene_script_touch_and_transfer(
     frame_clock: Option<Res<crate::plugins::FrameClock>>,
     mut touch: ResMut<SceneTouchState>,
     mut script: ResMut<StageScriptRuntime>,
+    mut mission: Option<ResMut<StageMissionRuntime>>,
     net: Res<crate::plugins::network_plugin::NetState>,
     net_tx: Option<Res<crate::plugins::network_plugin::NetTx>>,
     collider: Res<crate::plugins::stage_collider::StageCollider>,
@@ -2444,10 +2516,13 @@ fn scene_script_touch_and_transfer(
                 continue;
             }
             touch.cooldowns.insert(key, now + 0.6);
-            if let Err(error) = runtime.call_item(
+            if let Err(error) = runtime.call_item_linked(
                 callback_name,
                 "OnTouch",
                 &[PstValue::Num(character_id as f64)],
+                mission
+                    .as_deref_mut()
+                    .and_then(StageMissionRuntime::script_mut),
             ) {
                 warn!("script callItem OnTouch failed: {error}");
             }
@@ -3098,15 +3173,37 @@ fn sync_network_escort_flag(
 fn call_escort_pickup(
     runtime: &mut SceneScriptRuntime,
     definition: &meteor_network::escort_definition::EscortDefinition,
-    actor: i32,
+    actor: i64,
+    mission: Option<&mut MissionScriptRuntime>,
 ) {
-    if let Err(error) = runtime.call_item(
-        &definition.scene_name,
-        "OnPickUp",
-        &[PstValue::Num(actor as f64)],
-    ) {
+    if let Err(error) = runtime.item_picked_up(&definition.scene_name, actor, mission) {
         warn!("escort OnPickUp failed: {error}");
     }
+}
+
+pub(super) fn notify_script_kill(
+    killer: i64,
+    victim: i64,
+    mut scene: Option<&mut SceneScriptRuntime>,
+    mut mission: Option<&mut MissionScriptRuntime>,
+) -> Result<(), String> {
+    if killer < 0 || killer == victim {
+        return Ok(());
+    }
+    let args = [PstValue::Num(killer as f64), PstValue::Num(victim as f64)];
+    let scene_result = match scene.as_deref_mut() {
+        Some(scene) => scene
+            .call_linked("OnCharacterKill", &args, mission.as_deref_mut())
+            .map(|_| ()),
+        None => Ok(()),
+    };
+    let task_result = match mission {
+        Some(mission) => mission
+            .call_linked("OnCharacterKill", &args, scene)
+            .map(|_| ()),
+        None => Ok(()),
+    };
+    scene_result.and(task_result)
 }
 
 fn apply_network_escort_pickups(
@@ -3130,8 +3227,8 @@ fn apply_network_escort_pickups(
             .members
             .iter()
             .position(|m| m.player_id == player_id)
-            .map_or(-1, |i| i as i32);
-        call_escort_pickup(runtime, definition, actor);
+            .map_or(-1, |i| i as i64);
+        call_escort_pickup(runtime, definition, actor, None);
     }
 }
 
@@ -3383,7 +3480,11 @@ fn escort_cargo_pickup(
                         .get(carrier)
                         .ok()
                         .map_or(0, |(_, _, _, _, npc, _)| npc.map_or(0, |npc| npc.id));
-                    call_escort_pickup(runtime, definition, actor as i32);
+                    let mission = mission.script_mut().map(|task| {
+                        task.host_mut().sync_flag_carrier(Some(actor));
+                        task
+                    });
+                    call_escort_pickup(runtime, definition, actor, mission);
                 }
                 *last_carrier = Some(carrier);
                 *was_returning = false;
@@ -3491,9 +3592,16 @@ fn mode_objective_tick(
     }
 }
 
-fn start_mission_script(mut script: ResMut<StageMissionRuntime>) {
+fn start_mission_script(
+    mut script: ResMut<StageMissionRuntime>,
+    mut scene: Option<ResMut<StageScriptRuntime>>,
+) {
     if let Some(runtime) = script.script_mut() {
-        if let Err(error) = runtime.start() {
+        if let Err(error) = runtime.start_linked(
+            scene
+                .as_deref_mut()
+                .and_then(StageScriptRuntime::script_mut),
+        ) {
             warn!("mission script start failed: {error}");
         }
     }
@@ -3504,6 +3612,7 @@ fn tick_mission_script(
     frame_clock: Option<Res<crate::plugins::FrameClock>>,
     request: Res<LaunchRequest>,
     mut script: ResMut<StageMissionRuntime>,
+    mut scene: Option<ResMut<StageScriptRuntime>>,
 ) {
     #[cfg(not(target_arch = "wasm32"))]
     let _perf = super::perf_plugin::Scope::new(20);
@@ -3512,16 +3621,83 @@ fn tick_mission_script(
     }
     if let Some(runtime) = script.script_mut() {
         let dt = crate::plugins::simulation_dt(frame_clock.as_deref(), time.delta_secs());
-        if let Err(error) = runtime.update(dt as f64) {
+        if let Err(error) = runtime.update_linked(
+            dt as f64,
+            scene
+                .as_deref_mut()
+                .and_then(StageScriptRuntime::script_mut),
+        ) {
             warn!("mission script tick failed: {error}");
         }
     }
 }
 
-fn consume_mission_npc_requests(
+pub(super) fn consume_pst_actor_requests(
+    mut commands: Commands,
+    mission: Option<ResMut<StageMissionRuntime>>,
+    request: Res<LaunchRequest>,
+    net: Res<super::network_plugin::NetState>,
+    actors: Query<
+        (
+            Entity,
+            &DeathRespawn,
+            &Health,
+            Option<&LocalFighter>,
+            Option<&MissionNpc>,
+            Has<crate::components::fighter::WeaponSwitchActive>,
+        ),
+        With<Fighter>,
+    >,
+) {
+    use meteor_scene::mission_runtime::ActorRequest;
+    let Some(mut mission) = mission else { return };
+    let Some(script) = mission.script_mut() else {
+        return;
+    };
+    let requests = script.host_mut().take_actor_requests();
+    if !should_load_mission_script(&request)
+        || net.status == super::network_plugin::NetStatus::InRoom
+    {
+        return;
+    }
+    for action in requests {
+        let id = match action {
+            ActorRequest::SwitchWeapon(id) | ActorRequest::Reborn(id) => id,
+        };
+        let Some((entity, death, health, _, _, switching)) =
+            actors.iter().find(|(_, _, _, local, npc, _)| {
+                if id == 0 {
+                    local.is_some()
+                } else {
+                    npc.is_some_and(|npc| npc.in_scene_roster && npc.id == id)
+                }
+            })
+        else {
+            continue;
+        };
+        match action {
+            ActorRequest::SwitchWeapon(_)
+                if !switching && !death.active && health.current > 0.0 =>
+            {
+                commands
+                    .entity(entity)
+                    .insert(super::combat_plugin::ScriptWeaponSwitch);
+            }
+            ActorRequest::Reborn(_) if death.active && health.current <= 0.0 => {
+                commands
+                    .entity(entity)
+                    .insert(super::combat_plugin::ScriptReborn);
+            }
+            _ => {}
+        }
+    }
+}
+
+pub(super) fn consume_mission_npc_requests(
     mut commands: Commands,
     request: Res<LaunchRequest>,
     mut script: ResMut<StageMissionRuntime>,
+    mut scene: Option<ResMut<StageScriptRuntime>>,
     mut pending: ResMut<PendingMissionNpcCommands>,
     mut player_performance: ResMut<PlayerPerformance>,
     waypoints: Option<Res<WaypointGraph>>,
@@ -3566,6 +3742,9 @@ fn consume_mission_npc_requests(
         spawn_mission_npc(
             &mut commands,
             &mut script,
+            scene
+                .as_deref_mut()
+                .and_then(StageScriptRuntime::script_mut),
             waypoints.as_deref(),
             &npc_script,
             id,
@@ -3786,7 +3965,7 @@ fn consume_mission_attribute_updates(
     }
 }
 
-fn consume_mission_say_requests(
+pub(super) fn consume_mission_say_requests(
     mut script: ResMut<StageMissionRuntime>,
     mut dialogue: Option<ResMut<crate::plugins::ui_plugin::DialogueState>>,
 ) {
@@ -3859,32 +4038,43 @@ fn behavior_from_name(name: &str) -> Option<meteor_ai::behavior::BehaviorMode> {
 fn spawn_mission_npc(
     commands: &mut Commands,
     script: &mut ResMut<StageMissionRuntime>,
+    scene: Option<&mut SceneScriptRuntime>,
     waypoints: Option<&WaypointGraph>,
     npc_script: &str,
     id: i64,
 ) {
-    let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let roots = resource_roots(&root);
-    let legacy_path = format!("Level/{npc_script}.pst");
-    let bytes = meteor_asset::runtime_assets::read_legacy_path(&legacy_path).or_else(|| {
-        roots
-            .iter()
-            .find_map(|root| crate::resource_io::read(root.join(&legacy_path)).ok())
-    });
-    let Some(bytes) = bytes else {
-        warn!("mission AddNPC(\"{npc_script}\") — {npc_script}.pst missing");
-        return;
-    };
-    let text = crate::text_codec::decode_text(&bytes);
-    if let Some(runtime) = script.script_mut() {
-        if let Err(error) = runtime.activate_npc_script(id, &text) {
-            warn!("mission NPC {npc_script} initialization failed: {error}");
-        }
-    }
-    let definition = script
+    let definition = match script
         .script()
-        .and_then(|runtime| runtime.npc_definition(id, npc_script))
-        .unwrap_or_else(|| meteor_scene::mission_runtime::parse_npc_definition(&text, npc_script));
+        .and_then(|runtime| runtime.initialized_npc_definition(id, npc_script))
+    {
+        Some(definition) => definition,
+        None => {
+            let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let legacy_path = format!("Level/{npc_script}.pst");
+            let bytes =
+                meteor_asset::runtime_assets::read_legacy_path(&legacy_path).or_else(|| {
+                    resource_roots(&root)
+                        .iter()
+                        .find_map(|root| crate::resource_io::read(root.join(&legacy_path)).ok())
+                });
+            let Some(bytes) = bytes else {
+                warn!("mission AddNPC(\"{npc_script}\") — {npc_script}.pst missing");
+                return;
+            };
+            let text = crate::text_codec::decode_text(&bytes);
+            if let Some(runtime) = script.script_mut() {
+                if let Err(error) = runtime.activate_npc_script_linked(id, &text, scene) {
+                    warn!("mission NPC {npc_script} initialization failed: {error}");
+                }
+            }
+            script
+                .script()
+                .and_then(|runtime| runtime.npc_definition(id, npc_script))
+                .unwrap_or_else(|| {
+                    meteor_scene::mission_runtime::parse_npc_definition(&text, npc_script)
+                })
+        }
+    };
 
     let initial_forced_behavior = None;
     let initial_behavior_args = Vec::new();
@@ -4061,6 +4251,34 @@ fn sync_mission_fighters(
                 || !performance.queue.is_empty(),
         );
         host.sync_enemy(npc.id, intent.enemy_id);
+    }
+}
+
+fn sync_mission_spare_weapons(
+    mut script: ResMut<StageMissionRuntime>,
+    players: Query<&Fighter, With<LocalFighter>>,
+    npcs: Query<(&MissionNpc, &Fighter)>,
+) {
+    let Some(runtime) = script.script_mut() else {
+        return;
+    };
+    let host = runtime.host_mut();
+    let spare_item = |fighter: &Fighter| {
+        let slot = usize::from(1 - fighter.weapon_slot.min(1));
+        meteor_network::stock_protocol::stock_weapon_item_id(
+            fighter.weapon_slots[slot],
+            fighter.weapon_slot_variants[slot],
+        )
+        .unwrap_or(0)
+    };
+    host.begin_spare_weapon_sync();
+    if let Ok(player) = players.single() {
+        host.sync_spare_weapon(0, spare_item(player));
+    }
+    for (npc, fighter) in &npcs {
+        if npc.in_scene_roster {
+            host.sync_spare_weapon(npc.id, spare_item(fighter));
+        }
     }
 }
 
@@ -5052,6 +5270,70 @@ mod tests {
 
         let runtime = app.world().resource::<StageMissionRuntime>();
         assert_eq!(runtime.script().unwrap().host().output(), &["432"]);
+    }
+
+    #[test]
+    fn pst_extension_queries_follow_the_live_spare_slot() {
+        let source = r#"
+OnStart() { Print(GetWeapon2(0), GetWeaponType2(0)); }
+OnUpdate() { Print(GetWeapon2(0), GetWeaponType2(0)); }
+"#;
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .insert_resource(crate::plugins::FrameClock {
+                sim_dt: 0.1,
+                ..default()
+            })
+            .insert_resource(LaunchRequest::default())
+            .insert_resource(StageMissionRuntime(Some(MissionScriptRuntime::new(
+                source,
+                Default::default(),
+            ))))
+            .add_systems(
+                Startup,
+                (sync_mission_spare_weapons, start_mission_script).chain(),
+            )
+            .add_systems(
+                Update,
+                (sync_mission_spare_weapons, tick_mission_script).chain(),
+            );
+        let player = app
+            .world_mut()
+            .spawn((
+                LocalFighter,
+                Fighter {
+                    character_id: 0,
+                    player_slot: 0,
+                    weapon: 6,
+                    weapon_slots: [6, 11],
+                    weapon_slot: 0,
+                    weapon_slot_variants: [1, 2],
+                    weapon_variant: 1,
+                },
+            ))
+            .id();
+
+        app.update();
+        {
+            let mut fighter = app.world_mut().get_mut::<Fighter>(player).unwrap();
+            fighter.weapon = 11;
+            fighter.weapon_slot = 1;
+            fighter.weapon_variant = 2;
+        }
+        app.update();
+        app.world_mut()
+            .get_mut::<Fighter>(player)
+            .unwrap()
+            .weapon_slots[0] = 0;
+        app.update();
+        app.world_mut().despawn(player);
+        app.update();
+
+        let runtime = app.world().resource::<StageMissionRuntime>();
+        assert_eq!(
+            runtime.script().unwrap().host().output(),
+            &["53 11", "53 11", "15 6", "0 0", "-1 -1"]
+        );
     }
 
     #[test]

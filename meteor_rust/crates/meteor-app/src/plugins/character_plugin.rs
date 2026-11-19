@@ -1643,22 +1643,7 @@ pub(crate) fn weapon_model_stem(weapon_id: u8, variant: u8) -> Option<String> {
 }
 
 pub(crate) fn weapon_slot_from_item(item_id: i64) -> Option<(u8, u8)> {
-    if !(1..=59).contains(&item_id) {
-        return None;
-    }
-    match item_id {
-        47..=50 => return Some((10, (item_id - 47) as u8)),
-        51..=54 => return Some((11, (item_id - 51) as u8)),
-        55..=58 => return Some((12, (item_id - 55) as u8)),
-        59 => return Some((2, 5)),
-        _ => {}
-    }
-    const CLASSES: [u8; 9] = [1, 2, 3, 4, 5, 6, 7, 8, 9];
-    let offset = (item_id - 1) as usize;
-    Some((
-        CLASSES[offset % CLASSES.len()],
-        (offset / CLASSES.len()) as u8,
-    ))
+    meteor_core::weapon_kind_and_variant_from_item(u32::try_from(item_id).ok()?)
 }
 
 #[derive(Debug, Clone, Copy)]

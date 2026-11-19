@@ -296,6 +296,7 @@ type PickupPropsQuery<'w, 's> = Query<
         &'static Transform,
         &'static mut Visibility,
         Option<&'static crate::plugins::render_plugin::DynamicWeaponDrop>,
+        Option<&'static crate::plugins::render_plugin::ScriptSpawnedPickup>,
     ),
     (
         Without<crate::plugins::stage_plugin::LocalFighter>,
@@ -1002,6 +1003,31 @@ fn queue_pickup_effect(commands: &mut Commands, model: &str, collector: Entity) 
     });
 }
 
+fn finish_offline_pickup(
+    prop: &mut StageProp,
+    visibility: &mut Visibility,
+    respawn: f32,
+    consumed: &mut HashMap<String, (f32, u32)>,
+    actor: i64,
+    scene: Option<&mut meteor_scene::scene_script_runtime::SceneScriptRuntime>,
+    mission: Option<&mut meteor_scene::mission_runtime::MissionScriptRuntime>,
+) {
+    use meteor_scene::pst_runtime::PstValue;
+    prop.hit_count += 1;
+    prop.respawn_timer = respawn;
+    prop.interactive = false;
+    *visibility = Visibility::Hidden;
+    consumed.insert(prop.name.to_ascii_lowercase(), (respawn, prop.hit_count));
+    if let Some(scene) = scene {
+        for key in ["active", "interactive"] {
+            scene.set_item_property(&prop.name, key, PstValue::Num(0.0));
+        }
+        if let Err(error) = scene.item_picked_up(&prop.name, actor, mission) {
+            warn!("script pickup callback failed: {error}");
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn item_pickup(
     mut commands: Commands,
@@ -1011,6 +1037,7 @@ pub(crate) fn item_pickup(
     mut players: PickupPlayerQuery<'_, '_>,
     mut props: PickupPropsQuery<'_, '_>,
     mut script: ResMut<crate::plugins::stage_plugin::StageScriptRuntime>,
+    mut mission: Option<ResMut<crate::plugins::stage_plugin::StageMissionRuntime>>,
     resources: Option<Res<super::combat_plugin::CombatResourceData>>,
 ) {
     let dt = crate::plugins::simulation_dt(frame_clock.as_deref(), time.delta_secs());
@@ -1023,7 +1050,9 @@ pub(crate) fn item_pickup(
 
     let mut seen_props = std::collections::HashSet::new();
     let mut consumed_props = HashMap::new();
-    'props: for (prop_entity, mut prop, transform, mut visibility, dynamic_drop) in &mut props {
+    'props: for (prop_entity, mut prop, transform, mut visibility, dynamic_drop, script_spawn) in
+        &mut props
+    {
         if prop.respawn_timer > 0.0 {
             prop.respawn_timer -= dt;
             if prop.respawn_timer <= 0.0 {
@@ -1050,6 +1079,15 @@ pub(crate) fn item_pickup(
         if !prop.interactive || prop.broken {
             continue;
         }
+        let script_pickup = script.script().is_some_and(|scene| {
+            scene
+                .host()
+                .resolve_name(&prop.name)
+                .and_then(|id| scene.host().instance(id))
+                .is_some_and(|item| {
+                    item.get("script_pickup").truthy() && item.get("active").truthy()
+                })
+        });
         for &(_, collector) in &collectors {
             let Ok((
                 player_entity,
@@ -1081,6 +1119,21 @@ pub(crate) fn item_pickup(
             if !within_pickup_range(prop.world_center(transform), player_transform.translation) {
                 continue;
             }
+            if script_pickup {
+                if local.is_none() {
+                    continue;
+                }
+                finish_offline_pickup(
+                    &mut prop,
+                    &mut visibility,
+                    0.0,
+                    &mut consumed_props,
+                    0,
+                    script.script_mut(),
+                    mission.as_deref_mut().and_then(|m| m.script_mut()),
+                );
+                continue 'props;
+            }
             let Some((respawn, effect)) = item_effect_for(&prop.model) else {
                 let Some((weapon, variant)) = weapon_from_model(&prop.model) else {
                     continue;
@@ -1098,32 +1151,20 @@ pub(crate) fn item_pickup(
                     commands.entity(prop_entity).despawn();
                     continue 'props;
                 }
-                prop.hit_count += 1;
-                prop.respawn_timer = weapon_respawn_seconds(&prop.model).unwrap_or(5.0);
-                prop.interactive = false;
-                *visibility = Visibility::Hidden;
-                consumed_props.insert(
-                    prop.name.to_ascii_lowercase(),
-                    (prop.respawn_timer, prop.hit_count),
+                let respawn = if script_spawn.is_some() {
+                    0.0
+                } else {
+                    weapon_respawn_seconds(&prop.model).unwrap_or(5.0)
+                };
+                finish_offline_pickup(
+                    &mut prop,
+                    &mut visibility,
+                    respawn,
+                    &mut consumed_props,
+                    character_id,
+                    script.script_mut(),
+                    mission.as_deref_mut().and_then(|m| m.script_mut()),
                 );
-                if let Some(runtime) = script.script_mut() {
-                    for (key, value) in [("active", 0.0), ("interactive", 0.0)] {
-                        runtime.set_item_property(
-                            &prop.name,
-                            key,
-                            meteor_scene::scene_script_runtime::PstValue::Num(value),
-                        );
-                    }
-                    if let Err(error) = runtime.call_item(
-                        &prop.name,
-                        "OnPickUp",
-                        &[meteor_scene::scene_script_runtime::PstValue::Num(
-                            character_id as f64,
-                        )],
-                    ) {
-                        warn!("script callItem OnPickUp failed: {error}");
-                    }
-                }
                 continue 'props;
             };
             if local.is_none() {
@@ -1180,38 +1221,21 @@ pub(crate) fn item_pickup(
             );
 
             queue_pickup_effect(&mut commands, &prop.model, player_entity);
-            prop.hit_count += 1;
-            prop.respawn_timer = respawn;
-            prop.interactive = false;
-            *visibility = Visibility::Hidden;
-            consumed_props.insert(
-                prop.name.to_ascii_lowercase(),
-                (prop.respawn_timer, prop.hit_count),
+            let respawn = if script_spawn.is_some() { 0.0 } else { respawn };
+            finish_offline_pickup(
+                &mut prop,
+                &mut visibility,
+                respawn,
+                &mut consumed_props,
+                character_id,
+                script.script_mut(),
+                mission.as_deref_mut().and_then(|m| m.script_mut()),
             );
-
-            if let Some(runtime) = script.script_mut() {
-                for (key, value) in [("active", 0.0), ("interactive", 0.0)] {
-                    runtime.set_item_property(
-                        &prop.name,
-                        key,
-                        meteor_scene::scene_script_runtime::PstValue::Num(value),
-                    );
-                }
-                if let Err(error) = runtime.call_item(
-                    &prop.name,
-                    "OnPickUp",
-                    &[meteor_scene::scene_script_runtime::PstValue::Num(
-                        character_id as f64,
-                    )],
-                ) {
-                    warn!("script callItem OnPickUp failed: {error}");
-                }
-            }
             continue 'props;
         }
     }
 
-    for (_, mut prop, _, mut visibility, _) in &mut props {
+    for (_, mut prop, _, mut visibility, _, _) in &mut props {
         if let Some(&(respawn, hits)) = consumed_props.get(&prop.name.to_ascii_lowercase()) {
             prop.respawn_timer = respawn;
             prop.hit_count = hits;

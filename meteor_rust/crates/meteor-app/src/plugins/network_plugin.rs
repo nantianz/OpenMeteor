@@ -1986,7 +1986,7 @@ fn collect_net_key_actions(
 ) {
     if net.status != NetStatus::InRoom
         || !net.round_active
-        || performance.is_some_and(|performance| performance.input_blocked)
+        || performance.is_some_and(|performance| performance.blocks_input())
     {
         return;
     }

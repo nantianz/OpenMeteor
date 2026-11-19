@@ -336,6 +336,9 @@ impl Plugin for CombatPlugin {
                         .after(super::stage_plugin::tick_stage_script),
                     super::hazard_plugin::publish_stock_environment_geometry,
                     stage_hazard_damage.run_if(crate::plugins::simulation_frame),
+                    super::stage_plugin::consume_pst_actor_requests
+                        .run_if(crate::plugins::simulation_frame),
+                    scripted_respawn.run_if(crate::plugins::simulation_frame),
                     evaluate_match_end,
                     death_respawn,
                 )
@@ -492,6 +495,7 @@ fn stage_hazard_damage(
     mut notices: Option<ResMut<crate::plugins::system_notice::SystemNoticeFeed>>,
     mut offline_scores: Option<ResMut<OfflineScores>>,
     mut script: ResMut<super::stage_plugin::StageScriptRuntime>,
+    mut mission: Option<ResMut<super::stage_plugin::StageMissionRuntime>>,
     mut drops: MessageWriter<super::render_plugin::OfflineWeaponDeathDrop>,
     mut fighters: Query<
         (
@@ -675,11 +679,18 @@ fn stage_hazard_damage(
             .filter(|_| {
                 !(net.status == NetStatus::InRoom && net.is_stock_host() && net.stage == "sn22")
             });
+        let mut mission = mission
+            .as_deref_mut()
+            .and_then(|mission| mission.script_mut());
+        if let (Some(id), Some(mission)) = (character_id, mission.as_deref_mut()) {
+            mission.host_mut().record_script_death(id);
+        }
         if let (Some(id), Some(runtime)) = (character_id, script.script_mut()) {
             use meteor_scene::scene_script_runtime::PstValue;
-            if let Err(error) = runtime.call(
+            if let Err(error) = runtime.call_linked(
                 "Scene_OnCharacterEvent",
                 &[PstValue::Num(id as f64), PstValue::Num(202.0)],
+                mission,
             ) {
                 warn!("environment death callback failed: {error}");
             }
@@ -2263,6 +2274,7 @@ pub(crate) struct HitFeedback<'w> {
     room: Option<Res<'w, crate::app_state::RoomState>>,
     notices: Option<ResMut<'w, crate::plugins::system_notice::SystemNoticeFeed>>,
     offline_scores: Option<ResMut<'w, OfflineScores>>,
+    mission_scripts: Option<ResMut<'w, crate::plugins::stage_plugin::StageMissionRuntime>>,
     #[cfg(not(target_arch = "wasm32"))]
     trace: Option<ResMut<'w, super::combat_trace::CombatTrace>>,
 }
@@ -3454,6 +3466,12 @@ fn report_committed_anger(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[derive(Component)]
+pub(super) struct ScriptWeaponSwitch;
+
+#[derive(Component)]
+pub(super) struct ScriptReborn;
+
 fn combat_tick(
     mut commands: Commands,
     (active_fighter, time): (Option<Res<super::fighter_frame::ActiveFighter>>, Res<Time>),
@@ -3470,7 +3488,10 @@ fn combat_tick(
     assets: Option<Res<CharacterAssetsSet>>,
     mut controller: ResMut<LockOnController>,
     mut command_input: ResMut<crate::plugins::input_plugin::LocalCommandInput>,
-    switching: Query<(), With<WeaponSwitchActive>>,
+    (switching, script_switch): (
+        Query<(), With<WeaponSwitchActive>>,
+        Query<(), With<ScriptWeaponSwitch>>,
+    ),
     ranged_gates: Query<&RangedFireGate>,
     remotes: RemoteLockCandidateQuery<'_, '_>,
     mut query: CombatTickQuery<'_, '_>,
@@ -3583,6 +3604,9 @@ fn combat_tick(
         }
 
         if death.active {
+            if script_switch.contains(entity) {
+                commands.entity(entity).remove::<ScriptWeaponSwitch>();
+            }
             continue;
         }
         let Some(character_assets) = assets.0.get(&format!("p{}", fighter.character_id)) else {
@@ -3596,7 +3620,7 @@ fn combat_tick(
             .is_some_and(|state| *state.get() != AppState::Playing)
             || player_performance
                 .as_deref()
-                .is_some_and(|performance| performance.input_blocked);
+                .is_some_and(|performance| performance.blocks_input());
         let accept_local_input = is_local
             && !input_blocked
             && crate::plugins::input_simulation_substep(frame_clock.as_deref());
@@ -3763,6 +3787,25 @@ fn combat_tick(
         let input_pose_instance = sm.fighter_mut().pose.pose_instance_id;
         let mut attack_commit_accepted = false;
         let mut switch_started = false;
+        if script_switch.contains(entity) && !switch_active {
+            if fighter.weapon_slots[other_weapon_slot(fighter.weapon_slot)] == 0 {
+                commands.entity(entity).remove::<ScriptWeaponSwitch>();
+            } else if let Some(active) = begin_local_weapon_switch(
+                &mut sm,
+                false,
+                gun_aim.aiming,
+                fighter,
+                motion,
+                &attack_motion,
+                network.common_amb.as_deref(),
+            ) {
+                commands
+                    .entity(entity)
+                    .remove::<ScriptWeaponSwitch>()
+                    .insert(active);
+                switch_started = true;
+            }
+        }
         if is_local {
             let current_direction = directional_input(&keys, &mouse, &keymap);
             let step_direction = network
@@ -4167,7 +4210,7 @@ fn combat_tick(
             if let Some(now_ms) = command_update_ms {
                 command_input.0.update(now_ms);
             }
-        } else if !is_local && !switch_active {
+        } else if !is_local && !switch_active && !switch_started {
             if std::mem::take(&mut intent.want_weapon_switch) {
                 gun_aim.aiming = false;
                 intent.lock_target = None;
@@ -6360,9 +6403,21 @@ fn attack_windows(
                                 && net.is_stock_host()
                                 && net.stage == "sn22")
                         });
+                    let offline_victim = character_id.filter(|_| {
+                        net.status != NetStatus::InRoom
+                            && !mrc_playback.as_deref().is_some_and(|replay| replay.active)
+                    });
+                    let mut mission = feedback
+                        .mission_scripts
+                        .as_deref_mut()
+                        .and_then(|mission| mission.script_mut());
+                    if let (Some(victim), Some(mission)) = (offline_victim, mission.as_deref_mut())
+                    {
+                        mission.host_mut().record_script_death(victim);
+                    }
                     if let (Some(character_id), Some(runtime)) = (character_id, script.script_mut())
                     {
-                        if let Err(error) = runtime.call(
+                        if let Err(error) = runtime.call_linked(
                             "Scene_OnCharacterEvent",
                             &[
                                 meteor_scene::scene_script_runtime::PstValue::Num(
@@ -6370,8 +6425,19 @@ fn attack_windows(
                                 ),
                                 meteor_scene::scene_script_runtime::PstValue::Num(202.0),
                             ],
+                            mission.as_deref_mut(),
                         ) {
                             warn!("script Scene_OnCharacterEvent failed: {error}");
+                        }
+                    }
+                    if let Some(victim) = offline_victim {
+                        if let Err(error) = super::stage_plugin::notify_script_kill(
+                            snapshot.script_character_id,
+                            victim,
+                            script.script_mut(),
+                            mission,
+                        ) {
+                            warn!("script kill callback failed: {error}");
                         }
                     }
                 } else {
@@ -6489,10 +6555,14 @@ fn attack_windows(
                                 .host_mut()
                                 .set_character_team(snapshot.script_character_id, team);
                         }
-                        if let Err(error) = runtime.call_item(
+                        if let Err(error) = runtime.call_item_linked(
                             &prop.name,
                             "OnAttack",
                             &scene_on_attack_args(snapshot.script_character_id, prop_damage),
+                            feedback
+                                .mission_scripts
+                                .as_deref_mut()
+                                .and_then(|m| m.script_mut()),
                         ) {
                             warn!("script callItem OnAttack failed: {error}");
                         }
@@ -6648,11 +6718,19 @@ fn attack_windows(
             .filter(|_| {
                 !(net.status == NetStatus::InRoom && net.is_stock_host() && net.stage == "sn22")
             });
+        let mut mission = feedback
+            .mission_scripts
+            .as_deref_mut()
+            .and_then(|mission| mission.script_mut());
+        if let (Some(id), Some(mission)) = (character_id, mission.as_deref_mut()) {
+            mission.host_mut().record_script_death(id);
+        }
         if let (Some(id), Some(runtime)) = (character_id, script.script_mut()) {
             use meteor_scene::scene_script_runtime::PstValue;
-            if let Err(error) = runtime.call(
+            if let Err(error) = runtime.call_linked(
                 "Scene_OnCharacterEvent",
                 &[PstValue::Num(id as f64), PstValue::Num(202.0)],
+                mission,
             ) {
                 warn!("self effect death callback failed: {error}");
             }
@@ -6812,7 +6890,7 @@ fn advance_match_settlement(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn evaluate_match_end(
+pub(super) fn evaluate_match_end(
     mut end: ResMut<MatchEnd>,
     time: Res<Time>,
     frame_clock: Option<Res<crate::plugins::FrameClock>>,
@@ -7040,29 +7118,59 @@ fn solo_round_decision(round_result: i32, game_over: Option<i64>) -> i32 {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn death_respawn(
-    mut commands: Commands,
-    time: Res<Time>,
-    frame_clock: Option<Res<crate::plugins::FrameClock>>,
-    end: Res<MatchEnd>,
-    request: Res<crate::app_state::LaunchRequest>,
-    net: Res<NetState>,
-    mission: Option<Res<crate::plugins::stage_plugin::StageMissionRuntime>>,
-    assets: Option<Res<CharacterAssetsSet>>,
-    mut lock: ResMut<LockOnController>,
-    mut camera_basis: ResMut<crate::plugins::camera_plugin::CameraBasis>,
-    mut query: DeathRespawnQuery<'_, '_>,
-    mut statuses: Query<(
-        &mut crate::components::fighter::FighterStatusEffects,
-        &mut crate::components::fighter::WornEffect,
-    )>,
-) {
+#[derive(bevy::ecs::system::SystemParam)]
+pub(super) struct RespawnParams<'w, 's> {
+    commands: Commands<'w, 's>,
+    time: Res<'w, Time>,
+    frame_clock: Option<Res<'w, super::FrameClock>>,
+    end: Res<'w, MatchEnd>,
+    request: Res<'w, crate::app_state::LaunchRequest>,
+    net: Res<'w, NetState>,
+    mission: Option<Res<'w, super::stage_plugin::StageMissionRuntime>>,
+    assets: Option<Res<'w, CharacterAssetsSet>>,
+    lock: ResMut<'w, LockOnController>,
+    camera_basis: ResMut<'w, super::camera_plugin::CameraBasis>,
+    query: DeathRespawnQuery<'w, 's>,
+    statuses: Query<
+        'w,
+        's,
+        (
+            &'static mut crate::components::fighter::FighterStatusEffects,
+            &'static mut crate::components::fighter::WornEffect,
+        ),
+    >,
+    scripted: Query<'w, 's, (), With<ScriptReborn>>,
+}
+
+pub(super) fn death_respawn(params: RespawnParams<'_, '_>) {
+    respawn_fighters(params, false);
+}
+
+pub(super) fn scripted_respawn(params: RespawnParams<'_, '_>) {
+    respawn_fighters(params, true);
+}
+
+fn respawn_fighters(params: RespawnParams<'_, '_>, scripted_only: bool) {
+    let RespawnParams {
+        mut commands,
+        time,
+        frame_clock,
+        end,
+        request,
+        net,
+        mission,
+        assets,
+        mut lock,
+        mut camera_basis,
+        mut query,
+        mut statuses,
+        scripted,
+    } = params;
     if request.mode == "replay" {
         return;
     }
 
-    if end.settled || net.status == NetStatus::InRoom {
+    if end.settled || net.status == NetStatus::InRoom || (scripted_only && scripted.is_empty()) {
         return;
     }
 
@@ -7074,7 +7182,7 @@ pub(super) fn death_respawn(
     } else {
         meteor_network::modes::mode_rule_id(&request.mode)
     };
-    if !meteor_network::modes::can_respawn(rule) {
+    if !scripted_only && !meteor_network::modes::can_respawn(rule) {
         return;
     }
     let dt = crate::plugins::simulation_dt(frame_clock.as_deref(), time.delta_secs());
@@ -7104,15 +7212,20 @@ pub(super) fn death_respawn(
         local,
     ) in &mut query
     {
-        if mission_npc.is_some() {
+        if scripted_only != scripted.contains(entity) || (!scripted_only && mission_npc.is_some()) {
             continue;
+        }
+        if scripted_only {
+            commands.entity(entity).remove::<ScriptReborn>();
         }
         if !death.active {
             continue;
         }
-        death.timer -= dt;
-        if death.timer > 0.0 {
-            continue;
+        if !scripted_only {
+            death.timer -= dt;
+            if death.timer > 0.0 {
+                continue;
+            }
         }
 
         if let Ok((mut status, mut worn)) = statuses.get_mut(entity) {
@@ -7140,7 +7253,9 @@ pub(super) fn death_respawn(
             ai_intent.as_deref_mut(),
             wall.as_deref_mut(),
         );
-        commands.entity(entity).remove::<WeaponSwitchActive>();
+        commands
+            .entity(entity)
+            .remove::<(WeaponSwitchActive, ScriptWeaponSwitch)>();
         super::stage_plugin::FighterPlacement {
             position: death.spawn_pos,
             facing: motion.facing,
@@ -7314,7 +7429,7 @@ fn preadvance_local_ground_locomotion_pose(
             .is_some_and(|state| *state.get() != AppState::Playing)
             || player_performance
                 .as_deref()
-                .is_some_and(|performance| performance.input_blocked)
+                .is_some_and(|performance| performance.blocks_input())
         {
             Vec3::ZERO
         } else {
@@ -7598,7 +7713,7 @@ fn default_poses(
                         .is_none_or(|state| *state.get() == AppState::Playing)
                     && !player_performance
                         .as_deref()
-                        .is_some_and(|performance| performance.input_blocked)
+                        .is_some_and(|performance| performance.blocks_input())
                 {
                     let current =
                         crate::plugins::movement_plugin::directional_input(&keys, &mouse, &keymap);
@@ -21725,6 +21840,7 @@ mod tests {
     include!("combat_plugin/ninja_air_chain_tests.rs");
     include!("combat_plugin/sn11_bridge_tests.rs");
     include!("combat_tests/stock_impact_feedback.rs");
+    include!("combat_tests/pst_key_door_guard.rs");
     include!("combat_tests/down_jump.rs");
     include!("combat_tests/r7_input.rs");
     include!("combat_tests/fake_forward_roll.rs");
@@ -25853,3 +25969,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, feature = "original-assets", not(target_arch = "wasm32")))]
+pub(super) use tests::run_pst_key_door_guard_demo;

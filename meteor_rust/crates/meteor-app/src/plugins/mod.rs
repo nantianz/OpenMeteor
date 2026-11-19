@@ -680,6 +680,7 @@ pub mod network_plugin;
 mod npc_navigation;
 pub mod pak_textures;
 pub mod physics_plugin;
+mod pst_ui;
 mod radar_map;
 pub mod ranged_plugin;
 pub mod render_plugin;

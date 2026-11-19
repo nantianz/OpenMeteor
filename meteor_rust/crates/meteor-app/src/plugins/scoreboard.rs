@@ -114,7 +114,7 @@ fn auto_show_scoreboard(end: &MatchEnd, net: &NetState) -> bool {
     end.settled && net.battle_result.is_none()
 }
 
-fn capture_offline_roster(
+pub(super) fn capture_offline_roster(
     state: Res<State<AppState>>,
     net: Res<NetState>,
     request: Res<LaunchRequest>,

@@ -1,0 +1,71 @@
+int Rule = 1;
+int RoundTime = 10;
+int PlayerSpawn = 9;
+int PlayerSpawnDir = 90;
+int PlayerWeapon = 5;
+int PlayerWeapon2 = 0;
+int PlayerHP = 2000;
+
+int guard = -1;
+int revived = 0;
+
+OnStart()
+{
+    Say(0, "前面有一把钥匙。拿到钥匙，打开门，击败守卫。");
+}
+
+Item_OnPickUp(int item, int character)
+{
+    if (character != 0)
+    {
+        return;
+    }
+    if (item == GetSceneItemId("D_DemoSword"))
+    {
+        CharSwitchWeapon(character);
+        return;
+    }
+    if (guard >= 0 || item != GetSceneItemId("D_DemoKey"))
+    {
+        return;
+    }
+    UiCreatePanel("key_door", "石门");
+    UiAddText("key_door", "已拿到钥匙。用它打开石门。");
+    UiAddButton("key_door", "open", "开门");
+    UiShowPanel("key_door");
+}
+
+OnUiButton(string panel, string button)
+{
+    if (panel != "key_door" || button != "open" || guard >= 0)
+    {
+        return;
+    }
+    if (ExecuteFunction(GetSceneScriptId(), "OpenDemoDoor"))
+    {
+        UiClosePanel("key_door");
+        guard = AddNPC("pst_demo_guard");
+        CreateSceneItem("D_DemoSword", "pickup", "W0_0", 0);
+        PlayMusic("music/s8.mp3");
+        Say(0, "门开了。捡起脚边的剑，迎战守卫！");
+    }
+}
+
+OnCharacterKill(int killer, int victim)
+{
+    if (killer == 0 && victim == guard)
+    {
+        if (!revived && Reborn(guard))
+        {
+            revived = 1;
+            Say(0, "守卫复活了，再击败他一次！");
+            return;
+        }
+        Say(0, "守卫已击败。");
+        GameOver(1);
+    }
+    if (killer == guard && victim == 0)
+    {
+        GameOver(-1);
+    }
+}

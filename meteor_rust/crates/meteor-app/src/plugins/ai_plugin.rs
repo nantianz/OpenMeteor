@@ -1389,9 +1389,9 @@ pub(crate) fn drive_npc_ai(
         Option<Res<StageCollider>>,
         Option<Res<CharacterContactFrame>>,
     ),
-    (mut script, scene_script): (
+    (mut script, mut scene_script): (
         Option<ResMut<StageMissionRuntime>>,
-        Option<Res<crate::plugins::stage_plugin::StageScriptRuntime>>,
+        Option<ResMut<crate::plugins::stage_plugin::StageScriptRuntime>>,
     ),
     net: Option<Res<crate::plugins::network_plugin::NetState>>,
     qi_values: Query<&crate::components::fighter::Qi>,
@@ -1770,7 +1770,12 @@ pub(crate) fn drive_npc_ai(
         if let Some(id) = init_id.filter(|_| !performing && patrol.avoidance.is_none()) {
             if thought_tick {
                 if let Some(runtime) = script.as_deref_mut().and_then(|s| s.script_mut()) {
-                    if let Err(error) = runtime.run_npc_init(id) {
+                    if let Err(error) = runtime.run_npc_init_linked(
+                        id,
+                        scene_script
+                            .as_deref_mut()
+                            .and_then(|scene| scene.script_mut()),
+                    ) {
                         warn!("NPC {id} OnStart: {error}");
                     }
                 }
@@ -3582,6 +3587,7 @@ pub(crate) fn drive_npc_ai(
 pub(crate) fn finish_npc_script_tick(
     active_fighter: Option<Res<super::fighter_frame::ActiveFighter>>,
     mut script: Option<ResMut<StageMissionRuntime>>,
+    mut scene: Option<ResMut<crate::plugins::stage_plugin::StageScriptRuntime>>,
     mut npcs: Query<(Entity, &mut NpcPatrol, Option<&MissionNpc>), With<NpcFighter>>,
 ) {
     for (entity, mut patrol, npc) in &mut npcs {
@@ -3592,7 +3598,10 @@ pub(crate) fn finish_npc_script_tick(
             if let (Some(npc), Some(runtime)) =
                 (npc, script.as_deref_mut().and_then(|s| s.script_mut()))
             {
-                if let Err(error) = runtime.update_npc_script(npc.id) {
+                if let Err(error) = runtime.update_npc_script_linked(
+                    npc.id,
+                    scene.as_deref_mut().and_then(|scene| scene.script_mut()),
+                ) {
                     warn!("NPC {} OnUpdate: {error}", npc.id);
                 }
             }

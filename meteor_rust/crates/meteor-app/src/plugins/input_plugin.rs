@@ -731,7 +731,7 @@ pub(crate) fn capture_local_hold_inputs(
     }
     let input_blocked = performance
         .as_deref()
-        .is_some_and(|performance| performance.input_blocked);
+        .is_some_and(|performance| performance.blocks_input());
     update_crouch_latch(
         &mut crouch,
         CrouchInputFrame {
@@ -1306,7 +1306,7 @@ pub(crate) fn capture_local_command_input(
             crouch_held: state.crouch.held,
         },
     );
-    if performance.is_some_and(|performance| performance.input_blocked) {
+    if performance.is_some_and(|performance| performance.blocks_input()) {
         state.command_input.0.clear();
         state.dodge.clear();
         state.jump.clear();
