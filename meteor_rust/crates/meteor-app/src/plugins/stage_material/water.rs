@@ -1,4 +1,5 @@
 use super::{GmdlMaterial, GmdlMode};
+use crate::plugins::graphics_pack::config::WaterSkySelection;
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::prelude::*;
@@ -19,6 +20,26 @@ struct WaterSource {
     vertex_alpha: f32,
     reflection: &'static [u8],
     depth: &'static [u8],
+    sky_visibility: &'static [u8],
+    sky_visibility_layout: [usize; 2],
+    sky_visibility_skybox: &'static [(&'static str, &'static str)],
+}
+
+impl WaterSource {
+    fn sky_visibility_matches(&self, sky: WaterSkySelection<'_>) -> bool {
+        self.sky_visibility_layout
+            == [
+                sky.profile.visibility_resolution,
+                sky.profile.visibility_directions,
+            ]
+            && self.sky_visibility_skybox.len() == sky.skybox.len()
+            && self.sky_visibility_skybox.iter().zip(sky.skybox).all(
+                |((object, texture), target)| {
+                    object.eq_ignore_ascii_case(&target.object)
+                        && texture.eq_ignore_ascii_case(&target.texture)
+                },
+            )
+    }
 }
 #[cfg(not(feature = "original-assets"))]
 const SURFACES: &[WaterSource] = &[];
@@ -63,7 +84,23 @@ fn data_image(bytes: &[u8], images: &mut Assets<Image>) -> Handle<Image> {
 #[derive(Default)]
 pub(crate) struct WaterCache {
     ripple: Option<Handle<Image>>,
-    maps: HashMap<(String, String, String), (Handle<Image>, Handle<Image>)>,
+    maps: HashMap<(String, String, String), WaterImages>,
+}
+
+struct WaterImages {
+    reflection: Handle<Image>,
+    depth: Handle<Image>,
+    sky_visibility: Option<Handle<Image>>,
+}
+
+impl WaterImages {
+    fn attach(&self, material: &mut GmdlMaterial) {
+        material.water_reflection = Some(self.reflection.clone());
+        material.water_depth = Some(self.depth.clone());
+        material
+            .water_sky_visibility
+            .clone_from(&self.sky_visibility);
+    }
 }
 
 impl WaterCache {
@@ -76,6 +113,7 @@ impl WaterCache {
         texture: &str,
         center: [f32; 3],
         images: &mut Assets<Image>,
+        sky: Option<WaterSkySelection<'_>>,
     ) -> bool {
         if !matches!(material.mode, GmdlMode::Blend | GmdlMode::SrcColorOne)
             || material.params.alpha_cutoff > 0.0
@@ -89,6 +127,7 @@ impl WaterCache {
         else {
             return false;
         };
+        let sky = sky.filter(|_| setting.kind == 1);
         let additive = setting.blend_mode == config::BlendMode::SrcColorOne;
         let expected_mode = if additive {
             GmdlMode::SrcColorOne
@@ -121,14 +160,18 @@ impl WaterCache {
                 bounds = s.maps.bounds;
                 vertex_alpha = s.maps.vertex_alpha;
                 if let (Some(reflection), Some(depth)) = (&s.maps.reflection, &s.maps.depth) {
-                    let maps = self.maps.entry(key).or_insert_with(|| {
-                        (raw_image(reflection, images), raw_image(depth, images))
+                    let maps = self.maps.entry(key).or_insert_with(|| WaterImages {
+                        reflection: raw_image(reflection, images),
+                        depth: raw_image(depth, images),
+                        sky_visibility: sky
+                            .and(s.maps.sky_visibility.as_ref())
+                            .map(|map| raw_image(map, images)),
                     });
-                    material.water_reflection = Some(maps.0.clone());
-                    material.water_depth = Some(maps.1.clone());
+                    maps.attach(material);
                 } else {
                     material.water_reflection = None;
                     material.water_depth = None;
+                    material.water_sky_visibility = None;
                 }
             }
             #[cfg(any(target_arch = "wasm32", target_os = "android"))]
@@ -142,17 +185,18 @@ impl WaterCache {
             bounds = s.bounds;
             vertex_alpha = s.vertex_alpha;
             if setting.needs_maps() {
-                let maps = self.maps.entry(key).or_insert_with(|| {
-                    (
-                        data_image(s.reflection, images),
-                        data_image(s.depth, images),
-                    )
+                let maps = self.maps.entry(key).or_insert_with(|| WaterImages {
+                    reflection: data_image(s.reflection, images),
+                    depth: data_image(s.depth, images),
+                    sky_visibility: sky
+                        .filter(|&sky| s.sky_visibility_matches(sky))
+                        .map(|_| data_image(s.sky_visibility, images)),
                 });
-                material.water_reflection = Some(maps.0.clone());
-                material.water_depth = Some(maps.1.clone());
+                maps.attach(material);
             } else {
                 material.water_reflection = None;
                 material.water_depth = None;
+                material.water_sky_visibility = None;
             }
         }
         let ripple = self.ripple.get_or_insert_with(|| {
@@ -180,6 +224,22 @@ impl WaterCache {
             vertex_alpha,
             profile.map_or(setting.extinction, |(_, _, fallback_depth)| fallback_depth),
         );
+        material.water_sky_reflection = sky.is_some() && material.water_sky_visibility.is_some();
+        if let Some(sky) = sky {
+            let p = sky.profile;
+            material.water_sky_style = Vec4::new(
+                p.wave_distortion,
+                p.refraction_damping,
+                p.grazing_boost,
+                0.0,
+            );
+            material.water_sky_ranges = Vec4::new(
+                p.grazing_range[0],
+                p.grazing_range[1],
+                p.horizon_fade[0],
+                p.horizon_fade[1],
+            );
+        }
         material.water_optics =
             profile.map_or_else(Default::default, |(p, style, _)| super::WaterOptics {
                 absorption_ior: Vec3::from_array(p.absorption).extend(p.ior),
@@ -340,7 +400,8 @@ mod tests {
                 s.object,
                 s.texture,
                 [10.0, 20.0, 0.0],
-                &mut images
+                &mut images,
+                None,
             ));
             assert_eq!(mat.water_bounds.x, s.bounds[0] - 10.0 * MODEL_SCALE);
             assert_eq!(mat.water_bounds.y, s.bounds[1] + 20.0 * MODEL_SCALE);
@@ -376,6 +437,7 @@ mod tests {
             "sn13w01.jpg",
             [0.0; 3],
             &mut images,
+            None,
         );
         assert_eq!(images.len(), count);
         mat.mode = GmdlMode::Add;
@@ -385,7 +447,8 @@ mod tests {
             "Plane02",
             "sn13w01.jpg",
             [0.0; 3],
-            &mut images
+            &mut images,
+            None,
         ));
     }
 }

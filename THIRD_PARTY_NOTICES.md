@@ -11,6 +11,7 @@ retain their own licenses and copyright notices.
 | Bevy default font | Distributed by the Bevy text dependency | SIL Open Font License 1.1 |
 | Noto Sans SC, Windows release font | https://github.com/google/fonts/tree/a85815a42757630ce188fdad368c2dfc444d4773/ofl/notosanssc | SIL Open Font License 1.1 |
 | Protocol compatibility fixture, @bufbuild/protobuf | https://github.com/bufbuild/protobuf-es | Apache-2.0 |
+| Starter grass ground textures | Poly Haven (Stony Dirt Path and Sparse Grass) | https://polyhaven.com/license (CC0) |
 | SN03 and SN06 runtime rock Meshlets and textures | Fab / Megascans | https://www.fab.com/eula |
 
 Vendored license texts are included beside their source. Other dependencies are

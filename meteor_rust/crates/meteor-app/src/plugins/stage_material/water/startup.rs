@@ -24,7 +24,12 @@ fn begin(
     mut commands: Commands,
     mut state: ResMut<WaterStartup>,
     font: Res<crate::plugins::launcher_ui::UiFont>,
+    graphics: Option<Res<crate::plugins::graphics_pack::GraphicsPacks>>,
 ) {
+    let graphics = graphics
+        .as_deref()
+        .map(|packs| packs.catalog_snapshot())
+        .unwrap_or_default();
     *state.progress.lock().unwrap() = (0.0, "正在检查水面烘焙缓存".into());
     let progress = state.progress.clone();
     let (tx, rx) = mpsc::channel();
@@ -36,6 +41,7 @@ fn begin(
             }
             super::bake_cache::prepare(
                 super::config::get(),
+                &graphics,
                 &super::bake_cache::directory(),
                 |value, caption| {
                     *progress.lock().unwrap() = (value, caption);

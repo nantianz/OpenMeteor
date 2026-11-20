@@ -61,6 +61,7 @@ bitflags::bitflags! {
         const SRC_COLOR_ONE = 1 << 2;
         const SRC_ALPHA_ONE = 1 << 3;
         const SRC_ALPHA_BLEND = 1 << 4;
+        const WATER_SKY = 1 << 5;
     }
 }
 
@@ -113,9 +114,13 @@ pub struct GmdlMaterial {
     pub(crate) water_optics: WaterOptics,
     pub(crate) grass_ground: Vec4,
     pub(crate) grass_bounds: Vec4,
+    pub(crate) grass_coverage: Option<Handle<Image>>,
+    pub(crate) grass_underlay: Option<Handle<Image>>,
+    pub(crate) grass_underlay_scale: f32,
 
     pub water_bounds: Vec4,
     pub water_reflection: Option<Handle<Image>>,
+    pub(crate) water_sky_visibility: Option<Handle<Image>>,
     pub water_depth: Option<Handle<Image>>,
     pub water_normal: Option<Handle<Image>>,
     pub water_dynamics: Option<Handle<Image>>,
@@ -123,6 +128,9 @@ pub struct GmdlMaterial {
 
     pub water_live_reflection: bool,
     pub(crate) water_screen_refraction: bool,
+    pub(crate) water_sky_reflection: bool,
+    pub(crate) water_sky_style: Vec4,
+    pub(crate) water_sky_ranges: Vec4,
 
     pub body_glow: Vec4,
 
@@ -164,14 +172,21 @@ impl GmdlMaterial {
             water_optics: WaterOptics::default(),
             grass_ground: Vec4::ZERO,
             grass_bounds: Vec4::ZERO,
+            grass_coverage: None,
+            grass_underlay: None,
+            grass_underlay_scale: 0.0,
             water_bounds: Vec4::ZERO,
             water_reflection: None,
+            water_sky_visibility: None,
             water_depth: None,
             water_normal: None,
             water_dynamics: None,
             water_dynamics_bounds: Vec4::ZERO,
             water_live_reflection: false,
             water_screen_refraction: false,
+            water_sky_reflection: false,
+            water_sky_style: Vec4::ZERO,
+            water_sky_ranges: Vec4::ZERO,
             body_glow: Vec4::ZERO,
             body_style: Vec4::ZERO,
             first_person_clip: Vec4::ZERO,
@@ -197,6 +212,9 @@ impl GmdlMaterial {
 
     fn key(&self) -> GmdlMaterialKey {
         let mut key = GmdlMaterialKey::empty();
+        if self.water_sky_reflection && !cfg!(any(target_arch = "wasm32", target_os = "android")) {
+            key |= GmdlMaterialKey::WATER_SKY;
+        }
         if self.two_side {
             key |= GmdlMaterialKey::TWO_SIDE;
         }
@@ -305,6 +323,11 @@ impl Material for GmdlMaterial {
         if is_prepass_pipeline(descriptor) {
             return Ok(());
         }
+        if key.bind_group_data.contains(GmdlMaterialKey::WATER_SKY) {
+            if let Some(fragment) = &mut descriptor.fragment {
+                fragment.shader_defs.push("WATER_SKY_REFLECTION".into());
+            }
+        }
         if let Some(depth_stencil) = &mut descriptor.depth_stencil {
             depth_stencil.depth_write_enabled =
                 Some(!key.bind_group_data.contains(GmdlMaterialKey::BLEND_GROUP));
@@ -333,6 +356,7 @@ pub struct GmdlMaterialPlugin;
 
 impl Plugin for GmdlMaterialPlugin {
     fn build(&self, app: &mut App) {
+        super::graphics_pack::sky::register_panorama_shader(app);
         water::install(app);
         dynamic_uniforms::install(app);
         water::interaction::install(app);

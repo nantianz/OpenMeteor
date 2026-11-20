@@ -16,6 +16,7 @@ use bevy::camera::{
     visibility::{NoAutoAabb, VisibilitySystems},
 };
 use bevy::ecs::system::SystemParamItem;
+use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::mesh::{MeshTag, MeshVertexBufferLayoutRef};
 use bevy::pbr::{MaterialPipeline, MaterialPipelineKey};
 use bevy::prelude::*;
@@ -185,7 +186,7 @@ pub(crate) fn spawn<'a>(
     faces: &std::collections::BTreeSet<u32>,
     support: Option<&crate::plugins::stage_collider::StageMeshCollider>,
     center: [f32; 3],
-) -> Option<&'a Grass> {
+) -> Option<GrassGround<'a>> {
     let Some(profile) = packs
         .scenes(stage)
         .filter_map(|(_, scene)| scene.grass.as_ref())
@@ -197,17 +198,18 @@ pub(crate) fn spawn<'a>(
         return None;
     }
     let support = support.map(|mesh| mesh as &dyn meteor_physics::collision::MeshCollider);
-    let tiles = match placement::place(profile, source, description, faces, support, center) {
-        Ok(tiles) if !tiles.is_empty() => tiles,
-        Ok(_) => {
-            warn!("{stage}: grass area contains no eligible ground");
-            return None;
-        }
-        Err(error) => {
-            warn!("{stage}: {error}");
-            return None;
-        }
-    };
+    let (tiles, cover) =
+        match placement::place(profile, source, description, faces, support, center) {
+            Ok((tiles, cover)) if !tiles.is_empty() => (tiles, cover),
+            Ok(_) => {
+                warn!("{stage}: grass area contains no eligible ground");
+                return None;
+            }
+            Err(error) => {
+                warn!("{stage}: {error}");
+                return None;
+            }
+        };
     let fallback = super::config::Wind::default();
     let wind = packs.wind(stage).unwrap_or(&fallback);
     let mut bytes = Vec::with_capacity(tiles.len() * ROOTS_PER_TILE * 16);
@@ -294,6 +296,53 @@ pub(crate) fn spawn<'a>(
         "{stage}: interactive grass placed {root_count} clumps in {} tiles",
         tiles.len()
     );
+    let bounds = cover.bounds();
+    let underlay = packs
+        .scenes(stage)
+        .filter_map(|(pack, scene)| scene.grass_ground.as_ref().map(|ground| (pack, ground)))
+        .last()
+        .and_then(|(pack, ground)| {
+            let source = pack.images.get(&ground.image)?;
+            let (bytes, mip_count) = super::surfaces::mip_chain(source, true);
+            let mut image = Image::new_uninit(
+                Extent3d {
+                    width: source.width,
+                    height: source.height,
+                    depth_or_array_layers: 1,
+                },
+                TextureDimension::D2,
+                TextureFormat::Rgba8UnormSrgb,
+                RenderAssetUsages::RENDER_WORLD,
+            );
+            image.data = Some(bytes);
+            image.texture_descriptor.mip_level_count = mip_count;
+            Some((images.add(image), ground.world_size.recip()))
+        });
+    let coverage = if underlay.is_some() {
+        let mut image = Image::new(
+            Extent3d {
+                width: cover.size.x,
+                height: cover.size.y,
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            placement::ground_channels(&cover, &tiles),
+            TextureFormat::Rg8Unorm,
+            RenderAssetUsages::RENDER_WORLD,
+        );
+
+        image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+            address_mode_u: ImageAddressMode::Repeat,
+            address_mode_v: ImageAddressMode::Repeat,
+            mag_filter: ImageFilterMode::Linear,
+            min_filter: ImageFilterMode::Linear,
+            mipmap_filter: ImageFilterMode::Linear,
+            ..default()
+        });
+        image
+    } else {
+        cover.into_image()
+    };
     commands
         .spawn((
             PlayingSceneEntity,
@@ -331,7 +380,12 @@ pub(crate) fn spawn<'a>(
                 ));
             }
         });
-    Some(profile)
+    Some(GrassGround {
+        profile,
+        bounds,
+        coverage: images.add(coverage),
+        underlay,
+    })
 }
 
 fn clump_capacity(bucket: usize) -> usize {
@@ -351,22 +405,36 @@ fn upgrade_lod(desired: usize, bucket: usize, remaining: &mut usize) -> usize {
     DISTANT
 }
 
-pub(crate) fn ground_material(
-    profile: &Grass,
-    object: &str,
-    texture: &str,
-    material: &mut crate::plugins::stage_material::GmdlMaterial,
-) {
-    if !profile
-        .surfaces
-        .iter()
-        .any(|target| target.matches(object, texture))
-    {
-        return;
+pub(crate) struct GrassGround<'a> {
+    profile: &'a Grass,
+    bounds: Vec4,
+    coverage: Handle<Image>,
+    underlay: Option<(Handle<Image>, f32)>,
+}
+
+impl GrassGround<'_> {
+    pub(crate) fn configure(
+        &self,
+        object: &str,
+        texture: &str,
+        material: &mut crate::plugins::stage_material::GmdlMaterial,
+    ) {
+        if self
+            .profile
+            .surfaces
+            .iter()
+            .any(|target| target.matches(object, texture))
+        {
+            material.grass_ground =
+                Vec3::from_array(self.profile.tip_color).extend(self.profile.ground_cover);
+            material.grass_bounds = self.bounds;
+            material.grass_coverage = Some(self.coverage.clone());
+            if let Some((texture, scale)) = &self.underlay {
+                material.grass_underlay = Some(texture.clone());
+                material.grass_underlay_scale = *scale;
+            }
+        }
     }
-    let [min, max] = profile.bounds.unwrap_or([[-65536.0; 2], [65536.0; 2]]);
-    material.grass_ground = Vec3::from_array(profile.tip_color).extend(profile.ground_cover);
-    material.grass_bounds = Vec4::new(min[0], min[1], max[0], max[1]);
 }
 
 fn update(

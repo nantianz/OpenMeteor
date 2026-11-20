@@ -334,7 +334,10 @@ pub(super) fn update_wind(
     }
 }
 
-fn mip_chain(source: &meteor_asset::texture::DecodedImage, srgb: bool) -> (Vec<u8>, u32) {
+pub(super) fn mip_chain(
+    source: &meteor_asset::texture::DecodedImage,
+    srgb: bool,
+) -> (Vec<u8>, u32) {
     let linear: [f32; 256] = std::array::from_fn(|i| {
         let x = i as f32 / 255.;
         if srgb && x > 0.04045 {

@@ -64,7 +64,13 @@ pub struct Scene {
     #[serde(default)]
     pub sky: Option<Sky>,
     #[serde(default)]
+    pub water_sky_reflections: Vec<WaterSkyReflection>,
+    #[serde(default)]
     pub grass: Option<Grass>,
+    #[serde(default)]
+    pub grass_ground: Option<GrassGroundTexture>,
+    #[serde(default)]
+    pub snow: Option<Snow>,
     #[serde(default)]
     pub environment: Option<Environment>,
     #[serde(default)]
@@ -89,7 +95,7 @@ pub struct Scene {
 #[serde(default, deny_unknown_fields)]
 pub struct Grass {
     pub enabled: bool,
-    pub surfaces: Vec<GrassSurface>,
+    pub surfaces: Vec<SurfaceSelector>,
     pub bounds: Option<[[f32; 2]; 2]>,
     pub density: f32,
     pub tile_size: f32,
@@ -116,14 +122,145 @@ pub struct Grass {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct GrassSurface {
+pub struct GrassGroundTexture {
+    pub image: String,
+    pub world_size: f32,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SurfaceSelector {
     pub object: String,
     pub texture: String,
 }
 
-impl GrassSurface {
+impl SurfaceSelector {
     pub fn matches(&self, object: &str, texture: &str) -> bool {
         self.object.eq_ignore_ascii_case(object) && self.texture.eq_ignore_ascii_case(texture)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WaterSkyReflection {
+    pub surface: SurfaceSelector,
+    pub enabled: bool,
+    pub visibility_resolution: usize,
+    pub visibility_directions: usize,
+    pub wave_distortion: f32,
+    pub refraction_damping: f32,
+    pub grazing_boost: f32,
+    pub grazing_range: [f32; 2],
+    pub horizon_fade: [f32; 2],
+}
+
+impl WaterSkyReflection {
+    fn validate(&self) -> Result<(), String> {
+        if [&self.surface.object, &self.surface.texture]
+            .into_iter()
+            .any(|s| s.trim().is_empty() || s.len() > 120 || s.contains(['*', '?']))
+            || !(16..=96).contains(&self.visibility_resolution)
+            || !(4..=32).contains(&self.visibility_directions)
+            || self.visibility_directions % 4 != 0
+        {
+            return Err("invalid water sky reflection surface or visibility grid".into());
+        }
+        range("water sky wave_distortion", self.wave_distortion, 0., 1.)?;
+        range(
+            "water sky refraction_damping",
+            self.refraction_damping,
+            0.,
+            1.,
+        )?;
+        range("water sky grazing_boost", self.grazing_boost, 0., 1.)?;
+        for (name, [start, end]) in [
+            ("grazing_range", self.grazing_range),
+            ("horizon_fade", self.horizon_fade),
+        ] {
+            range(name, start, 0., 1.)?;
+            range(name, end, 0., 1.)?;
+            if start >= end {
+                return Err(format!("water sky {name} must increase"));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct WaterSkySelection<'a> {
+    pub profile: &'a WaterSkyReflection,
+    pub skybox: &'a [SkyIdentity],
+}
+
+pub(super) fn select_water_sky<'a>(
+    scenes: impl Iterator<Item = &'a Scene>,
+    object: &str,
+    texture: &str,
+) -> Option<WaterSkySelection<'a>> {
+    let texture = texture.rsplit(['/', '\\']).next().unwrap_or(texture);
+    let mut reflection = None;
+    let mut sky = None;
+    for scene in scenes {
+        if let Some(value) = &scene.sky {
+            sky = Some(value);
+        }
+        if let Some(value) = scene
+            .water_sky_reflections
+            .iter()
+            .find(|r| r.surface.matches(object, texture))
+        {
+            reflection = Some(value);
+        }
+    }
+    let profile = reflection.filter(|r| r.enabled)?;
+    let sky = sky.filter(|sky| sky.enabled && sky.replace_skybox)?;
+    Some(WaterSkySelection {
+        profile,
+        skybox: &sky.skybox,
+    })
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Snow {
+    pub enabled: bool,
+    pub surfaces: Vec<SurfaceSelector>,
+    pub thickness: f32,
+    pub recovery_seconds: f32,
+    pub imprint_strength: f32,
+}
+
+impl Default for Snow {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            surfaces: vec![],
+            thickness: 0.36,
+            recovery_seconds: 36.0,
+            imprint_strength: 0.8,
+        }
+    }
+}
+
+impl Snow {
+    fn validate(&self, stage: &str) -> Result<(), String> {
+        if stage == "*"
+            || self.surfaces.len() > 32
+            || (self.enabled && self.surfaces.is_empty())
+            || self.surfaces.iter().any(|surface| {
+                [&surface.object, &surface.texture]
+                    .iter()
+                    .any(|name| name.trim().is_empty() || name.contains('*'))
+            })
+        {
+            return Err(format!(
+                "{stage}: snow requires a stage and exact surface selectors"
+            ));
+        }
+        range("snow recovery seconds", self.recovery_seconds, 3.0, 120.0)?;
+        range("snow thickness", self.thickness, 0.12, 0.58)?;
+        range("snow imprint strength", self.imprint_strength, 0.05, 1.0)
     }
 }
 
@@ -278,6 +415,9 @@ pub struct Sky {
     pub density: f32,
     pub coverage: f32,
     pub scale: f32,
+    pub cloud_definition: f32,
+    pub weather_scale: f32,
+    pub weather_offset: [f32; 2],
     pub wind: [f32; 2],
     pub steps: u32,
     pub cloud_update_hz: u32,
@@ -302,6 +442,9 @@ impl Default for Sky {
             density: 0.13,
             coverage: 0.57,
             scale: 0.017,
+            cloud_definition: 0.0,
+            weather_scale: 0.00065,
+            weather_offset: [0.0; 2],
             wind: [1.7, 0.6],
             steps: 24,
             cloud_update_hz: 15,
@@ -322,7 +465,7 @@ pub enum SkyTime {
     Fixed { time: String },
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SkyIdentity {
     pub object: String,
@@ -403,6 +546,11 @@ impl Sky {
         range("cloud density", self.density, 0., 1.)?;
         range("cloud coverage", self.coverage, 0., 1.)?;
         range("cloud scale", self.scale, 0.0001, 1.)?;
+        range("cloud definition", self.cloud_definition, 0.0, 1.0)?;
+        range("weather scale", self.weather_scale, 0.0001, 0.01)?;
+        for offset in self.weather_offset {
+            range("weather offset", offset, -10000.0, 10000.0)?;
+        }
         range("sky ambient strength", self.ambient_strength, 0., 2.)?;
         range("sky ground bounce", self.ground_bounce, 0., 1.)?;
         if let Some(sun) = &self.sun {
@@ -950,8 +1098,37 @@ impl Pack {
             if let Some(sky) = &s.sky {
                 sky.validate(&s.stage)?;
             }
+            if s.water_sky_reflections.len() > 32 {
+                return Err("too many water sky reflections".into());
+            }
+            let mut reflected = std::collections::HashSet::new();
+            for reflection in &s.water_sky_reflections {
+                reflection.validate()?;
+                let surface = &reflection.surface;
+                if !reflected.insert((
+                    surface.object.to_ascii_lowercase(),
+                    surface.texture.to_ascii_lowercase(),
+                )) {
+                    return Err(format!(
+                        "duplicate water sky surface: {} / {}",
+                        surface.object, surface.texture
+                    ));
+                }
+            }
             if let Some(grass) = &s.grass {
                 grass.validate(&s.stage)?;
+            }
+            if let Some(ground) = &s.grass_ground {
+                resource(&ground.image)?;
+                range(
+                    "grass ground texture world_size",
+                    ground.world_size,
+                    0.5,
+                    24.0,
+                )?;
+            }
+            if let Some(snow) = &s.snow {
+                snow.validate(&s.stage)?;
             }
             if let Some(e) = &s.environment {
                 color("sky", e.sky)?;

@@ -15,7 +15,11 @@ mod sky_benchmark;
 #[cfg(feature = "original-assets")]
 mod sn03_preview;
 #[cfg(feature = "original-assets")]
+mod sn04_snow;
+#[cfg(feature = "original-assets")]
 mod sn06_preview;
+#[cfg(feature = "original-assets")]
+mod sn13_water_sky;
 fn capture(app: &mut App, pixels: &Arc<Mutex<Vec<u8>>>) -> Vec<u8> {
     capture_size(app, pixels, 128, 128)
 }
@@ -54,6 +58,7 @@ fn headless_cloud_sky_renders_and_respects_opaque_depth() {
     use crate::app_state::{AppState, LoadedStageInfo, Settings};
     use crate::plugins::graphics_pack::{config, sky};
 
+    let water_sky: Option<std::path::PathBuf> = std::env::var_os("METEOR_SN13_WATER_SKY_CAPTURE").map(Into::into);
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
@@ -71,17 +76,21 @@ fn headless_cloud_sky_renders_and_respects_opaque_depth() {
             .disable::<bevy::audio::AudioPlugin>(),
     );
     sky::install(&mut app);
-    app.add_plugins(crate::plugins::stage_material::GmdlMaterialPlugin)
-        .add_systems(PostUpdate, runtime::update_frame)
-        .insert_state(AppState::Playing)
-        .insert_resource(Settings {
-            environment_lighting: false,
-            ..default()
-        })
-        .insert_resource(LoadedStageInfo {
-            stage_id: "sn13".into(),
-            ..default()
-        });
+    app.insert_resource(Settings {
+        environment_lighting: false,
+        water_live_reflections: water_sky.is_some(),
+        ..default()
+    })
+    .add_plugins(crate::plugins::stage_material::GmdlMaterialPlugin)
+    .add_systems(PostUpdate, runtime::update_frame)
+    .insert_state(AppState::Playing)
+    .insert_resource(LoadedStageInfo {
+        stage_id: "sn13".into(),
+        ..default()
+    });
+    if water_sky.is_some() {
+        app.add_plugins(crate::plugins::display_settings_plugin::DisplaySettingsPlugin);
+    }
     crate::plugins::frame_work::install(&mut app);
     let mut packs = starter();
     app.insert_resource(starter());
@@ -191,6 +200,28 @@ fn headless_cloud_sky_renders_and_respects_opaque_depth() {
         lit[middle + 2] > lit[middle] + 8,
         "sky must tint the opaque material"
     );
+
+    let detailed = config::Sky {
+        cloud_definition: 1.0,
+        ..configured.clone()
+    };
+    *app.world_mut()
+        .resource_mut::<Assets<sky::CloudSkyMaterial>>()
+        .get_mut(&cloud)
+        .unwrap() = sky::material(&detailed, &light, noise.clone(), packs.wind("sn13"));
+    let defined_clouds = capture(&mut app, &pixels);
+    assert!(sky::cache_ready(&app));
+    assert!(
+        changed(&lit, &defined_clouds) > 512,
+        "cloud definition must change the visible cloud structure"
+    );
+    assert_eq!(lit[middle..middle + 4], defined_clouds[middle..middle + 4]);
+    *app.world_mut()
+        .resource_mut::<Assets<sky::CloudSkyMaterial>>()
+        .get_mut(&cloud)
+        .unwrap() = sky::material(&configured, &light, noise.clone(), packs.wind("sn13"));
+    assert_eq!(capture(&mut app, &pixels), lit);
+
     app.world_mut().resource_mut::<FrameUniforms>().seconds = 14.0;
     let moved = capture(&mut app, &pixels);
     assert!(
@@ -258,13 +289,19 @@ fn headless_cloud_sky_renders_and_respects_opaque_depth() {
     #[cfg(feature = "original-assets")]
     let benchmark = std::env::var_os("METEOR_SKY_BENCH").is_some();
     #[cfg(feature = "original-assets")]
-    if dir.is_some() || benchmark {
-        run_sn13(&mut app, dir, benchmark, times);
+    if dir.is_some() || benchmark || water_sky.is_some() {
+        run_sn13(&mut app, dir, benchmark, times, water_sky);
     }
 }
 
 #[cfg(feature = "original-assets")]
-fn run_sn13(app: &mut App, dir: Option<std::path::PathBuf>, benchmark: bool, times: bool) {
+fn run_sn13(
+    app: &mut App,
+    dir: Option<std::path::PathBuf>,
+    benchmark: bool,
+    times: bool,
+    water_sky: Option<std::path::PathBuf>,
+) {
     use crate::app_state::{LoadedStageAssets, LoadedStageInfo};
     use crate::plugins::{
         escort_assets::LoadedEscort, hazard_plugin::StageHazardRuntime,
@@ -326,9 +363,11 @@ fn run_sn13(app: &mut App, dir: Option<std::path::PathBuf>, benchmark: bool, tim
     if benchmark {
         sky_benchmark::run(app, camera, &target, to_world);
     }
+    if let Some(dir) = water_sky {
+        sn13_water_sky::capture(app, &dir, camera, &target, to_world, width, height);
+    }
 }
 
-#[cfg(feature = "original-assets")]
 fn load_sn13_variant(app: &mut App, enabled: bool) {
     use crate::app_state::Settings;
     use crate::plugins::render_plugin::{setup_stage_scene, PlayingSceneEntity};
@@ -355,7 +394,6 @@ fn load_sn13_variant(app: &mut App, enabled: bool) {
     assert_eq!(activated, enabled);
 }
 
-#[cfg(feature = "original-assets")]
 fn capture_sn13(
     app: &mut App,
     dir: std::path::PathBuf,

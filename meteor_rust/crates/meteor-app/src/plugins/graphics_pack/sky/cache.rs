@@ -10,18 +10,23 @@ use bevy::render::{
 use bevy::shader::ShaderDefVal;
 use std::time::{Duration, Instant};
 
-const WIDTH: u32 = 2048;
-const HEIGHT: u32 = 1024;
-const ROWS_PER_FRAME: u32 = 96;
+const WIDTH: u32 = 3072;
+const HEIGHT: u32 = 1536;
+const ROWS_PER_FRAME: u32 = 64;
+const CLOUD_TILE_SIZE: u32 = 16;
 const FORMAT: TextureFormat = TextureFormat::Rgba16Float;
+const MAX_BLEND_SECONDS: f32 = 0.055;
 
 #[derive(Clone, Copy, Default, ShaderType)]
-pub(super) struct CacheView {
+pub(crate) struct CacheView {
     origin_time: Vec4,
     previous_origin_time: Vec4,
     state: UVec4,
     drift: Vec4,
     previous_drift: Vec4,
+    horizon: Vec4,
+    zenith: Vec4,
+    layer: Vec4,
 }
 
 #[derive(Clone, PartialEq)]
@@ -29,6 +34,7 @@ struct Profile {
     material: AssetId<CloudSkyMaterial>,
     sky: SkyUniform,
     noise: Handle<Image>,
+    weather: Handle<Image>,
     cycling: bool,
 }
 
@@ -38,8 +44,10 @@ impl Profile {
             && next.cycling
             && self.material == next.material
             && self.noise == next.noise
+            && self.weather == next.weather
             && self.sky.layer == next.sky.layer
             && self.sky.motion == next.sky.motion
+            && self.sky.weather == next.sky.weather
             && self.sky.wind == next.sky.wind
             && self.sky.sun.w == next.sky.sun.w
     }
@@ -55,12 +63,25 @@ struct Bake {
     eye_time: Vec4,
     slot: usize,
     row: u32,
+    end_row: u32,
     travel: Vec2,
     bindings: BindGroup,
 }
 
+fn cloud_rows(layer: Vec4, eye_y: f32) -> std::ops::Range<u32> {
+    let horizon = HEIGHT / 3;
+    if eye_y < layer.x {
+        (horizon - CLOUD_TILE_SIZE)..HEIGHT
+    } else if eye_y > layer.x + layer.y {
+        0..(horizon + CLOUD_TILE_SIZE)
+    } else {
+        0..HEIGHT
+    }
+}
+
 struct Panorama {
     views: [TextureView; 2],
+    reflection_view: TextureView,
     sampler: Sampler,
     layout: BindGroupLayoutDescriptor,
     pipeline: CachedComputePipelineId,
@@ -73,7 +94,7 @@ struct Panorama {
 }
 
 #[derive(Resource, Default)]
-pub(crate) struct CloudCache(Option<Panorama>);
+pub struct CloudCache(Option<Panorama>);
 
 #[cfg(test)]
 pub(super) fn ready(app: &App) -> bool {
@@ -86,6 +107,11 @@ pub(super) fn ready(app: &App) -> bool {
 }
 
 impl CloudCache {
+    pub(crate) fn reflection_bindings(&self) -> Option<(&TextureView, &Sampler, &Buffer)> {
+        let gpu = self.0.as_ref()?;
+        Some((&gpu.reflection_view, &gpu.sampler, gpu.view.buffer()?))
+    }
+
     pub(super) fn attach(&self, group: &mut UnpreparedBindGroup) -> Result<(), AsBindGroupError> {
         let gpu = self.0.as_ref().ok_or(AsBindGroupError::RetryNextUpdate)?;
         group.bindings.extend([
@@ -149,6 +175,7 @@ fn extract(
             material: handle.0.id(),
             sky: material.0.params.clone(),
             noise: material.0.noise.clone(),
+            weather: material.0.weather.clone(),
             cycling,
         })
     });
@@ -173,23 +200,31 @@ fn initialize(
     if source.profile.is_none() || cache.0.is_some() {
         return;
     }
-    let views = std::array::from_fn(|_| {
-        device
-            .create_texture(&TextureDescriptor {
-                label: Some("cloud panorama"),
-                size: Extent3d {
-                    width: WIDTH,
-                    height: HEIGHT,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: TextureDimension::D2,
-                format: FORMAT,
-                usage: TextureUsages::TEXTURE_BINDING | TextureUsages::STORAGE_BINDING,
-                view_formats: &[],
-            })
-            .create_view(&TextureViewDescriptor::default())
+    let texture = device.create_texture(&TextureDescriptor {
+        label: Some("cloud panorama"),
+        size: Extent3d {
+            width: WIDTH,
+            height: HEIGHT,
+            depth_or_array_layers: 2,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: FORMAT,
+        usage: TextureUsages::TEXTURE_BINDING | TextureUsages::STORAGE_BINDING,
+        view_formats: &[],
+    });
+    let views = std::array::from_fn(|slot| {
+        texture.create_view(&TextureViewDescriptor {
+            dimension: Some(TextureViewDimension::D2),
+            base_array_layer: slot as u32,
+            array_layer_count: Some(1),
+            ..default()
+        })
+    });
+    let reflection_view = texture.create_view(&TextureViewDescriptor {
+        dimension: Some(TextureViewDimension::D2Array),
+        ..default()
     });
     let sampler = device.create_sampler(&SamplerDescriptor {
         address_mode_u: AddressMode::Repeat,
@@ -207,6 +242,7 @@ fn initialize(
                 binding_types::sampler(SamplerBindingType::Filtering),
                 uniform_buffer::<CacheView>(false),
                 texture_storage_2d(FORMAT, StorageTextureAccess::WriteOnly),
+                texture_2d(TextureSampleType::Float { filterable: true }),
             ),
         ),
     );
@@ -222,6 +258,7 @@ fn initialize(
     view.write_buffer(&device, &queue);
     cache.0 = Some(Panorama {
         views,
+        reflection_view,
         sampler,
         layout,
         pipeline,
@@ -281,7 +318,8 @@ fn update(
     if gpu.bake.is_none() {
         let mut previous = *gpu.view.get();
         if let Some(published) = gpu.published.filter(|_| previous.state.w != 0) {
-            let progress = (published.elapsed().as_secs_f32() / interval.as_secs_f32()).min(1.0);
+            let duration = interval.as_secs_f32().min(MAX_BLEND_SECONDS);
+            let progress = (published.elapsed().as_secs_f32() / duration).min(1.0);
             let blend = (255.0 * progress).round() as u32;
             if blend != previous.state.z {
                 previous.state.z = blend;
@@ -301,7 +339,9 @@ fn update(
         {
             return;
         }
-        let Some(noise) = images.get(&profile.noise) else {
+        let (Some(noise), Some(weather)) =
+            (images.get(&profile.noise), images.get(&profile.weather))
+        else {
             return;
         };
         let slot = 1 - previous.state.y as usize;
@@ -319,18 +359,21 @@ fn update(
                 &noise.sampler,
                 gpu.stripe.binding().unwrap(),
                 &gpu.views[slot],
+                &weather.texture_view,
             )),
         );
+        let rows = cloud_rows(profile.sky.layer, source.eye_time.y);
         gpu.bake = Some(Bake {
             eye_time: source.eye_time,
             slot,
-            row: 0,
+            row: rows.start,
+            end_row: rows.end,
             travel,
             bindings,
         });
     }
     let bake = gpu.bake.as_mut().unwrap();
-    let rows = ROWS_PER_FRAME.min(HEIGHT - bake.row);
+    let rows = ROWS_PER_FRAME.min(bake.end_row - bake.row);
     gpu.stripe.set(CacheView {
         origin_time: bake.eye_time,
         state: UVec4::new(bake.row, rows, 0, 0),
@@ -347,10 +390,14 @@ fn update(
             });
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &bake.bindings, &[]);
-        pass.dispatch_workgroups(WIDTH.div_ceil(8), rows.div_ceil(8), 1);
+        pass.dispatch_workgroups(
+            WIDTH.div_ceil(CLOUD_TILE_SIZE),
+            rows.div_ceil(CLOUD_TILE_SIZE),
+            1,
+        );
     }
     bake.row += rows;
-    if bake.row == HEIGHT {
+    if bake.row == bake.end_row {
         let previous = *gpu.view.get();
         gpu.view.set(CacheView {
             origin_time: bake.eye_time,
@@ -358,6 +405,9 @@ fn update(
             state: UVec4::new(1, bake.slot as u32, 0, previous.state.x),
             drift: travel.extend(bake.travel.x).extend(bake.travel.y),
             previous_drift: previous.drift.zw().extend(0.0).extend(0.0),
+            horizon: gpu.sky.get().horizon,
+            zenith: gpu.sky.get().zenith,
+            layer: gpu.sky.get().layer,
         });
         gpu.view.write_buffer(&device, &queue);
         gpu.published = Some(Instant::now());

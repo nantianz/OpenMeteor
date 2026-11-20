@@ -42,8 +42,9 @@ fn vertex(
     let pattern = u32(source.w) - 1u;
     let seed = (f32(pattern & 255u) + 0.5) / 256.0;
     let species = (pattern >> 8u) & 3u;
-    let slope = vec2<f32>(f32((pattern >> 10u) & 127u), f32((pattern >> 17u) & 127u))
-        * (3.04 / 127.0) - 1.52;
+    let slope = (vec2<f32>(f32((pattern >> 10u) & 31u), f32((pattern >> 15u) & 31u)) - 16.0)
+        * (1.52 / 15.0);
+    let edge = f32((pattern >> 20u) & 15u) / 15.0;
     let distance_to_camera = distance(root, view.world_position);
     var fade_at = field.distances.w;
     if (blade.x >= 144.0 || leaf.z >= 4.0) {
@@ -68,8 +69,10 @@ fn vertex(
     let patch_height = sin(dot(root.xz, vec2<f32>(0.20, 0.112))
         + 0.8 * sin(dot(root.xz, vec2<f32>(-0.09, 0.24))));
     var height = mix(field.blade.x, field.blade.y, individual)
-        * (0.72 + growth * 0.45) * (1.0 + patch_height * 0.26 * field.meadow.w) * fade;
-    var width = mix(field.blade.z, field.blade.w, fract(seed * 7.17 + leaf.z * 0.377)) * fade;
+        * (0.72 + growth * 0.45) * (1.0 + patch_height * 0.26 * field.meadow.w)
+        * fade * mix(0.25, 1.0, edge);
+    var width = mix(field.blade.z, field.blade.w, fract(seed * 7.17 + leaf.z * 0.377))
+        * fade * mix(0.56, 1.0, edge);
 
     width *= mix(1.0, 1.85, smoothstep(field.distances.y, field.distances.z, distance_to_camera));
     var lean = 0.18 + 0.36 * individual;
@@ -132,7 +135,7 @@ fn vertex(
         bend = (sample.rg * 255.0 - 128.0) / 127.0 * floor_match;
         pressure = sample.b * floor_match;
     }
-    let clump = facing * (field.root_color.w * leaf.w);
+    let clump = facing * (field.root_color.w * leaf.w * mix(0.45, 1.0, edge));
     let curved = (facing * lean + wind + bend * 1.13) * (t * t * height);
     let lateral = side * (blade.z * width * 0.5 * taper);
     let y = height * rise * (1.0 - pressure * 0.76 * t) + dot(slope, clump + lateral)

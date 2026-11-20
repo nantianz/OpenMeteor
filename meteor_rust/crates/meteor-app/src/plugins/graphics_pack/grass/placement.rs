@@ -1,4 +1,4 @@
-use super::Grass;
+use super::{super::ground_cover::GroundCover, Grass};
 use crate::plugins::render_plugin::classify_gmdl_material;
 use crate::plugins::stage_material::GmdlMode;
 use bevy::prelude::*;
@@ -10,11 +10,50 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(super) const ROOTS_PER_TILE: usize = 192;
 const MAX_TILES: usize = 512;
 const MAX_TILE_REFERENCES: usize = 32768;
+const EDGE_WIDTH: f32 = 2.4;
+const ROOT_COVER_RADIUS: f32 = 0.90;
+const FULL_COVER_WEIGHT: f32 = 5.4;
 
 pub(super) struct Tile {
     pub roots: Vec<Vec4>,
     pub min: Vec3,
     pub max: Vec3,
+}
+
+pub(super) fn ground_channels(cover: &GroundCover, tiles: &[Tile]) -> Vec<u8> {
+    let bounds = cover.bounds();
+    let origin = bounds.xy();
+    let spacing = bounds.z / cover.size.x as f32;
+    let radius = (ROOT_COVER_RADIUS / spacing).max(1.5);
+    let inv_radius_sq = radius.powi(-2);
+
+    let normalize = (ROOT_COVER_RADIUS / (radius * spacing)).powi(2) / FULL_COVER_WEIGHT;
+    let mut density = vec![0.0_f32; cover.depths.len()];
+    for root in tiles.iter().flat_map(|tile| &tile.roots) {
+        let center = (root.xz() - origin) / spacing - 0.5;
+        let lo = (center - radius).floor().as_uvec2();
+        let hi = (center + radius).ceil().as_uvec2().min(cover.size);
+        for z in lo.y..hi.y {
+            for x in lo.x..hi.x {
+                let offset = Vec2::new(x as f32, z as f32) - center;
+                let weight = (1.0 - offset.length_squared() * inv_radius_sq).max(0.0);
+                density[(z * cover.size.x + x) as usize] += weight * weight;
+            }
+        }
+    }
+    cover
+        .depths
+        .iter()
+        .zip(density)
+        .flat_map(|(&edge, sum)| {
+            let growth = if edge == 0 {
+                0
+            } else {
+                ((sum * normalize).min(1.0) * 255.0).round() as u8
+            };
+            [edge, growth]
+        })
+        .collect()
 }
 
 pub(super) fn place(
@@ -24,7 +63,7 @@ pub(super) fn place(
     collision_faces: &BTreeSet<u32>,
     support: Option<&dyn MeshCollider>,
     center: [f32; 3],
-) -> Result<Vec<Tile>, String> {
+) -> Result<(Vec<Tile>, GroundCover), String> {
     let mut matched = vec![false; grass.surfaces.len()];
     let mut triangles = Vec::new();
     let mut face_base = 0;
@@ -92,7 +131,10 @@ pub(super) fn place(
             target.object, target.texture
         ));
     }
-    distribute(grass, &triangles, support)
+    let cover = GroundCover::for_triangles(&triangles, grass.bounds, EDGE_WIDTH)
+        .ok_or("grass coverage is empty or exceeded the raster budget")?;
+    let tiles = distribute(grass, &triangles, &cover, support)?;
+    Ok((tiles, cover))
 }
 
 fn hash(mut x: u32) -> u32 {
@@ -149,10 +191,15 @@ fn vegetation(grass: &Grass, point: Vec2, seed: u32) -> u32 {
     }
 }
 
-fn root_style(species: u32, slope: Vec2, seed: u32) -> f32 {
-    let quantize = |v: f32| ((v.clamp(-1.52, 1.52) / 1.52 * 0.5 + 0.5) * 127.0).round() as u32;
+fn root_style(species: u32, slope: Vec2, edge: f32, seed: u32) -> f32 {
+    let quantize = |v: f32| ((v.clamp(-1.52, 1.52) * (15.0 / 1.52)).round() + 16.0) as u32;
     let random = (hash(seed) >> 24) & 255;
-    (1 + (random | (species << 8) | (quantize(slope.x) << 10) | (quantize(slope.y) << 17))) as f32
+    let cover = (edge * 15.0).round() as u32;
+    (1 + (random
+        | (species << 8)
+        | (quantize(slope.x) << 10)
+        | (quantize(slope.y) << 15)
+        | (cover << 20))) as f32
 }
 
 fn density_noise(point: Vec2) -> f32 {
@@ -173,6 +220,7 @@ fn density_noise(point: Vec2) -> f32 {
 fn distribute(
     grass: &Grass,
     triangles: &[[Vec3; 3]],
+    cover: &GroundCover,
     support: Option<&dyn MeshCollider>,
 ) -> Result<Vec<Tile>, String> {
     let size = grass.tile_size;
@@ -242,6 +290,11 @@ fn distribute(
             if bounds.is_some_and(|[lo, hi]| !point.cmpge(lo).all() || !point.cmplt(hi).all()) {
                 continue;
             }
+            let margin = ((cover.at_world(point) - 0.035) / 0.765).clamp(0.0, 1.0);
+            let edge = margin * margin * (3.0 - 2.0 * margin);
+            if edge <= 0.01 || unit(key ^ 461) > 0.27 + edge * 0.73 {
+                continue;
+            }
             let Some((height, slope)) = faces
                 .iter()
                 .filter_map(|&i| ground(point, triangles[i]))
@@ -259,7 +312,12 @@ fn distribute(
             let position = Vec3::new(point.x, height + 0.018, point.y);
             min = min.min(position);
             max = max.max(position);
-            roots.push(position.extend(root_style(vegetation(grass, point, key), slope, key ^ 71)));
+            roots.push(position.extend(root_style(
+                vegetation(grass, point, key),
+                slope,
+                edge,
+                key ^ 71,
+            )));
         }
         roots.sort_unstable_by_key(|root| (root.w as u32 - 1) & 255);
         roots.truncate(target as usize);

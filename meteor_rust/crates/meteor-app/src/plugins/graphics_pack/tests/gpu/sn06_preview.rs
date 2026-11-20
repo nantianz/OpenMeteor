@@ -183,6 +183,7 @@ fn headless_sn06_scan_enhancement_preview() {
         ("west", Vec3::new(-0.75, 0.13, 0.66)),
         ("north", Vec3::new(-0.26, 0.22, -0.97)),
         ("falls", Vec3::new(0.73, 0.17, -0.68)),
+        ("skyline", Vec3::new(-0.26, 0.61, -0.97)),
         ("meadow", Vec3::new(0.82, -0.14, 0.57)),
     ] {
         *app.world_mut().get_mut::<Transform>(camera).unwrap() =

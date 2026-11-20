@@ -1,0 +1,10 @@
+{
+  "name": "openmeteor-resource-tools",
+  "private": true,
+  "engines": {"node": ">=22.13.0"},
+  "scripts": {
+    "generate:water": "python3 tools/generate_water.py",
+    "verify:water": "python3 tools/test_water.py && python3 tools/generate_water.py --check",
+    "verify:packs": "node --test tools/verify_graphics_pack.mjs"
+  }
+}

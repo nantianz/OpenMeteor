@@ -9,7 +9,26 @@ use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderSystems};
 use std::collections::{HashMap, HashSet};
 
-type ParamKey = [u32; 74];
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+use crate::plugins::graphics_pack::sky::cache::{CacheView, CloudCache};
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+use bevy::render::{
+    render_resource::{
+        binding_types::{sampler, texture_2d_array},
+        SamplerBindingType, TextureSampleType, TextureViewDimension,
+    },
+    texture::FallbackImage,
+};
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+type SkyBindingParams = (
+    Option<Res<'static, CloudCache>>,
+    Res<'static, FallbackImage>,
+);
+#[cfg(any(target_arch = "wasm32", target_os = "android"))]
+type SkyBindingParams = ();
+
+type ParamKey = [u32; 83];
 
 #[derive(Resource, Default, Clone)]
 pub(crate) struct FrameUniforms {
@@ -46,6 +65,9 @@ struct GpuParams {
     grass_ground: Vec4,
     grass_bounds: Vec4,
     pbr_lighting: Vec3,
+    grass_underlay_scale: f32,
+    water_sky_style: Vec4,
+    water_sky_ranges: Vec4,
 }
 
 impl GmdlMaterial {
@@ -103,9 +125,9 @@ impl GmdlMaterial {
             self.pbr_textures.z.to_bits(),
             self.pbr_textures.w.to_bits(),
         ];
-        let mut key = [0; 74];
+        let mut key = [0; 83];
         key[..50].copy_from_slice(&existing);
-        key[50] = self.water_screen_refraction as u32;
+        key[50] = u32::from(self.water_screen_refraction);
         key[51..55].copy_from_slice(
             &self
                 .water_optics
@@ -117,7 +139,10 @@ impl GmdlMaterial {
         key[59..63].copy_from_slice(&self.water_optics.control.to_array().map(f32::to_bits));
         key[63..67].copy_from_slice(&self.grass_ground.to_array().map(f32::to_bits));
         key[67..71].copy_from_slice(&self.grass_bounds.to_array().map(f32::to_bits));
-        key[71..].copy_from_slice(&self.pbr_lighting.to_array().map(f32::to_bits));
+        key[71..74].copy_from_slice(&self.pbr_lighting.to_array().map(f32::to_bits));
+        key[74] = self.grass_underlay_scale.to_bits();
+        key[75..79].copy_from_slice(&self.water_sky_style.to_array().map(f32::to_bits));
+        key[79..83].copy_from_slice(&self.water_sky_ranges.to_array().map(f32::to_bits));
         key
     }
 }
@@ -134,6 +159,8 @@ pub struct SharedBuffers {
     liquid_contacts: UniformBuffer<LiquidContacts>,
     graphics: UniformBuffer<crate::plugins::graphics_pack::GraphicsFrame>,
     grass_light: UniformBuffer<Vec4>,
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    empty_sky: UniformBuffer<CacheView>,
 }
 
 impl SharedBuffers {
@@ -182,6 +209,9 @@ impl ParamBuffers {
                     grass_ground: material.grass_ground,
                     grass_bounds: material.grass_bounds,
                     pbr_lighting: material.pbr_lighting,
+                    grass_underlay_scale: material.grass_underlay_scale,
+                    water_sky_style: material.water_sky_style,
+                    water_sky_ranges: material.water_sky_ranges,
                     detail: Vec4::new(
                         if material.normal_texture.is_some() {
                             1.0
@@ -224,7 +254,9 @@ pub struct Textures {
     water_normal: Option<Handle<Image>>,
     #[texture(15)]
     #[sampler(16)]
-    water_dynamics: Option<Handle<Image>>,
+    surface_detail: Option<Handle<Image>>,
+    #[texture(18, visibility(fragment))]
+    surface_aux: Option<Handle<Image>>,
 }
 
 impl AsBindGroup for GmdlMaterial {
@@ -234,6 +266,7 @@ impl AsBindGroup for GmdlMaterial {
         Res<'static, SharedBuffers>,
         ResMut<'static, ParamBuffers>,
         Res<'static, RenderQueue>,
+        SkyBindingParams,
     );
 
     fn label() -> &'static str {
@@ -249,7 +282,7 @@ impl AsBindGroup for GmdlMaterial {
         param: &mut SystemParamItem<'_, '_, Self::Param>,
         force_no_bindless: bool,
     ) -> Result<UnpreparedBindGroup, AsBindGroupError> {
-        let (textures, shared, cache, queue) = param;
+        let (textures, shared, cache, queue, _sky) = param;
         let camera = if self.camera_occlusion_enabled {
             &shared.camera
         } else {
@@ -290,7 +323,16 @@ impl AsBindGroup for GmdlMaterial {
             } else {
                 self.water_normal.clone()
             },
-            water_dynamics: self.water_dynamics.clone(),
+
+            surface_detail: self
+                .water_dynamics
+                .clone()
+                .or_else(|| self.grass_coverage.clone()),
+
+            surface_aux: self
+                .water_sky_visibility
+                .clone()
+                .or_else(|| self.grass_underlay.clone()),
         }
         .unprepared_bind_group(layout, device, textures, force_no_bindless)?;
         result
@@ -306,6 +348,36 @@ impl AsBindGroup for GmdlMaterial {
                     .clone(),
             ),
         ));
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        {
+            let (clouds, fallback) = _sky;
+            let (view, sampler, buffer) = if self.water_sky_reflection {
+                clouds
+                    .as_ref()
+                    .and_then(|clouds| clouds.reflection_bindings())
+                    .ok_or(AsBindGroupError::RetryNextUpdate)?
+            } else {
+                (
+                    &fallback.d2_array.texture_view,
+                    &fallback.d2_array.sampler,
+                    shared
+                        .empty_sky
+                        .buffer()
+                        .ok_or(AsBindGroupError::RetryNextUpdate)?,
+                )
+            };
+            result.bindings.extend([
+                (
+                    19,
+                    OwnedBindingResource::TextureView(TextureViewDimension::D2Array, view.clone()),
+                ),
+                (
+                    20,
+                    OwnedBindingResource::Sampler(SamplerBindingType::Filtering, sampler.clone()),
+                ),
+                (21, OwnedBindingResource::Buffer(buffer.clone())),
+            ]);
+        }
         let buffer = cache.get_buffer(self, device, queue);
         result
             .bindings
@@ -338,6 +410,13 @@ impl AsBindGroup for GmdlMaterial {
             uniform_buffer::<crate::plugins::graphics_pack::GraphicsFrame>(false)
                 .build(17, ShaderStages::FRAGMENT),
         );
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        entries.extend([
+            texture_2d_array(TextureSampleType::Float { filterable: true })
+                .build(19, ShaderStages::FRAGMENT),
+            sampler(SamplerBindingType::Filtering).build(20, ShaderStages::FRAGMENT),
+            uniform_buffer::<CacheView>(false).build(21, ShaderStages::FRAGMENT),
+        ]);
         entries
     }
 }
@@ -380,6 +459,10 @@ fn upload_frame(
     queue: Res<RenderQueue>,
 ) {
     cache.0.retain(|key, _| live.0.contains(key));
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    if shared.empty_sky.buffer().is_none() {
+        shared.empty_sky.write_buffer(&device, &queue);
+    }
     if shared.camera.buffer().is_none() || *shared.camera.get() != frame.camera {
         #[cfg(all(feature = "perf-diagnostics", not(target_arch = "wasm32")))]
         if shared.camera.buffer().is_none() {
@@ -556,8 +639,14 @@ mod tests {
         );
 
         let entries = GmdlMaterial::bind_group_layout_entries(&device, false);
-
-        assert_eq!(entries.len(), 18);
+        assert_eq!(
+            entries.len(),
+            if cfg!(any(target_arch = "wasm32", target_os = "android")) {
+                19
+            } else {
+                22
+            }
+        );
 
         use bevy::render::render_resource::*;
         let source = super::super::standalone_shader_source(true)

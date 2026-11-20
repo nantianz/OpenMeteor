@@ -2662,10 +2662,11 @@ pub(super) fn setup_stage_scene(
     mut hazards: ResMut<super::hazard_plugin::StageHazardRuntime>,
     graphics: Option<Res<super::graphics_pack::GraphicsPacks>>,
     render_adapter: Option<Res<bevy::render::renderer::RenderAdapterInfo>>,
-    (mut cloud_materials, mut cloud_noise, mut grass_materials): (
+    (mut cloud_materials, mut cloud_noise, mut grass_materials, mut snow_materials): (
         Option<ResMut<Assets<super::graphics_pack::sky::CloudSkyMaterial>>>,
         Option<ResMut<super::graphics_pack::sky::CloudNoise>>,
         Option<ResMut<Assets<super::graphics_pack::grass::GrassMaterial>>>,
+        Option<ResMut<Assets<super::graphics_pack::snow::SnowMaterial>>>,
     ),
 ) {
     hazards.0 = Default::default();
@@ -2885,6 +2886,13 @@ pub(super) fn setup_stage_scene(
         None
     };
 
+    let mut snow = graphics
+        .as_deref()
+        .and_then(|packs| {
+            super::graphics_pack::snow::SnowSurfaces::for_stage(packs, &loaded.stage_id)
+        })
+        .filter(|_| stage_collider.mesh.is_some() && snow_materials.is_some());
+
     for (obj_idx, object) in gmdl.objects.iter().enumerate() {
         if skip_render.contains(object.name.as_str()) {
             continue;
@@ -3085,6 +3093,10 @@ pub(super) fn setup_stage_scene(
             {
                 if let Some(name) = gmdl.resolve_texture_name(mat) {
                     let mut material = materials.get_mut(&material_handle).unwrap();
+                    let water_sky = graphics
+                        .as_deref()
+                        .filter(|_| enhanced_sky)
+                        .and_then(|packs| packs.water_sky(&loaded.stage_id, &object.name, name));
                     if water_cache.configure(
                         &mut material,
                         &loaded.stage_id,
@@ -3092,6 +3104,7 @@ pub(super) fn setup_stage_scene(
                         name,
                         loaded.center,
                         &mut images,
+                        water_sky,
                     ) {
                         liquid_surface = Some(
                             super::stage_material::water::interaction::LiquidSurface::from_geometry(
@@ -3142,15 +3155,24 @@ pub(super) fn setup_stage_scene(
                 &mut images,
             );
             if mode == GmdlMode::Opaque && alpha_cutoff == 0.0 && liquid_surface.is_none() {
-                if let (Some(profile), Some(texture)) =
-                    (grass_ground, gmdl.resolve_texture_name(mat))
+                if let (Some(field), Some(texture)) =
+                    (&grass_ground, gmdl.resolve_texture_name(mat))
                 {
-                    super::graphics_pack::grass::ground_material(
-                        profile,
+                    field.configure(
                         &object.name,
                         texture,
                         &mut materials.get_mut(&material_handle).unwrap(),
                     );
+                }
+            }
+            if curated_surface
+                && mode == GmdlMode::Opaque
+                && liquid_surface.is_none()
+                && wind.is_none()
+                && !scrolling
+            {
+                if let (Some(field), Some(texture)) = (&mut snow, gmdl.resolve_texture_name(mat)) {
+                    field.add_surface(&object.name, texture, &mesh, &transform);
                 }
             }
             let wind_bounds = wind.as_ref().map(|w| {
@@ -3226,6 +3248,16 @@ pub(super) fn setup_stage_scene(
         "spawned {} stage mesh batches, {} faces (textured {} faces, ifl materials {}, ifl frames {})",
         drawn_objects, drawn_faces, textured_faces, ifl_materials, ifl_frames_total
     );
+    if let (Some(snow), Some(terrain_materials)) = (snow, snow_materials.as_deref_mut()) {
+        snow.spawn(
+            &loaded.stage_id,
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+            terrain_materials,
+            &mut images,
+        );
+    }
     meshlets.warn_unmatched();
     for props in meshlets.prepare_props(&mut surfaces, &mut images) {
         for (clusters, material) in props.primitives {

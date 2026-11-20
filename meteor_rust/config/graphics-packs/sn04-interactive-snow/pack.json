@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "id": "sn04-interactive-snow",
+  "scenes": [
+    {
+      "stage": "sn04",
+      "snow": {
+        "surfaces": [
+          {"object": "di", "texture": "sn0410.jpg"},
+          {"object": "di", "texture": "sn0411.jpg"}
+        ],
+        "thickness": 0.38,
+        "recovery_seconds": 36,
+        "imprint_strength": 0.95
+      }
+    }
+  ]
+}

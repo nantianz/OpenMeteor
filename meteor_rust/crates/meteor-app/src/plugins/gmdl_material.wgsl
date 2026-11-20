@@ -7,6 +7,32 @@
 #import bevy_pbr::mesh_types::MESH_FLAGS_SHADOW_RECEIVER_BIT;
 #import bevy_pbr::shadows::fetch_directional_shadow;
 
+#ifdef WATER_SKY_REFLECTION
+#import meteor::cloud_panorama::{CloudCacheView, panorama_uv};
+@group(#{MATERIAL_BIND_GROUP}) @binding(19) var water_clouds: texture_2d_array<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(20) var water_cloud_sampler: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(21) var<uniform> water_cloud_view: CloudCacheView;
+
+fn water_cloud_sample(slot: u32, anchor: vec3<f32>, ray: vec3<f32>, origin: vec3<f32>, drift: vec2<f32>) -> vec4<f32> {
+    let uv = panorama_uv(anchor, ray, origin, drift, water_cloud_view.layer.xy);
+    if (uv.z == 0.0) { return vec4<f32>(0.0); }
+    return textureSampleLevel(water_clouds, water_cloud_sampler, uv.xy, i32(slot), 0.0);
+}
+
+fn reflected_sky(origin: vec3<f32>, ray: vec3<f32>) -> vec3<f32> {
+    let cache = water_cloud_view;
+    let slot = cache.state.y;
+    var cloud = water_cloud_sample(slot, cache.origin_time.xyz, ray, origin, cache.drift.xy - cache.drift.zw);
+    if (cache.state.w != 0u) {
+        let old = water_cloud_sample(1u - slot, cache.previous_origin_time.xyz, ray, origin,
+            cache.drift.xy - cache.previous_drift.xy);
+        cloud = mix(old, cloud, f32(cache.state.z) / 255.0);
+    }
+    let clear = mix(cache.horizon.rgb, cache.zenith.rgb, pow(max(ray.y, 0.0), 0.48));
+    return clear * (1.0 - cloud.a) + cloud.rgb;
+}
+#endif
+
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> material: GmdlGpuParams;
 @group(#{MATERIAL_BIND_GROUP}) @binding(1) var base_color_texture: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(2) var base_color_sampler: sampler;
@@ -26,15 +52,35 @@
 @group(#{MATERIAL_BIND_GROUP}) @binding(12) var water_normal: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(13) var water_normal_sampler: sampler;
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(15) var water_dynamics: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(16) var water_dynamics_sampler: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(15) var surface_detail: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(16) var surface_detail_sampler: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(18) var surface_aux: texture_2d<f32>;
+
+#ifdef WATER_SKY_REFLECTION
+fn water_sky_horizon(depth_uv: vec2<f32>, ray: vec3<f32>) -> f32 {
+    let dimensions = textureDimensions(surface_aux);
+    let size = f32(dimensions.y);
+    let sectors = dimensions.x / dimensions.y * 4u;
+    let tile_width = 4.0 / f32(sectors);
+    let cell = clamp(depth_uv, vec2<f32>(0.5 / size), vec2<f32>(1.0 - 0.5 / size));
+    let sector = fract(atan2(ray.z, ray.x) / 6.28318530718 + 1.0) * f32(sectors);
+    let first = u32(sector);
+    let next = (first + 1u) % sectors;
+    let a = textureSampleLevel(surface_aux, water_depth_sampler, vec2<f32>((cell.x + f32(first / 4u)) * tile_width, cell.y), 0.0);
+    var b = a;
+    if (first % 4u == 3u) {
+        b = textureSampleLevel(surface_aux, water_depth_sampler, vec2<f32>((cell.x + f32(next / 4u)) * tile_width, cell.y), 0.0);
+    }
+    return mix(a[first % 4u], b[next % 4u], fract(sector));
+}
+#endif
 
 fn water_disturbance(world: vec3<f32>) -> vec3<f32> {
     let bounds = material.water_dynamics_bounds;
     if (bounds.z <= 0.0 || material.water.x != 1.0) { return vec3<f32>(0.0); }
     let uv = (world.xz - bounds.xy) / bounds.zw;
     if (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))) { return vec3<f32>(0.0); }
-    let data = textureSampleLevel(water_dynamics, water_dynamics_sampler, uv, 0.0);
+    let data = textureSampleLevel(surface_detail, surface_detail_sampler, uv, 0.0);
     return vec3<f32>((data.rg * 255.0 - vec2<f32>(128.0)) / 64.0, data.b);
 }
 
@@ -61,6 +107,9 @@ struct GmdlGpuParams {
     grass_ground: vec4<f32>,
     grass_bounds: vec4<f32>,
     pbr_lighting: vec3<f32>,
+    grass_underlay_scale: f32,
+    water_sky_style: vec4<f32>,
+    water_sky_ranges: vec4<f32>,
 };
 
 struct WaterOptics {
@@ -296,7 +345,7 @@ fn water_screen_reflection(world: vec3<f32>, normal: vec3<f32>, view_dir: vec3<f
 fn water_screen_refraction(world: vec3<f32>, frag_coord: vec3<f32>,
     ray: vec3<f32>, path: f32) -> vec4<f32> {
 #ifdef DEPTH_PREPASS
-    if (material.detail.y < 2.0 || ray.y >= -0.02 || path <= 0.06) { return vec4<f32>(0.0); }
+    if ((u32(material.detail.y) & 2u) == 0u || ray.y >= -0.02 || path <= 0.06) { return vec4<f32>(0.0); }
     let source_pixel = vec2<i32>(frag_coord.xy);
     let source_depths = opaque_depth_range(source_pixel);
 
@@ -350,12 +399,13 @@ fn water_fresnel(cosine: f32, ior: f32) -> f32 {
 
 fn enhanced_water(
     world: vec3<f32>, frag_coord: vec3<f32>, surface_normal: vec3<f32>, normal: vec3<f32>, view_dir: vec3<f32>,
-    light_dir: vec3<f32>, reflection: vec3<f32>, reflection_valid: f32,
+    light_dir: vec3<f32>, reflection: vec3<f32>, reflection_valid: f32, sky_weight: f32,
     depth: f32, coverage: f32, shade: f32, foam: f32,
 ) -> vec4<f32> {
     let optics = material.water_optics;
     let ior = optics.absorption_ior.w;
-    let ray = refract(-view_dir, normalize(mix(surface_normal, normal, optics.control.y)), 1.0 / ior);
+    let ripple_transmission = optics.control.y * (1.0 - material.water_sky_style.y * sky_weight);
+    let ray = refract(-view_dir, normalize(mix(surface_normal, normal, ripple_transmission)), 1.0 / ior);
     let path = min(depth / max(abs(dot(ray, surface_normal)), 0.25), optics.control.z);
     let extinction = max(optics.absorption_ior.rgb + optics.scattering_g.rgb, vec3<f32>(0.0001));
     let transmission = exp(-extinction * path);
@@ -386,7 +436,14 @@ fn enhanced_water(
         + sun * light_entry * (transmitted_light + shallow_scatter * angular) * shade);
     let refracted = water_screen_refraction(world, frag_coord, ray, path);
     let seen = refracted.a;
-    let reflected = f * reflection_valid;
+    var reflected = f * reflection_valid;
+#ifdef WATER_SKY_REFLECTION
+
+    let grazing = 1.0 - clamp(view_dir.y, 0.0, 1.0);
+    let sky_fresnel = max(f, water_fresnel(1.0 - grazing, ior));
+    let sheen = material.water_sky_style.z * smoothstep(material.water_sky_ranges.x, material.water_sky_ranges.y, grazing);
+    reflected = mix(f, mix(sky_fresnel, 1.0, sheen), sky_weight) * reflection_valid;
+#endif
     let absorbed = 1.0 - dot(transmission, vec3<f32>(0.2126, 0.7152, 0.0722));
     let layer = reflected + (1.0 - reflected) * mix(absorbed, 1.0, seen);
     let half_sum = light_dir + view_dir;
@@ -433,11 +490,30 @@ fn shade_water(in: VertexOutput, normal: vec3<f32>, color: vec4<f32>, shade: f32
     let physical_normal = normalize(surface_normal - vec3<f32>(dynamic.x, 0.0, dynamic.y));
     let reflection_normal = normalize(mix(physical_normal, normal,
         select(0.12, 1.0, poison)));
+    let reflection_ray = reflect(-view_dir, reflection_normal);
     let reflected = textureSampleLevel(water_reflection, water_reflection_sampler,
-        water_reflection_uv(reflect(-view_dir, reflection_normal)), 0.0);
+        water_reflection_uv(reflection_ray), 0.0);
+    var probe = reflected;
+    var sky_weight = 0.0;
+#ifdef WATER_SKY_REFLECTION
+    if (water_cloud_view.state.x != 0u && view_dir.y > 0.0) {
+
+        let sky_normal = normalize(vec3<f32>(0.0, 1.0, 0.0)
+            + vec3<f32>(physical_normal.x, 0.0, physical_normal.z) * material.water_sky_style.x);
+        let sky_ray = reflect(-view_dir, sky_normal);
+        if (sky_ray.y > 0.0) {
+            let horizon = water_sky_horizon(depth_uv, sky_ray);
+            sky_weight = smoothstep(horizon + material.water_sky_ranges.z, horizon + material.water_sky_ranges.w, sky_ray.y);
+            if (sky_weight > 0.0) {
+                let sky = reflected_sky(in.world_position.xyz, sky_ray);
+                probe = mix(probe, vec4<f32>(sky, 1.0), sky_weight);
+            }
+        }
+    }
+#endif
     let screen_reflection = water_screen_reflection(in.world_position.xyz, reflection_normal, view_dir);
-    let reflected_rgb = mix(reflected.rgb, screen_reflection.rgb, screen_reflection.a);
-    let reflection_valid = max(reflected.a, screen_reflection.a);
+    let reflected_rgb = mix(probe.rgb, screen_reflection.rgb, screen_reflection.a);
+    let reflection_valid = max(probe.a, screen_reflection.a);
     var light_dir = normalize(vec3<f32>(40.0, 80.0, 30.0));
 #ifdef VERTEX_OUTPUT_INSTANCE_INDEX
     if (lights.n_directional_lights > 0u) {
@@ -449,7 +525,8 @@ fn shade_water(in: VertexOutput, normal: vec3<f32>, color: vec4<f32>, shade: f32
         if (graphics.counts.w > 0.5 || graphics.sun.w > 0.001) { light_dir = graphics.sun.xyz; }
         let optical_depth = mix(material.water.w, depth, valid_bed);
         return enhanced_water(in.world_position.xyz, in.position.xyz, surface_normal, normal, view_dir,
-            light_dir, reflected_rgb, reflection_valid, optical_depth, coverage, shade, dynamic.z);
+            light_dir, reflected_rgb, reflection_valid, sky_weight * (1.0 - screen_reflection.a),
+            optical_depth, coverage, shade, dynamic.z);
     }
     let air_cos = clamp(abs(dot(surface_normal, view_dir)), 0.0, 1.0);
     let water_cos = sqrt(1.0 - (1.0 - air_cos * air_cos) / (1.333 * 1.333));
@@ -701,20 +778,6 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     }
     var color = texel * diffuse;
     color.a *= params.opacity;
-    if (graphics.counts.z > 0.5 && material.grass_ground.w > 0.0) {
-        let point = in.world_position.xz;
-        let low = point - material.grass_bounds.xy;
-        let high = material.grass_bounds.zw - point;
-        let edge = min(min(low.x, low.y), min(high.x, high.y));
-        let slope = smoothstep(0.50, 0.82, normalize(in.world_normal).y);
-        let meadow_variation = 2.0 * grass_patch(point * 0.19) - 1.0;
-        let tuft = sin(dot(point, vec2<f32>(2.4, 2.9)) + meadow_variation) * sin(dot(point, vec2<f32>(-3.3, 2.1)));
-        let distance_gain = 1.0 - smoothstep(20.0, 105.0, distance(in.world_position.xyz, view.world_position));
-        let variation = 0.58 + 0.12 * meadow_variation + 0.13 * tuft * distance_gain;
-        let turf = material.grass_ground.rgb * variation * vec3<f32>(1.06, 0.91, 0.78);
-        color = vec4<f32>(mix(color.rgb, turf, material.grass_ground.w * slope
-            * smoothstep(0.0, 1.4, edge)), color.a);
-    }
 
     if (params.mode == 3u) {
 
@@ -730,6 +793,40 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
             color = vec4<f32>(pack_pbr(in, shading_normal, texel.rgb, diffuse.rgb, in.uv + uv_offset), color.a);
         } else {
             color = vec4<f32>(color.rgb * shade, color.a);
+        }
+        if (graphics.counts.z > 0.5 && material.grass_ground.w > 0.0 && material.water.x == 0.0) {
+            let point = in.world_position.xz;
+            let uv = (point - material.grass_bounds.xy) / material.grass_bounds.zw;
+            let slope = smoothstep(0.50, 0.82, normalize(in.world_normal).y);
+
+            let scan_uv = vec2<f32>(dot(point, vec2<f32>(0.94, 0.342)),
+                                    dot(point, vec2<f32>(-0.342, 0.94))) * material.grass_underlay_scale;
+            let scan_dx = dpdx(scan_uv);
+            let scan_dy = dpdy(scan_uv);
+            if (slope > 0.0 && all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0))) {
+                let cover = textureSampleLevel(surface_detail, surface_detail_sampler, uv, 0.0).rg;
+                let edge = smoothstep(0.035, 0.80, cover.r);
+                if (edge > 0.0) {
+                    let meadow = 2.0 * grass_patch(point * 0.19) - 1.0;
+                    var ground_color: vec3<f32>;
+                    if (material.grass_underlay_scale > 0.0) {
+                        let scan = textureSampleGrad(surface_aux, surface_detail_sampler, scan_uv, scan_dx, scan_dy).rgb;
+
+                        let lightness = dot(scan, vec3<f32>(0.2126, 0.7152, 0.0722));
+                        let canopy = material.grass_ground.rgb * (0.40 + min(2.9 * lightness, 0.62));
+                        let growth = smoothstep(0.12, 0.68, cover.g) * smoothstep(0.20, 0.85, edge);
+                        ground_color = mix(scan, canopy, growth) * (0.94 + 0.16 * meadow);
+                    } else {
+                        let tuft = sin(dot(point, vec2<f32>(2.4, 2.9)) + meadow) * sin(dot(point, vec2<f32>(-3.3, 2.1)));
+                        let distance_gain = 1.0 - smoothstep(20.0, 105.0, distance(in.world_position.xyz, view.world_position));
+                        let variation = 0.58 + 0.12 * meadow + 0.13 * tuft * distance_gain;
+                        let fringe = mix(vec3<f32>(1.12, 0.84, 0.65), vec3<f32>(1.06, 0.91, 0.78), edge);
+                        ground_color = material.grass_ground.rgb * variation * fringe;
+                    }
+                    let amount = material.grass_ground.w * slope * edge;
+                    color = vec4<f32>(mix(color.rgb, ground_color * shade, amount), color.a);
+                }
+            }
         }
     }
     if (material.pbr_textures.w > 0.5 && params.mode == 0u) {

@@ -149,7 +149,7 @@ fn spawn_stock_preview(app: &mut App, stage: &'static str) -> Option<[Transform;
                             mode,
                         );
                         if alpha_cutoff == 0.0 {
-                            ground_material(profile, &object.name, name, &mut material);
+                            profile.configure(&object.name, name, &mut material);
                         }
                         let (mesh, transform) =
                             render_plugin::build_scene_mesh(object, &indices, center, description);
@@ -198,7 +198,7 @@ fn stock_grass_uses_the_authored_ground_and_stays_inside_the_budget() {
         Some(&cob.face_ids),
         center,
     );
-    let tiles = placement::place(
+    let (tiles, _) = placement::place(
         profile,
         &mesh,
         Some(&desc),
@@ -286,7 +286,7 @@ fn si_fang_zhen_courtyard_reaches_all_edges_with_a_bounded_distant_lod() {
         .scenes("sn06")
         .find_map(|(_, scene)| scene.grass.as_ref())
         .unwrap();
-    let tiles = placement::place(
+    let (tiles, cover) = placement::place(
         profile,
         &mesh,
         Some(&desc),
@@ -295,6 +295,19 @@ fn si_fang_zhen_courtyard_reaches_all_edges_with_a_bounded_distant_lod() {
         center,
     )
     .unwrap();
+    let channels = placement::ground_channels(&cover, &tiles);
+    let mut bare = 0;
+    let mut lush = 0;
+    for (&edge, pixel) in cover.depths.iter().zip(channels.chunks_exact(2)) {
+        assert_eq!(pixel[0], edge);
+        if edge == 0 {
+            assert_eq!(pixel[1], 0);
+        } else if edge >= 220 {
+            bare += usize::from(pixel[1] <= 76);
+            lush += usize::from(pixel[1] >= 174);
+        }
+    }
+    assert!(bare > 100 && lush > bare, "bare {bare}, lush {lush}");
     let min = tiles
         .iter()
         .map(|tile| tile.min)
@@ -450,7 +463,8 @@ fn grass_gpu_draws_tracks_recovers_and_honors_visible_tile_limit() {
         .unwrap();
     profile.tile_size = 6.0;
     profile.max_visible_tiles = 12;
-    let mut ground = GroundMaterial::new_scene(
+    profile.patch_variation = 0.0;
+    let ground = GroundMaterial::new_scene(
         GmdlMaterialParams {
             opacity: 1.0,
             alpha_cutoff: 0.0,
@@ -462,7 +476,6 @@ fn grass_gpu_draws_tracks_recovers_and_honors_visible_tile_limit() {
         true,
         GmdlMode::Opaque,
     );
-    ground_material(profile, "ground", "sn302.jpg", &mut ground);
     let ground = app
         .world_mut()
         .resource_mut::<Assets<GroundMaterial>>()
@@ -476,16 +489,18 @@ fn grass_gpu_draws_tracks_recovers_and_honors_visible_tile_limit() {
     app.world_mut().spawn((
         PlayingSceneEntity,
         Mesh3d(terrain),
-        MeshMaterial3d(ground),
+        MeshMaterial3d(ground.clone()),
         Transform::IDENTITY,
     ));
+    let fixture_ground_material = ground.clone();
     app.world_mut()
         .run_system_once(
             move |mut commands: Commands,
                   mut meshes: ResMut<Assets<Mesh>>,
                   mut images: ResMut<Assets<Image>>,
-                  mut materials: ResMut<Assets<GrassMaterial>>| {
-                spawn(
+                  mut materials: ResMut<Assets<GrassMaterial>>,
+                  mut ground_materials: ResMut<Assets<GroundMaterial>>| {
+                let coverage = spawn(
                     &mut commands,
                     &mut meshes,
                     &mut images,
@@ -497,6 +512,12 @@ fn grass_gpu_draws_tracks_recovers_and_honors_visible_tile_limit() {
                     &BTreeSet::new(),
                     None,
                     [0.; 3],
+                )
+                .unwrap();
+                coverage.configure(
+                    "ground",
+                    "sn302.jpg",
+                    &mut ground_materials.get_mut(&ground).unwrap(),
                 );
             },
         )
@@ -521,7 +542,23 @@ fn grass_gpu_draws_tracks_recovers_and_honors_visible_tile_limit() {
         data
     };
     let capture = |app: &mut App, frames| capture_size(app, frames, WIDTH, HEIGHT);
+    let scanned = capture(&mut app, 20);
+    {
+        let mut materials = app.world_mut().resource_mut::<Assets<GroundMaterial>>();
+        let mut ground = materials.get_mut(&fixture_ground_material).unwrap();
+        assert!(ground.grass_underlay.is_some());
+        ground.grass_underlay_scale = 0.0;
+    }
     let baseline = capture(&mut app, 20);
+    let changed_ground = scanned
+        .chunks_exact(4)
+        .zip(baseline.chunks_exact(4))
+        .filter(|(scan, procedural)| (0..3).any(|i| scan[i].abs_diff(procedural[i]) > 12))
+        .count();
+    assert!(
+        changed_ground > 1000,
+        "scanned ground only changed {changed_ground} pixels"
+    );
     let night = crate::plugins::graphics_pack::GraphicsFrame {
         sky: Vec4::new(0.014, 0.026, 0.047, 0.0),
         environment: Vec4::new(1.0, 0.0, 1.0, 0.0),

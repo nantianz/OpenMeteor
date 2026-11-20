@@ -2,6 +2,7 @@ use super::{
     bake::{BakedSurface, Inputs},
     config::{Surface, WaterConfig},
 };
+use crate::plugins::graphics_pack::{config::WaterSkySelection, GraphicsPacks};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -23,11 +24,19 @@ struct Entry {
 fn digest(maps: &BakedSurface) -> String {
     format!("{:x}", Sha256::digest(serde_json::to_vec(maps).unwrap()))
 }
-fn valid(m: &BakedSurface, s: &Surface) -> bool {
+fn valid(m: &BakedSurface, s: &Surface, sky: Option<WaterSkySelection<'_>>) -> bool {
     m.bounds.iter().all(|v| v.is_finite())
         && m.bounds[2] > 0.0
         && m.bounds[3] > 0.0
         && (0.0..=1.0).contains(&m.vertex_alpha)
+        && if let Some(sky) = sky {
+            let cells = sky.profile.visibility_resolution;
+            m.sky_visibility.as_ref().is_some_and(|map| {
+                map.valid(cells * (sky.profile.visibility_directions / 4), cells)
+            })
+        } else {
+            m.sky_visibility.is_none()
+        }
         && if s.needs_maps() {
             let tile = s.reflection_face + 2;
             m.reflection
@@ -38,7 +47,12 @@ fn valid(m: &BakedSurface, s: &Surface) -> bool {
             m.reflection.is_none() && m.depth.is_none()
         }
 }
-fn read(path: &Path, key: &str, s: &Surface) -> Option<BakedSurface> {
+fn read(
+    path: &Path,
+    key: &str,
+    s: &Surface,
+    sky: Option<WaterSkySelection<'_>>,
+) -> Option<BakedSurface> {
     use std::io::Read;
     let mut bytes = Vec::new();
     std::fs::File::open(path)
@@ -50,7 +64,7 @@ fn read(path: &Path, key: &str, s: &Surface) -> Option<BakedSurface> {
         return None;
     }
     let e: Entry = serde_json::from_slice(&bytes).ok()?;
-    (e.key == key && e.digest == digest(&e.maps) && valid(&e.maps, s)).then_some(e.maps)
+    (e.key == key && e.digest == digest(&e.maps) && valid(&e.maps, s, sky)).then_some(e.maps)
 }
 fn write(path: &Path, key: &str, maps: &BakedSurface) -> Result<(), String> {
     use std::io::Write;
@@ -79,20 +93,22 @@ fn write(path: &Path, key: &str, maps: &BakedSurface) -> Result<(), String> {
 pub(super) fn cached(
     inputs: &Inputs,
     s: &Surface,
+    sky: Option<WaterSkySelection<'_>>,
     root: &Path,
     progress: impl FnMut(f32),
 ) -> Result<(BakedSurface, bool), String> {
-    let key = inputs.cache_key(s);
+    let key = inputs.cache_key(s, sky);
     let path = root.join(format!("{key}.json"));
-    if let Some(m) = read(&path, &key, s) {
+    if let Some(m) = read(&path, &key, s, sky) {
         return Ok((m, true));
     }
-    let maps = inputs.bake(s, progress)?;
+    let maps = inputs.bake(s, sky, progress)?;
     write(&path, &key, &maps).map_err(|e| format!("无法保存水面缓存 {}: {e}", path.display()))?;
     Ok((maps, false))
 }
 pub(super) fn prepare(
     c: &WaterConfig,
+    graphics: &GraphicsPacks,
     root: &Path,
     mut progress: impl FnMut(f32, String),
 ) -> Result<Vec<Prepared>, String> {
@@ -109,7 +125,10 @@ pub(super) fn prepare(
             current = Some((s.stage.clone(), Inputs::load(&s.stage)?));
         }
         let inputs = &current.as_ref().unwrap().1;
-        let (maps, hit) = cached(inputs, s, root, |p| {
+        let sky = graphics
+            .water_sky_for_bake(&s.stage, &s.object, &s.texture)
+            .filter(|_| s.kind == 1);
+        let (maps, hit) = cached(inputs, s, sky, root, |p| {
             progress(
                 (index as f32 + p) / total,
                 format!("正在自动烘焙水面：{}/{}", s.stage, s.object),
@@ -171,21 +190,22 @@ mod tests {
             vertex_alpha: 0.5,
             reflection: Some(map(tile * 3, tile * 2)),
             depth: Some(map(128, 128)),
+            sky_visibility: None,
         };
         let dir = std::env::temp_dir().join(format!("water-cache-test-{}", std::process::id()));
         let p = dir.join("entry.json");
         write(&p, "one", &maps).unwrap();
-        assert!(read(&p, "one", s).is_some());
-        assert!(read(&p, "two", s).is_none());
+        assert!(read(&p, "one", s, None).is_some());
+        assert!(read(&p, "two", s, None).is_none());
         let mut changed = s.clone();
         changed.reflection_face = 128;
-        assert!(read(&p, "one", &changed).is_none());
+        assert!(read(&p, "one", &changed, None).is_none());
         let mut e: Entry = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
         e.maps.depth.as_mut().unwrap().rgba[0] = 1;
         std::fs::write(&p, serde_json::to_vec(&e).unwrap()).unwrap();
-        assert!(read(&p, "one", s).is_none());
+        assert!(read(&p, "one", s, None).is_none());
         std::fs::write(&p, b"{\"partial\":").unwrap();
-        assert!(read(&p, "one", s).is_none());
+        assert!(read(&p, "one", s, None).is_none());
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

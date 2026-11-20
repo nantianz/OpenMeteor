@@ -179,7 +179,8 @@ fn render_original_liquid(stage: &str, eye: Vec3, aim: Vec3, live_reflection: bo
                     &object.name,
                     name,
                     [0.0; 3],
-                    &mut app.world_mut().resource_mut::<Assets<Image>>()
+                    &mut app.world_mut().resource_mut::<Assets<Image>>(),
+                    None,
                 ));
                 if stage == "sn13" {
                     assert_eq!(

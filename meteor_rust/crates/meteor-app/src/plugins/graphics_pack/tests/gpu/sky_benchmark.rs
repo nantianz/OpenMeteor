@@ -2,7 +2,7 @@ use super::*;
 use bevy::render::{render_resource::Extent3d, renderer::RenderAdapterInfo};
 use std::time::{Duration, Instant};
 
-fn wait(device: &RenderDevice) {
+pub(super) fn wait(device: &RenderDevice) {
     device
         .poll(PollType::Wait {
             submission_index: None,
@@ -11,7 +11,7 @@ fn wait(device: &RenderDevice) {
         .unwrap();
 }
 
-fn summarize(samples: &mut [f64]) -> String {
+pub(super) fn summarize(samples: &mut [f64]) -> String {
     if samples.is_empty() {
         return "unavailable".to_owned();
     }
@@ -30,6 +30,13 @@ pub(super) fn run(
     target: &Handle<Image>,
     to_world: impl Fn(Vec3) -> Vec3,
 ) {
+    let original_size = app
+        .world()
+        .resource::<Assets<Image>>()
+        .get(target)
+        .unwrap()
+        .texture_descriptor
+        .size;
     let adapter = app.world().resource::<RenderAdapterInfo>();
     eprintln!(
         "sn13 sky benchmark: adapter {:?}, {}",
@@ -61,14 +68,15 @@ pub(super) fn run(
             let mut results = [Vec::new(), Vec::new()];
             for enabled in [false, true, true, false] {
                 load_sn13_variant(app, enabled);
-                for frame in 0..48 {
+
+                for frame in 0..56 {
                     app.world_mut().resource_mut::<FrameUniforms>().seconds =
                         f64::from(frame) / 60.0;
                     let start = Instant::now();
                     app.update();
                     let device = app.world().resource::<RenderDevice>();
                     wait(device);
-                    if frame >= 16 {
+                    if frame >= 24 {
                         assert_eq!(sky::cache_ready(app), enabled);
                         results[usize::from(enabled)].push(start.elapsed().as_secs_f64() * 1000.0);
                     }
@@ -82,4 +90,10 @@ pub(super) fn run(
             }
         }
     }
+    app.world_mut()
+        .resource_mut::<Assets<Image>>()
+        .get_mut(target)
+        .unwrap()
+        .resize(original_size);
+    app.world_mut().resource_mut::<FrameUniforms>().seconds = 0.0;
 }

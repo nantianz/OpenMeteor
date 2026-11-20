@@ -16,11 +16,13 @@ use bevy::shader::{Shader, ShaderRef};
 use meteor_asset::gmdl::GmdlMesh;
 use std::collections::HashSet;
 
-mod cache;
+pub(crate) mod cache;
 mod clock;
 mod noise;
 
 const SHADER: Handle<Shader> = bevy::asset::uuid_handle!("1c5ee9c3-0985-436a-b829-287a3b623efb");
+const PANORAMA_SHADER: Handle<Shader> =
+    bevy::asset::uuid_handle!("b2a22c67-e87b-4946-9382-2e87b7d3a4b3");
 
 #[derive(Clone, Default, PartialEq, ShaderType)]
 struct SkyUniform {
@@ -32,6 +34,7 @@ struct SkyUniform {
     wind: Vec4,
     sun: Vec4,
     sun_color: Vec4,
+    weather: Vec4,
 }
 
 #[derive(AsBindGroup, Clone)]
@@ -41,6 +44,8 @@ pub(crate) struct SkyBindings {
     #[texture(1, dimension = "3d")]
     #[sampler(2)]
     noise: Handle<Image>,
+    #[texture(3)]
+    weather: Handle<Image>,
 }
 
 #[derive(Asset, TypePath, Clone)]
@@ -131,13 +136,22 @@ pub(crate) struct SkyCycle {
     clock: clock::Cycle,
 }
 
+#[derive(Clone)]
+pub(crate) struct CloudTextures {
+    noise: Handle<Image>,
+    weather: Handle<Image>,
+}
+
 #[derive(Resource, Default)]
-pub(crate) struct CloudNoise(Option<Handle<Image>>);
+pub(crate) struct CloudNoise(Option<CloudTextures>);
 
 impl CloudNoise {
-    pub(crate) fn get(&mut self, images: &mut Assets<Image>) -> Handle<Image> {
+    pub(crate) fn get(&mut self, images: &mut Assets<Image>) -> CloudTextures {
         self.0
-            .get_or_insert_with(|| images.add(noise::image()))
+            .get_or_insert_with(|| CloudTextures {
+                noise: images.add(noise::image()),
+                weather: images.add(noise::weather()),
+            })
             .clone()
     }
 }
@@ -147,7 +161,23 @@ pub(crate) fn install(app: &mut App) {
         .init_resource::<CloudNoise>()
         .add_systems(Update, update_cycle.after(update_uv_scroll));
     bevy::asset::load_internal_asset!(app, SHADER, "cloud_sky.wgsl", Shader::from_wgsl);
+    register_panorama_shader(app);
     cache::install(app);
+}
+
+pub(crate) fn register_panorama_shader(app: &mut App) {
+    if !app
+        .world()
+        .resource::<Assets<Shader>>()
+        .contains(PANORAMA_SHADER.id())
+    {
+        bevy::asset::load_internal_asset!(
+            app,
+            PANORAMA_SHADER,
+            "cloud_panorama.wgsl",
+            Shader::from_wgsl
+        );
+    }
 }
 
 #[cfg(test)]
@@ -350,7 +380,7 @@ pub(crate) fn atmosphere_lighting(sky: &Sky, light: &Environment) -> SkyLighting
 pub(crate) fn material(
     sky: &Sky,
     light: &Environment,
-    noise: Handle<Image>,
+    textures: CloudTextures,
     wind: Option<&super::config::Wind>,
 ) -> CloudSkyMaterial {
     let flow = wind
@@ -361,12 +391,24 @@ pub(crate) fn material(
         .unwrap_or_else(|| Vec2::from_array(sky.wind).extend(0.0).extend(0.0));
     let mut params = SkyUniform {
         layer: Vec4::new(sky.base_height, sky.thickness, sky.density, sky.coverage),
-        motion: Vec4::new(0.0, 0.0, sky.scale, sky.cloud_update_hz as f32),
+        motion: Vec4::new(
+            sky.cloud_definition,
+            0.0,
+            sky.scale,
+            sky.cloud_update_hz as f32,
+        ),
         wind: flow,
+        weather: Vec2::from_array(sky.weather_offset)
+            .extend(sky.weather_scale)
+            .extend(0.0),
         ..default()
     };
     params.set_lighting(sky, light);
-    CloudSkyMaterial(SkyBindings { params, noise })
+    CloudSkyMaterial(SkyBindings {
+        params,
+        noise: textures.noise,
+        weather: textures.weather,
+    })
 }
 
 impl SkyUniform {

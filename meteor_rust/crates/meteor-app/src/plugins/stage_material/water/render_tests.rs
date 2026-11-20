@@ -119,6 +119,7 @@ fn headless_water_changes_animates_and_restores_while_scrolling_smoke_is_unchang
         "sn13w01.jpg",
         [0.0; 3],
         &mut app.world_mut().resource_mut::<Assets<Image>>(),
+        None,
     );
 
     material.water_bounds.x = -material.water_bounds.z * 0.5;

@@ -2,6 +2,7 @@ use super::{
     bake_rays::{Rays, Triangle},
     config::{BlendMode, Surface},
 };
+use crate::plugins::graphics_pack::config::{SkyIdentity, WaterSkySelection};
 use bevy::prelude::*;
 use meteor_asset::{gmdl::GmdlMesh, texture::DecodedImage};
 use serde::{Deserialize, Serialize};
@@ -35,6 +36,8 @@ pub(super) struct BakedSurface {
     pub vertex_alpha: f32,
     pub reflection: Option<Map>,
     pub depth: Option<Map>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sky_visibility: Option<Map>,
 }
 pub(super) struct Inputs {
     mesh: GmdlMesh,
@@ -96,8 +99,19 @@ impl Inputs {
             hash,
         })
     }
-    pub fn cache_key(&self, s: &Surface) -> String {
+    pub fn cache_key(&self, s: &Surface, sky: Option<WaterSkySelection<'_>>) -> String {
         let mut hash = self.hash.clone();
+        if let Some(sky) = sky {
+            hash.update(b"water-sky-visibility-v3");
+            hash.update(
+                serde_json::to_vec(&(
+                    sky.profile.visibility_resolution,
+                    sky.profile.visibility_directions,
+                    sky.skybox,
+                ))
+                .unwrap(),
+            );
+        }
 
         hash.update(
             serde_json::to_vec(&(
@@ -113,7 +127,7 @@ impl Inputs {
         );
         format!("{:x}", hash.finalize())
     }
-    fn triangles(&self, s: &Surface) -> Result<(Rays, Rays, f32), String> {
+    fn triangles(&self, s: &Surface, skybox: &[SkyIdentity]) -> Result<(Rays, Rays, f32), String> {
         let mut water = Vec::new();
         let mut scene = Vec::new();
         let mut alpha = 0u8;
@@ -159,6 +173,12 @@ impl Inputs {
                     return Err("GMDL 顶点索引越界".into());
                 }
                 let triangle = Triangle {
+                    sky: self.mesh.resolve_texture_name(mat).is_some_and(|name| {
+                        skybox.iter().any(|target| {
+                            target.object.eq_ignore_ascii_case(&object.name)
+                                && target.texture.eq_ignore_ascii_case(name)
+                        })
+                    }),
                     points: std::array::from_fn(|i| {
                         Vec3::from_slice(&object.positions[face[i] as usize * 3..][..3])
                     }),
@@ -192,8 +212,14 @@ impl Inputs {
         }
         Ok((Rays::new(water), Rays::new(scene), alpha as f32 / 255.0))
     }
-    pub fn bake(&self, s: &Surface, mut progress: impl FnMut(f32)) -> Result<BakedSurface, String> {
-        let (water, scene, vertex_alpha) = self.triangles(s)?;
+    pub fn bake(
+        &self,
+        s: &Surface,
+        sky: Option<WaterSkySelection<'_>>,
+        mut progress: impl FnMut(f32),
+    ) -> Result<BakedSurface, String> {
+        let (water, scene, vertex_alpha) =
+            self.triangles(s, sky.map_or(&[], |selection| selection.skybox))?;
         let mut lo = Vec3::splat(f32::INFINITY);
         let mut hi = Vec3::splat(f32::NEG_INFINITY);
         for t in &water.triangles {
@@ -218,6 +244,7 @@ impl Inputs {
                 vertex_alpha,
                 reflection: None,
                 depth: None,
+                sky_visibility: None,
             });
         }
         let candidates: Vec<_> = water
@@ -240,6 +267,7 @@ impl Inputs {
             .unwrap()
             .0;
         let tile = s.reflection_face + 2;
+        let phases = if sky.is_some() { 8.0 } else { 7.0 };
         let mut reflection = Map::blank(tile * 3, tile * 2);
         for face in 0..6 {
             for y in 0..tile {
@@ -270,7 +298,7 @@ impl Inputs {
                     }
                 }
                 if y % 8 == 0 {
-                    progress((face as f32 + y as f32 / tile as f32) / 7.0);
+                    progress((face as f32 + y as f32 / tile as f32) / phases);
                 }
             }
             blur_tile(&mut reflection, face, tile);
@@ -308,18 +336,102 @@ impl Inputs {
                 }
             }
             if y % 8 == 0 {
-                progress((6.0 + y as f32 / 128.0) / 7.0);
+                progress((6.0 + y as f32 / 128.0) / phases);
             }
         }
+        let sky_visibility = sky.map(|selection| {
+            bake_sky_visibility(
+                &water,
+                &scene,
+                lo,
+                hi,
+                selection.profile.visibility_resolution,
+                selection.profile.visibility_directions,
+                &mut progress,
+            )
+        });
         progress(1.0);
         Ok(BakedSurface {
             bounds,
             vertex_alpha,
             reflection: Some(reflection),
             depth: Some(depth),
+            sky_visibility,
         })
     }
 }
+
+fn bake_sky_visibility(
+    water: &Rays,
+    scene: &Rays,
+    lo: Vec3,
+    hi: Vec3,
+    cells: usize,
+    sectors: usize,
+    progress: &mut impl FnMut(f32),
+) -> Map {
+    let blocked = |origin, direction| {
+        scene
+            .trace(origin, direction)
+            .is_some_and(|hit| !scene.triangles[hit.index].sky)
+    };
+    let directions: Vec<_> = (0..sectors)
+        .map(|i| {
+            let (sin, cos) = (i as f32 * std::f32::consts::TAU / sectors as f32).sin_cos();
+            Vec2::new(cos, -sin)
+        })
+        .collect();
+    let tiles = sectors / 4;
+    let mut map = Map::blank(cells * tiles, cells);
+    map.rgba.fill(255);
+    for y in 0..cells {
+        progress((7.0 + y as f32 / cells as f32) / 8.0);
+        for x in 0..cells {
+            let mut origin = Vec3::new(
+                lo.x + (x as f32 + 0.5) / cells as f32 * (hi.x - lo.x),
+                hi.y - (y as f32 + 0.5) / cells as f32 * (hi.y - lo.y),
+                hi.z + 10.0,
+            );
+            let Some(surface) = water.trace(origin, -Vec3::Z) else {
+                continue;
+            };
+            origin.z -= surface.distance - 1.0;
+
+            if blocked(origin, Vec3::Z) {
+                continue;
+            }
+            for (index, axis) in directions.iter().enumerate() {
+                let ray_hit = |elevation: f32| {
+                    blocked(
+                        origin,
+                        (*axis * (1.0 - elevation * elevation).sqrt()).extend(elevation),
+                    )
+                };
+                let mut lower = 0.0;
+                let mut upper = 1.0;
+                for elevation in [0.94, 0.78, 0.57, 0.38, 0.22, 0.10, 0.03] {
+                    if ray_hit(elevation) {
+                        lower = elevation;
+                        break;
+                    }
+                    upper = elevation;
+                }
+                for _ in 0..3 {
+                    let middle = (lower + upper) * 0.5;
+                    if ray_hit(middle) {
+                        lower = middle;
+                    } else {
+                        upper = middle;
+                    }
+                }
+                let pixel = y * cells * tiles + (index / 4) * cells + x;
+                map.rgba[pixel * 4 + index % 4] = (upper * 255.0).round() as u8;
+            }
+        }
+    }
+    map
+}
+
 fn cube_direction(face: usize, u: f32, v: f32) -> Vec3 {
     match face {
         0 => Vec3::new(1., -v, -u),

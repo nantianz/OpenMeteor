@@ -6,6 +6,8 @@ use bevy::{
 };
 
 const SIZE: u32 = 64;
+const WEATHER_SIZE: u32 = 128;
+const WEATHER_CELLS: i32 = 5;
 
 pub(super) fn image() -> Image {
     let cells = CloudCells::new();
@@ -16,9 +18,9 @@ pub(super) fn image() -> Image {
                 let p = (Vec3::new(x as f32, y as f32, z as f32) + 0.5) / SIZE as f32;
                 let shape = 0.76 * value(p, 8, 127) + 0.24 * value(p, 17, 611);
                 let erosion = 0.65 * value(p, 21, 389) + 0.35 * value(p, 31, 173);
-                let weather = value(p, 4, 281);
+                let fine = value(p, 13, 281);
                 let billows = cells.density(p);
-                data.extend([shape, erosion, weather, billows].map(|v| (v * 255.0).round() as u8));
+                data.extend([shape, erosion, fine, billows].map(quantize));
             }
         }
     }
@@ -33,15 +35,85 @@ pub(super) fn image() -> Image {
         TextureFormat::Rgba8Unorm,
         RenderAssetUsages::RENDER_WORLD,
     );
-    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+    image.sampler = repeating_sampler();
+    image
+}
+
+pub(super) fn weather() -> Image {
+    let mut data = Vec::with_capacity((WEATHER_SIZE * WEATHER_SIZE * 4) as usize);
+    for z in 0..WEATHER_SIZE {
+        for x in 0..WEATHER_SIZE {
+            let uv = (Vec2::new(x as f32, z as f32) + 0.5) / WEATHER_SIZE as f32;
+            data.extend(weather_at(uv).to_array().map(quantize));
+        }
+    }
+    let mut image = Image::new(
+        Extent3d {
+            width: WEATHER_SIZE,
+            height: WEATHER_SIZE,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8Unorm,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    image.sampler = repeating_sampler();
+    image
+}
+
+fn weather_at(uv: Vec2) -> Vec4 {
+    let p = Vec3::new(uv.x, 0.0, uv.y);
+    let distortion = Vec2::new(value(p, 7, 191), value(p, 7, 345)) - 0.5;
+    let point = uv * WEATHER_CELLS as f32 + distortion * 0.25;
+    let origin = point.floor().as_ivec2();
+    let mut union = 0.0_f32;
+    let mut total = 0.0_f32;
+    let mut tower_height = 0.0_f32;
+    for z in -1..=1 {
+        for x in -1..=1 {
+            let cell = origin + IVec2::new(x, z);
+            let wrapped = cell.rem_euclid(IVec2::splat(WEATHER_CELLS)).as_uvec2();
+            let key = UVec3::new(wrapped.x, 0, wrapped.y);
+            let random = |seed| lattice_random(key, seed);
+            let angle = random(25) * std::f32::consts::PI;
+            let axis = Vec2::from_angle(angle);
+            let center = cell.as_vec2() + Vec2::new(random(153), random(417)) * 0.47 + 0.265;
+            let d = point - center;
+            let patch = Vec2::new(d.dot(axis), d.perp_dot(axis));
+            let radius = Vec2::new(0.48 + 0.25 * random(614), 0.30 + 0.22 * random(90));
+            let body = (1.0 - (patch / radius).length_squared()).max(0.0);
+            let satellite = (1.0
+                - ((patch - Vec2::new(0.29, 0.10)) / (radius * 0.53)).length_squared())
+            .max(0.0);
+            let cover = (body + 0.48 * satellite * (1.0 - body)).powf(0.70);
+            let gain = cover * (0.52 + 0.48 * random(91));
+            union += gain * (1.0 - union);
+            total += gain;
+            tower_height += gain * (0.4 + 0.6 * random(821));
+        }
+    }
+    Vec4::new(
+        union,
+        tower_height / total.max(0.001),
+        value(p, 3, 649),
+        1.0,
+    )
+}
+
+fn quantize(value: f32) -> u8 {
+    (value.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+fn repeating_sampler() -> ImageSampler {
+    ImageSampler::Descriptor(ImageSamplerDescriptor {
         address_mode_u: ImageAddressMode::Repeat,
         address_mode_v: ImageAddressMode::Repeat,
         address_mode_w: ImageAddressMode::Repeat,
         mag_filter: ImageFilterMode::Linear,
         min_filter: ImageFilterMode::Linear,
         ..default()
-    });
-    image
+    })
 }
 
 struct CloudCells(Vec<Vec3>);

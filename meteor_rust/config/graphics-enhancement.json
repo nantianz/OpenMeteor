@@ -1,5 +1,8 @@
 {
   "schema_version": 1,
   "enabled": false,
-  "packs": ["graphics-packs/starter/pack.json"]
+  "packs": [
+    "graphics-packs/starter/pack.json",
+    "graphics-packs/sn04-interactive-snow/pack.json"
+  ]
 }

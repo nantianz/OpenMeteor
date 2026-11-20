@@ -19,6 +19,8 @@
     "stone_color": "textures/stone-color.png",
     "stone_normal": "textures/stone-normal.png",
     "stone_orm": "textures/stone-orm.png",
+    "ravine_grass_ground": "textures/grass-ravine-ground.png",
+    "courtyard_grass_ground": "textures/grass-courtyard-ground.png",
     "studio_diffuse": "textures/studio-diffuse.png",
     "studio_spec_0": "textures/studio-specular-0.png",
     "studio_spec_1": "textures/studio-specular-1.png",
@@ -162,6 +164,7 @@
     {
       "stage": "sn06",
       "surfaces": [{"texture": "sn064.jpg", "material": "stone"}],
+      "grass_ground": {"image": "courtyard_grass_ground", "world_size": 3.2},
       "fog": [{"center": [0.0, 6.0, 0.0], "radius": 30.0, "color": [0.58, 0.65, 0.72], "density": 0.008}],
       "grass": {
         "surfaces": [{"object": "Box02", "texture": "sn06mian5.jpg"}],
@@ -170,12 +173,13 @@
         "root_color": [0.023, 0.044, 0.013], "tip_color": [0.135, 0.191, 0.050],
         "near_distance": 18.0, "mid_distance": 40.0, "max_distance": 180.0,
         "max_visible_tiles": 512, "max_triangles": 168000,
-        "clump_radius": 0.29, "patch_size": 4.6, "ground_cover": 1.0,
+        "clump_radius": 0.29, "patch_size": 4.6, "patch_variation": 0.90, "ground_cover": 1.0,
         "species": {"grass": 0.79, "plumes": 0.075, "broadleaf": 0.135}
       }
     },
     {
       "stage": "sn03",
+      "grass_ground": {"image": "ravine_grass_ground", "world_size": 3.5},
       "grass": {
         "surfaces": [{"object": "ground", "texture": "sn302.jpg"}],
         "density": 7.0,
@@ -191,6 +195,7 @@
         "max_triangles": 104000,
         "clump_radius": 0.29,
         "patch_size": 3.1,
+        "patch_variation": 0.78,
         "ground_cover": 0.95,
         "species": {"grass": 0.78, "plumes": 0.09, "broadleaf": 0.13},
         "interaction_radius": 1.35,
@@ -199,6 +204,19 @@
     },
     {
       "stage": "sn13",
+      "water_sky_reflections": [
+        {
+          "surface": {"object": "Plane02", "texture": "sn13w01.jpg"},
+          "enabled": true,
+          "visibility_resolution": 48,
+          "visibility_directions": 16,
+          "wave_distortion": 0.16,
+          "refraction_damping": 0.55,
+          "grazing_boost": 0.64,
+          "grazing_range": [0.15, 0.73],
+          "horizon_fade": [0.012, 0.063]
+        }
+      ],
       "wind": {
         "direction": [1.0, 0.38], "strength": 0.7, "gust": 0.25,
         "response": {"cloud": 2.0, "water": 1.0, "grass": 1.5, "cloth": 1.0}
@@ -217,11 +235,14 @@
         "zenith": [0.055, 0.17, 0.43],
         "cloud_color": [1.0, 0.97, 0.94],
         "base_height": 91.0,
-        "thickness": 55.0,
-        "density": 0.26,
-        "coverage": 0.59,
+        "thickness": 93.0,
+        "density": 0.185,
+        "coverage": 0.49,
         "scale": 0.036,
-        "steps": 24,
+        "cloud_definition": 0.70,
+        "weather_scale": 0.00055,
+        "weather_offset": [100.0, -90.0],
+        "steps": 32,
         "sun": {"direction": [-0.58, 0.52, -0.64], "color": [1.0, 0.91, 0.77], "intensity": 1.75},
         "ambient_strength": 1.15,
         "ground_bounce": 0.27

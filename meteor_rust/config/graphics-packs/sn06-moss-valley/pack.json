@@ -292,27 +292,30 @@
           0.885,
           0.78
         ],
-        "base_height": 160.0,
-        "thickness": 54.0,
-        "density": 0.035,
-        "coverage": 0.44,
-        "scale": 0.023,
-        "steps": 16,
+        "base_height": 94.0,
+        "thickness": 108.0,
+        "density": 0.135,
+        "coverage": 0.53,
+        "scale": 0.024,
+        "cloud_definition": 1.0,
+        "weather_scale": 0.00048,
+        "weather_offset": [180.0, 10.0],
+        "steps": 32,
         "cloud_update_hz": 6,
-        "ambient_strength": 1.09,
-        "ground_bounce": 0.32,
+        "ambient_strength": 0.88,
+        "ground_bounce": 0.28,
         "sun": {
           "direction": [
             -0.82,
-            0.37,
+            0.46,
             0.43
           ],
           "color": [
             1.0,
-            0.87,
-            0.66
+            0.91,
+            0.77
           ],
-          "intensity": 2.05
+          "intensity": 2.27
         }
       },
       "wind": {

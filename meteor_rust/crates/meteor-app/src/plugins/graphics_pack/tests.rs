@@ -12,6 +12,69 @@ pub(super) fn starter() -> GraphicsPacks {
     )
     .unwrap()
 }
+
+#[test]
+fn water_sky_uses_manifest_selectors_and_disabled_overrides() {
+    let mut profile = json!({
+        "surface": {"object":"Plane37", "texture":"sn914.jpg"}, "enabled":true,
+        "visibility_resolution":24, "visibility_directions":8,
+        "wave_distortion":0.2, "refraction_damping":0.4, "grazing_boost":0.5,
+        "grazing_range":[0.1, 0.6], "horizon_fade":[0.01, 0.05]
+    });
+    let preset = json!({"schema_version":1, "id":"preset", "scenes":[{
+        "stage":"sn09", "sky":{"enabled":true, "replace_skybox":true,
+            "skybox":[{"object":"TestSky", "texture":"sky.bmp"}]},
+        "water_sky_reflections":[profile.clone()]
+    }]});
+    let load = |index: &[u8], override_pack: &serde_json::Value| {
+        load_with_reader(index, |name| {
+            Ok(if name == "preset.json" {
+                &preset
+            } else {
+                override_pack
+            }
+            .to_string()
+            .into_bytes())
+        })
+    };
+    let packs = load(
+        br#"{"schema_version":1,"enabled":true,"packs":["preset.json"]}"#,
+        &json!(null),
+    )
+    .unwrap();
+    let selected = packs
+        .water_sky("SN09", "plane37", "sn09\\SN914.JPG")
+        .unwrap();
+    assert_eq!(selected.profile.visibility_resolution, 24);
+    assert_eq!(selected.profile.visibility_directions, 8);
+    assert_eq!(selected.profile.grazing_boost, 0.5);
+    assert_eq!(selected.skybox[0].object, "TestSky");
+    assert!(packs.water_sky("sn13", "Plane37", "sn914.jpg").is_none());
+    assert!(packs.water_sky("sn09", "Plane02", "sn914.jpg").is_none());
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    assert_eq!(
+        packs
+            .water_sky_for_bake("sn09", "Plane37", "sn914.jpg")
+            .unwrap()
+            .profile
+            .visibility_directions,
+        8
+    );
+
+    profile["enabled"] = json!(false);
+    let mut override_pack = json!({"schema_version":1, "id":"override", "scenes":[{
+        "stage":"sn09", "water_sky_reflections":[profile]
+    }]});
+    let layered = br#"{"schema_version":1,"enabled":true,"packs":["preset.json","override.json"]}"#;
+    let packs = load(layered, &override_pack).unwrap();
+    assert!(packs.water_sky("sn09", "Plane37", "sn914.jpg").is_none());
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    assert!(packs
+        .water_sky_for_bake("sn09", "Plane37", "sn914.jpg")
+        .is_none());
+    override_pack["scenes"][0]["water_sky_reflections"][0]["visibility_directions"] = json!(6);
+    assert!(load(layered, &override_pack).is_err());
+}
 fn plain() -> GmdlMaterial {
     GmdlMaterial::new_scene(
         GmdlMaterialParams {

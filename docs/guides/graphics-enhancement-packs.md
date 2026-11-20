@@ -99,42 +99,160 @@ Starter 的 `stage: "*"` 提供默认风，金华城（`sn13`）有自己的覆�
 
 ## 可交互草地
 
-开启图形增强包后可在一线天（`sn03`）和四方阵（`sn06`）测试。前者匹配 `ground / sn302.jpg`，后者覆盖 `Box02 / sn06mian5.jpg` 主庭院。细长草叶、芒穗、阔叶及枯黄叶尖成片混合。跑过时草会弯倒，离开后回弹。天空替换生效后，草叶随天空补光和太阳变亮或变暗。 近地的挥砍、剑气和飞行道具也可压弯草叶，动作经过后草会回弹。局内可切换「可交互草地」，在同一机位和分辨率对比帧时间。
+开启 `config/graphics-enhancement.json` 后进入一线天（`sn03`）或四方阵（`sn06`）。
+Starter 匹配一线天的 `ground / sn302.jpg` 和四方阵的 `Box02 / sn06mian5.jpg` 主庭院。
+草叶和地面着色共用从原地表生成的过渡区。靠近石砖、裸土和草区边缘时，草簇逐渐变矮变稀，
+地面颜色也逐渐回到原贴图。
+草根下铺设 CC0 实拍地表，一线天使用碎石泥地，四方阵使用露土的稀草地。
+载入关卡时，把实际草根密度写入同一张边缘遮罩。密草区保留连续的低矮植被底色，稀草区透出扫描图的土色，
+远处切换草叶细节等级时也能看见这些斑块。地表从同一次遮罩采样读取边缘和密度。
+扫描图按世界坐标铺设，在 1K 色图内合并轻量的环境遮蔽。远处使用 mipmap，地表只增加一次纹理采样，
+沿用原地面的绘制和光照。素材来自 Poly Haven 的 [Stony Dirt Path](https://polyhaven.com/a/stony_dirt_path)
+和 [Sparse Grass](https://polyhaven.com/a/sparse_grass)。
+细长草叶、细芒穗、低矮阔叶和枯黄叶尖成片混合。沿地面跑过，可看到草向外压弯再回弹。
+天空替换生效后，草叶使用同一套太阳与天空补光，随昼夜变色。
+设置中“战斗与场景特效”下的“可交互草地”可在局内开关。
 
-在 `config/graphics-packs/starter/pack.json` 的 `scenes[].grass` 调整以下参数。修改后重启。
-
-| 字段 | 用法 |
+| `scenes[].grass` 字段 | 用途 |
 | --- | --- |
-| `enabled`、`surfaces`、`bounds` | 关卡开关、精确的对象名与贴图名，以及可选的 `[[minX,minZ],[maxX,maxZ]]` 世界坐标范围 |
-| `density`、`tile_size`、`min_up` | 每平方世界单位的目标草簇数、草块边长和最小向上法线分量 |
-| `height`、`width`、`root_color`、`tip_color` | 叶片高宽范围及根部、叶尖的线性 RGB |
-| `near_distance`、`mid_distance`、`max_distance` | 近、中和最远可见范围，最远可设到 240 世界单位，四方阵示例为 180 |
-| `max_visible_tiles`、`max_triangles` | 草块和三角形硬上限。一线天为 96 块、104,000 个三角形，四方阵高密度预设为 512 块、168,000 个三角形 |
-| `species`、`patch_size`、`clump_radius`、`ground_cover` | 植被类型权重、成片变化尺寸、草簇半径和地表覆盖强度 |
+| `enabled`、`surfaces` | 关卡开关和精确的 `{"object":"ground","texture":"sn302.jpg"}` 选择器。结合原版地表坡度与 COB 碰撞面筛选 |
+| `bounds`、`min_up` | 可选的 `[[minX,minZ],[maxX,maxZ]]` 世界坐标范围及最小向上法线分量。大场景可用范围限制草地 |
+| `density`、`tile_size`、`clump_radius` | 每平方世界单位目标草簇数、草块边长、单簇散开半径。每块最多 192 簇，每关最多 512 块 |
+| `species`、`patch_size` | 长草 `grass`、芒穗 `plumes` 和阔叶 `broadleaf` 的相对权重，以及成片变化的尺寸 |
 | `patch_variation` | 0–1，控制草簇密度、高度和共享风下弯曲幅度的变化。默认 0 |
-| `plume_color` | 可选线性 RGB，启用后各距离档使用同一套带穗草茎 |
-| `wind_strength`、`interaction_radius`、`recovery_seconds` | 风弯曲量、脚边影响范围和回弹时间 |
+| `plume_color` | 可选的线性 RGB，启用后各距离档使用同一套带穗形的草茎 |
+| `ground_cover` | 新地表与原地面纹理的最大混合比例。关闭「可交互草地」会一并关闭地表混合 |
+| `height`、`width`、`root_color`、`tip_color` | 草叶高度和宽度的最小／最大值、根部与叶尖的线性 RGB |
+| `near_distance`、`mid_distance`、`max_distance` | 近、中和最远可见距离。最远范围可设到 240 世界单位，四方阵示例为 180 |
+| `max_visible_tiles` | 可见草块硬上限，范围 4–512。四方阵容纳整个比武台的草块，由视锥和三角形预算裁剪。Android 和 Web 额外限制为 40 块 |
+| `max_triangles` | 可见草地的每帧提交预算。一线天为 104,000，四方阵加密至 168,000。移动端和 Web 额外限制为 28,000 |
+| `wind_strength`、`interaction_radius`、`recovery_seconds` | 草叶的局部弯曲系数、落脚影响范围、回弹时间。共享风启用时，弯曲量还取决于关卡风和 `response.grass` |
 
-最远一档每草块最多提交 96 个单三角形草叶。远近共用草根、叶片朝向、着色和风动，叶宽随距离过渡。桌面从相机位置分配草块预算，再按视锥裁剪。踩踏只更新相机附近的 64×64 交互纹理，最多跟踪 8 个落地角色。远景覆盖补偿参考 [AMD GPUOpen 的草地渲染实现](https://gpuopen.com/learn/mesh_shaders/mesh_shaders-procedural_grass_rendering/#level-of-detail)。
+关卡可用 `scenes[].grass_ground` 指定草下的地表图。`image` 引用同一包 `resources` 中的 PNG，
+`world_size` 是每次平铺覆盖的世界单位，范围 0.5–24。后加载的包可单独替换该地表图。
+没有声明地表图的关卡继续使用程序化地表配色。
+
+草根随关卡加载一次，草块共享网格和材质。近、中、远三档每块最多 192、144、96 簇。
+最远一档每块最多 96 片单三角形草叶。远近共用草根、叶片朝向、着色和风动，叶宽随距离平滑过渡。
+桌面从相机位置分配草块预算，再按视锥裁剪。原地转动镜头只改变哪些草块进入视野。
+交互图是相机附近的 64×64 纹理，最多 30 Hz，跟踪最近 8 个落地角色。武器、身体和特效的攻击盒
+接近地面时扫倒草叶，重砸向外压草，投射物沿经过场景裁剪的飞行段留痕。每次刷新最多处理 12 段招式碰触，
+和脚步共用一张交互图。相邻碰触复用地面采样，停用草地时暂停收集招式几何。渲染使用不透明草叶几何，
+关闭单片投影；原场景碰撞、移动和联机数据不受影响。参考 [Grassworks 性能说明](https://grassworks.techredux.co/docs/performance)
+和 [Grassworks 交互说明](https://grassworks.techredux.co/docs/interaction)。草簇分布和风动参考
+[Sucker Punch 的程序化草地演讲](https://gdcvault.com/play/1027214/)。
+
+验收时沿一线天的泥地走、跑、跳，再静止看离脚处的草回弹。用同一机位和分辨率切换开关对比慢帧；
+低配置可降低 `max_visible_tiles` 和三档距离。
+
+## 炽雪城互动雪地
+
+在 `config/graphics-enhancement.json` 中开启增强包并确认 `packs` 包含
+`graphics-packs/sn04-interactive-snow/pack.json`，重启后进入炽雪城（`sn04`）。
+现有自定义索引可以单独加入这条路径。移除这条路径，或把包内 `snow.enabled` 设为
+`false` 并重启，即可关闭雪地互动。
+
+主地面 `di` 的两种积雪材质（`sn0410.jpg` 和 `sn0411.jpg`）上方覆盖一层有厚度的雪。
+雪面在石道边缘逐渐变薄，并以斑驳的薄霜露出下方底材。走跑把雪压低并在鞋印边缘推起雪，跳落压出更宽的坑并扬起雪粉，
+翻滚沿整段移动路径压出连续沟槽。角色在空中或从更高一层经过时，地面的雪保持原状。
+积雪逐渐回填，单机暂停时冻结，新开一局重新开始。各端在本地生成雪面，接地沿用原版碰撞。
+
+自制包可用 `scenes[].snow.surfaces` 指定同一近水平地面的精确对象和贴图对。
+`thickness` 控制积雪厚度（0.12–0.58 世界单位，炽雪城为 0.38），
+`imprint_strength` 控制压实深度和堆雪强度（0.05–1），`recovery_seconds` 控制回填时间（3–120 秒）。
+
+雪面复用远近两套常驻网格，顶点着色器读取世界坐标下的压实和堆雪高度。未受扰动和较远的区域
+使用粗网格，相邻细网格沿公共边缝合到粗网格。桌面最多 8 块细网格，Android 和 WASM 最多 4 块，
+且每块精度更低。每次最多处理 32 个接触，保留 64 块稀疏交互数据和 96 个雪粉粒子。
+高度修改按 8 KiB 的小块上传，每次最多上传 12 块，交互每秒最多更新 30 次。
+雪面静止时复用常驻数据，回填开始后才分批刷新受影响的区域。
+
+验收时沿中央石道走到两侧干净的白雪，低头看脚下。分别走、跑、原地跳落和翻滚，
+再返回石道。检查雪层边缘、压坑的深度、两侧堆起的雪、翻滚沟槽的连续性和回填速度。
+
+桌面可用原版资源复测 1080p 同机位的整帧耗时，测试输出 p50、p95 和受扰动块数。
+同时设置 `METEOR_SN04_CAPTURE_DIR` 可导出原地面、未踩积雪、脚印、落地和翻滚五张 PNG。
+
+```sh
+METEOR_SN04_SNOW_BENCH=1 cargo test --manifest-path meteor_rust/Cargo.toml -p meteor-app --lib sn04_snow -- --nocapture
+```
 
 ## 体积云和天空盒
 
-开启图形增强包后进入金华城（`sn13`）。在 `scenes[].sky` 指定 `enabled` 和 `replace_skybox`。后者开启时，`skybox` 里每组 `{"object":"Sphere01","texture":"sky1.bmp"}` 都要匹配，才会隐藏指定的原版材质批次。关闭替换会保留原天空盒，原天空面可能遮挡后方的体积云。游戏内的「天空增强」设置在下一局生效。
+将 `config/graphics-enhancement.json` 的 `enabled` 设为 `true`，重启后进入金华城
+（`sn13`）。Starter 的 `scenes[].sky` 已配置该关卡；设置中“战斗与场景特效”下的“天空增强”
+控制下一局是否应用。体积云在桌面的 Metal、DX12 和 Vulkan 路径可用。
 
-`horizon`、`zenith` 和 `cloud_color` 是线性 RGB。可用 `base_height`、`thickness`、`coverage`、`density` 和 `scale` 调整云层。`steps` 是每条视线的采样上限，默认 24，范围 8～48。`sky.wind` 用于未设置共享风的旧包。
-`cloud_update_hz` 是全景缓存更新频率上限，默认 15，范围 1～30。每帧只刷新一部分缓存，按当前相机方向取样。
-成功替换天空盒后，场景和角色使用新天空的补光，共用 `sun` 的颜色和方向。`ambient_strength` 和 `ground_bounce` 用于调整天空漫射光和地表反弹。
-Windows 上使用 DX12 或 Vulkan。参考 [HPVolumeCloud](https://github.com/AshenOneArt/HPVolumeCloud) 的散射模型说明。
-
-在关卡的 `sky` 对象中添加一种时间模式，重启生效。旧的 `fixed_time` 字段也可继续用，配新模式时移除旧字段。
-
-| 模式 | 配置 |
+| 字段 | 用途 |
 | --- | --- |
-| 自动循环 | `"time": {"mode":"cycle","start_time":"07:00","time_scale":60}` |
-| 进图时的本机时间 | `"time": {"mode":"system"}` |
-| 指定时刻 | `"time": {"mode":"fixed","time":"23:30"}` |
+| `enabled` | 启用关卡天空增强。关卡无配置时沿用原天空 |
+| `replace_skybox` | `true` 时隐藏 `skybox` 中选定的材质批次；`false` 时保留关卡天空盒，包括挡住增强背景的原天空面 |
+| `skybox` | 一组精确的 `{"object":"Sphere01","texture":"sky1.bmp"}` 标识。大小写不敏感，支持在同一对象上分别指定多张贴图。替换要求明确的关卡 ID 和非空列表 |
+| `horizon`、`zenith`、`cloud_color` | 地平线、天顶和云的线性 RGB |
+| `base_height`、`thickness` | 云底高度、云层厚度，使用游戏世界单位 |
+| `density`、`coverage`、`scale` | 消光密度、覆盖率、噪声空间频率 |
+| `cloud_definition` | 近云边缘密度过渡和侵蚀强度。范围 0～1，默认 0 |
+| `weather_scale`、`weather_offset` | 风驱动的区域天气场比例与世界坐标偏移。决定云团聚集的位置、蓝天间隙和云塔大小 |
+| `wind`、`steps` | 兼容用的独立 X/Z 风速及每条视线的采样上限，默认 24，范围 8～48。关卡配置 `wind.response` 后，云使用关卡风。短视线和远处薄云会降低实际步数 |
+| `cloud_update_hz` | 云缓存更新频率上限，默认 15，范围 1～30。实际频率还受每帧更新行数限制 |
+| `sun` | 可选的 `direction`、线性 RGB `color` 和 `intensity`，只用于当前增强天空。省略时取该关卡的 `environment` 太阳 |
+| `time` | 可选的关卡时钟。支持自动循环、系统时间和指定时间 |
+| `fixed_time` | 兼容旧包的固定时刻写法。仅在省略 `time` 时使用 |
+| `ambient_strength`、`ground_bounce` | 天空漫射光强度（0～2）和地表反弹比例（0～1） |
 
-`60` 倍表示现实 1 分钟推进关卡 1 小时。单机暂停冻结，重新进图从指定起点开始。要快速看过午夜，从 `23:30` 开始，约 30 秒后到午夜。
+开启替换时，所有标识都匹配后才切换。某项缺失或对象重名时继续绘制原天空，日志会指出对应标识。
+金华城示例包括 `Sphere01` 上的 `sky1.bmp`、`sky2.bmp`、`sky3.bmp`，
+以及 `Sphere02` 和 `Sphere03` 上的 `am2sky1.jpg`。
+区域天气场先确定云团分布、云底和云顶。三维噪声塑造相连的云瓣，并侵蚀云团的边缘。
+云内沿太阳方向分段估算遮蔽，叠加多次散射近似。远云随距离染入大气色。
+光线步进按分段实际长度积分。长步进在段内分两点采样密度，共用一次光照计算。
+全景缓存写入时，根据透射率和相对邻点的亮度变化调整去噪强度。云体细节来自世界空间的密度和自阴影。
+风动使用共享的帧时间缓冲，关卡运行时天空材质保持原有绑定。
+启用云层的关卡共享 3072×1536 双缓冲全景缓存。每帧最多更新 64 行，云所在的区间算完才切换。
+镜头在云层外时跳过背向云层的半球。
+全景缓存把三分之二的行数留给地平线上方。每帧沿当前相机方向重投影，按风速补偿位移，最多用 55 毫秒混合新旧结果。
+天空底色和太阳仍按画面分辨率计算。缓存首次生成期间使用直接采样。
+四方阵和金华城预设使用不同的区域天气比例和偏移。相邻云团共享较平稳的云底和变化的云顶高度。
+山谷的太阳方向、强度和色温由 `sky.sun` 指定，天空和地面反弹光的强度可单独调节。
+区域天气场与三维密度分层参考 [Guerrilla 的 Nubis 分享](https://www.guerrilla-games.com/read/nubis-authoring-real-time-volumetric-cloudscapes-with-the-decima-engine)。
+参考 [HPVolumeCloud](https://github.com/AshenOneArt/HPVolumeCloud) 的散射模型说明，使用内置 WGSL 实现。
+云形参考 [Godot 体积云示例](https://github.com/godotengine/godot-demo-projects/blob/master/3d/sky_shaders/sky_volumetric_clouds.gdshader) 的多尺度塑形思路。
+
+成功替换天空盒后，场景和角色会根据天空渐变、云量及云层厚度获得半球漫射光，
+同时接受 `sky.sun` 的方向光。开启动态阴影时，投影方向同步。清水使用这套光源计算水体散射。
+PBR 表面使用天空漫射和低频镜面环境光。天空补光是关卡级近似，云移动时地面光照保持稳定。
+关闭天空增强并重新进入关卡会恢复原有光照路径。
+
+### 水面云倒影
+
+桌面端在启用图形增强包及游戏内「天空增强」「水面增强」后，读取关卡的 `scenes[].water_sky_reflections`。
+Starter 包的金华城条目选中了 `Plane02 / sn13w01.jpg`。该表面须在 `water-enhancement.json` 中配置为清水，原天空的替换对象取自关卡生效的 `sky.skybox`。
+
+| 参数 | 作用 |
+| --- | --- |
+| `surface` | 用 `object` 和 `texture` 指定水面对象名与贴图文件名 |
+| `enabled` | 控制该表面的云倒影。多个包匹配时使用最后一项，可用 `false` 覆盖前面的配置 |
+| `visibility_resolution`、`visibility_directions` | 遮挡图的空间网格边长与方向数。分别为 16～96 和 4～32，方向数为 4 的倍数 |
+| `wave_distortion`、`refraction_damping` | 大波纹对云影轮廓的扰动，以及有云影时对折射波纹的减弱程度，范围均为 0～1 |
+| `grazing_boost`、`grazing_range` | 斜视时额外反射的强度及渐入范围。范围端点为 0～1，并按递增顺序填写 |
+| `horizon_fade` | 倒影在遮挡边缘的过渡范围。端点为 0～1，并按递增顺序填写 |
+
+修改包配置后重启生效。遮挡精度或天空盒标识发生变化时，桌面端会自动更新该水面的烘焙缓存。
+视觉强度和波纹设置复用已有遮挡缓存。启用原版资源离屏测试前，使用 `npm --prefix asset-tools run generate:water` 生成的对应遮挡图。
+
+### 关卡天空时间
+
+在 `config/graphics-packs/starter/pack.json` 找到关卡，例如金华城（`sn13`）。在已有的 `sky` 对象中添加以下任意一项，重启游戏生效。
+
+| 模式 | 添加到 `sky` 的字段 |
+| --- | --- |
+| 自动循环 | `"time": {"mode": "cycle", "start_time": "07:00", "time_scale": 60}` |
+| 固定为进图时的本机时间 | `"time": {"mode": "system"}` |
+| 固定为指定时刻 | `"time": {"mode": "fixed", "time": "23:30"}` |
+
+时刻使用 24 小时制 `HH:mm`。`time_scale` 是正数倍率，`60` 表示现实 1 分钟推进关卡 1 小时，完整昼夜约 24 分钟。重新进图从 `start_time` 开始，单机暂停时冻结。系统时间模式进图时读取一次本机时区的时刻。省略 `time` 和 `fixed_time` 时沿用关卡预设。
+
+太阳、云色和天空补光按关卡时钟变化。自动循环的更新频率受 `cloud_update_hz` 限制，云层分批改用新光照。验证跨午夜时可从 `23:30` 开始，用 `60` 倍速，约 30 秒经过午夜。
 
 ## 人物布料
 

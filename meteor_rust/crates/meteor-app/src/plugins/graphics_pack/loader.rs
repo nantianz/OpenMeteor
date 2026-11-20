@@ -104,6 +104,12 @@ fn stage_resources(config: &Pack, meshlets: bool) -> (BTreeSet<&str>, BTreeSet<&
                 .iter()
                 .filter_map(|surface| surface.material.as_deref()),
         );
+        images.extend(
+            scene
+                .grass_ground
+                .as_ref()
+                .map(|ground| ground.image.as_str()),
+        );
         if let Some(environment) = &scene.environment {
             images.extend(environment.diffuse.as_deref());
             images.extend(environment.specular_mips.iter().map(String::as_str));
@@ -458,6 +464,30 @@ impl GraphicsPacks {
                 .map(move |s| (p, s))
         })
     }
+
+    pub(crate) fn water_sky<'a>(
+        &'a self,
+        stage: &'a str,
+        object: &str,
+        texture: &str,
+    ) -> Option<WaterSkySelection<'a>> {
+        select_water_sky(self.scenes(stage).map(|(_, scene)| scene), object, texture)
+    }
+
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    pub(crate) fn water_sky_for_bake<'a>(
+        &'a self,
+        stage: &str,
+        object: &str,
+        texture: &str,
+    ) -> Option<WaterSkySelection<'a>> {
+        let scenes = self
+            .catalog
+            .iter()
+            .flat_map(|pack| &pack.config.scenes)
+            .filter(|scene| scene.stage == "*" || scene.stage.eq_ignore_ascii_case(stage));
+        select_water_sky(scenes, object, texture)
+    }
 }
 
 fn read_mounted_resource(name: &str) -> Result<Vec<u8>, String> {
@@ -528,11 +558,12 @@ mod tests {
         let config = serde_json::json!({
             "schema_version": 1,
             "id": "stage-assets",
-            "resources": {"common":"common.png", "valley":"valley.png", "city":"city.png"},
+            "resources": {"common":"common.png", "valley":"valley.png", "city":"city.png", "soil":"soil.png"},
             "materials": {"common":{"base_color":"common"}, "valley":{"normal":"valley"}, "city":{"orm":"city"}},
             "scenes": [
                 {"stage":"*", "surfaces":[{"object":"common","material":"common"}]},
-                {"stage":"sn06", "surfaces":[{"object":"valley","material":"valley"}]},
+                {"stage":"sn06", "surfaces":[{"object":"valley","material":"valley"}],
+                 "grass_ground":{"image":"soil","world_size":3.2}},
                 {"stage":"sn13", "surfaces":[{"object":"city","material":"city"}]}
             ]
         });
@@ -550,15 +581,18 @@ mod tests {
             Ok(image.to_vec())
         })
         .unwrap();
-        assert_eq!(reads, ["pack/common.png", "pack/valley.png"]);
-        let texture = Arc::downgrade(&graphics.packs[0].images["valley"]);
+        assert_eq!(
+            reads,
+            ["pack/common.png", "pack/soil.png", "pack/valley.png"]
+        );
+        let texture = Arc::downgrade(&graphics.packs[0].images["soil"]);
         let next = load_resources(&graphics.catalog, Some("sn13"), true, |path| {
             reads.push(path.to_owned());
             Ok(image.to_vec())
         })
         .unwrap();
-        assert_eq!(&reads[2..], ["pack/city.png", "pack/common.png"]);
-        assert!(!next[0].images.contains_key("valley"));
+        assert_eq!(&reads[3..], ["pack/city.png", "pack/common.png"]);
+        assert!(!next[0].images.contains_key("soil"));
 
         let mut app = App::new();
         app.add_plugins(bevy::state::app::StatesPlugin)

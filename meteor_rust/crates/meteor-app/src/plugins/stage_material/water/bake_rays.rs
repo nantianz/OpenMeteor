@@ -2,6 +2,7 @@ use bevy::prelude::*;
 
 #[derive(Clone)]
 pub(super) struct Triangle {
+    pub sky: bool,
     pub points: [Vec3; 3],
     pub uv: [Vec2; 3],
     pub color: [Vec3; 3],
@@ -138,6 +139,7 @@ mod tests {
     #[test]
     fn nearest_hit_has_barycentrics_and_misses_remain_empty() {
         let tri = |z| Triangle {
+            sky: false,
             points: [
                 Vec3::new(0., 0., z),
                 Vec3::new(2., 0., z),
