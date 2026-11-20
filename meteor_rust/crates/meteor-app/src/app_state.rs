@@ -1020,8 +1020,31 @@ fn parse_settings(text: &str) -> (Settings, Keymap) {
 
 pub fn reset_settings_defaults(settings: &mut Settings, keymap: &mut Keymap) {
     *settings = Settings::default();
-    *keymap = Keymap::default();
+    *keymap = read_default_keymap().unwrap_or_default();
     let _ = save_settings(settings, keymap);
+}
+
+fn read_default_keymap() -> Option<Keymap> {
+    #[cfg(target_arch = "wasm32")]
+    let bytes = meteor_asset::runtime_assets::read_entry("userdata/user_default.cfg")?;
+    #[cfg(not(target_arch = "wasm32"))]
+    let bytes = {
+        use std::io::Read;
+        let settings = settings_file_path();
+        let path = settings.parent()?.join("UserData").join("user_default.cfg");
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)
+            .ok()?
+            .take(65_537)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        bytes
+    };
+    if bytes.len() > 65_536 {
+        return None;
+    }
+    let text = std::str::from_utf8(&bytes).ok()?;
+    Some(parse_settings(text).1)
 }
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]

@@ -172,6 +172,11 @@ pub fn resolve_local_combatant_name(
         return name.to_string();
     }
     if local {
+        if net.status != NetStatus::InRoom {
+            if let Some(name) = net.offline_script_player_name.as_ref() {
+                return name.clone();
+            }
+        }
         return if request.player_name.trim().is_empty() {
             "玩家".into()
         } else {

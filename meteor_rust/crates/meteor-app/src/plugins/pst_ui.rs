@@ -1,5 +1,8 @@
+use bevy::asset::RenderAssetUsages;
+use bevy::image::{CompressedImageFormats, ImageSampler, ImageType};
 use bevy::prelude::*;
 use bevy::ui::{FocusPolicy, ScrollPosition};
+use meteor_scene::pst_game::ScriptEvent;
 use meteor_scene::pst_runtime::PstValue;
 use meteor_scene::pst_ui::{PstUi, UiOwner, UiPanel};
 
@@ -56,12 +59,13 @@ pub(super) fn sync_panel(
     end: Option<Res<MatchEnd>>,
     ui: Res<StagePstUi>,
     font: Option<Res<UiFont>>,
+    mut images: Option<ResMut<Assets<Image>>>,
     roots: Query<(Entity, &PstPanelRoot)>,
 ) {
     let shown =
         ui.0.as_ref()
-            .filter(|_| active_in_play(&state, end.as_deref()))
-            .and_then(PstUi::visible);
+            .and_then(PstUi::visible)
+            .filter(|panel| presents_panel(&state, end.as_deref(), panel.owner));
     if let Some(panel) = shown.as_ref() {
         if roots.single().is_ok_and(|(_, root)| &root.0 == panel) {
             return;
@@ -71,11 +75,108 @@ pub(super) fn sync_panel(
         commands.entity(entity).despawn();
     }
     if let (Some(panel), Some(font)) = (shown, font) {
-        spawn_panel(&mut commands, panel, &font);
+        let pictures = panel.images.clone();
+        let surface = spawn_panel(&mut commands, panel, &font);
+        if let Some(images) = images.as_deref_mut() {
+            for picture in pictures {
+                let image =
+                    super::stage_plugin::pst_extensions::read_installed_script_asset(&picture.path)
+                        .filter(|bytes| bytes.len() <= 4 * 1024 * 1024)
+                        .and_then(|bytes| {
+                            let (extension, width, height) = picture_header(&bytes)?;
+                            if !(1..=2048).contains(&width) || !(1..=2048).contains(&height) {
+                                return None;
+                            }
+                            Image::from_buffer(
+                                &bytes,
+                                ImageType::Extension(extension),
+                                CompressedImageFormats::NONE,
+                                true,
+                                ImageSampler::linear(),
+                                RenderAssetUsages::default(),
+                            )
+                            .ok()
+                        });
+                if let Some(image) = image {
+                    let image_size = image.size().as_vec2();
+                    let [x0, y0, x1, y1] = picture
+                        .uv
+                        .map(|value| f32::from(value) / f32::from(u16::MAX));
+                    let a = Vec2::new(x0, y0) * image_size;
+                    let b = Vec2::new(x1, y1) * image_size;
+                    let rect = Rect {
+                        min: a.min(b),
+                        max: a.max(b),
+                    };
+                    let size = rect.size();
+                    let scale = (310.0 / size.x).min(165.0 / size.y).min(1.0);
+                    let [r, g, b, alpha] = picture.tint;
+                    let mut node = ImageNode::new(images.add(image));
+                    node.rect = Some(rect);
+                    node.flip_x = x0 > x1;
+                    node.flip_y = y0 > y1;
+                    node.color = Color::srgba_u8(r, g, b, alpha);
+                    let child = commands
+                        .spawn((
+                            node,
+                            Node {
+                                width: Val::Px(size.x * scale),
+                                height: Val::Px(size.y * scale),
+                                ..default()
+                            },
+                        ))
+                        .id();
+                    commands.entity(surface).add_child(child);
+                }
+            }
+        }
     }
 }
 
-pub(super) fn spawn_panel(commands: &mut Commands, panel: UiPanel, font: &UiFont) {
+fn picture_header(bytes: &[u8]) -> Option<(&'static str, u32, u32)> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        let width = u32::from_be_bytes(bytes.get(16..20)?.try_into().ok()?);
+        let height = u32::from_be_bytes(bytes.get(20..24)?.try_into().ok()?);
+        return Some(("png", width, height));
+    }
+    if !bytes.starts_with(b"\xff\xd8") {
+        return None;
+    }
+    let mut cursor = 2;
+    while bytes.get(cursor) == Some(&0xff) {
+        while bytes.get(cursor) == Some(&0xff) {
+            cursor += 1;
+        }
+        let marker = *bytes.get(cursor)?;
+        cursor += 1;
+        if matches!(marker, 0xd9 | 0xda) {
+            return None;
+        }
+        let size = usize::from(u16::from_be_bytes(
+            bytes.get(cursor..cursor + 2)?.try_into().ok()?,
+        ));
+        if size < 2 {
+            return None;
+        }
+        if matches!(marker, 0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf) {
+            if size < 7 {
+                return None;
+            }
+            let height = u16::from_be_bytes(bytes.get(cursor + 3..cursor + 5)?.try_into().ok()?);
+            let width = u16::from_be_bytes(bytes.get(cursor + 5..cursor + 7)?.try_into().ok()?);
+            return Some(("jpg", u32::from(width), u32::from(height)));
+        }
+        cursor += size;
+    }
+    None
+}
+
+fn presents_panel(state: &State<AppState>, end: Option<&MatchEnd>, owner: UiOwner) -> bool {
+    active_in_play(state, end)
+        || *state.get() == AppState::Menu && matches!(owner, UiOwner::Startup(_))
+}
+
+pub(super) fn spawn_panel(commands: &mut Commands, panel: UiPanel, font: &UiFont) -> Entity {
     let modal = !panel.buttons.is_empty();
     let root = commands
         .spawn((
@@ -146,6 +247,7 @@ pub(super) fn spawn_panel(commands: &mut Commands, panel: UiPanel, font: &UiFont
             commands.entity(actions).add_child(button);
         }
     }
+    surface
 }
 
 pub(super) fn dispatch_button(
@@ -154,11 +256,9 @@ pub(super) fn dispatch_button(
     ui: Option<Res<StagePstUi>>,
     mut scene: Option<ResMut<StageScriptRuntime>>,
     mut mission: Option<ResMut<StageMissionRuntime>>,
+    mut startup: Option<ResMut<super::stage_plugin::pst_extensions::GlobalPst>>,
     buttons: Query<(&Interaction, &PstPanelButton), Changed<Interaction>>,
 ) {
-    if !active_in_play(&state, end.as_deref()) {
-        return;
-    }
     if buttons.is_empty() {
         return;
     }
@@ -169,6 +269,9 @@ pub(super) fn dispatch_button(
     else {
         return;
     };
+    if !presents_panel(&state, end.as_deref(), panel.owner) {
+        return;
+    }
 
     let Some(button) = buttons.iter().find_map(|(interaction, button)| {
         (*interaction == Interaction::Pressed && button.generation == panel.generation)
@@ -177,15 +280,32 @@ pub(super) fn dispatch_button(
         return;
     };
     let args = [PstValue::Str(panel.id), PstValue::Str(button.id.clone())];
+    let playing = active_in_play(&state, end.as_deref());
     let scene = scene
         .as_deref_mut()
+        .filter(|_| playing)
         .and_then(StageScriptRuntime::script_mut);
     let mission = mission
         .as_deref_mut()
+        .filter(|_| playing)
         .and_then(StageMissionRuntime::script_mut);
     let result = match panel.owner {
         UiOwner::Scene => scene.map(|scene| scene.call_linked("OnUiButton", &args, mission)),
         UiOwner::Mission => mission.map(|mission| mission.call_linked("OnUiButton", &args, scene)),
+        UiOwner::Startup(index) => startup.as_deref_mut().map(|startup| {
+            startup
+                .0
+                .dispatch(
+                    Some(index),
+                    &[ScriptEvent {
+                        name: "OnUiButton".into(),
+                        args: args.to_vec(),
+                    }],
+                    scene,
+                    mission,
+                )
+                .map(|_| PstValue::Num(0.0))
+        }),
     };
     if let Some(Err(error)) = result {
         warn!("PST button handler failed: {error}");

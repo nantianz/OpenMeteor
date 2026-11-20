@@ -489,9 +489,13 @@ impl<F: FighterView> StateMachine<F> {
     }
 
     pub fn taunt(&mut self) -> bool {
+        self.taunt_with_pose(32)
+    }
+
+    pub fn taunt_with_pose(&mut self, pose: u16) -> bool {
         if self.current != FighterState::Name
             || self.fighter.is_airborne()
-            || !self.fighter.has_pose(32)
+            || !self.fighter.has_pose(pose)
         {
             return false;
         }
@@ -500,7 +504,7 @@ impl<F: FighterView> StateMachine<F> {
         self.set_state(FighterState::Attack1);
         self.attack_stage = 1;
         self.locked = true;
-        self.fighter.play_pose(32, true);
+        self.fighter.play_pose(pose, true);
         true
     }
 

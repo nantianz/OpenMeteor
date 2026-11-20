@@ -2,6 +2,7 @@ mod spatial;
 use spatial::{Bounds, Tree};
 
 use bevy::ecs::prelude::Resource;
+use bevy::math::{Quat, Vec3};
 use meteor_asset::des::StageDescription;
 use meteor_asset::gmdl::GmdlMesh;
 use meteor_core::constants::MODEL_SCALE;
@@ -48,6 +49,7 @@ pub struct StageMeshCollider {
 
     spatial: Option<Tree>,
     owner_trees: HashMap<i32, Tree>,
+    geometry_revision: u64,
 }
 
 impl StageMeshCollider {
@@ -241,11 +243,31 @@ impl StageMeshCollider {
             &self.indices,
         );
         self.owner_trees.insert(owner, tree);
+        self.geometry_revision = self.geometry_revision.wrapping_add(1);
         owner
     }
 
     pub fn update_owner_vertices(&mut self, owner: i32, verts: &[[f32; 3]]) {
         let _ = self.update_owner_vertices_range(owner, 0, verts);
+    }
+
+    pub(super) fn place_owner(
+        &mut self,
+        owner: i32,
+        previous: Vec3,
+        position: Vec3,
+        yaw_delta: Quat,
+    ) {
+        let Some(&(start, end)) = self.owner_vert_ranges.get(&owner) else {
+            return;
+        };
+        let vertices: Vec<_> = self.positions[start..end]
+            .iter()
+            .map(|vertex| {
+                (position + yaw_delta * (Vec3::from_array(*vertex) - previous)).to_array()
+            })
+            .collect();
+        self.update_owner_vertices(owner, &vertices);
     }
 
     pub fn update_owner_vertices_range(
@@ -266,6 +288,7 @@ impl StageMeshCollider {
             return true;
         }
         self.positions[target..target + verts.len()].copy_from_slice(verts);
+        self.geometry_revision = self.geometry_revision.wrapping_add(1);
         if let Some(tree) = self.owner_trees.get_mut(&owner) {
             tree.refit(&self.positions, &self.indices);
         }
@@ -273,11 +296,18 @@ impl StageMeshCollider {
     }
 
     pub fn set_owner_enabled(&mut self, owner: i32, enabled: bool) {
-        if enabled {
-            self.disabled_owners.remove(&owner);
+        let changed = if enabled {
+            self.disabled_owners.remove(&owner)
         } else {
-            self.disabled_owners.insert(owner);
+            self.disabled_owners.insert(owner)
+        };
+        if changed {
+            self.geometry_revision = self.geometry_revision.wrapping_add(1);
         }
+    }
+
+    pub(super) fn geometry_revision(&self) -> u64 {
+        self.geometry_revision
     }
 
     pub fn body_hits_damage_owners(&self, cx: f32, cy: f32, cz: f32, owners: &[i32]) -> bool {

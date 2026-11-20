@@ -1,3 +1,4 @@
+use crate::pst_game::PstGame;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -71,7 +72,10 @@ impl Token {
     }
 }
 
-const TYPE_NAMES: [&str; 3] = ["int", "string", "float"];
+const TYPE_NAMES: &[&str] = &[
+    "int", "string", "float", "bool", "uint", "double", "void", "var",
+];
+pub(crate) const ARRAY_LIMIT: usize = 65_536;
 const TWO_CHAR: [&str; 12] = [
     "==", "!=", "<=", ">=", "&&", "||", "++", "--", "+=", "-=", "*=", "/=",
 ];
@@ -203,6 +207,10 @@ pub enum Statement {
     While {
         test: Expr,
         body: Box<Statement>,
+    },
+    Switch {
+        selector: Expr,
+        cases: Vec<(Option<Expr>, Vec<Statement>)>,
     },
     Return(Option<Expr>),
     Break,
@@ -459,6 +467,33 @@ impl Parser {
                 body: Box::new(body),
             });
         }
+        if self.match_value("switch") {
+            self.take_value("(")?;
+            let selector = self.expression(0)?;
+            self.take_value(")")?;
+            self.take_value("{")?;
+            let mut cases = Vec::new();
+            let mut has_default = false;
+            while !self.match_value("}") {
+                let label = if self.match_value("case") {
+                    Some(self.expression(0)?)
+                } else {
+                    self.take_value("default")?;
+                    if has_default {
+                        return Err("duplicate switch default".into());
+                    }
+                    has_default = true;
+                    None
+                };
+                self.take_value(":")?;
+                let mut body = Vec::new();
+                while !matches!(self.peek(0).value(), "case" | "default" | "}" | "<eof>") {
+                    body.push(self.statement()?);
+                }
+                cases.push((label, body));
+            }
+            return Ok(Statement::Switch { selector, cases });
+        }
         if self.match_value("return") {
             let value = if self.peek(0).value() == ";" {
                 None
@@ -569,6 +604,13 @@ impl Parser {
         match token {
             Token::Number(n) => Ok(Expr::Literal(PstValue::Num(n))),
             Token::String(s) => Ok(Expr::Literal(PstValue::Str(s))),
+            Token::Ident(name) if name == "true" || name == "false" => {
+                Ok(Expr::Literal(PstValue::Num(if name == "true" {
+                    1.0
+                } else {
+                    0.0
+                })))
+            }
             Token::Ident(name) => Ok(Expr::Ident(name)),
             Token::Op(op) if op == "(" => {
                 let node = self.expression(0)?;
@@ -621,12 +663,18 @@ pub trait PstHost {
     fn npc_script_id(&self, _name: &str) -> Option<i64> {
         None
     }
+    fn npc_script_name(&self, _id: i64) -> Option<String> {
+        None
+    }
     fn initialize_script_actor(&mut self, _id: i64, _globals: &HashMap<String, PstValue>) {}
     fn finish_script_actor_initialization(
         &mut self,
         _id: i64,
         _globals: &HashMap<String, PstValue>,
     ) {
+    }
+    fn take_script_overrides(&mut self, _id: i64) -> Option<String> {
+        None
     }
 }
 
@@ -660,6 +708,14 @@ pub(crate) struct Execution<'a> {
 pub(crate) trait LinkedScript {
     fn resolve_script(&self, selector: &PstValue) -> Option<i64>;
     fn root_builtin(&mut self, id: i64, name: &str, args: &[PstValue]) -> Option<PstValue>;
+    fn script_name_at(&self, id: i64) -> Option<String>;
+    fn script_var(&self, id: i64, name: &str) -> Option<PstValue>;
+    fn npc_builtin(
+        &mut self,
+        name: &str,
+        args: &[PstValue],
+        execution: &mut Execution<'_>,
+    ) -> Result<PstValue, String>;
     fn invoke_script(
         &mut self,
         id: i64,
@@ -669,14 +725,120 @@ pub(crate) trait LinkedScript {
     ) -> Result<bool, String>;
 }
 
-fn script_id(value: &PstValue) -> Option<i64> {
+pub(crate) struct LinkedPair<'a>(pub &'a mut dyn LinkedScript, pub &'a mut dyn LinkedScript);
+
+impl LinkedScript for LinkedPair<'_> {
+    fn resolve_script(&self, selector: &PstValue) -> Option<i64> {
+        self.0
+            .resolve_script(selector)
+            .or_else(|| self.1.resolve_script(selector))
+    }
+
+    fn root_builtin(&mut self, id: i64, name: &str, args: &[PstValue]) -> Option<PstValue> {
+        self.0
+            .root_builtin(id, name, args)
+            .or_else(|| self.1.root_builtin(id, name, args))
+    }
+
+    fn script_name_at(&self, id: i64) -> Option<String> {
+        self.0
+            .script_name_at(id)
+            .or_else(|| self.1.script_name_at(id))
+    }
+
+    fn script_var(&self, id: i64, name: &str) -> Option<PstValue> {
+        self.0
+            .script_var(id, name)
+            .or_else(|| self.1.script_var(id, name))
+    }
+
+    fn npc_builtin(
+        &mut self,
+        name: &str,
+        args: &[PstValue],
+        execution: &mut Execution<'_>,
+    ) -> Result<PstValue, String> {
+        let mission = PstValue::from(MISSION_SCRIPT_ID);
+        let (target, other) = if self.0.resolve_script(&mission).is_some() {
+            (&mut *self.0, &mut *self.1)
+        } else {
+            (&mut *self.1, &mut *self.0)
+        };
+        let mut nested = Execution {
+            steps: execution.steps,
+            max_steps: execution.max_steps,
+            depth: execution.depth,
+            peer: None,
+        };
+        let result = if let Some(previous) = execution.peer.as_deref_mut() {
+            let mut pair = LinkedPair(previous, other);
+            let mut with_peer = Execution {
+                peer: Some(&mut pair),
+                ..nested
+            };
+            let result = target.npc_builtin(name, args, &mut with_peer);
+            nested.steps = with_peer.steps;
+            result
+        } else {
+            let mut with_peer = Execution {
+                peer: Some(other),
+                ..nested
+            };
+            let result = target.npc_builtin(name, args, &mut with_peer);
+            nested.steps = with_peer.steps;
+            result
+        };
+        execution.steps = nested.steps;
+        result
+    }
+
+    fn invoke_script(
+        &mut self,
+        id: i64,
+        name: &str,
+        args: &[PstValue],
+        execution: &mut Execution<'_>,
+    ) -> Result<bool, String> {
+        let (target, other) = if self.0.resolve_script(&PstValue::from(id)).is_some() {
+            (&mut *self.0, &mut *self.1)
+        } else {
+            (&mut *self.1, &mut *self.0)
+        };
+        let run = |peer| Execution {
+            steps: execution.steps,
+            max_steps: execution.max_steps,
+            depth: execution.depth,
+            peer,
+        };
+        if let Some(previous) = execution.peer.as_deref_mut() {
+            let mut pair = LinkedPair(previous, other);
+            let mut nested = run(Some(&mut pair));
+            let result = target.invoke_script(id, name, args, &mut nested);
+            execution.steps = nested.steps;
+            return result;
+        }
+        let mut nested = run(Some(other));
+        let result = target.invoke_script(id, name, args, &mut nested);
+        execution.steps = nested.steps;
+        result
+    }
+}
+
+struct ScheduledCall {
+    script: Option<i64>,
+    at: f64,
+    name: String,
+    args: Vec<PstValue>,
+}
+
+pub(crate) fn script_id(value: &PstValue) -> Option<i64> {
     match value {
         PstValue::Num(n) if n.fract() == 0.0 && n.abs() < (1u64 << 53) as f64 => Some(*n as i64),
         _ => None,
     }
 }
 
-fn script_name(path: &str) -> String {
+pub(crate) fn script_name(path: &str) -> String {
     let name = path
         .rsplit(['/', '\\'])
         .next()
@@ -699,6 +861,10 @@ pub struct Runtime<H: PstHost> {
     parked_root: Option<ScriptModule>,
     root_id: Option<i64>,
     root_name: String,
+    game: Option<PstGame>,
+    scheduled: Vec<ScheduledCall>,
+    files: HashMap<Option<i64>, crate::pst_files::ScriptFiles>,
+    callbacks: HashMap<&'static str, Vec<String>>,
 }
 
 impl<H: PstHost> Runtime<H> {
@@ -716,6 +882,10 @@ impl<H: PstHost> Runtime<H> {
             parked_root: None,
             root_id: None,
             root_name: String::new(),
+            game: None,
+            scheduled: Vec::new(),
+            files: HashMap::new(),
+            callbacks: HashMap::new(),
         };
         let mut execution = runtime.execution(None);
         let globals = runtime.program.globals.clone();
@@ -728,6 +898,76 @@ impl<H: PstHost> Runtime<H> {
     pub(crate) fn set_root_script(&mut self, id: i64, name: &str) {
         self.root_id = Some(id);
         self.root_name = script_name(name);
+    }
+
+    pub fn set_game(&mut self, game: PstGame) {
+        self.game = Some(game);
+    }
+
+    pub fn game(&self) -> Option<&PstGame> {
+        self.game.as_ref()
+    }
+
+    pub(crate) fn replace_program(&mut self, program: Program) {
+        let mut previous = std::mem::take(&mut self.globals);
+        self.program = program;
+        let declarations = self.program.globals.clone();
+        let mut execution = self.execution(None);
+        for declaration in &declarations {
+            let saved = previous.remove(&declaration.name);
+            let compatible = saved.as_ref().is_some_and(|value| {
+                declaration.value_type == "var"
+                    || match value {
+                        PstValue::Array(_) => declaration.size.is_some(),
+                        PstValue::Str(_) => {
+                            declaration.size.is_none() && declaration.value_type == "string"
+                        }
+                        PstValue::Num(_) => {
+                            declaration.size.is_none() && declaration.value_type != "string"
+                        }
+                    }
+            });
+            if compatible {
+                self.globals
+                    .insert(declaration.name.clone(), saved.unwrap());
+            } else {
+                self.declare(declaration, true, &mut execution);
+            }
+        }
+        self.scheduled.retain(|call| {
+            call.script.is_some() || self.program.functions.contains_key(&call.name)
+        });
+    }
+
+    pub(crate) fn run_due(
+        &mut self,
+        mut peer: Option<&mut dyn LinkedScript>,
+    ) -> Result<(), String> {
+        let Some(now) = self.game.as_ref().map(PstGame::now) else {
+            return Ok(());
+        };
+        let calls = std::mem::take(&mut self.scheduled);
+        let (mut due, later): (Vec<_>, Vec<_>) = calls.into_iter().partition(|call| call.at <= now);
+        self.scheduled = later;
+        due.sort_by(|left, right| left.at.total_cmp(&right.at));
+        let mut result = Ok(());
+        for call in due {
+            let linked = peer
+                .as_mut()
+                .map(|peer| &mut **peer as &mut dyn LinkedScript);
+            let current = match call.script {
+                Some(id) if self.host.script_actor_active(id) && self.script_initialized(id) => {
+                    self.call_script_with_peer(id, &call.name, &call.args, linked)
+                        .map(|_| ())
+                }
+                None => self
+                    .call_with_peer(&call.name, &call.args, linked)
+                    .map(|_| ()),
+                _ => Ok(()),
+            };
+            result = result.and(current);
+        }
+        result
     }
 
     fn execution<'p>(&self, peer: Option<&'p mut dyn LinkedScript>) -> Execution<'p> {
@@ -748,8 +988,35 @@ impl<H: PstHost> Runtime<H> {
         Ok(())
     }
 
+    pub(crate) fn reload_script(&mut self, id: i64, source: &str) -> Result<(), String> {
+        let program = parse_program(source)?;
+        let initial = Runtime::new(program.clone(), NullHost, self.max_steps);
+        self.script_templates
+            .insert(id, (program.clone(), initial.globals.clone()));
+        let mut globals = initial.globals;
+        if let Some((_, previous)) = self.scripts.remove(&id) {
+            for (name, saved) in previous {
+                if let Some(value) = globals.get_mut(&name) {
+                    if std::mem::discriminant(value) == std::mem::discriminant(&saved) {
+                        *value = saved;
+                    }
+                }
+            }
+        }
+        self.scheduled
+            .retain(|call| call.script != Some(id) || program.functions.contains_key(&call.name));
+        self.scripts.insert(id, (program, globals));
+        Ok(())
+    }
+
     pub fn script_initialized(&self, id: i64) -> bool {
         self.initialized_scripts.contains(&id)
+    }
+
+    pub(crate) fn script_has_function(&self, id: i64, callback: &str) -> bool {
+        self.scripts
+            .get(&id)
+            .is_some_and(|(program, _)| program.functions.contains_key(callback))
     }
 
     pub fn script_values(&self, id: i64) -> Option<&HashMap<String, PstValue>> {
@@ -788,6 +1055,23 @@ impl<H: PstHost> Runtime<H> {
         self.scripts.insert(id, (program, globals));
         self.initialized_scripts.insert(id);
         self.call_module(Some(id), "OnInit", &[PstValue::Num(id as f64)], execution)?;
+        if let Some(overrides) = self.host.take_script_overrides(id) {
+            if let Some((_, globals)) = self.scripts.get_mut(&id) {
+                for (name, value) in overrides.split(';').filter_map(|part| part.split_once('=')) {
+                    match globals.get_mut(name.trim()) {
+                        Some(PstValue::Num(number)) => {
+                            if let Ok(value) = value.trim().parse::<f64>() {
+                                if value.is_finite() {
+                                    *number = value;
+                                }
+                            }
+                        }
+                        Some(PstValue::Str(text)) => *text = value.trim().to_owned(),
+                        _ => {}
+                    }
+                }
+            }
+        }
 
         if let Some(values) = self.script_values(id).cloned() {
             self.host.finish_script_actor_initialization(id, &values);
@@ -874,6 +1158,19 @@ impl<H: PstHost> Runtime<H> {
         self.program.functions.contains_key(name)
     }
 
+    pub(crate) fn function_names(&self) -> impl Iterator<Item = &String> {
+        self.program.functions.keys()
+    }
+
+    pub(crate) fn event_callbacks(&self, event: &str) -> Vec<String> {
+        let mut callbacks = self.callbacks.get(event).cloned().unwrap_or_default();
+        callbacks.retain(|name| self.has_function(name));
+        if self.has_function(event) && !callbacks.iter().any(|name| name == event) {
+            callbacks.insert(0, event.into());
+        }
+        callbacks
+    }
+
     pub fn host(&self) -> &H {
         &self.host
     }
@@ -899,6 +1196,59 @@ impl<H: PstHost> Runtime<H> {
 
     pub fn call(&mut self, name: &str, args: &[PstValue]) -> Result<PstValue, String> {
         self.call_with_peer(name, args, None)
+    }
+
+    pub(crate) fn execute_line_with_peer(
+        &mut self,
+        line: &str,
+        peer: Option<&mut dyn LinkedScript>,
+    ) -> Result<PstValue, String> {
+        let mut execution = self.execution(peer);
+        self.execute_line_inner(line, &mut execution)
+    }
+
+    fn execute_line_inner(
+        &mut self,
+        line: &str,
+        execution: &mut Execution<'_>,
+    ) -> Result<PstValue, String> {
+        if !self
+            .game
+            .as_ref()
+            .is_some_and(PstGame::execute_line_enabled)
+        {
+            return Err("PST ExecuteLine is disabled".into());
+        }
+        if line.len() > 4096 || execution.depth >= 64 {
+            return Err("PST command limit exceeded".into());
+        }
+        let suffix = if line.trim_end().ends_with([';', '}']) {
+            ""
+        } else {
+            ";"
+        };
+        let source = format!("{line}{suffix}");
+        let mut parser = Parser {
+            tokens: tokenize(&source),
+            index: 0,
+        };
+        let mut statements = Vec::new();
+        while !parser.peek(0).is_eof() {
+            statements.push(parser.statement()?);
+        }
+        if let Some(Statement::Expression(expression)) = statements.last_mut() {
+            let expression = std::mem::replace(expression, Expr::Literal(PstValue::Num(0.0)));
+            *statements.last_mut().unwrap() = Statement::Return(Some(expression));
+        }
+        self.execute(
+            &Statement::Block(statements),
+            &mut HashMap::new(),
+            execution,
+        )
+        .map(|flow| match flow {
+            Some(Flow::Return(value)) => value,
+            _ => PstValue::Num(1.0),
+        })
     }
 
     pub(crate) fn call_with_peer(
@@ -933,6 +1283,145 @@ impl<H: PstHost> Runtime<H> {
         execution: &mut Execution<'_>,
     ) -> Result<PstValue, String> {
         Self::step(execution)?;
+        if name == "CanInvokeGameAPI" {
+            let [PstValue::Str(api)] = args else {
+                return Ok(PstValue::Num(0.0));
+            };
+            let supported = crate::pst_api::supports(api)
+                && (api != "ExecuteLine"
+                    || self
+                        .game
+                        .as_ref()
+                        .is_some_and(PstGame::execute_line_enabled));
+            return Ok(PstValue::Num(f64::from(u8::from(supported))));
+        }
+        if name == "Command" {
+            let [PstValue::Str(command), arguments @ ..] = args else {
+                return Ok(PstValue::Num(0.0));
+            };
+            let number = |value: &PstValue| {
+                match value {
+                    PstValue::Num(value) => Some(*value),
+                    PstValue::Str(value) => value.parse::<f64>().ok(),
+                    _ => None,
+                }
+                .filter(|value| value.is_finite())
+            };
+            return match (command.to_ascii_lowercase().as_str(), arguments) {
+                ("moveto", [x, y, z]) => {
+                    let (Some(x), Some(y), Some(z)) = (number(x), number(y), number(z)) else {
+                        return Ok(PstValue::Num(0.0));
+                    };
+                    self.call_inner(
+                        "CharSetPosition",
+                        &[
+                            PstValue::Num(0.0),
+                            PstValue::Array(vec![
+                                PstValue::Num(x),
+                                PstValue::Num(y),
+                                PstValue::Num(z),
+                            ]),
+                        ],
+                        execution,
+                    )
+                }
+                ("weapon" | "loadmych" | "pose" | "scene", [value]) => {
+                    let Some(value) = number(value) else {
+                        return Ok(PstValue::Num(0.0));
+                    };
+                    let action = match command.to_ascii_lowercase().as_str() {
+                        "weapon" => "CharEquipWeapon",
+                        "loadmych" => "CharSetModel",
+                        "pose" => "CharShowPose",
+                        _ => {
+                            return self.call_inner(
+                                "EnterScene",
+                                &[PstValue::Num(value)],
+                                execution,
+                            )
+                        }
+                    };
+                    self.call_inner(
+                        action,
+                        &[PstValue::Num(0.0), PstValue::Num(value)],
+                        execution,
+                    )
+                }
+                _ => Ok(PstValue::Num(0.0)),
+            };
+        }
+        if name == "ExecuteLine" {
+            let [PstValue::Str(line)] = args else {
+                return Ok(PstValue::Num(0.0));
+            };
+            let executed = self.execute_line_inner(line, execution);
+            if let Err(error) = &executed {
+                log::warn!("PST ExecuteLine: {error}");
+            }
+            return Ok(PstValue::Num(f64::from(u8::from(executed.is_ok()))));
+        }
+        if name == "DisableExecuteLine" {
+            if let Some(game) = self.game.as_ref() {
+                game.disable_execute_line();
+            }
+            return Ok(PstValue::Num(1.0));
+        }
+        if matches!(name, "AddChatCallback" | "AddMessageCallback") {
+            let [PstValue::Str(callback)] = args else {
+                return Ok(PstValue::Num(0.0));
+            };
+            if !self.root_id.is_some_and(|id| id <= -10)
+                || self.active_script.is_some()
+                || !self.has_function(callback)
+                || self.game.is_none()
+            {
+                return Ok(PstValue::Num(0.0));
+            }
+            let event = if name == "AddChatCallback" {
+                "OnChat"
+            } else {
+                "OnScriptMessage"
+            };
+            let listeners = self.callbacks.entry(event).or_default();
+            if listeners.len() >= 32 {
+                return Ok(PstValue::Num(0.0));
+            }
+            if !listeners.contains(callback) {
+                listeners.push(callback.clone());
+            }
+            if let Some(game) = self.game.as_ref() {
+                game.register_startup_event(event);
+            }
+            return Ok(PstValue::Num(1.0));
+        }
+        if matches!(name, "Print" | "Output") {
+            if let Some(game) = self.game.as_ref() {
+                game.record_output(args);
+            }
+        }
+        if matches!(
+            name,
+            "OpenFile" | "ReadFile" | "ReadFileLine" | "WriteFile" | "WriteFileLine" | "CloseFile"
+        ) {
+            let storage = self.game.as_ref().and_then(PstGame::storage);
+            let files = self.files.entry(self.active_script).or_default();
+            return Ok(files
+                .call(storage, name, args)
+                .unwrap_or(PstValue::Num(0.0)));
+        }
+        if matches!(name, "AddNPC" | "RemoveNPC") && self.root_id != Some(MISSION_SCRIPT_ID) {
+            if let Some(peer) = execution.peer.as_deref_mut() {
+                let mut nested = Execution {
+                    steps: execution.steps,
+                    max_steps: execution.max_steps,
+                    depth: execution.depth,
+                    peer: Some(self),
+                };
+                let result = peer.npc_builtin(name, args, &mut nested);
+                execution.steps = nested.steps;
+                return result;
+            }
+        }
         if name == "AddNPC" {
             let result = self.host.builtin(name, args);
             let id = result.as_f64() as i64;
@@ -945,7 +1434,10 @@ impl<H: PstHost> Runtime<H> {
             let result = self.host.builtin(name, args);
             if result.truthy() {
                 if let Some(id) = args.first() {
-                    self.initialized_scripts.remove(&(id.as_f64() as i64));
+                    let id = id.as_f64() as i64;
+                    self.initialized_scripts.remove(&id);
+                    self.files.remove(&Some(id));
+                    self.scheduled.retain(|call| call.script != Some(id));
                 }
             }
             return Ok(result);
@@ -964,6 +1456,13 @@ impl<H: PstHost> Runtime<H> {
             };
             let called = self.execute_function(target, function, parameters, execution)?;
             return Ok(PstValue::Num(f64::from(u8::from(called))));
+        }
+        if name == "GetStartupScriptId" {
+            let id = args
+                .first()
+                .and_then(|name| self.find_startup(name))
+                .map_or(-1, |(id, _)| id);
+            return Ok(PstValue::from(id));
         }
         if matches!(
             name,
@@ -984,6 +1483,85 @@ impl<H: PstHost> Runtime<H> {
                 .resolve_script(target)
                 .or_else(|| execution.peer.as_deref()?.resolve_script(target));
             return Ok(PstValue::Num(id.unwrap_or(-1) as f64));
+        }
+        if let Some(value) = crate::pst_values::call(name, args) {
+            return Ok(value);
+        }
+        if name == "DelayCall" {
+            let [PstValue::Num(delay), PstValue::Str(function), parameters @ ..] = args else {
+                return Ok(PstValue::Num(0.0));
+            };
+            if let Some(now) = self.game.as_ref().map(PstGame::now) {
+                if (0.0..=86_400.0).contains(delay)
+                    && self.has_function(function)
+                    && self.scheduled.len() < 256
+                    && parameters.len() <= 16
+                {
+                    self.scheduled.push(ScheduledCall {
+                        script: self.active_script,
+                        at: now + delay,
+                        name: function.clone(),
+                        args: parameters.to_vec(),
+                    });
+                    return Ok(PstValue::Num(1.0));
+                }
+            }
+            return Ok(PstValue::Num(0.0));
+        }
+        if name == "CancelDelayedCalls" {
+            let before = self.scheduled.len();
+            self.scheduled.retain(|call| {
+                call.script != self.active_script
+                    || match args {
+                        [] => false,
+                        [PstValue::Str(name)] => call.name != *name,
+                        _ => true,
+                    }
+            });
+            return Ok(PstValue::Num((before - self.scheduled.len()) as f64));
+        }
+        if matches!(
+            name,
+            "GetSceneScriptName" | "GetLevelScriptName" | "GetNpcScriptName"
+        ) {
+            let id = match name {
+                "GetSceneScriptName" => Some(SCENE_SCRIPT_ID),
+                "GetLevelScriptName" => Some(MISSION_SCRIPT_ID),
+                _ => args.first().and_then(script_id).filter(|id| *id > 0),
+            };
+            let script = id.and_then(|id| {
+                self.script_name_at(id)
+                    .or_else(|| execution.peer.as_deref()?.script_name_at(id))
+            });
+            return Ok(PstValue::Str(script.unwrap_or_default()));
+        }
+        if matches!(name, "GetScriptVarInt" | "GetScriptVarString") {
+            let value = match args {
+                [target, PstValue::Str(var)] => {
+                    let resolve_peer = || {
+                        let peer = execution.peer.as_deref()?;
+                        Some((peer, peer.resolve_script(target)?))
+                    };
+                    if let Some(id) = self.resolve_script(target) {
+                        self.script_var(id, var)
+                    } else if let Some((peer, id)) = resolve_peer() {
+                        peer.script_var(id, var)
+                    } else {
+                        self.find_startup(target)
+                            .and_then(|(id, startup)| startup.variable(id, var))
+                    }
+                }
+                _ => None,
+            };
+            return Ok(match (name, value) {
+                ("GetScriptVarInt", Some(PstValue::Num(value))) => PstValue::Num(value.trunc()),
+                ("GetScriptVarInt", _) => PstValue::Num(0.0),
+                (_, Some(PstValue::Str(text))) => PstValue::Str(text),
+                _ => PstValue::Str(String::new()),
+            });
+        }
+        if let Some(result) = self.game.as_ref().and_then(|game| game.builtin(name, args)) {
+            return Ok(result);
         }
         if name == "UpdateAIAttrib" {
             let id = args.first().map(PstValue::as_f64).unwrap_or(-1.0) as i64;
@@ -1014,10 +1592,29 @@ impl<H: PstHost> Runtime<H> {
             });
         }
         let builtin_root = match name {
-            "CreateSceneItem" | "GetSceneItemCount" | "GetSceneItemId" | "GetSceneItemName" => {
-                Some(SCENE_SCRIPT_ID)
+            "CreateSceneItem"
+            | "GetSceneItemCount"
+            | "GetSceneItemId"
+            | "GetSceneItemName"
+            | "GetSceneItemModelName"
+            | "GetSceneItemPosition"
+            | "GetSceneItemRotationYaw"
+            | "SetSceneItemPosition"
+            | "SetSceneItemRotationYaw"
+            | "GetSceneItem"
+            | "SetSceneItem"
+            | "SetScene"
+            | "CreateEffect" => Some(SCENE_SCRIPT_ID),
+            "CharSwitchWeapon" | "Reborn" | "GetPosition" | "GetGameTimeFloat" => {
+                Some(MISSION_SCRIPT_ID)
             }
-            "CharSwitchWeapon" | "Reborn" => Some(MISSION_SCRIPT_ID),
+            "GetChar" | "GetAnyChar" | "GetHP" | "GetMaxHP" | "GetEnemy" | "GetLeader"
+            | "GetGameTime" | "Distance" | "ChangeBehavior" | "SetTarget" | "Say" | "Perform"
+            | "PlayerPerform" | "StopPerform" | "GameOver"
+                if self.root_id.is_some_and(|id| id <= -10) =>
+            {
+                Some(MISSION_SCRIPT_ID)
+            }
             _ => None,
         };
         if let Some(id) = builtin_root.filter(|id| self.root_id != Some(*id)) {
@@ -1054,22 +1651,58 @@ impl<H: PstHost> Runtime<H> {
         if let Some(id) = self.resolve_script(target) {
             return self.invoke_script(id, name, args, execution);
         }
-        let Some(peer) = execution.peer.as_deref_mut() else {
+        if let Some(id) = execution
+            .peer
+            .as_deref()
+            .and_then(|peer| peer.resolve_script(target))
+        {
+            let mut nested = Execution {
+                steps: execution.steps,
+                max_steps: execution.max_steps,
+                depth: execution.depth,
+                peer: Some(self),
+            };
+            let result =
+                execution
+                    .peer
+                    .as_deref_mut()
+                    .unwrap()
+                    .invoke_script(id, name, args, &mut nested);
+            execution.steps = nested.steps;
+            return result;
+        }
+        let Some((id, startup)) = self.find_startup(target) else {
             return Ok(false);
         };
-        let Some(id) = peer.resolve_script(target) else {
-            return Ok(false);
+        let (steps, max_steps, depth) = (execution.steps, execution.max_steps, execution.depth);
+        let invoke = |peer| {
+            let mut nested = Execution {
+                steps,
+                max_steps,
+                depth,
+                peer: Some(peer),
+            };
+            let result = startup.invoke(id, name, args, &mut nested);
+            (result, nested.steps)
         };
-
-        let mut nested = Execution {
-            steps: execution.steps,
-            max_steps: execution.max_steps,
-            depth: execution.depth,
-            peer: Some(self),
+        let (result, steps) = if let Some(peer) = execution.peer.as_deref_mut() {
+            invoke(&mut LinkedPair(self, peer))
+        } else {
+            invoke(self)
         };
-        let result = peer.invoke_script(id, name, args, &mut nested);
-        execution.steps = nested.steps;
+        execution.steps = steps;
         result
+    }
+
+    fn find_startup(
+        &self,
+        target: &PstValue,
+    ) -> Option<(i64, std::sync::Arc<crate::pst_startup::StartupModule>)> {
+        let game = self.game.as_ref()?;
+
+        (self.root_id.is_some_and(crate::pst_startup::is_startup_id) || game.active())
+            .then(|| game.startup_scripts.find(target))
+            .flatten()
     }
 
     fn host_has(&self, name: &str) -> bool {
@@ -1090,7 +1723,7 @@ impl<H: PstHost> Runtime<H> {
             let size = self
                 .evaluate(size, &mut HashMap::new(), execution)
                 .unwrap_or(PstValue::Num(0.0));
-            let n = (size.as_f64().max(0.0)) as usize;
+            let n = (size.as_f64() as usize).min(ARRAY_LIMIT);
             PstValue::Array(vec![Self::default_value(&declaration.value_type); n])
         } else if let Some(init) = &declaration.init {
             let mut scope = HashMap::new();
@@ -1114,7 +1747,10 @@ impl<H: PstHost> Runtime<H> {
     ) -> Result<(), String> {
         if let Some(size) = &declaration.size {
             let size = self.evaluate(size, scope, execution)?;
-            let n = size.as_f64().max(0.0) as usize;
+            let n = size.as_f64() as usize;
+            if n > ARRAY_LIMIT {
+                return Err(format!("PST array exceeds {ARRAY_LIMIT} elements"));
+            }
             scope.insert(
                 declaration.name.clone(),
                 PstValue::Array(vec![Self::default_value(&declaration.value_type); n]),
@@ -1266,6 +1902,36 @@ impl<H: PstHost> Runtime<H> {
                 }
                 Ok(None)
             }
+            Statement::Switch { selector, cases } => {
+                let value = self.evaluate(selector, scope, execution)?;
+                let mut start = None;
+                let mut fallback = None;
+                for (index, (label, _)) in cases.iter().enumerate() {
+                    if let Some(label) = label {
+                        if self.evaluate(label, scope, execution)? == value {
+                            start = Some(index);
+                            break;
+                        }
+                    } else {
+                        fallback = Some(index);
+                    }
+                }
+                let Some(start) = start.or(fallback) else {
+                    return Ok(None);
+                };
+                for (_, body) in &cases[start..] {
+                    for statement in body {
+                        if let Some(flow) = self.execute(statement, scope, execution)? {
+                            return Ok(if flow == Flow::Break {
+                                None
+                            } else {
+                                Some(flow)
+                            });
+                        }
+                    }
+                }
+                Ok(None)
+            }
             Statement::Return(value) => {
                 let value = match value {
                     Some(expr) => self.evaluate(expr, scope, execution)?,
@@ -1369,7 +2035,7 @@ impl<H: PstHost> Runtime<H> {
                                 PstValue::Num(n) if n.fract().abs() < 1e-9 => {
                                     format!("{:02}", n.trunc() as i64)
                                 }
-                                other => other_to_string(&other),
+                                other => value_text(&other),
                             })
                         })
                         .collect::<Result<Vec<String>, String>>()?
@@ -1394,6 +2060,41 @@ impl<H: PstHost> Runtime<H> {
 impl<H: PstHost> LinkedScript for Runtime<H> {
     fn root_builtin(&mut self, id: i64, name: &str, args: &[PstValue]) -> Option<PstValue> {
         (self.root_id == Some(id)).then(|| self.host.builtin(name, args))
+    }
+
+    fn script_name_at(&self, id: i64) -> Option<String> {
+        if self.root_id == Some(id) {
+            return Some(self.root_name.clone());
+        }
+        if id > 0 && self.initialized_scripts.contains(&id) {
+            return self.host.npc_script_name(id);
+        }
+        None
+    }
+
+    fn script_var(&self, id: i64, name: &str) -> Option<PstValue> {
+        let globals = if self.root_id == Some(id) {
+            if self.active_script.is_none() {
+                &self.globals
+            } else {
+                &self.parked_root.as_ref()?.1
+            }
+        } else {
+            self.script_values(id)?
+        };
+        globals.get(name).cloned()
+    }
+
+    fn npc_builtin(
+        &mut self,
+        name: &str,
+        args: &[PstValue],
+        execution: &mut Execution<'_>,
+    ) -> Result<PstValue, String> {
+        if self.root_id != Some(MISSION_SCRIPT_ID) {
+            return Ok(PstValue::Num(0.0));
+        }
+        self.call_inner(name, args, execution)
     }
 
     fn resolve_script(&self, selector: &PstValue) -> Option<i64> {
@@ -1434,8 +2135,8 @@ impl<H: PstHost> LinkedScript for Runtime<H> {
 fn num_op(left: &PstValue, right: &PstValue, op: &str) -> PstValue {
     match op {
         "+" => match (left, right) {
-            (PstValue::Str(a), b) => PstValue::Str(format!("{a}{}", other_to_string(b))),
-            (a, PstValue::Str(b)) => PstValue::Str(format!("{}{b}", other_to_string(a))),
+            (PstValue::Str(a), b) => PstValue::Str(format!("{a}{}", value_text(b))),
+            (a, PstValue::Str(b)) => PstValue::Str(format!("{}{b}", value_text(a))),
             _ => PstValue::Num(left.as_f64() + right.as_f64()),
         },
         "-" => PstValue::Num(left.as_f64() - right.as_f64()),
@@ -1492,7 +2193,7 @@ fn binary_op(op: &str, left: &PstValue, right: &PstValue) -> PstValue {
     }
 }
 
-fn other_to_string(value: &PstValue) -> String {
+pub fn value_text(value: &PstValue) -> String {
     match value {
         PstValue::Num(n) => {
             if n.fract().abs() < 1e-9 {

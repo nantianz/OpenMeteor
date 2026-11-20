@@ -6,6 +6,7 @@ use crate::pst_runtime::PstValue;
 pub enum UiOwner {
     Scene,
     Mission,
+    Startup(usize),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -22,6 +23,48 @@ pub struct UiPanel {
     pub title: String,
     pub text: Vec<String>,
     pub buttons: Vec<UiButton>,
+    pub images: Vec<UiPicture>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UiPicture {
+    pub path: String,
+    pub uv: [u16; 4],
+    pub tint: [u8; 4],
+}
+
+pub(crate) fn is_image_path(path: &str) -> bool {
+    path.len() <= 160
+        && path
+            .get(..6)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("image/"))
+        && path.rsplit_once('.').is_some_and(|(_, ext)| {
+            matches!(ext.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg")
+        })
+        && path.split('/').all(|part| {
+            !part.is_empty()
+                && part != "."
+                && part != ".."
+                && part
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || b"_.- ".contains(&c))
+        })
+}
+
+fn normalized(value: &PstValue) -> Option<[f64; 4]> {
+    let PstValue::Array(values) = value else {
+        return None;
+    };
+    let [PstValue::Num(x), PstValue::Num(y), PstValue::Num(z), PstValue::Num(w)] =
+        values.as_slice()
+    else {
+        return None;
+    };
+    let values = [*x, *y, *z, *w];
+    values
+        .iter()
+        .all(|value| (0.0..=1.0).contains(value))
+        .then_some(values)
 }
 
 #[derive(Default)]
@@ -63,7 +106,12 @@ impl PstUi {
     ) -> Option<PstValue> {
         if !matches!(
             name,
-            "UiCreatePanel" | "UiAddText" | "UiAddButton" | "UiShowPanel" | "UiClosePanel"
+            "UiCreatePanel"
+                | "UiAddText"
+                | "UiAddButton"
+                | "UiShowPanel"
+                | "UiClosePanel"
+                | "UiAddImage"
         ) {
             return None;
         }
@@ -97,6 +145,7 @@ impl PstUi {
                     title: title.clone(),
                     text: vec![],
                     buttons: vec![],
+                    images: vec![],
                 });
             }
             ("UiAddText", [Str(text)], Some(index))
@@ -114,6 +163,28 @@ impl PstUi {
                 buttons.push(UiButton {
                     id: button.clone(),
                     label: label.clone(),
+                });
+            }
+            ("UiAddImage", [Str(path), options @ ..], Some(index))
+                if state.panels[index].images.len() < 4 && is_image_path(path) =>
+            {
+                let (uv, tint) = match options {
+                    [] => (Some([0.0, 0.0, 1.0, 1.0]), Some([1.0; 4])),
+                    [uv] => (normalized(uv), Some([1.0; 4])),
+                    [uv, tint] => (normalized(uv), normalized(tint)),
+                    _ => return false,
+                };
+                let (Some(uv), Some(tint)) = (uv, tint) else {
+                    return false;
+                };
+                let uv = uv.map(|value| (value * f64::from(u16::MAX)).round() as u16);
+                if uv[0] == uv[2] || uv[1] == uv[3] {
+                    return false;
+                }
+                state.panels[index].images.push(UiPicture {
+                    path: path.clone(),
+                    uv,
+                    tint: tint.map(|value| (value * 255.0).round() as u8),
                 });
             }
             ("UiShowPanel", [], Some(_)) => state.shown = Some((owner, id.clone())),

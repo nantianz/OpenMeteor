@@ -21,6 +21,7 @@ pub enum NpcRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActorRequest {
     SwitchWeapon(i64),
+    SwitchWeaponIfAllowed(i64),
     Reborn(i64),
 }
 
@@ -103,6 +104,9 @@ fn npc_definition_from_values(
 
 #[derive(Default)]
 pub struct MissionHost {
+    npc_overrides: std::collections::HashMap<i64, String>,
+    started_npcs: std::collections::HashSet<i64>,
+    pst_stage_center: [f32; 3],
     scene_items: SceneItemCatalog,
     music_requests: Option<PstMusicRequests>,
     actor_requests: Vec<ActorRequest>,
@@ -169,6 +173,10 @@ pub struct MissionHost {
 }
 
 impl MissionHost {
+    pub fn set_pst_stage_center(&mut self, center: [f32; 3]) {
+        self.pst_stage_center = center;
+    }
+
     pub fn set_ui(&mut self, ui: crate::pst_ui::PstUi) {
         self.ui = Some(ui);
     }
@@ -182,9 +190,12 @@ impl MissionHost {
     }
 
     fn request_actor_action(&mut self, name: &str, args: &[PstValue]) -> bool {
-        let [PstValue::Num(id)] = args else {
+        let [PstValue::Num(id), rest @ ..] = args else {
             return false;
         };
+        if !rest.is_empty() && !(name == "CharSwitchWeapon" && matches!(rest, [PstValue::Num(_)])) {
+            return false;
+        }
         if *id < 0.0 || *id > f64::from(i32::MAX) || id.fract() != 0.0 {
             return false;
         }
@@ -194,6 +205,9 @@ impl MissionHost {
         }
         let alive = self.active.get(&id).copied().unwrap_or(false);
         let request = match (name, alive) {
+            ("CharSwitchWeapon", true) if rest.first().is_some_and(|force| !force.truthy()) => {
+                ActorRequest::SwitchWeaponIfAllowed(id)
+            }
             ("CharSwitchWeapon", true) => ActorRequest::SwitchWeapon(id),
             ("Reborn", false) => ActorRequest::Reborn(id),
             _ => return false,
@@ -506,6 +520,15 @@ impl MissionHost {
 }
 
 impl PstHost for MissionHost {
+    fn take_script_overrides(&mut self, id: i64) -> Option<String> {
+        self.npc_overrides.remove(&id)
+    }
+
+    fn npc_script_name(&self, id: i64) -> Option<String> {
+        self.npc_ids
+            .iter()
+            .find_map(|(name, &actor)| (actor == id).then(|| name.clone()))
+    }
     fn initialize_script_actor(
         &mut self,
         id: i64,
@@ -545,6 +568,8 @@ impl PstHost for MissionHost {
         id: i64,
         globals: &std::collections::HashMap<String, PstValue>,
     ) {
+        self.started_npcs.remove(&id);
+
         let definition = npc_definition_from_values(globals, "");
         self.npc_initial_hp.insert(id, definition.hp as i16);
         if globals.contains_key("Name") {
@@ -624,7 +649,7 @@ impl PstHost for MissionHost {
                     PstValue::Num(n) => format!("{}", n.trunc() as i64),
                     _ => String::new(),
                 };
-                if !script.is_empty() {
+                if !script.is_empty() && !script.contains(['/', '\\', '\0']) {
                     let id = if let Some(id) = self.npc_ids.get(&script).copied() {
                         self.in_scene.insert(id, true);
                         self.active.insert(id, true);
@@ -637,6 +662,12 @@ impl PstHost for MissionHost {
                         self.npc_ids.insert(script.clone(), self.next_char_id);
                         self.next_char_id
                     };
+                    if let Some(PstValue::Str(overrides)) = args
+                        .get(1)
+                        .filter(|value| matches!(value, PstValue::Str(text) if text.len() <= 4096))
+                    {
+                        self.npc_overrides.insert(id, overrides.clone());
+                    }
                     self.npc_requests.push(NpcRequest::Add { script, id });
                     return PstValue::Num(id as f64);
                 }
@@ -745,6 +776,21 @@ impl PstHost for MissionHost {
                 self.target_points.insert(slot, point);
                 PstValue::Num(1.0)
             }
+            "GetPosition" => {
+                let center = self.pst_stage_center;
+                self.target_position(arg(0).as_f64() as i64).map_or(
+                    PstValue::Num(0.0),
+                    |[x, y, z]| {
+                        let scale = meteor_core::MODEL_SCALE;
+                        crate::pst_game::vector_value([
+                            x as f32 / scale + center[0],
+                            center[1] - z as f32 / scale,
+                            y as f32 / scale + center[2],
+                        ])
+                    },
+                )
+            }
+            "GetGameTimeFloat" => PstValue::Num(self.elapsed),
             "IsPerforming" => {
                 let id = arg(0).as_f64() as i64;
                 let performing = (id == 0 || self.active_npc_fighter(id).is_some())
@@ -926,9 +972,37 @@ pub struct MissionScriptRuntime {
     values: std::collections::HashMap<String, PstValue>,
     elapsed: f64,
     update_accumulator: f64,
+    initialized: bool,
+    last_source: String,
+    npc_sources: std::collections::BTreeMap<i64, String>,
 }
 
 impl MissionScriptRuntime {
+    pub fn execute_line(
+        &mut self,
+        source: &str,
+        scene: Option<&mut SceneScriptRuntime>,
+    ) -> Result<PstValue, String> {
+        self.runtime
+            .execute_line_with_peer(source, scene.map(SceneScriptRuntime::linked_script))
+    }
+    pub fn set_game(&mut self, game: crate::pst_game::PstGame) {
+        self.runtime.set_game(game);
+    }
+
+    pub fn game(&self) -> Option<&crate::pst_game::PstGame> {
+        self.runtime.game()
+    }
+
+    pub fn run_due(&mut self, scene: Option<&mut SceneScriptRuntime>) -> Result<(), String> {
+        self.runtime
+            .run_due(scene.map(SceneScriptRuntime::linked_script))
+    }
+
+    pub fn has_event(&self, name: &str) -> bool {
+        self.runtime.has_function(name)
+    }
+
     pub fn new(source: &str, values: std::collections::HashMap<String, PstValue>) -> Self {
         Self::with_scene_items(source, values, SceneItemCatalog::default())
     }
@@ -938,7 +1012,15 @@ impl MissionScriptRuntime {
         values: std::collections::HashMap<String, PstValue>,
         scene_items: SceneItemCatalog,
     ) -> Self {
-        let program = parse_program(source).expect("mission pst parses");
+        Self::try_with_scene_items(source, values, scene_items).expect("mission pst parses")
+    }
+
+    pub fn try_with_scene_items(
+        source: &str,
+        values: std::collections::HashMap<String, PstValue>,
+        scene_items: SceneItemCatalog,
+    ) -> Result<Self, String> {
+        let program = parse_program(source)?;
 
         let mut host = MissionHost {
             scene_items,
@@ -957,16 +1039,47 @@ impl MissionScriptRuntime {
         }
         let mut runtime = Runtime::new(program, host, 50_000);
         runtime.set_root_script(MISSION_SCRIPT_ID, "mission");
-        Self {
+        Ok(Self {
             runtime,
             values,
             elapsed: 0.0,
             update_accumulator: 0.0,
-        }
+            initialized: false,
+            last_source: source.into(),
+            npc_sources: Default::default(),
+        })
     }
 
     pub fn set_script_name(&mut self, name: &str) {
         self.runtime.set_root_script(MISSION_SCRIPT_ID, name);
+    }
+
+    pub fn reload_source(&mut self, source: &str) -> Result<bool, String> {
+        if source == self.last_source {
+            return Ok(false);
+        }
+        source.clone_into(&mut self.last_source);
+        self.runtime.replace_program(parse_program(source)?);
+        Ok(true)
+    }
+
+    pub fn npc_source_names(&self) -> Vec<(i64, String)> {
+        self.npc_sources
+            .keys()
+            .filter_map(|&id| self.host().npc_script_name(id).map(|name| (id, name)))
+            .collect()
+    }
+
+    pub fn reload_npc_source(&mut self, id: i64, source: &str) -> Result<bool, String> {
+        let Some(previous) = self.npc_sources.get_mut(&id) else {
+            return Ok(false);
+        };
+        if previous == source {
+            return Ok(false);
+        }
+        source.clone_into(previous);
+        self.runtime.reload_script(id, source)?;
+        Ok(true)
     }
 
     pub(crate) fn linked_script(&mut self) -> &mut dyn LinkedScript {
@@ -982,7 +1095,9 @@ impl MissionScriptRuntime {
             host.npc_ids.insert(name.to_owned(), host.next_char_id);
             host.next_char_id
         };
-        self.runtime.register_script(id, source)
+        self.runtime.register_script(id, source)?;
+        self.npc_sources.insert(id, source.into());
+        Ok(())
     }
 
     pub fn activate_npc_script(&mut self, id: i64, source: &str) -> Result<(), String> {
@@ -997,6 +1112,7 @@ impl MissionScriptRuntime {
     ) -> Result<(), String> {
         if !self.runtime.script_initialized(id) {
             self.runtime.register_script(id, source)?;
+            self.npc_sources.insert(id, source.into());
             self.runtime
                 .activate_script_with_peer(id, scene.map(SceneScriptRuntime::linked_script))?;
         }
@@ -1070,6 +1186,11 @@ impl MissionScriptRuntime {
             scene.map(SceneScriptRuntime::linked_script),
         );
         self.runtime.host_mut().npc_callback_owner = previous;
+        if result.is_ok() && self.runtime.host_mut().started_npcs.insert(id) {
+            if let Some(game) = self.game() {
+                game.publish("NPC_OnStart", &[PstValue::from(id)]);
+            }
+        }
         result
     }
 
@@ -1137,7 +1258,30 @@ impl MissionScriptRuntime {
     }
 
     pub fn start_linked(&mut self, scene: Option<&mut SceneScriptRuntime>) -> Result<(), String> {
-        self.call_linked("OnStart", &[], scene)?;
+        let mut scene = scene;
+        self.initialize(scene.as_deref_mut())?;
+        self.call_linked("OnStart", &[], scene.as_deref_mut())?;
+        if self.has_event("Item_OnInit") {
+            if let Some(scene) = scene {
+                let items = scene
+                    .host()
+                    .instances()
+                    .iter()
+                    .filter_map(|item| scene.host().instance(item.index).map(|_| item.index))
+                    .collect::<Vec<_>>();
+                for item in items {
+                    self.call_linked("Item_OnInit", &[PstValue::Num(item as f64)], Some(scene))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn initialize(&mut self, scene: Option<&mut SceneScriptRuntime>) -> Result<(), String> {
+        if !self.initialized {
+            self.call_linked("OnInit", &[], scene)?;
+            self.initialized = true;
+        }
         Ok(())
     }
 
@@ -1162,12 +1306,31 @@ impl MissionScriptRuntime {
     pub fn update_linked(
         &mut self,
         dt: f64,
-        scene: Option<&mut SceneScriptRuntime>,
+        mut scene: Option<&mut SceneScriptRuntime>,
     ) -> Result<(), String> {
         self.elapsed += dt;
         self.update_accumulator += dt;
 
         self.runtime.host_mut().elapsed = self.elapsed;
+        self.call_linked("OnFrame", &[], scene.as_deref_mut())?;
+        for id in self.runtime.script_ids() {
+            if self
+                .runtime
+                .host()
+                .active
+                .get(&id)
+                .copied()
+                .unwrap_or(false)
+                && self.runtime.script_has_function(id, "OnFrame")
+            {
+                self.runtime.call_script_with_peer(
+                    id,
+                    "OnFrame",
+                    &[],
+                    scene.as_deref_mut().map(SceneScriptRuntime::linked_script),
+                )?;
+            }
+        }
 
         if self.update_accumulator >= 0.1 - 1e-9 {
             self.update_accumulator %= 0.1;

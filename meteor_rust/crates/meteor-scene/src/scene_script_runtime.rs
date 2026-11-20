@@ -30,6 +30,9 @@ pub struct SceneItemSpawn {
     pub name: String,
     pub model: String,
     pub actor: i64,
+    pub position: Option<[f32; 3]>,
+    pub pickup: bool,
+    pub temporary: Option<([i64; 2], Option<f32>)>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -220,27 +223,81 @@ impl SceneHost {
             .unwrap_or_default()
     }
 
+    pub fn set_item_metadata(&mut self, id: usize, model: &str, position: [f32; 3], yaw: f32) {
+        if let Some(item) = self.instance_mut(id) {
+            item.set("_model", PstValue::from(model));
+            item.set("_position", crate::pst_game::vector_value(position));
+            item.set("_yaw", PstValue::from(f64::from(yaw)));
+        }
+    }
+
+    pub fn take_item_placements(&mut self) -> Vec<(String, Option<[f32; 3]>, Option<f32>)> {
+        self.instances
+            .iter_mut()
+            .filter_map(|item| {
+                let position = item
+                    .props
+                    .remove("_move")
+                    .and_then(|value| crate::pst_game::vector(&value));
+                let yaw = item
+                    .props
+                    .remove("_rotate")
+                    .map(|value| value.as_f64() as f32);
+                (position.is_some() || yaw.is_some()).then(|| (item.name.clone(), position, yaw))
+            })
+            .collect()
+    }
+
     fn create_scene_pickup(&mut self, args: &[PstValue]) -> Option<usize> {
         let [PstValue::Str(name), PstValue::Str(kind), PstValue::Str(model), rest @ ..] = args
         else {
             return None;
         };
-        let actor = match rest {
-            [] => 0,
+        let (actor, position) = match rest {
+            [] => (0, None),
             [PstValue::Num(id)]
                 if *id >= 0.0 && *id <= f64::from(i32::MAX) && id.fract() == 0.0 =>
             {
-                *id as i64
+                (*id as i64, None)
             }
+            [value] => (0, Some(crate::pst_game::vector(value)?)),
             _ => return None,
         };
+        let pickup = match kind.as_str() {
+            "pickup" => true,
+            "" | "prop" => false,
+            _ => return None,
+        };
+        self.create_item(name, model, actor, position, pickup, None)
+    }
+
+    pub fn create_temp_item(
+        &mut self,
+        actor: i64,
+        resource: [i64; 2],
+        model: &str,
+        position: Option<[f32; 3]>,
+        yaw: Option<f32>,
+    ) -> Option<usize> {
+        let name = format!("PstTemp{}", self.instances.len());
+        self.create_item(&name, model, actor, position, true, Some((resource, yaw)))
+    }
+
+    fn create_item(
+        &mut self,
+        name: &str,
+        model: &str,
+        actor: i64,
+        position: Option<[f32; 3]>,
+        pickup: bool,
+        temporary: Option<([i64; 2], Option<f32>)>,
+    ) -> Option<usize> {
         let valid_stem = |s: &str| {
             !s.is_empty()
                 && s.len() <= 80
                 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
         };
-        if kind != "pickup"
-            || !valid_stem(name)
+        if !valid_stem(name)
             || !valid_stem(model)
             || self.resolve_name(name).is_some()
             || self
@@ -257,20 +314,28 @@ impl SceneHost {
         let id = self.instances.len();
         self.created_items += 1;
         self.item_catalog.append(name);
-        let props = ["active", "interactive", "visible"]
+        let mut props: HashMap<_, _> = ["active", "interactive", "visible"]
             .into_iter()
             .map(|key| (key.to_owned(), PstValue::Num(1.0)))
             .collect();
+        props.insert("_model".into(), PstValue::from(model));
+        props.insert("collision".into(), PstValue::from(i64::from(!pickup)));
+        if let Some(position) = position {
+            props.insert("_position".into(), crate::pst_game::vector_value(position));
+        }
         self.instances.push(SceneItemInstance {
-            name: name.clone(),
+            name: name.to_owned(),
             index: id,
             props,
         });
         pending.push(SceneItemSpawn {
             id,
-            name: name.clone(),
-            model: model.clone(),
+            name: name.to_owned(),
+            model: model.to_owned(),
             actor,
+            position,
+            pickup,
+            temporary,
         });
         Some(id)
     }
@@ -475,6 +540,42 @@ impl PstHost for SceneHost {
             "CreateSceneItem" => {
                 PstValue::Num(self.create_scene_pickup(args).map_or(-1.0, |id| id as f64))
             }
+            "GetSceneItemModelName"
+            | "GetSceneItemPosition"
+            | "GetSceneItemRotationYaw"
+            | "SetSceneItemPosition"
+            | "SetSceneItemRotationYaw" => {
+                if name.starts_with("Set") && self.dynamic_items.is_none() {
+                    return PstValue::Num(0.0);
+                }
+                let item = args
+                    .first()
+                    .and_then(|value| self.entry(value))
+                    .and_then(|id| self.instance_mut(id));
+                let Some(item) = item else {
+                    return PstValue::Num(0.0);
+                };
+                match (name, args.get(1)) {
+                    ("GetSceneItemModelName", _) => item.get("_model"),
+                    ("GetSceneItemPosition", _) => item.get("_position"),
+                    ("GetSceneItemRotationYaw", _) => item.get("_yaw"),
+                    ("SetSceneItemPosition", Some(value))
+                        if crate::pst_game::vector(value).is_some() =>
+                    {
+                        item.set("_position", value.clone());
+                        item.set("_move", value.clone());
+                        PstValue::Num(1.0)
+                    }
+                    ("SetSceneItemRotationYaw", Some(PstValue::Num(yaw)))
+                        if (*yaw as f32).is_finite() =>
+                    {
+                        item.set("_yaw", PstValue::Num(*yaw));
+                        item.set("_rotate", PstValue::Num(*yaw));
+                        PstValue::Num(1.0)
+                    }
+                    _ => PstValue::Num(0.0),
+                }
+            }
             "PlayMusic" => PstValue::Num(
                 u8::from(
                     self.music_requests
@@ -575,6 +676,12 @@ impl PstHost for SceneHost {
                         let slot = args.get(1).map(|v| v.as_f64() as i64).unwrap_or(0);
                         let lo = args.get(2).map(|v| v.as_f64() as i64).unwrap_or(0);
                         let hi = args.get(3).map(|v| v.as_f64() as i64).unwrap_or(0);
+                        if hi
+                            .checked_sub(lo)
+                            .is_none_or(|length| !(0..65_536).contains(&length))
+                        {
+                            return PstValue::Num(0.0);
+                        }
                         let mut values: Vec<i64> = (lo..=hi).collect();
 
                         for i in (1..values.len()).rev() {
@@ -622,7 +729,7 @@ impl PstHost for SceneHost {
             "SetScene" => {
                 let key =
                     field_to_string(args.first().unwrap_or(&PstValue::Num(0.0))).to_lowercase();
-                let values: Vec<f64> = args[1..].iter().map(|v| v.as_f64()).collect();
+                let values: Vec<f64> = args.iter().skip(1).map(PstValue::as_f64).collect();
                 self.scene_requests.push((key, values));
                 PstValue::Num(1.0)
             }
@@ -633,7 +740,10 @@ impl PstHost for SceneHost {
                     let hi = m.as_f64() as i64;
                     let a = lo.min(hi);
                     let b = lo.max(hi);
-                    PstValue::Num((a + (self.next_rand() * (b - a + 1) as f64) as i64) as f64)
+                    let width = i128::from(b) - i128::from(a) + 1;
+                    PstValue::Num(
+                        (i128::from(a) + (self.next_rand() * width as f64) as i128) as f64,
+                    )
                 } else {
                     PstValue::Num((self.next_rand() * (n as i64).max(1) as f64) as i64 as f64)
                 }
@@ -649,9 +759,31 @@ impl PstHost for SceneHost {
 pub struct SceneScriptRuntime {
     runtime: Runtime<SceneHost>,
     update_accumulator: f64,
+    last_source: String,
 }
 
 impl SceneScriptRuntime {
+    pub fn execute_line(
+        &mut self,
+        source: &str,
+        mission: Option<&mut MissionScriptRuntime>,
+    ) -> Result<PstValue, String> {
+        self.runtime
+            .execute_line_with_peer(source, mission.map(MissionScriptRuntime::linked_script))
+    }
+    pub fn set_game(&mut self, game: crate::pst_game::PstGame) {
+        self.runtime.set_game(game);
+    }
+
+    pub fn game(&self) -> Option<&crate::pst_game::PstGame> {
+        self.runtime.game()
+    }
+
+    pub fn run_due(&mut self, mission: Option<&mut MissionScriptRuntime>) -> Result<(), String> {
+        self.runtime
+            .run_due(mission.map(MissionScriptRuntime::linked_script))
+    }
+
     pub fn load(
         source: &str,
         instances: Vec<SceneItemInstance>,
@@ -664,7 +796,17 @@ impl SceneScriptRuntime {
         Ok(Self {
             runtime,
             update_accumulator: 0.0,
+            last_source: source.into(),
         })
+    }
+
+    pub fn reload_source(&mut self, source: &str) -> Result<bool, String> {
+        if source == self.last_source {
+            return Ok(false);
+        }
+        source.clone_into(&mut self.last_source);
+        self.runtime.replace_program(parse_program(source)?);
+        Ok(true)
     }
 
     pub fn set_script_name(&mut self, name: &str) {
@@ -683,8 +825,19 @@ impl SceneScriptRuntime {
         &mut self,
         mut mission: Option<&mut MissionScriptRuntime>,
     ) -> Result<(), String> {
-        for name in ["Scene_OnLoad", "Scene_OnInit"] {
-            self.call_linked(name, &[], mission.as_deref_mut())?;
+        for (scene_event, item_event) in [("Scene_OnLoad", "OnLoad"), ("Scene_OnInit", "OnInit")] {
+            if scene_event == "Scene_OnInit" {
+                if let Some(mission) = mission.as_deref_mut() {
+                    mission.initialize(Some(self))?;
+                }
+            }
+            self.call_linked(scene_event, &[], mission.as_deref_mut())?;
+            if let Some(game) = self.game() {
+                game.publish(scene_event, &[]);
+            }
+            for name in self.live_item_names() {
+                self.dispatch_item_event(&name, item_event, &[], mission.as_deref_mut())?;
+            }
         }
         Ok(())
     }
@@ -758,25 +911,84 @@ impl SceneScriptRuntime {
         &mut self,
         name: &str,
         actor: i64,
+        mission: Option<&mut MissionScriptRuntime>,
+    ) -> Result<(), String> {
+        self.dispatch_item_event(name, "OnPickUp", &[PstValue::from(actor)], mission)
+    }
+
+    pub fn dispatch_item_event(
+        &mut self,
+        name: &str,
+        event: &str,
+        args: &[PstValue],
         mut mission: Option<&mut MissionScriptRuntime>,
     ) -> Result<(), String> {
         let Some(item) = self.host().resolve_name(name) else {
             return Ok(());
         };
-        let actor = PstValue::Num(actor as f64);
-        let legacy = self.call_item_linked(
-            name,
-            "OnPickUp",
-            std::slice::from_ref(&actor),
-            mission.as_deref_mut(),
-        );
-        let args = [PstValue::Num(item as f64), actor];
-        let scene = self.call_linked("Item_OnPickUp", &args, mission.as_deref_mut());
-        let task = match mission {
-            Some(mission) => mission.call_linked("Item_OnPickUp", &args, Some(self)),
-            None => Ok(PstValue::Num(0.0)),
+        let legacy = self.call_item_linked(name, event, args, mission.as_deref_mut());
+        let generic = match event {
+            "OnLoad" => "Item_OnLoad",
+            "OnInit" => "Item_OnInit",
+            "OnIdle" => "Item_OnIdle",
+            "OnAttack" => "Item_OnAttack",
+            "OnTouch" => "Item_OnTouch",
+            "OnPickUp" => "Item_OnPickUp",
+            _ => return legacy.map(|_| ()),
         };
-        legacy.and(scene).and(task).map(|_| ())
+        let task = if matches!(event, "OnLoad" | "OnInit") {
+            None
+        } else {
+            mission
+        };
+        if !self.has_event(generic)
+            && !task.as_deref().is_some_and(|task| task.has_event(generic))
+            && !self.game().is_some_and(|game| game.receives(generic))
+        {
+            return legacy.map(|_| ());
+        }
+        let mut params = Vec::with_capacity(args.len() + 1);
+        params.push(PstValue::Num(item as f64));
+        params.extend_from_slice(args);
+        let generic = Self::dispatch_event(Some(self), task, generic, &params);
+        legacy.and(generic)
+    }
+
+    pub fn has_event(&self, name: &str) -> bool {
+        self.runtime.has_function(name)
+    }
+
+    pub fn dispatch_event(
+        mut scene: Option<&mut Self>,
+        mut mission: Option<&mut MissionScriptRuntime>,
+        event: &str,
+        args: &[PstValue],
+    ) -> Result<(), String> {
+        if let Some(game) = scene
+            .as_deref()
+            .and_then(Self::game)
+            .or_else(|| mission.as_deref().and_then(MissionScriptRuntime::game))
+        {
+            game.publish(event, args);
+        }
+        let scene_result = scene.as_deref_mut().map_or(Ok(()), |scene| {
+            scene
+                .call_linked(event, args, mission.as_deref_mut())
+                .map(|_| ())
+        });
+        let mission_result = mission.map_or(Ok(()), |mission| {
+            mission.call_linked(event, args, scene).map(|_| ())
+        });
+        scene_result.and(mission_result)
+    }
+
+    fn live_item_names(&self) -> Vec<String> {
+        self.host()
+            .instances()
+            .iter()
+            .filter(|item| self.host().instance(item.index).is_some())
+            .map(|item| item.name.clone())
+            .collect()
     }
 
     pub fn reconcile_item_callback(
@@ -838,21 +1050,15 @@ impl SceneScriptRuntime {
         mut mission: Option<&mut MissionScriptRuntime>,
     ) -> Result<(), String> {
         self.runtime.host_mut().game_time_ms += dt.max(0.0) * 1000.0;
+        self.call_linked("Scene_OnFrame", &[], mission.as_deref_mut())?;
         self.update_accumulator += dt;
         if self.update_accumulator < 0.1 {
             return Ok(());
         }
         self.update_accumulator %= 0.1;
         self.call_linked("Scene_OnIdle", &[], mission.as_deref_mut())?;
-        let instance_names: Vec<String> = self
-            .runtime
-            .host()
-            .instances()
-            .iter()
-            .map(|instance| instance.name.clone())
-            .collect();
-        for name in instance_names {
-            self.call_item_linked(&name, "OnIdle", &[], mission.as_deref_mut())?;
+        for name in self.live_item_names() {
+            self.dispatch_item_event(&name, "OnIdle", &[], mission.as_deref_mut())?;
         }
         Ok(())
     }
@@ -1461,6 +1667,7 @@ mod net_op_tests {
         let mut runtime = SceneScriptRuntime {
             runtime: Runtime::new(program, host, 50_000),
             update_accumulator: 0.0,
+            last_source: String::new(),
         };
         runtime.call("OnStart", &[]).expect("OnStart runs");
 
@@ -1533,6 +1740,7 @@ mod net_op_tests {
         let mut runtime = SceneScriptRuntime {
             runtime: Runtime::new(program, host, 50_000),
             update_accumulator: 0.0,
+            last_source: String::new(),
         };
         runtime
             .call_item(

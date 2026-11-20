@@ -48,6 +48,9 @@ pub(crate) fn offline_player_team(request: &LaunchRequest) -> i32 {
 }
 
 impl OfflineScores {
+    pub(super) fn totals_for(&self, id: &str) -> (u32, u32) {
+        self.totals.get(id).copied().unwrap_or_default()
+    }
     pub fn record_death(&mut self, target: String, attacker: Option<String>) {
         let total = self.totals.entry(target.clone()).or_default();
         total.1 = total.1.saturating_add(1);

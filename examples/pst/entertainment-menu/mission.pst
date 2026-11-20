@@ -1,0 +1,28 @@
+int Rule = 1;
+int RoundTime = 10;
+int PlayerSpawn = 9;
+int PlayerSpawnDir = 90;
+int PlayerWeapon = 5;
+int PlayerHP = 2000;
+int guard = -1;
+
+OnStart()
+{
+    Say(0, "按 J 打开娱乐菜单。");
+}
+
+SpawnPracticeGuard()
+{
+    if (!IsAlive(guard))
+    {
+        guard = AddNPC("pst_demo_guard", "Name=练习守卫;HP=600;");
+    }
+}
+
+OnTempItemPickUp(int type, int item, int actor)
+{
+    if (type == 2 && actor == 0)
+    {
+        PrintSystemText("拾取临时道具 " + item);
+    }
+}

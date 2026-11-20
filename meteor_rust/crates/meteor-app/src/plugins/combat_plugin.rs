@@ -484,7 +484,8 @@ fn apply_periodic_status_hits(
     }
 }
 
-fn stage_hazard_damage(
+pub(super) fn stage_hazard_damage(
+    (mut commands, forced_deaths): (Commands, Query<Entity, With<ScriptForcedDeath>>),
     time: Res<Time>,
     clock: Option<Res<crate::plugins::FrameClock>>,
     mut hazards: ResMut<super::hazard_plugin::StageHazardRuntime>,
@@ -548,15 +549,21 @@ fn stage_hazard_damage(
             },
         )
         .collect::<Vec<_>>();
-    let mut hits = Vec::new();
+    let mut hits: Vec<_> = forced_deaths
+        .iter()
+        .map(|entity| {
+            commands.entity(entity).remove::<ScriptForcedDeath>();
+            (entity.to_bits().to_string(), i32::MAX, true)
+        })
+        .collect();
     hazards.0.update(
         crate::plugins::simulation_dt(clock.as_deref(), time.delta_secs()),
         &positions,
         &mut |id, _, damage, _| {
-            hits.push((id.to_owned(), damage));
+            hits.push((id.to_owned(), damage, false));
         },
     );
-    for (id, damage) in hits {
+    for (id, damage, forced) in hits {
         let Some(entity) = id.parse::<u64>().ok().and_then(Entity::try_from_bits) else {
             continue;
         };
@@ -580,15 +587,18 @@ fn stage_hazard_damage(
         };
         if damage <= 0
             || health.current <= 0.0
-            || cheat.is_some()
-            || hit_clock.is_some_and(|c| c.spawn_protected())
+            || !forced && (cheat.is_some() || hit_clock.is_some_and(|c| c.spawn_protected()))
         {
             continue;
         }
         let Some(asset) = assets.0.get(&format!("p{}", fighter.character_id)) else {
             continue;
         };
-        health.current = (health.current - damage as f32).max(0.0);
+        health.current = if forced {
+            0.0
+        } else {
+            (health.current - damage as f32).max(0.0)
+        };
         let killed = health.current <= 0.0;
         if let Some(mut attack) = attack {
             *attack = FighterAttackMotion::default();
@@ -685,15 +695,14 @@ fn stage_hazard_damage(
         if let (Some(id), Some(mission)) = (character_id, mission.as_deref_mut()) {
             mission.host_mut().record_script_death(id);
         }
-        if let (Some(id), Some(runtime)) = (character_id, script.script_mut()) {
-            use meteor_scene::scene_script_runtime::PstValue;
-            if let Err(error) = runtime.call_linked(
-                "Scene_OnCharacterEvent",
-                &[PstValue::Num(id as f64), PstValue::Num(202.0)],
+        if let Some(id) = character_id {
+            let reason = if forced { 2 } else { 3 };
+            super::stage_plugin::notify_script_character(
+                script.script_mut(),
                 mission,
-            ) {
-                warn!("environment death callback failed: {error}");
-            }
+                id,
+                Some(reason),
+            );
         }
     }
 }
@@ -3193,7 +3202,7 @@ fn sort_attack_snapshots(snapshots: &mut [AttackSnapshot]) {
     );
 }
 
-fn combat_weapon_stats(
+pub(super) fn combat_weapon_stats(
     table: &CombatResourceTable,
     fighter: &Fighter,
 ) -> Option<WeaponCombatStats> {
@@ -3212,7 +3221,9 @@ pub(crate) fn fighter_speed_factor(
     let weapon_delta = resources
         .and_then(|resources| combat_weapon_stats(&resources.0, fighter))
         .map_or(0, |stats| stats.speed_delta);
-    let base = ((item_factor * 100.0).round() as i32).wrapping_add(weapon_delta);
+    let base = ((item_factor * 100.0).round() as i32)
+        .wrapping_add(weapon_delta)
+        .wrapping_add(status.map_or(0, |status| status.pst_modifiers[2]));
     let property = status.map_or_else(|| base.max(0), |status| status.effects.speed_property(base));
 
     if property == 0 {
@@ -3300,7 +3311,11 @@ pub(crate) fn fighter_combat_team(
     }
     mission_npc
         .map(|npc| i32::from(npc.team))
-        .unwrap_or(if local { 1 } else { 0 })
+        .unwrap_or(if local {
+            net.offline_script_player_team.unwrap_or(1)
+        } else {
+            0
+        })
 }
 
 fn teams_are_hostile(a: i32, b: i32) -> bool {
@@ -3472,6 +3487,15 @@ pub(super) struct ScriptWeaponSwitch;
 #[derive(Component)]
 pub(super) struct ScriptReborn;
 
+#[derive(Component)]
+pub(super) struct ScriptRebornAt(pub Vec3);
+
+#[derive(Component)]
+pub(super) struct ScriptActorInput(pub String);
+
+#[derive(Component)]
+pub(super) struct ScriptForcedDeath;
+
 fn combat_tick(
     mut commands: Commands,
     (active_fighter, time): (Option<Res<super::fighter_frame::ActiveFighter>>, Res<Time>),
@@ -3488,9 +3512,11 @@ fn combat_tick(
     assets: Option<Res<CharacterAssetsSet>>,
     mut controller: ResMut<LockOnController>,
     mut command_input: ResMut<crate::plugins::input_plugin::LocalCommandInput>,
-    (switching, script_switch): (
+    (switching, script_switch, script_inputs, script_options): (
         Query<(), With<WeaponSwitchActive>>,
         Query<(), With<ScriptWeaponSwitch>>,
+        Query<&ScriptActorInput>,
+        Query<&super::stage_plugin::pst_extensions::ScriptFighterOptions>,
     ),
     ranged_gates: Query<&RangedFireGate>,
     remotes: RemoteLockCandidateQuery<'_, '_>,
@@ -3787,6 +3813,43 @@ fn combat_tick(
         let input_pose_instance = sm.fighter_mut().pose.pose_instance_id;
         let mut attack_commit_accepted = false;
         let mut switch_started = false;
+        if let Ok(input) = script_inputs.get(entity) {
+            commands.entity(entity).remove::<ScriptActorInput>();
+            if !switch_active && sm.fighter_mut().health.current > 0.0 {
+                match input.0.as_str() {
+                    "j" => {
+                        if sm.handle_input(Action::Jump) && is_local {
+                            if let Some(jump) = network.jump_input.as_deref_mut() {
+                                jump.action_accepted = true;
+                                jump.accepted_release_hold_seconds = Some(0.0);
+                            }
+                        }
+                    }
+                    "burst" => attack_commit_accepted |= sm.handle_input(Action::QiBurst),
+                    input => {
+                        let mut valid = true;
+                        let directions = input
+                            .chars()
+                            .filter_map(|key| match key {
+                                'f' => Some(meteor_combat::combo_engine::Dir::Up),
+                                'b' => Some(meteor_combat::combo_engine::Dir::Down),
+                                'l' => Some(meteor_combat::combo_engine::Dir::Left),
+                                'r' => Some(meteor_combat::combo_engine::Dir::Right),
+                                'n' => None,
+                                _ => {
+                                    valid = false;
+                                    None
+                                }
+                            })
+                            .collect();
+                        if valid {
+                            sm.fighter_mut().attack_directions = directions;
+                            attack_commit_accepted |= sm.handle_input(Action::Attack);
+                        }
+                    }
+                }
+            }
+        }
         if script_switch.contains(entity) && !switch_active {
             if fighter.weapon_slots[other_weapon_slot(fighter.weapon_slot)] == 0 {
                 commands.entity(entity).remove::<ScriptWeaponSwitch>();
@@ -4211,7 +4274,11 @@ fn combat_tick(
                 command_input.0.update(now_ms);
             }
         } else if !is_local && !switch_active && !switch_started {
-            if std::mem::take(&mut intent.want_weapon_switch) {
+            if std::mem::take(&mut intent.want_weapon_switch)
+                && script_options
+                    .get(entity)
+                    .map_or(true, |options| options.allow_switch)
+            {
                 gun_aim.aiming = false;
                 intent.lock_target = None;
                 intent.ranged_aim = None;
@@ -4245,7 +4312,12 @@ fn combat_tick(
                 sm.handle_input(Action::Guard);
             }
             if std::mem::take(&mut intent.want_taunt) {
-                sm.taunt();
+                let pose = script_options
+                    .get(entity)
+                    .ok()
+                    .and_then(|options| options.aggress_pose)
+                    .unwrap_or(32);
+                sm.taunt_with_pose(pose);
             }
             if intent.want_attack && !npc_aim_consumed {
                 intent.want_attack = false;
@@ -6064,20 +6136,18 @@ fn attack_windows(
                     0
                 };
                 let attacker_bonus = attacker_bonus
-                    + ranged
-                        .statuses
-                        .get(snapshot.entity)
-                        .map_or(0, |status| status.effects.attack_bonus());
+                    + ranged.statuses.get(snapshot.entity).map_or(0, |status| {
+                        status.effects.attack_bonus() + status.pst_modifiers[0]
+                    });
                 let defender_bonus = if defender.player_slot == 0 && buffs.remaining > 0.0 {
                     buffs.defense_bonus
                 } else {
                     0
                 };
                 let defender_bonus = defender_bonus
-                    + ranged
-                        .statuses
-                        .get(defender_entity)
-                        .map_or(0, |status| status.effects.defense_bonus());
+                    + ranged.statuses.get(defender_entity).map_or(0, |status| {
+                        status.effects.defense_bonus() + status.pst_modifiers[1]
+                    });
                 let defender_weapon_def = combat_weapon_stats(&combat_resources.0, defender)
                     .map(|stats| stats.defense)
                     .unwrap_or(15)
@@ -6415,7 +6485,15 @@ fn attack_windows(
                     {
                         mission.host_mut().record_script_death(victim);
                     }
-                    if let (Some(character_id), Some(runtime)) = (character_id, script.script_mut())
+                    if let Some(victim) = offline_victim {
+                        super::stage_plugin::notify_script_character(
+                            script.script_mut(),
+                            mission.as_deref_mut(),
+                            victim,
+                            Some(1),
+                        );
+                    } else if let (Some(character_id), Some(runtime)) =
+                        (character_id, script.script_mut())
                     {
                         if let Err(error) = runtime.call_linked(
                             "Scene_OnCharacterEvent",
@@ -6489,10 +6567,9 @@ fn attack_windows(
                     |pose_id| combat_resources.0.pose_attack_percent(pose_id);
 
                 let prop_attack_bonus = prop_attack_bonus
-                    + ranged
-                        .statuses
-                        .get(snapshot.entity)
-                        .map_or(0, |status| status.effects.attack_bonus());
+                    + ranged.statuses.get(snapshot.entity).map_or(0, |status| {
+                        status.effects.attack_bonus() + status.pst_modifiers[0]
+                    });
                 let prop_damage = sum_attack_power(
                     snapshot.weapon,
                     snapshot.pose_id,
@@ -6555,7 +6632,7 @@ fn attack_windows(
                                 .host_mut()
                                 .set_character_team(snapshot.script_character_id, team);
                         }
-                        if let Err(error) = runtime.call_item_linked(
+                        if let Err(error) = runtime.dispatch_item_event(
                             &prop.name,
                             "OnAttack",
                             &scene_on_attack_args(snapshot.script_character_id, prop_damage),
@@ -6725,15 +6802,8 @@ fn attack_windows(
         if let (Some(id), Some(mission)) = (character_id, mission.as_deref_mut()) {
             mission.host_mut().record_script_death(id);
         }
-        if let (Some(id), Some(runtime)) = (character_id, script.script_mut()) {
-            use meteor_scene::scene_script_runtime::PstValue;
-            if let Err(error) = runtime.call_linked(
-                "Scene_OnCharacterEvent",
-                &[PstValue::Num(id as f64), PstValue::Num(202.0)],
-                mission,
-            ) {
-                warn!("self effect death callback failed: {error}");
-            }
+        if let Some(id) = character_id {
+            super::stage_plugin::notify_script_character(script.script_mut(), mission, id, Some(3));
         }
     }
 }
@@ -6940,7 +7010,11 @@ pub(super) fn evaluate_match_end(
         .map(|(fighter, death, mission_npc)| RoundMember {
             team: mission_npc
                 .map(|npc| npc.team as i32)
-                .unwrap_or(if fighter.player_slot == 0 { 1 } else { 2 }),
+                .unwrap_or(if fighter.player_slot == 0 {
+                    net.offline_script_player_team.unwrap_or(1)
+                } else {
+                    2
+                }),
             dead: death.active,
         })
         .collect();
@@ -7126,7 +7200,8 @@ pub(super) struct RespawnParams<'w, 's> {
     end: Res<'w, MatchEnd>,
     request: Res<'w, crate::app_state::LaunchRequest>,
     net: Res<'w, NetState>,
-    mission: Option<Res<'w, super::stage_plugin::StageMissionRuntime>>,
+    mission: Option<ResMut<'w, super::stage_plugin::StageMissionRuntime>>,
+    scene: Option<ResMut<'w, super::stage_plugin::StageScriptRuntime>>,
     assets: Option<Res<'w, CharacterAssetsSet>>,
     lock: ResMut<'w, LockOnController>,
     camera_basis: ResMut<'w, super::camera_plugin::CameraBasis>,
@@ -7140,6 +7215,7 @@ pub(super) struct RespawnParams<'w, 's> {
         ),
     >,
     scripted: Query<'w, 's, (), With<ScriptReborn>>,
+    placements: Query<'w, 's, &'static ScriptRebornAt>,
 }
 
 pub(super) fn death_respawn(params: RespawnParams<'_, '_>) {
@@ -7158,13 +7234,15 @@ fn respawn_fighters(params: RespawnParams<'_, '_>, scripted_only: bool) {
         end,
         request,
         net,
-        mission,
+        mut mission,
+        mut scene,
         assets,
         mut lock,
         mut camera_basis,
         mut query,
         mut statuses,
         scripted,
+        placements,
     } = params;
     if request.mode == "replay" {
         return;
@@ -7216,7 +7294,9 @@ fn respawn_fighters(params: RespawnParams<'_, '_>, scripted_only: bool) {
             continue;
         }
         if scripted_only {
-            commands.entity(entity).remove::<ScriptReborn>();
+            commands
+                .entity(entity)
+                .remove::<(ScriptReborn, ScriptRebornAt)>();
         }
         if !death.active {
             continue;
@@ -7257,7 +7337,9 @@ fn respawn_fighters(params: RespawnParams<'_, '_>, scripted_only: bool) {
             .entity(entity)
             .remove::<(WeaponSwitchActive, ScriptWeaponSwitch)>();
         super::stage_plugin::FighterPlacement {
-            position: death.spawn_pos,
+            position: placements
+                .get(entity)
+                .map_or(death.spawn_pos, |placement| placement.0),
             facing: motion.facing,
         }
         .apply(commands.entity(entity), &mut transform, Some(&mut motion));
@@ -7268,6 +7350,19 @@ fn respawn_fighters(params: RespawnParams<'_, '_>, scripted_only: bool) {
 
         target_hit_clock.reset_spawn();
         target_hit_clock.clear_hit();
+        if let Some(id) = mission_npc
+            .map(|npc| npc.id)
+            .or_else(|| local.is_some().then_some(0))
+        {
+            super::stage_plugin::notify_script_character(
+                scene.as_deref_mut().and_then(|scene| scene.script_mut()),
+                mission
+                    .as_deref_mut()
+                    .and_then(|mission| mission.script_mut()),
+                id,
+                None,
+            );
+        }
     }
 }
 
@@ -7348,6 +7443,12 @@ fn preadvance_local_ground_locomotion_pose(
         mut air,
     ) in &mut query
     {
+        if statuses.get(entity).is_ok_and(|status| {
+            status.pst_pose_instance == Some(pose.pose_instance_id) && !pose.finished()
+        }) {
+            continue;
+        }
+
         let mode1 = air
             .as_ref()
             .is_some_and(|air| air.recovery_ground_mode == Some(true));
@@ -7546,6 +7647,11 @@ fn default_poses(
         mut air,
     ) in &mut query
     {
+        if statuses.get(entity).is_ok_and(|status| {
+            status.pst_pose_instance == Some(pose.pose_instance_id) && !pose.finished()
+        }) {
+            continue;
+        }
         let base_speed = if local.is_some() {
             buffs.as_ref().map_or(1.0, |buffs| buffs.speed_factor)
         } else {

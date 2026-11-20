@@ -49,13 +49,18 @@ pub struct FighterStatusEffects {
 
     pub pending_periodic_hit: bool,
     pub worn: Vec<&'static str>,
+    pub(crate) pst_modifiers: [i32; 3],
+    pub(crate) pst_pose_instance: Option<u32>,
 }
 
 impl FighterStatusEffects {
     pub fn clear(&mut self, worn: &mut WornEffect) {
         worn.effects
             .retain(|effect| !self.worn.contains(&effect.name.as_str()));
-        *self = Self::default();
+        *self = Self {
+            pst_modifiers: self.pst_modifiers,
+            ..Self::default()
+        };
     }
     pub fn apply(&mut self, definition: meteor_asset::res::HitStatusEffect) {
         let delta = self.effects.apply(definition, self.clock);

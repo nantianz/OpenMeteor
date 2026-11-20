@@ -180,6 +180,7 @@ const ORIGIN_COMMANDS: &[&str] = &[
 ];
 
 const WEB_COMMANDS: &[&str] = &[
+    "pst",
     "help",
     "clear",
     "hp",
@@ -1382,7 +1383,22 @@ fn debug_console_toggle(
     keymap: Res<Keymap>,
     mut state: ResMut<DebugConsoleState>,
     mut panel: ResMut<DebugPanelState>,
+    pst: Option<Res<super::stage_plugin::pst_extensions::PstSession>>,
+    mut notices: Option<ResMut<super::system_notice::SystemNoticeFeed>>,
 ) {
+    if keys.just_pressed(KeyCode::Backslash) {
+        if let Some(hint) = pst.as_ref().and_then(|pst| pst.0.key_hint(true)) {
+            if let Some(notices) = notices.as_deref_mut().filter(|_| !hint.is_empty()) {
+                notices.push(hint);
+            }
+        } else {
+            state.open = !state.open;
+            if state.open {
+                panel.open = false;
+                state.panel_open = false;
+            }
+        }
+    }
     if keymap.debug_panel.just_pressed(&keys, &mouse) {
         panel.open = !panel.open;
         state.panel_open = panel.open;
@@ -1907,6 +1923,9 @@ struct ExecWorld<'w> {
     room: Res<'w, RoomState>,
     keymap: Res<'w, Keymap>,
     waypoints: Option<Res<'w, meteor_scene::stage_loader::WaypointGraph>>,
+    stage_script: Option<ResMut<'w, super::stage_plugin::StageScriptRuntime>>,
+    mission_script: Option<ResMut<'w, super::stage_plugin::StageMissionRuntime>>,
+    pst: Option<Res<'w, super::stage_plugin::pst_extensions::PstSession>>,
 }
 
 #[derive(bevy::ecs::system::SystemParam)]
@@ -1929,7 +1948,7 @@ struct ExecFighters<'w, 's> {
 
 fn debug_exec_queue(
     mut env: ExecEnv,
-    world: ExecWorld,
+    mut world: ExecWorld,
     mut scene: ExecScene,
     mut fighters: ExecFighters,
 ) {
@@ -1939,6 +1958,53 @@ fn debug_exec_queue(
         let args = args.as_slice();
         let local_entity = fighters.local.single().ok().map(|(e, ..)| e);
         match name.as_str() {
+            "pst" => {
+                if world
+                    .net
+                    .as_deref()
+                    .is_some_and(|net| net.status == super::network_plugin::NetStatus::InRoom)
+                {
+                    env.log
+                        .print("PST 控制台仅在本地关卡可用", ConsoleTone::Err);
+                    continue;
+                }
+                let source = line
+                    .trim_start()
+                    .split_once(char::is_whitespace)
+                    .map_or("", |(_, source)| source.trim());
+                if source.is_empty() {
+                    env.log.print("用法 pst <表达式或语句>", ConsoleTone::Info);
+                    continue;
+                }
+                if let Some(pst) = &world.pst {
+                    pst.0.begin_console_capture();
+                }
+                let stage = world
+                    .stage_script
+                    .as_deref_mut()
+                    .and_then(|stage| stage.script_mut());
+                let mission = world
+                    .mission_script
+                    .as_deref_mut()
+                    .and_then(|mission| mission.script_mut());
+                let result = match (mission, stage) {
+                    (Some(mission), stage) => mission.execute_line(source, stage),
+                    (None, Some(stage)) => stage.execute_line(source, None),
+                    (None, None) => Err("当前没有已加载的 PST 模块".into()),
+                };
+                if let Some(pst) = &world.pst {
+                    for line in pst.0.end_console_capture() {
+                        env.log.print(line, ConsoleTone::Info);
+                    }
+                }
+                match result {
+                    Ok(value) => env.log.print(
+                        meteor_scene::pst_runtime::value_text(&value),
+                        ConsoleTone::Ok,
+                    ),
+                    Err(error) => env.log.print(error, ConsoleTone::Err),
+                }
+            }
             "help" => help(args, &env.names, &mut env.log),
             "clear" => env.log.lines.clear(),
             "shows" => env.stats_visible.0 = parse_bool(args.first(), env.stats_visible.0),

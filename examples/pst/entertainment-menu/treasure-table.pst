@@ -1,0 +1,22 @@
+// CSV columns: model, x, y, z. Coordinates use the stage's original Z-up axes.
+int SpawnTreasureTable(string path)
+{
+    int file = OpenFile(path, "r");
+    if (file < 0) { return -1; }
+
+    int count = 0;
+    for (int row = 0; row < 256; row += 1)
+    {
+        var line = ReadFileLine(file);
+        if (line == -1) { break; }
+        line = StringTrim(line);
+        if (!line || StringSlice(line, 0, 1) == "#") { continue; }
+        var fields = StringSplit(line, ",");
+        if (ArraySize(fields) != 4) { continue; }
+        var position = Vector3(ToFloat(fields[1]), ToFloat(fields[2]), ToFloat(fields[3]));
+        int item = CreateSceneItem("PstTreasure_" + row, "pickup", StringTrim(fields[0]), position);
+        if (item >= 0) { count += 1; }
+    }
+    CloseFile(file);
+    return count;
+}

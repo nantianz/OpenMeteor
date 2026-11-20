@@ -511,7 +511,7 @@ fn spawn_stage_props_with_hd(
             vec![None; model_mesh.objects.len()];
         if collision_capable {
             let (verts, prop_indices, parts) =
-                prop_collision_geometry(model_mesh, dummy, prop_transform);
+                prop_collision_geometry(model_mesh, dummy.scale, prop_transform);
             collider_parts = parts;
             prop_collider_owner = Some(collider.append_prop_world_triangles(&verts, &prop_indices));
             if let Some(owner) = prop_collider_owner {
@@ -783,14 +783,14 @@ pub(crate) fn append_solid_props_for_test(
         })
         .expect("original solid prop model");
         let (vertices, indices, _) =
-            prop_collision_geometry(&mesh, dummy, prop_transform(dummy, center));
+            prop_collision_geometry(&mesh, dummy.scale, prop_transform(dummy, center));
         collider.append_prop_world_triangles(&vertices, &indices);
     }
 }
 
 fn prop_collision_geometry(
     model_mesh: &GmdlMesh,
-    dummy: &meteor_asset::des::StageObject,
+    scale: f32,
     transform: Transform,
 ) -> (Vec<[f32; 3]>, Vec<u32>, Vec<PropCollisionPart>) {
     let mut verts = Vec::new();
@@ -803,8 +803,7 @@ fn prop_collision_geometry(
         let base = verts.len() as u32;
         let mut part_local = Vec::with_capacity(object.num_verts);
         for vertex in object.positions.chunks_exact(3) {
-            let point = transform.rotation
-                * (Vec3::from_slice(vertex) * (MODEL_SCALE * dummy.scale))
+            let point = transform.rotation * (Vec3::from_slice(vertex) * (MODEL_SCALE * scale))
                 + transform.translation;
             verts.push(point.to_array());
 
@@ -1498,12 +1497,18 @@ fn spawn_network_weapon_drop(
 }
 
 #[derive(Component)]
-pub(crate) struct ScriptSpawnedPickup;
+pub(crate) struct ScriptSpawnedPickup {
+    pub temporary_resource: Option<[i64; 2]>,
+}
+
+#[derive(Component)]
+pub(crate) struct ScriptSpawnedProp;
 
 pub(super) fn spawn_pst_scene_items(
     mut commands: Commands,
     mut script: ResMut<super::stage_plugin::StageScriptRuntime>,
     loaded: Res<crate::app_state::LoadedStageInfo>,
+    mut collider: Option<ResMut<StageCollider>>,
     (mut meshes, mut materials, mut images): (
         ResMut<Assets<Mesh>>,
         ResMut<Assets<GmdlMaterial>>,
@@ -1529,14 +1534,24 @@ pub(super) fn spawn_pst_scene_items(
     let candidates = stage_asset_roots(&root);
     let pak_root = pak_files_root(&candidates, &loaded.stage_id);
     for spawn in spawns {
-        let anchor = actors.iter().find_map(|(transform, local, npc)| {
-            (if spawn.actor == 0 {
-                local.is_some()
-            } else {
-                npc.is_some_and(|npc| npc.in_scene_roster && npc.id == spawn.actor)
-            })
-            .then_some(transform.translation)
-        });
+        use super::stage_plugin::pst_extensions::{source_to_world, world_to_source};
+        let item = scene.host().instance(spawn.id);
+        let specified =
+            item.and_then(|item| meteor_scene::pst_game::vector(&item.get("_position")));
+        let yaw = item.map_or(0.0, |item| item.get("_yaw").as_f64() as f32);
+        let anchor = specified
+            .or(spawn.position)
+            .map(|position| source_to_world(position, loaded.center))
+            .or_else(|| {
+                actors.iter().find_map(|(transform, local, npc)| {
+                    (if spawn.actor == 0 {
+                        local.is_some()
+                    } else {
+                        npc.is_some_and(|npc| npc.in_scene_roster && npc.id == spawn.actor)
+                    })
+                    .then_some(transform.translation)
+                })
+            });
         let stems = model_stems(&spawn.model);
         let Some((position, model_mesh)) = anchor
             .and_then(|position| load_prop_model(&candidates, &stems).map(|mesh| (position, mesh)))
@@ -1552,13 +1567,15 @@ pub(super) fn spawn_pst_scene_items(
         let Some(item) = scene.host_mut().instance_mut(spawn.id) else {
             continue;
         };
-        if !super::item_plugin::npc_getitem_model(&model) {
+        if spawn.pickup && !super::item_plugin::npc_getitem_model(&model) {
             item.set(
                 "script_pickup",
                 meteor_scene::scene_script_runtime::PstValue::Num(1.0),
             );
         }
         let active = item.get("active").truthy();
+        let collision = !spawn.pickup && item.collision_enabled();
+        let interactive = active && item.get("interactive").truthy();
         let visibility =
             if super::stage_plugin::script_item_is_rendered(active, item.get("visible").truthy()) {
                 Visibility::Visible
@@ -1566,30 +1583,73 @@ pub(super) fn spawn_pst_scene_items(
                 Visibility::Hidden
             };
         let (center_offset, half_extents) = prop_bounds(&model_mesh, 1.0);
+        let flight = spawn.temporary.and_then(|(_, yaw)| yaw).map(|yaw| {
+            let yaw = yaw.to_radians();
+            DynamicWeaponDropFlight {
+                start: position + Vec3::Y * NETWORK_WEAPON_DROP_HEIGHT,
+                velocity: Vec3::new(yaw.sin() * 12.0, 0.0, yaw.cos() * 12.0),
+                elapsed: 0.0,
+            }
+        });
+        let translation = flight.map_or(position, |flight| flight.start);
+        let transform = Transform {
+            translation,
+            rotation: Quat::from_rotation_y(yaw.to_radians())
+                * Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+            scale: Vec3::splat(MODEL_SCALE),
+        };
+        scene.host_mut().set_item_metadata(
+            spawn.id,
+            &model,
+            world_to_source(translation, loaded.center),
+            yaw,
+        );
         let entity = commands
             .spawn((
                 PlayingSceneEntity,
-                ScriptSpawnedPickup,
                 super::item_plugin::StageProp {
-                    name: spawn.name,
+                    name: spawn.name.clone(),
                     model,
                     center_offset,
                     half_extents,
                     hit_count: 0,
                     respawn_timer: 0.0,
-                    interactive: active && item.get("interactive").truthy(),
-                    collision_enabled: false,
+                    interactive: interactive && flight.is_none(),
+                    collision_enabled: collision,
                     breakable: false,
                     broken: false,
                 },
                 visibility,
-                Transform {
-                    translation: position,
-                    rotation: Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
-                    scale: Vec3::splat(MODEL_SCALE),
-                },
+                transform,
             ))
             .id();
+        if spawn.pickup {
+            commands.entity(entity).insert(ScriptSpawnedPickup {
+                temporary_resource: spawn.temporary.map(|(resource, _)| resource),
+            });
+        } else {
+            commands.entity(entity).insert(ScriptSpawnedProp);
+            if let Some(mesh) = collider
+                .as_deref_mut()
+                .and_then(|collider| collider.mesh.as_mut())
+            {
+                let (vertices, indices, _) = prop_collision_geometry(&model_mesh, 1.0, transform);
+                if !indices.is_empty() {
+                    let owner = mesh.append_prop_world_triangles(&vertices, &indices);
+                    mesh.set_owner_enabled(owner, collision);
+                    commands.entity(entity).insert(PropColliderOwner(owner));
+                }
+            }
+        }
+        if let Some(flight) = flight {
+            commands.entity(entity).insert((
+                flight,
+                DynamicWeaponDropPickupDelay::default(),
+                DynamicWeaponDrop {
+                    reference: spawn.name.clone(),
+                },
+            ));
+        }
         attach_pickup_model(
             &mut commands,
             (&mut meshes, &mut materials, &mut images),
@@ -1809,22 +1869,31 @@ fn advance_network_weapon_drop_flight(
     mut commands: Commands,
     mut net: Option<ResMut<crate::plugins::network_plugin::NetState>>,
     tx: Option<Res<crate::plugins::network_plugin::NetTx>>,
+    mut scene: Option<ResMut<super::stage_plugin::StageScriptRuntime>>,
     mut drops: Query<(
         Entity,
         &mut Transform,
         &mut crate::plugins::item_plugin::StageProp,
         &mut DynamicWeaponDropFlight,
         &DynamicWeaponDrop,
+        Option<&ScriptSpawnedPickup>,
     )>,
 ) {
     let mut stage = CollisionSystem::new(0.55, 1.8);
     if let Some(mesh) = collider.mesh.as_ref() {
         stage.set_mesh_collider(mesh);
     }
-    for (entity, mut transform, mut prop, mut flight, drop) in &mut drops {
+    for (entity, mut transform, mut prop, mut flight, drop, scripted) in &mut drops {
         flight.elapsed += crate::plugins::simulation_dt(frame_clock.as_deref(), time.delta_secs());
         if flight.elapsed > NETWORK_WEAPON_DROP_TIMEOUT {
             commands.entity(entity).despawn();
+            if scripted.is_some() {
+                if let Some(scene) = scene.as_deref_mut().and_then(|scene| scene.script_mut()) {
+                    if let Some(id) = scene.host().resolve_name(&prop.name) {
+                        scene.host_mut().exclude_instances([id]);
+                    }
+                }
+            }
             if let Some(net) = net.as_deref_mut() {
                 net.dynamic_weapon_drops.remove(&drop.reference);
             }
@@ -1841,7 +1910,7 @@ fn advance_network_weapon_drop_flight(
         if let Some(hit) = hit {
             let rest = previous + (next - previous).normalize_or_zero() * hit.t;
             transform.translation = rest;
-            if let Some(net) = net.as_deref_mut() {
+            if let Some(net) = net.as_deref_mut().filter(|_| scripted.is_none()) {
                 use crate::plugins::network_plugin::NetStatus;
                 if net.status == NetStatus::InRoom {
                     if let Some(tx) = tx.as_ref() {
@@ -4259,7 +4328,8 @@ mod tests {
                 let poses =
                     meteor_asset::fmc::parse_prop_poses(&read(&format!("cmodel/{model_name}.pos")));
                 let base = prop_transform(dummy, meteor_scene::stage_loader::ARENA_CENTER);
-                let (vertices, indices, geometry) = prop_collision_geometry(&model, dummy, base);
+                let (vertices, indices, geometry) =
+                    prop_collision_geometry(&model, dummy.scale, base);
                 let mesh = collider.mesh.as_mut().unwrap();
                 let owner = mesh.append_world_triangles(&vertices, &indices);
                 let vertex_start = mesh.positions.len() - vertices.len();
@@ -4410,7 +4480,7 @@ mod tests {
             .filter(|d| d.name.starts_with("D_sn09f"))
         {
             let base = prop_transform(dummy, meteor_scene::stage_loader::ARENA_CENTER);
-            let (vertices, indices, parts) = prop_collision_geometry(&model, dummy, base);
+            let (vertices, indices, parts) = prop_collision_geometry(&model, dummy.scale, base);
             let owner = collider
                 .mesh
                 .as_mut()
@@ -6137,7 +6207,7 @@ Object D_roller { Position: 0 0 0 Quaternion: 1 0 0 0 Custom: { model="sn08B01" 
             .flat_map(|object| &object.face_mat)
             .all(|material| *material == -1));
         let transform = prop_transform(proxy, meteor_scene::stage_loader::ARENA_CENTER);
-        let (vertices, indices, _) = prop_collision_geometry(&model, proxy, transform);
+        let (vertices, indices, _) = prop_collision_geometry(&model, proxy.scale, transform);
         assert_eq!(indices.len(), 36, "all 12 render-empty proxy faces collide");
         let mut collider = StageMeshCollider::default();
         let owner = collider.append_world_triangles(&vertices, &indices);

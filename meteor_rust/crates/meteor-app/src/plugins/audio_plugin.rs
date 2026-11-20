@@ -100,7 +100,9 @@ impl Plugin for AudioPlugin {
                 Update,
                 play_script_music
                     .after(crate::plugins::FighterFrameSet::PoseResolve)
-                    .run_if(in_state(AppState::Playing)),
+                    .run_if(|state: Res<State<AppState>>| {
+                        matches!(state.get(), AppState::Playing | AppState::Menu)
+                    }),
             );
         #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
         app.add_systems(OnEnter(AppState::Menu), play_menu_music);

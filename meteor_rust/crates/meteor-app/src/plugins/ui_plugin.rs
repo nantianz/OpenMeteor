@@ -2406,6 +2406,8 @@ fn toggle_pause(
     mut next_state: ResMut<NextState<AppState>>,
     loading: Option<Res<super::loading_ui::LoadingPresentation>>,
     confirmation: Query<Entity, With<ExitConfirmation>>,
+    pst: Option<Res<super::stage_plugin::pst_extensions::PstSession>>,
+    mut notices: Option<ResMut<super::system_notice::SystemNoticeFeed>>,
     mut commands: Commands,
 ) {
     if loading.is_some_and(|loading| loading.active) {
@@ -2422,6 +2424,14 @@ fn toggle_pause(
                 commands.entity(entity).despawn();
             }
             return;
+        }
+        if *state.get() == AppState::Playing {
+            if let Some(hint) = pst.as_ref().and_then(|pst| pst.0.key_hint(false)) {
+                if let Some(notices) = notices.as_deref_mut().filter(|_| !hint.is_empty()) {
+                    notices.push(hint);
+                }
+                return;
+            }
         }
         match state.get() {
             AppState::Playing => next_state.set(AppState::Paused),

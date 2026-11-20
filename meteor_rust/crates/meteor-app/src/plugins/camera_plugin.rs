@@ -167,6 +167,7 @@ fn sync_pointer_lock(
     state: Res<State<AppState>>,
     dbg: Option<Res<crate::plugins::debug_plugin::DebugConsoleState>>,
     performance: Option<Res<super::stage_plugin::PlayerPerformance>>,
+    pst: Option<Res<super::stage_plugin::pst_extensions::PstSession>>,
     mut windows: Query<(&Window, &mut CursorOptions), With<PrimaryWindow>>,
 ) {
     let Ok((window, mut cursor)) = windows.single_mut() else {
@@ -175,7 +176,8 @@ fn sync_pointer_lock(
 
     let playing = matches!(state.get(), AppState::Playing);
     let ui_capture = dbg.is_some_and(|dbg| dbg.captures_input())
-        || performance.is_some_and(|performance| performance.ui_modal);
+        || performance.is_some_and(|performance| performance.ui_modal)
+        || pst.is_some_and(|pst| pst.0.mouse_released());
     let focused = window.focused;
     let lock = playing && !ui_capture && focused && !cfg!(target_os = "android");
     let want_mode = if lock {

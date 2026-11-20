@@ -472,6 +472,8 @@ pub struct NetState {
     pub(crate) asset_prepare: Option<asset_barrier::Request>,
     pub(crate) asset_error: Option<String>,
     pub status: NetStatus,
+    pub(crate) offline_script_player_team: Option<i32>,
+    pub(crate) offline_script_player_name: Option<String>,
     pub address: String,
     pub player_id: String,
     pub client_id: String,
@@ -596,6 +598,7 @@ pub struct NetState {
     pub radar_star_players: std::collections::HashSet<String>,
 
     pub chat_messages: std::collections::VecDeque<(String, String)>,
+    pub(crate) pst_chat_messages: std::collections::VecDeque<String>,
 
     pub pending_system_notices: Vec<String>,
 
@@ -695,6 +698,8 @@ impl Default for NetState {
             asset_prepare: None,
             asset_error: None,
             status: NetStatus::Disconnected,
+            offline_script_player_team: None,
+            offline_script_player_name: None,
             address: default_net_address(),
             player_id: String::new(),
             client_id: String::new(),
@@ -793,6 +798,7 @@ impl Default for NetState {
             stock_vips: [None, None],
             radar_star_players: std::collections::HashSet::new(),
             chat_messages: std::collections::VecDeque::new(),
+            pst_chat_messages: std::collections::VecDeque::new(),
             pending_system_notices: Vec::new(),
             pending_stock_entry_notices: Default::default(),
         }
@@ -6250,10 +6256,7 @@ fn handle_net_message(
             } else {
                 name
             };
-            net.chat_messages.push_back((name, text));
-            if net.chat_messages.len() > 20 {
-                net.chat_messages.pop_front();
-            }
+            push_chat_message(net, name, text);
         }
         Message::EscortTaken {
             player_id,
@@ -10087,6 +10090,17 @@ fn net_room_members_text(net: &NetState) -> String {
     lines.join("\n")
 }
 
+fn push_chat_message(net: &mut NetState, name: String, text: String) {
+    if net.chat_messages.len() >= 20 {
+        net.chat_messages.pop_front();
+    }
+    if net.pst_chat_messages.len() >= 64 {
+        net.pst_chat_messages.pop_front();
+    }
+    net.pst_chat_messages.push_back(text.clone());
+    net.chat_messages.push_back((name, text));
+}
+
 fn net_chat_input(
     mut submitted: MessageReader<super::native_text_input::TextSubmitted>,
     mut net: ResMut<NetState>,
@@ -10113,6 +10127,7 @@ fn net_chat_input(
 
 fn net_update_chat(
     net: Res<NetState>,
+    pst: Option<Res<super::stage_plugin::pst_extensions::PstSession>>,
     input: Res<NetChatInput>,
     mut chat_texts: Query<
         &mut Text,
@@ -10130,6 +10145,10 @@ fn net_update_chat(
     >,
 ) {
     for mut text in &mut chat_texts {
+        if pst.as_ref().is_some_and(|pst| pst.0.chat_hidden()) {
+            text.0.clear();
+            continue;
+        }
         text.0 = net
             .chat_messages
             .iter()

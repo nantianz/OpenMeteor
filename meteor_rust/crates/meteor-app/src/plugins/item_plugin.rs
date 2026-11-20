@@ -80,6 +80,46 @@ pub struct ItemBuffs {
 }
 
 impl ItemBuffs {
+    pub(super) fn pst_buff_ids<'a>(
+        &'a self,
+        resources: Option<&'a meteor_asset::res::CombatResourceTable>,
+    ) -> impl Iterator<Item = i64> + 'a {
+        self.stat_buffs
+            .iter()
+            .filter_map(move |buff| {
+                resources?
+                    .status_effect_for_model(&buff.model)
+                    .map(|effect| i64::from(effect.id))
+            })
+            .chain(
+                self.periodic_effects
+                    .active
+                    .iter()
+                    .map(|effect| i64::from(effect.definition.id)),
+            )
+    }
+
+    pub(super) fn pst_remove_buff(
+        &mut self,
+        id: i64,
+        health: &mut Health,
+        resources: Option<&meteor_asset::res::CombatResourceTable>,
+    ) {
+        let old_max = self.max_hp_bonus;
+        self.stat_buffs.retain(|buff| {
+            resources
+                .and_then(|table| table.status_effect_for_model(&buff.model))
+                .is_none_or(|effect| i64::from(effect.id) != id)
+        });
+        self.periodic_effects
+            .active
+            .retain(|effect| i64::from(effect.definition.id) != id);
+        self.project_stats();
+        self.project_periodic();
+        health.max = (health.max + (self.max_hp_bonus - old_max) as f32).max(1.0);
+        health.current = health.current.min(health.max);
+    }
+
     fn clear_on_death(&mut self, health: &mut Health, online: bool) {
         if !online {
             health.max = (health.max - self.max_hp_bonus as f32).max(1.0);
@@ -302,6 +342,7 @@ type PickupPropsQuery<'w, 's> = Query<
         Without<crate::plugins::stage_plugin::LocalFighter>,
         Without<Fighter>,
         Without<super::escort_assets::EscortPropVisual>,
+        Without<super::render_plugin::ScriptSpawnedProp>,
         With<StageProp>,
     ),
 >;
@@ -1008,7 +1049,7 @@ fn finish_offline_pickup(
     visibility: &mut Visibility,
     respawn: f32,
     consumed: &mut HashMap<String, (f32, u32)>,
-    actor: i64,
+    (actor, temporary): (i64, Option<[i64; 2]>),
     scene: Option<&mut meteor_scene::scene_script_runtime::SceneScriptRuntime>,
     mission: Option<&mut meteor_scene::mission_runtime::MissionScriptRuntime>,
 ) {
@@ -1022,7 +1063,21 @@ fn finish_offline_pickup(
         for key in ["active", "interactive"] {
             scene.set_item_property(&prop.name, key, PstValue::Num(0.0));
         }
-        if let Err(error) = scene.item_picked_up(&prop.name, actor, mission) {
+        let result = if let Some([kind, id]) = temporary {
+            meteor_scene::scene_script_runtime::SceneScriptRuntime::dispatch_event(
+                Some(scene),
+                mission,
+                "OnTempItemPickUp",
+                &[
+                    PstValue::from(kind),
+                    PstValue::from(id),
+                    PstValue::from(actor),
+                ],
+            )
+        } else {
+            scene.item_picked_up(&prop.name, actor, mission)
+        };
+        if let Err(error) = result {
             warn!("script pickup callback failed: {error}");
         }
     }
@@ -1053,6 +1108,8 @@ pub(crate) fn item_pickup(
     'props: for (prop_entity, mut prop, transform, mut visibility, dynamic_drop, script_spawn) in
         &mut props
     {
+        let temporary = script_spawn.and_then(|spawn| spawn.temporary_resource);
+
         if prop.respawn_timer > 0.0 {
             prop.respawn_timer -= dt;
             if prop.respawn_timer <= 0.0 {
@@ -1120,7 +1177,7 @@ pub(crate) fn item_pickup(
                 continue;
             }
             if script_pickup {
-                if local.is_none() {
+                if local.is_none() && temporary.is_none() {
                     continue;
                 }
                 finish_offline_pickup(
@@ -1128,7 +1185,7 @@ pub(crate) fn item_pickup(
                     &mut visibility,
                     0.0,
                     &mut consumed_props,
-                    0,
+                    (character_id, temporary),
                     script.script_mut(),
                     mission.as_deref_mut().and_then(|m| m.script_mut()),
                 );
@@ -1147,7 +1204,7 @@ pub(crate) fn item_pickup(
                     .insert(crate::components::fighter::WeaponVariantChanged);
                 info!("weapon pickup {} stored as weapon {}", prop.model, weapon);
                 queue_pickup_effect(&mut commands, &prop.model, player_entity);
-                if dynamic_drop.is_some() {
+                if dynamic_drop.is_some() && temporary.is_none() {
                     commands.entity(prop_entity).despawn();
                     continue 'props;
                 }
@@ -1161,7 +1218,7 @@ pub(crate) fn item_pickup(
                     &mut visibility,
                     respawn,
                     &mut consumed_props,
-                    character_id,
+                    (character_id, temporary),
                     script.script_mut(),
                     mission.as_deref_mut().and_then(|m| m.script_mut()),
                 );
@@ -1227,7 +1284,7 @@ pub(crate) fn item_pickup(
                 &mut visibility,
                 respawn,
                 &mut consumed_props,
-                character_id,
+                (character_id, temporary),
                 script.script_mut(),
                 mission.as_deref_mut().and_then(|m| m.script_mut()),
             );
