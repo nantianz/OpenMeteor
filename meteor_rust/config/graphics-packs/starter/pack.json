@@ -223,6 +223,7 @@
       },
       "sky": {
         "enabled": true,
+        "time": {"mode": "system"},
         "replace_skybox": true,
         "skybox": [
           {"object": "Sphere01", "texture": "sky1.bmp"},

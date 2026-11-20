@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "id": "sn06-waterfall-experiment",
+  "resources": {
+    "waterfall-flow": "textures/waterfall-flow-v1.png"
+  },
+  "scenes": [
+    {
+      "stage": "sn06",
+      "surfaces": [
+        {
+          "object": "Plane20",
+          "texture": "sn06sh.jpg",
+          "additive_texture": "waterfall-flow"
+        },
+        {
+          "object": "Plane18",
+          "texture": "sn06sh.jpg",
+          "additive_texture": "waterfall-flow"
+        },
+        {
+          "object": "Plane27",
+          "texture": "sn06sh.jpg",
+          "additive_texture": "waterfall-flow"
+        },
+        {
+          "object": "Plane25",
+          "texture": "sn06sh.jpg",
+          "additive_texture": "waterfall-flow"
+        },
+        {
+          "object": "Plane23",
+          "texture": "sn06sh.jpg",
+          "additive_texture": "waterfall-flow"
+        },
+        {
+          "object": "Plane21",
+          "texture": "sn06sh.jpg",
+          "additive_texture": "waterfall-flow"
+        },
+        {
+          "object": "Plane19",
+          "texture": "sn06sh2.jpg",
+          "additive_texture": "waterfall-flow",
+          "waterfall_layers": true,
+          "waterfall_floor": 0.0
+        },
+        {
+          "object": "Plane17",
+          "texture": "sn06sh2.jpg",
+          "additive_texture": "waterfall-flow",
+          "waterfall_layers": true,
+          "waterfall_floor": 0.0
+        },
+        {
+          "object": "Plane28",
+          "texture": "sn06sh2.jpg",
+          "additive_texture": "waterfall-flow",
+          "waterfall_layers": true,
+          "waterfall_floor": 0.0
+        },
+        {
+          "object": "Plane26",
+          "texture": "sn06sh2.jpg",
+          "additive_texture": "waterfall-flow",
+          "waterfall_layers": true,
+          "waterfall_floor": 0.0
+        },
+        {
+          "object": "Plane24",
+          "texture": "sn06sh2.jpg",
+          "additive_texture": "waterfall-flow",
+          "waterfall_layers": true,
+          "waterfall_floor": 0.0
+        },
+        {
+          "object": "Plane22",
+          "texture": "sn06sh2.jpg",
+          "additive_texture": "waterfall-flow",
+          "waterfall_layers": true,
+          "waterfall_floor": 0.0
+        }
+      ]
+    }
+  ]
+}

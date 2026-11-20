@@ -1,5 +1,6 @@
 pub(crate) mod cloth_binding;
 pub(crate) mod cloth_obj;
+mod color_pipeline;
 pub(crate) mod config;
 pub(crate) mod grass;
 mod ground_cover;
@@ -9,6 +10,8 @@ mod runtime;
 pub(crate) mod sky;
 pub(super) mod snow;
 mod surfaces;
+pub(super) mod waterfalls;
+mod weapons;
 use crate::app_state::AppState;
 use bevy::prelude::*;
 #[cfg(test)]
@@ -21,6 +24,7 @@ pub fn install(app: &mut App) {
     sky::install(app);
     grass::install(app);
     snow::install(app);
+    color_pipeline::install(app);
     app.init_resource::<GraphicsPacks>()
         .add_systems(Startup, show_error)
         .add_systems(
@@ -31,6 +35,10 @@ pub fn install(app: &mut App) {
             PostUpdate,
             (runtime::update_frame, surfaces::update_wind)
                 .after(bevy::transform::TransformSystems::Propagate),
+        )
+        .add_systems(
+            PostUpdate,
+            weapons::apply_weapon_materials.before(bevy::transform::TransformSystems::Propagate),
         );
 }
 fn release_stage_assets(mut packs: ResMut<GraphicsPacks>) {

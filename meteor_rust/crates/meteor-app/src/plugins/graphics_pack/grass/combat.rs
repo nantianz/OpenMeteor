@@ -123,11 +123,22 @@ impl GrassCombat {
             let downward = -travel.y > elapsed * 5.0 && -travel.y > travel.xz().length();
             let width = extent(axes[0].x, axes[1].x, axes[2].x)
                 .min(extent(axes[0].z, axes[1].z, axes[2].z));
+
+            let speed = if elapsed > 0.0 {
+                travel.length() / elapsed
+            } else {
+                0.0
+            };
+            let strength = (0.55
+                + 0.28 * (speed / 25.0).clamp(0.0, 1.0)
+                + 0.07 * (width / 1.5).clamp(0.0, 1.0)
+                + if effect { 0.10 } else { 0.0 })
+            .clamp(0.0, 1.0);
             self.push(Stroke {
                 start,
                 end: bottom,
                 radius: (0.52 + width * 0.65).clamp(0.6, 2.1),
-                strength: if effect { 0.86 } else { 0.76 },
+                strength,
                 extra_height: if effect { 0.9 } else { 0.0 },
                 headroom: (height * 2.0).clamp(0.55, 4.0),
                 downward: downward || (effect && width >= 1.2 && travel.length_squared() < 0.04),
@@ -239,8 +250,16 @@ impl GrassCombat {
                     project(a, reach, stroke.headroom)
                 };
                 if let Some(a) = ground_a.or(ground_b) {
+                    let contact_height = ground_b.map_or(b.y - a.y, |hit| b.y - hit.y).max(0.0);
+                    let proximity = (1.0 - contact_height / reach.max(0.01)).clamp(0.0, 1.0);
                     let b = ground_b.filter(|b| (b.y - a.y).abs() < 1.0).unwrap_or(a);
-                    dirty |= map.stamp_scaled(a, b, eye, stroke.radius, stroke.strength);
+                    dirty |= map.stamp_scaled(
+                        a,
+                        b,
+                        eye,
+                        stroke.radius,
+                        stroke.strength * (0.45 + 0.55 * proximity),
+                    );
                 }
             }
         }
@@ -357,5 +376,47 @@ mod tests {
         assert!(combat.paint(&mut map, Vec2::ZERO, 1.1, |_, _, _| {
             panic!("the same trace should reuse the ground samples")
         }));
+    }
+
+    #[test]
+    fn fast_low_hits_press_harder_than_slow_high_hits() {
+        let actor = Entity::from_bits(12);
+        let mut combat = GrassCombat::default();
+        combat.set_eye(Some(Vec2::ZERO));
+        combat.record_boxes(actor, 1, 0, 0.0, false, &[bounds(0.0, 0.1)]);
+        combat.pending.clear();
+        combat.record_boxes(actor, 1, 0, 0.1, false, &[bounds(0.1, 0.1)]);
+        let slow = combat.pending.last().unwrap().strength;
+        combat.pending.clear();
+        combat.record_boxes(actor, 1, 0, 0.2, false, &[bounds(2.1, 0.1)]);
+        let fast = combat.pending.last().unwrap().strength;
+        assert!(
+            fast > slow + 0.15,
+            "speed must affect pressure: {slow} vs {fast}"
+        );
+
+        let pressure = |height: f32| {
+            let mut combat = GrassCombat::default();
+            combat.set_eye(Some(Vec2::ZERO));
+            let point = Vec3::new(0.3, height, 0.3);
+            combat.push(Stroke {
+                start: point,
+                end: point,
+                radius: 1.4,
+                strength: fast,
+                extra_height: 0.0,
+                headroom: 0.55,
+                downward: false,
+            });
+            let mut map = BendMap::default();
+            assert!(combat.paint(&mut map, Vec2::ZERO, 1.1, floor));
+            map.pixels(-1.0, 2.0)[2]
+        };
+        let low = pressure(0.1);
+        let high = pressure(1.0);
+        assert!(
+            low > high + 50,
+            "deep contact {low} must press more than a tip graze {high}"
+        );
     }
 }

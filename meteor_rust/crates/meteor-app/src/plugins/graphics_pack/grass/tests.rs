@@ -578,8 +578,74 @@ fn grass_gpu_draws_tracks_recovers_and_honors_visible_tile_limit() {
         green_energy(&night_pixels) * 2 < green_energy(&baseline),
         "grass blades must get darker at night"
     );
+    let mut directional = crate::plugins::graphics_pack::GraphicsFrame {
+        sky: Vec4::new(0.69, 0.69, 0.69, 0.0),
+        sun: Vec4::new(1.0, 0.5, 0.0, 1.0),
+        environment: Vec4::new(1.0, 0.0, 1.0, 0.0),
+        counts: Vec4::W,
+        ..default()
+    };
+    app.world_mut().resource_mut::<FrameUniforms>().graphics = directional;
+    let east_light = capture(&mut app, 12);
+    directional.sun = Vec4::new(0.0, 0.5, 1.0, 1.0);
+    app.world_mut().resource_mut::<FrameUniforms>().graphics = directional;
+    let north_light = capture(&mut app, 12);
+    let changed_direction = east_light
+        .chunks_exact(4)
+        .zip(north_light.chunks_exact(4))
+        .filter(|(a, b)| (0..3).any(|i| a[i].abs_diff(b[i]) > 2))
+        .count();
+    assert!(
+        changed_direction > 200,
+        "grass must follow light direction: {changed_direction}"
+    );
     app.world_mut().resource_mut::<FrameUniforms>().graphics = default();
     assert_eq!(capture(&mut app, 12), baseline);
+
+    let blocker = app
+        .world_mut()
+        .resource_mut::<Assets<Mesh>>()
+        .add(Cuboid::new(5.0, 1.0, 5.0));
+    let blocker_material = app
+        .world_mut()
+        .resource_mut::<Assets<StandardMaterial>>()
+        .add(Color::srgb(0.4, 0.2, 0.1));
+    let blocker = app
+        .world_mut()
+        .spawn((
+            Mesh3d(blocker),
+            MeshMaterial3d(blocker_material),
+            Transform::from_xyz(0.0, 5.0, 0.0),
+        ))
+        .id();
+    let sun = app
+        .world_mut()
+        .spawn((
+            DirectionalLight {
+                shadow_maps_enabled: true,
+                ..default()
+            },
+            Transform::from_xyz(0.0, 20.0, 4.0).looking_at(Vec3::ZERO, Vec3::Z),
+        ))
+        .id();
+    let unshadowed = capture(&mut app, 30);
+    app.world_mut().resource_mut::<FrameUniforms>().lighting.w = 0.8;
+    let shadowed = capture(&mut app, 20);
+    let darkened = unshadowed
+        .chunks_exact(4)
+        .zip(shadowed.chunks_exact(4))
+        .filter(|(before, after)| {
+            before[1] > before[0].saturating_add(8) && before[1] > after[1].saturating_add(6)
+        })
+        .count();
+    assert!(
+        darkened > 50,
+        "projected shadows must darken grass: {darkened}"
+    );
+    app.world_mut().despawn(blocker);
+    app.world_mut().despawn(sun);
+    app.world_mut().resource_mut::<FrameUniforms>().lighting.w = 0.0;
+    assert_eq!(capture(&mut app, 20), baseline);
     app.world_mut().resource_mut::<FrameUniforms>().seconds = 19.0;
     assert_eq!(capture(&mut app, 8), baseline, "calm field must stay still");
     let count = |world: &mut World| {

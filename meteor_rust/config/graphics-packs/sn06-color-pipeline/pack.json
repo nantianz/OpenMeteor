@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "sn06-color-pipeline-experiment",
+  "scenes": [
+    {
+      "stage": "sn06",
+      "color_pipeline": { "enabled": true, "exposure_ev": 1.0, "night_exposure_ev": 2.0 },
+      "surfaces": [
+        { "texture": "sn06sh.jpg", "waterfall_lighting": true },
+        { "texture": "sn06sh2.jpg", "waterfall_lighting": true }
+      ]
+    }
+  ]
+}

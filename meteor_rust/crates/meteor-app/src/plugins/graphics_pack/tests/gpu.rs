@@ -13,6 +13,9 @@ use std::sync::{Arc, Mutex};
 #[cfg(feature = "original-assets")]
 mod sky_benchmark;
 #[cfg(feature = "original-assets")]
+mod longsword_preview;
+mod color_pipeline;
+#[cfg(feature = "original-assets")]
 mod sn03_preview;
 #[cfg(feature = "original-assets")]
 mod sn04_snow;

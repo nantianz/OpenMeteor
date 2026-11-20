@@ -9,6 +9,24 @@ pub(super) struct Cycle {
     last_sample: f64,
 }
 
+#[derive(Default)]
+pub(super) struct SystemClock {
+    last_sample: Option<f64>,
+}
+
+impl SystemClock {
+    pub(super) fn sample(&mut self, now: f64, read: impl FnOnce() -> Option<f32>) -> Option<f32> {
+        if self
+            .last_sample
+            .is_some_and(|last| now >= last && now - last < 1.0)
+        {
+            return None;
+        }
+        self.last_sample = Some(now);
+        read()
+    }
+}
+
 impl Cycle {
     pub(super) fn new(start_minutes: u16, scale: f64, updates_per_second: u32) -> Self {
         Self {
@@ -37,33 +55,41 @@ impl Cycle {
 }
 
 #[cfg(windows)]
-pub(super) fn local_minutes() -> Option<u16> {
+pub(super) fn local_minutes() -> Option<f32> {
     use windows_sys::Win32::{Foundation::SYSTEMTIME, System::SystemInformation::GetLocalTime};
 
     let mut local = SYSTEMTIME::default();
     unsafe { GetLocalTime(&mut local) };
-    Some(local.wHour * 60 + local.wMinute)
+    Some(
+        f32::from(local.wHour * 60 + local.wMinute)
+            + f32::from(local.wSecond) / 60.0
+            + f32::from(local.wMilliseconds) / 60_000.0,
+    )
 }
 
 #[cfg(unix)]
-pub(super) fn local_minutes() -> Option<u16> {
+pub(super) fn local_minutes() -> Option<f32> {
     let utc = unsafe { libc::time(std::ptr::null_mut()) };
     let mut local = std::mem::MaybeUninit::uninit();
     if utc == -1 || unsafe { libc::localtime_r(&utc, local.as_mut_ptr()) }.is_null() {
         return None;
     }
     let local = unsafe { local.assume_init() };
-    Some((local.tm_hour * 60 + local.tm_min) as u16)
+    Some((local.tm_hour * 60 + local.tm_min) as f32 + local.tm_sec as f32 / 60.0)
 }
 
 #[cfg(target_arch = "wasm32")]
-pub(super) fn local_minutes() -> Option<u16> {
+pub(super) fn local_minutes() -> Option<f32> {
     let local = js_sys::Date::new_0();
-    Some((local.get_hours() * 60 + local.get_minutes()) as u16)
+    Some(
+        (local.get_hours() * 60 + local.get_minutes()) as f32
+            + local.get_seconds() as f32 / 60.0
+            + local.get_milliseconds() as f32 / 60_000.0,
+    )
 }
 
 #[cfg(not(any(unix, windows, target_arch = "wasm32")))]
-pub(super) fn local_minutes() -> Option<u16> {
+pub(super) fn local_minutes() -> Option<f32> {
     None
 }
 
@@ -80,5 +106,16 @@ mod tests {
         assert_eq!(cycle.sample(153.0), None);
         assert_eq!(cycle.sample(183.0), Some(30.0));
         assert_eq!(cycle.sample(183.0 + 1440.0), Some(30.0));
+    }
+
+    #[test]
+    fn system_clock_polls_local_time_and_tracks_midnight_and_clock_changes() {
+        let mut clock = SystemClock::default();
+        assert_eq!(clock.sample(1.0, || Some(1439.9)), Some(1439.9));
+        assert_eq!(clock.sample(1.5, || panic!("must throttle")), None);
+        assert_eq!(clock.sample(2.0, || Some(0.1)), Some(0.1));
+        assert_eq!(clock.sample(3.0, || Some(720.0)), Some(720.0));
+        assert_eq!(clock.sample(4.0, || None), None);
+        assert_eq!(clock.sample(5.0, || Some(721.0)), Some(721.0));
     }
 }

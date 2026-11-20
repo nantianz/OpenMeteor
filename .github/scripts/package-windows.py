@@ -72,11 +72,21 @@ def graphics_files():
         return path
 
     index = json.loads(add("graphics-enhancement.json").read_text(encoding="utf-8"))
+    required = {
+        "graphics-packs/sn06-moss-valley/pack.json",
+        "graphics-packs/sn06-nextgen-sample/pack.json",
+        "graphics-packs/longsword/pack.json",
+        "graphics-packs/sn06-color-pipeline/pack.json",
+    }
+    if index.get("enabled") is not True or not required.issubset(index.get("packs", [])):
+        raise ValueError("default graphics enhancements are disabled or incomplete")
     for preset in ("water-deep.json", "water-shallow.json"):
         json.loads(add(preset).read_text(encoding="utf-8"))
     demo = "graphics-packs/meshlet-demo/pack.json"
     optional_packs = []
-    for preset in ("graphics-enhancement-sn03.json", "graphics-enhancement-sn06.json"):
+    for preset in ("graphics-enhancement-sn03.json", "graphics-enhancement-sn06.json",
+                   "graphics-enhancement-sn06-nextgen.json", "graphics-enhancement-sn06-color-pipeline.json",
+                   "graphics-enhancement-longsword-preview.json", "graphics-enhancement-sn06-waterfall-experiment.json"):
         optional_packs.extend(json.loads(add(preset).read_text(encoding="utf-8"))["packs"])
     for name in dict.fromkeys([*index["packs"], demo, *optional_packs]):
         manifest = json.loads(add(name).read_text(encoding="utf-8"))

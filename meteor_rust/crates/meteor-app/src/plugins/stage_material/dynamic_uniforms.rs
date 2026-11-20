@@ -159,11 +159,18 @@ pub struct SharedBuffers {
     liquid_contacts: UniformBuffer<LiquidContacts>,
     graphics: UniformBuffer<crate::plugins::graphics_pack::GraphicsFrame>,
     grass_light: UniformBuffer<Vec4>,
+    grass_direction: UniformBuffer<Vec4>,
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     empty_sky: UniformBuffer<CacheView>,
 }
 
 impl SharedBuffers {
+    pub(in crate::plugins) fn lighting(&self) -> Result<Buffer, AsBindGroupError> {
+        self.lighting
+            .buffer()
+            .cloned()
+            .ok_or(AsBindGroupError::RetryNextUpdate)
+    }
     pub(in crate::plugins) fn clock(&self) -> Result<Buffer, AsBindGroupError> {
         self.clock
             .buffer()
@@ -173,6 +180,13 @@ impl SharedBuffers {
 
     pub(in crate::plugins) fn grass_light(&self) -> Result<Buffer, AsBindGroupError> {
         self.grass_light
+            .buffer()
+            .cloned()
+            .ok_or(AsBindGroupError::RetryNextUpdate)
+    }
+
+    pub(in crate::plugins) fn grass_direction(&self) -> Result<Buffer, AsBindGroupError> {
+        self.grass_direction
             .buffer()
             .cloned()
             .ok_or(AsBindGroupError::RetryNextUpdate)
@@ -494,6 +508,12 @@ fn upload_frame(
     if shared.grass_light.buffer().is_none() || *shared.grass_light.get() != grass_light {
         shared.grass_light.set(grass_light);
         shared.grass_light.write_buffer(&device, &queue);
+    }
+    let grass_direction = frame.graphics.grass_light_direction();
+    if shared.grass_direction.buffer().is_none() || *shared.grass_direction.get() != grass_direction
+    {
+        shared.grass_direction.set(grass_direction);
+        shared.grass_direction.write_buffer(&device, &queue);
     }
     let clock = split_time(frame.seconds)
         .extend(if frame.scene_normal_maps { 1.0 } else { 0.0 })

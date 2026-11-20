@@ -634,8 +634,9 @@ fn scene_lighting(in: VertexOutput, detail_normal: vec3<f32>) -> vec3<f32> {
     if (graphics.counts.w > 0.5) {
         let irradiance = mix(graphics.ground.rgb, graphics.sky.rgb, detail_normal.y * 0.5 + 0.5);
         let sun = graphics.sun_color.rgb * graphics.sun.w * max(dot(detail_normal, graphics.sun.xyz), 0.0);
-        let exposure = graphics.environment.z;
+        let exposure = select(graphics.environment.z, 1.0, unified_hdr());
         let linear = exposure * (1.60 * irradiance + sun * (0.55 * mix(1.0, shadow, lighting.w)));
+        if (unified_hdr()) { return linear; }
         return pack_linear_to_srgb(linear);
     }
 #ifdef VERTEX_OUTPUT_INSTANCE_INDEX
@@ -656,8 +657,17 @@ struct GraphicsFrame {
     contacts: array<vec4<f32>,16>, contact_normals: array<vec4<f32>,16>,
     counts: vec4<f32>,
     water_wind: vec4<f32>, water_wind_cross: vec4<f32>,
+    color_pipeline: vec4<f32>,
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(17) var<uniform> graphics: GraphicsFrame;
+
+fn unified_hdr() -> bool {
+#ifdef METEOR_HDR_TARGET
+    return graphics.color_pipeline.x > 0.5;
+#else
+    return false;
+#endif
+}
 
 fn pack_srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
     return select(c / 12.92, pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4)), c > vec3<f32>(0.04045));
@@ -709,8 +719,9 @@ fn pack_pbr(in: VertexOutput, n: vec3<f32>, texel: vec3<f32>, vertex: vec3<f32>,
     let a004 = min(coeff.x*coeff.x,exp2(-9.28*nv))*coeff.x+coeff.y;
     let ab = vec2<f32>(-1.04,1.04)*a004+coeff.zw;
     let ambient = ((1.0-metal)*base*irradiance + radiance*(f0*ab.x+vec3<f32>(ab.y))) * graphics.environment.x * orm.r;
-    let x = max((direct * material.pbr_lighting.x + ambient * material.pbr_lighting.y)
-        * graphics.environment.z, vec3<f32>(0.0));
+    let radiance_sum = max(direct * material.pbr_lighting.x + ambient * material.pbr_lighting.y, vec3<f32>(0.0));
+    if (unified_hdr()) { return radiance_sum; }
+    let x = radiance_sum * graphics.environment.z;
     let mapped = clamp((x*(2.51*x+0.03))/(x*(2.43*x+0.59)+0.14),vec3<f32>(0.0),vec3<f32>(1.0));
     return pack_linear_to_srgb(mapped);
 }
@@ -739,7 +750,8 @@ fn pack_fog(position: vec3<f32>, color: vec3<f32>) -> vec3<f32> {
         if (d>0.0) {
             let entry=max(-b-sqrt(d),0.0);let exit=min(-b+sqrt(d),distance_to_surface);
             let depth=max(exit-entry,0.0)*fog.w;
-            optical_depth+=depth;tint+=fog.rgb*depth;
+            optical_depth+=depth;
+            tint+=select(fog.rgb, pack_srgb_to_linear(fog.rgb), unified_hdr())*depth;
         }
     }
     let transmittance=exp(-min(optical_depth * material.pbr_lighting.z,16.0));
@@ -777,6 +789,9 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         shading_normal = scene_detail_normal(in, in.uv + uv_offset);
     }
     var color = texel * diffuse;
+    if (unified_hdr() && !water && material.pbr.x <= 0.5 && (params.mode == 0u || params.mode == 1u)) {
+        color = vec4<f32>(pack_srgb_to_linear(color.rgb), color.a);
+    }
     color.a *= params.opacity;
 
     if (params.mode == 3u) {
@@ -785,7 +800,46 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     } else {
 
         let shade = scene_lighting(in, shading_normal);
-        if (water) {
+        if (material.water.x == 7.0) {
+
+            if (graphics.counts.w > 0.5) {
+
+                let light = vec3<f32>(0.10) + graphics.sky.rgb * 2.0 + graphics.sun_color.rgb * graphics.sun.w * 0.42;
+                let exposure = select(graphics.environment.z, 1.0, unified_hdr());
+                let waterfall_light = light * exposure;
+                let gain = select(pack_linear_to_srgb(waterfall_light), waterfall_light, unified_hdr());
+                color = vec4<f32>(color.rgb * sqrt(max(gain, vec3<f32>(0.0))), color.a);
+            }
+        } else if (material.water.x == 5.0) {
+
+            let phase = fract(simulation_time.x * 0.19) + fract(simulation_time.y * 0.19);
+            let phase_b = fract(simulation_time.x * 0.1197) + fract(simulation_time.y * 0.1197);
+            let uv = in.uv;
+            let drift = 0.022 * sin(uv.y * 4.1 + phase * 6.28318);
+            let a = textureSample(base_color_texture, base_color_sampler, uv * vec2<f32>(0.8, 0.78) + vec2<f32>(drift, -phase)).r;
+            let b = textureSample(base_color_texture, base_color_sampler, uv * vec2<f32>(1.13, 0.57) + vec2<f32>(0.37 - drift, -phase_b)).r;
+            let foam = clamp(a * 0.65 + b * 0.55, 0.0, 1.0);
+            let edge = smoothstep(0.0, 0.16, uv.x + drift) * (1.0 - smoothstep(0.81, 0.99, uv.x + drift));
+            color = vec4<f32>(mix(vec3<f32>(0.52, 0.69, 0.73), vec3<f32>(0.94, 0.97, 0.94), foam), foam * edge * params.opacity);
+            if (graphics.counts.w > 0.5) {
+                let light = (graphics.sky.rgb * 1.15 + graphics.sun_color.rgb * graphics.sun.w * 0.42)
+                    * select(graphics.environment.z, 1.0, unified_hdr());
+                color = vec4<f32>(color.rgb * select(pack_linear_to_srgb(light), light, unified_hdr()), color.a);
+            }
+        } else if (material.water.x == 6.0) {
+
+            let p = in.uv * 2.0 - vec2<f32>(1.0);
+            let phase = fract(simulation_time.x * 0.045) + fract(simulation_time.y * 0.045);
+            let phase_y = fract(simulation_time.x * 0.0135) + fract(simulation_time.y * 0.0135);
+            let noise = textureSample(base_color_texture, base_color_sampler, in.uv * vec2<f32>(1.7, 0.6) + vec2<f32>(phase, -phase_y)).r;
+            let cloud = 1.0 - smoothstep(0.35, 1.0, length(p * vec2<f32>(0.92, 1.15)));
+            color = vec4<f32>(vec3<f32>(0.72, 0.81, 0.79), cloud * (0.3 + 0.7 * noise) * params.opacity);
+            if (graphics.counts.w > 0.5) {
+                let light = (graphics.sky.rgb * 1.15 + graphics.sun_color.rgb * graphics.sun.w * 0.42)
+                    * select(graphics.environment.z, 1.0, unified_hdr());
+                color = vec4<f32>(color.rgb * select(pack_linear_to_srgb(light), light, unified_hdr()), color.a);
+            }
+        } else if (water) {
             color = shade_water(in, shading_normal, color, dot(shade, vec3<f32>(0.2126, 0.7152, 0.0722)));
         } else if (material.water.x == 4.0) {
             color = shade_spray(in, shading_normal, color, dot(shade, vec3<f32>(0.2126, 0.7152, 0.0722)));

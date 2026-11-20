@@ -204,7 +204,7 @@ impl Default for Settings {
             hit_sway: false,
             character_motion: true,
             new_character_models: true,
-            volumetric_fog: false,
+            volumetric_fog: true,
             sky_enhance: true,
             grass_enhance: true,
             target_fps: 0,
@@ -212,12 +212,12 @@ impl Default for Settings {
             contrast: 94.0,
             sharpness: 0.3,
             gamma: 49.0,
-            dynamic_shadows: false,
+            dynamic_shadows: true,
             scene_normal_maps: true,
             hd_scene: true,
             water_enhance: true,
             water_live_reflections: false,
-            environment_lighting: false,
+            environment_lighting: true,
 
             dlss5_neural_rendering: false,
 

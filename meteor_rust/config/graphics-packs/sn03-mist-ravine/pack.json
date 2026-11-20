@@ -469,6 +469,7 @@
     {
       "stage": "sn03",
       "sky": {
+        "time": {"mode": "system"},
         "enabled": true,
         "replace_skybox": true,
         "skybox": [

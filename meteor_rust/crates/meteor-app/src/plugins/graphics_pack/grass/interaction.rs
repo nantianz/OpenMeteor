@@ -80,7 +80,7 @@ impl BendMap {
     }
 
     pub fn stamp(&mut self, from: Vec3, to: Vec3, eye: Vec2, radius: f32) -> bool {
-        self.stamp_scaled(from, to, eye, radius, 1.0)
+        self.stamp_scaled(from, to, eye, radius, 0.68)
     }
 
     pub(super) fn stamp_scaled(
@@ -95,7 +95,8 @@ impl BendMap {
         let b = to.xz();
         let path = b - a;
         let path_len = path.length_squared().max(0.0001);
-        let path_direction = path.normalize_or_zero();
+
+        let path_direction = path / (path.length() + SPACING * 0.5);
         let center = (eye / SPACING).floor().as_ivec2();
         let lo = ((a.min(b) - Vec2::splat(radius)) / SPACING)
             .floor()
@@ -113,14 +114,16 @@ impl BendMap {
                 let t = ((point - a).dot(path) / path_len).clamp(0.0, 1.0);
                 let delta = point - (a + path * t);
                 let influence = (1.0 - delta.length_squared() / (radius * radius)).max(0.0);
-                let pressure = influence * influence * strength;
+                let pressure = influence * strength;
                 let index = (y.rem_euclid(SIZE) * SIZE + x.rem_euclid(SIZE)) as usize;
                 let cell = &mut self.cells[index];
                 if pressure <= 1.0 / 255.0 || (cell.world == world && pressure < cell.pressure) {
                     continue;
                 }
-                let direction =
-                    (delta.normalize_or_zero() + 0.45 * path_direction).normalize_or_zero();
+
+                let radial = delta / (delta.length_squared() + (SPACING * 0.35).powi(2)).sqrt();
+                let direction = radial + 0.45 * path_direction;
+                let direction = direction / direction.length().max(1.0);
                 *cell = Cell {
                     world,
                     bend: pressure * direction,
@@ -222,5 +225,32 @@ mod tests {
         assert!(map.pixels(0., 10.)[2] < center[2]);
         map.decay(Vec2::splat(90.), 1.0);
         assert!(map.pixels(0., 10.).chunks_exact(4).all(|p| p == EMPTY));
+    }
+
+    #[test]
+    fn idle_contact_jitter_does_not_flip_the_bend_direction() {
+        let mut map = BendMap::default();
+        let center = Vec3::new(0.3, 3.0, 0.3);
+        map.stamp(center, center, Vec2::ZERO, 1.6);
+        let mut previous = center;
+        let mut before = map.pixels(0.0, 10.0);
+        for step in 0..20 {
+            let position = center + Vec3::X * if step % 2 == 0 { 0.001 } else { -0.001 };
+            map.decay(Vec2::ZERO, 0.9);
+            map.stamp(previous, position, Vec2::ZERO, 1.6);
+            let after = map.pixels(0.0, 10.0);
+            let max_change = before
+                .chunks_exact(4)
+                .zip(after.chunks_exact(4))
+                .map(|(a, b)| a[0].abs_diff(b[0]).max(a[1].abs_diff(b[1])))
+                .max()
+                .unwrap();
+            assert!(
+                max_change <= 3,
+                "idle contact changed a bend channel by {max_change}"
+            );
+            before = after;
+            previous = position;
+        }
     }
 }

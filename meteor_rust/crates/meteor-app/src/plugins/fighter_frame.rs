@@ -157,13 +157,24 @@ fn run_fighters(world: &mut World) {
     .min(f64::from(meteor_core::MAX_FRAME_DT));
     let mut consumed = 0.0;
     let mut first = true;
+
+    let mut replay_steps = world
+        .get_resource::<super::FrameClock>()
+        .map(|clock| clock.replay_steps.clone())
+        .filter(|steps| !steps.is_empty())
+        .map(|steps| steps.into_iter());
     while consumed < total {
         let remaining = total - consumed;
 
-        let step = if remaining <= max_step + rounding_tolerance {
+        let step = match replay_steps.as_mut().and_then(Iterator::next) {
+            Some(step) => f64::from(step).min(remaining),
+            None if remaining <= max_step + rounding_tolerance => remaining,
+            None => max_step,
+        };
+        let step = if replay_steps.as_ref().is_some_and(|steps| steps.len() == 0) {
             remaining
         } else {
-            max_step
+            step
         };
         consumed = (consumed + step).min(total);
         let step_wall = if total > 0.0 {

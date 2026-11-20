@@ -35,6 +35,7 @@ struct SkyUniform {
     sun: Vec4,
     sun_color: Vec4,
     weather: Vec4,
+    celestial: Vec4,
 }
 
 #[derive(AsBindGroup, Clone)]
@@ -125,6 +126,7 @@ pub(crate) struct SkyLighting {
     pub ground: Vec3,
     pub sun: Vec4,
     pub sun_color: Vec3,
+    pub night_factor: f32,
 }
 
 #[derive(Component)]
@@ -133,7 +135,12 @@ pub(crate) struct CloudSky(pub Option<SkyLighting>);
 #[derive(Component)]
 pub(crate) struct SkyCycle {
     base: (Sky, Environment),
-    clock: clock::Cycle,
+    clock: SkyClock,
+}
+
+enum SkyClock {
+    Cycle(clock::Cycle),
+    System(clock::SystemClock),
 }
 
 #[derive(Clone)]
@@ -216,22 +223,37 @@ pub(crate) fn scene(
             let minutes = sky_minutes(start_time)?;
             let cycle = SkyCycle {
                 base: (profile.clone(), lighting.clone()),
-                clock: clock::Cycle::new(minutes, *time_scale, profile.cloud_update_hz),
+                clock: SkyClock::Cycle(clock::Cycle::new(
+                    minutes,
+                    *time_scale,
+                    profile.cloud_update_hz,
+                )),
             };
-            (Some(minutes), Some(cycle))
+            (Some(f32::from(minutes)), Some(cycle))
         }
-        Some(SkyTime::Fixed { time }) => (sky_minutes(time), None),
+        Some(SkyTime::Fixed { time }) => (sky_minutes(time).map(f32::from), None),
         Some(SkyTime::System {}) => {
             let minutes = clock::local_minutes();
             if minutes.is_none() {
                 warn!("{stage}: could not read the local time for the sky");
             }
-            (minutes, None)
+            let cycle = SkyCycle {
+                base: (profile.clone(), lighting.clone()),
+                clock: SkyClock::System(clock::SystemClock::default()),
+            };
+            (minutes, Some(cycle))
         }
-        None => (profile.fixed_time.as_deref().and_then(sky_minutes), None),
+        None => (
+            profile
+                .fixed_time
+                .as_deref()
+                .and_then(sky_minutes)
+                .map(f32::from),
+            None,
+        ),
     };
     if let Some(minutes) = minutes {
-        sample_time(&mut profile, &mut lighting, f32::from(minutes));
+        sample_time(&mut profile, &mut lighting, minutes);
     }
     Some((profile, lighting, cycle))
 }
@@ -239,8 +261,9 @@ pub(crate) fn scene(
 pub(crate) fn update_cycle(
     frame_clock: Option<Res<FrameClock>>,
     frame: Option<Res<FrameUniforms>>,
+    real_time: Option<Res<Time<Real>>>,
     mut domes: Query<(
-        &MeshMaterial3d<CloudSkyMaterial>,
+        Option<&MeshMaterial3d<CloudSkyMaterial>>,
         &mut CloudSky,
         &mut SkyCycle,
     )>,
@@ -249,15 +272,23 @@ pub(crate) fn update_cycle(
     let fallback = frame.as_ref().map_or(0.0, |frame| frame.seconds);
     let now = simulation_play_now(frame_clock.as_deref(), fallback);
     for (handle, mut sky, mut cycle) in &mut domes {
-        let Some(minutes) = cycle.clock.sample(now) else {
-            continue;
+        let minutes = match &mut cycle.clock {
+            SkyClock::Cycle(clock) => clock.sample(now),
+            SkyClock::System(clock) => clock.sample(
+                real_time
+                    .as_ref()
+                    .map_or(now, |time| time.elapsed_secs_f64()),
+                clock::local_minutes,
+            ),
         };
-        let Some(mut material) = materials.get_mut(&handle.0) else {
+        let Some(minutes) = minutes else {
             continue;
         };
         let (mut profile, mut light) = cycle.base.clone();
         sample_time(&mut profile, &mut light, minutes);
-        material.0.params.set_lighting(&profile, &light);
+        if let Some(mut material) = handle.and_then(|handle| materials.get_mut(&handle.0)) {
+            material.0.params.set_lighting(&profile, &light);
+        }
         if sky.0.is_some() {
             sky.0 = Some(atmosphere_lighting(&profile, &light));
         }
@@ -276,6 +307,7 @@ fn sample_time(sky: &mut Sky, lighting: &mut Environment, minutes: f32) {
     let elevation = direction.y;
     let day = smoothstep(0.04, 0.61, elevation);
     let twilight = smoothstep(-0.26, 0.07, elevation);
+    sky.night_factor = 1.0 - twilight;
     let mut horizon = Vec3::new(0.012, 0.022, 0.047);
     let mut zenith = Vec3::new(0.003, 0.008, 0.023);
     let dawn = minutes < 720.0;
@@ -304,12 +336,34 @@ fn sample_time(sky: &mut Sky, lighting: &mut Environment, minutes: f32) {
     sky.zenith = zenith.to_array();
     sky.cloud_color = clouds.to_array();
     sky.ambient_strength *= 0.27 + 0.73 * twilight;
-    lighting.sun_direction = direction.to_array();
+    let high_sun = smoothstep(0.60, 0.95, elevation);
+    let sun_intensity =
+        lighting.sun_intensity * smoothstep(-0.02, 0.45, elevation) * (1.0 - 0.25 * high_sun);
+    let moon_direction = -direction;
+    let moon_fade = smoothstep(-0.02, 0.28, moon_direction.y);
+    let moon_color = sky
+        .moon
+        .as_ref()
+        .map_or([0.58, 0.68, 1.0], |moon| moon.color);
+    let moon_intensity = sky.moon.as_ref().map_or(0.35, |moon| moon.intensity) * moon_fade;
+
+    let moon_weight = smoothstep(-0.12, 0.12, -elevation);
+    sky.moon_active = moon_weight >= 0.5;
+    lighting.sun_direction = (if sky.moon_active {
+        moon_direction
+    } else {
+        direction
+    })
+    .to_array();
     lighting.sun_color = warm
         .lerp(Vec3::from_array(lighting.sun_color), day)
+        .lerp(Vec3::from_array(moon_color), moon_weight)
         .to_array();
-    let high_sun = smoothstep(0.60, 0.95, elevation);
-    lighting.sun_intensity *= smoothstep(-0.02, 0.45, elevation) * (1.0 - 0.25 * high_sun);
+    lighting.sun_intensity = if sky.moon_active {
+        moon_intensity * (2.0 * moon_weight - 1.0)
+    } else {
+        sun_intensity * (1.0 - 2.0 * moon_weight)
+    };
 }
 
 fn smoothstep(low: f32, high: f32, value: f32) -> f32 {
@@ -374,6 +428,7 @@ pub(crate) fn atmosphere_lighting(sky: &Sky, light: &Environment) -> SkyLighting
         ground: sky_fill * Vec3::new(1.0, 0.88, 0.74) * sky.ground_bounce,
         sun: dir.extend(light.sun_intensity * (1.0 - overcast * 0.65) * dir.y.max(0.0).sqrt()),
         sun_color: Vec3::from_array(light.sun_color),
+        night_factor: sky.night_factor,
     }
 }
 
@@ -420,6 +475,7 @@ impl SkyUniform {
             .normalize_or_zero()
             .extend(sky.steps as f32);
         self.sun_color = Vec3::from_array(light.sun_color).extend(light.sun_intensity);
+        self.celestial = Vec4::new(f32::from(sky.moon_active), 0., 0., 0.);
     }
 }
 
@@ -461,7 +517,7 @@ mod tests {
             .cross(Vec3::from_array(authored.sun_direction))
             .normalize();
         let mut lighting = Vec::new();
-        for time in ["07:00", "12:00", "18:30", "23:30"] {
+        for time in ["07:00", "12:00", "17:30", "23:30"] {
             packs.packs[0]
                 .config
                 .scenes
@@ -481,11 +537,99 @@ mod tests {
         assert!(dawn.sun.truncate().dot(across) > 0.8);
         assert!(noon.sun.y > 0.9);
         assert!(dusk.sun.truncate().dot(across) < -0.8);
-        assert!(noon.sun.w > dawn.sun.w && dawn.sun.w > dusk.sun.w);
-        assert_eq!(night.sun.w, 0.0);
+        assert!(noon.sun.w > dawn.sun.w && noon.sun.w > dusk.sun.w);
+        assert!(night.sun.w > 0.0 && night.sun.w < dawn.sun.w);
+        assert!(night.sun.y > 0.0 && night.sun_color.z > night.sun_color.x);
         assert!(noon.sky.length() > dusk.sky.length() && dusk.sky.length() > night.sky.length());
         for invalid in ["7:00", "24:00", "05:60", "sunrise", "０７:００"] {
             assert!(super::super::config::sky_minutes(invalid).is_none());
+        }
+    }
+
+    #[test]
+    fn realtime_sky_keeps_a_live_clock_and_moon_can_be_configured() {
+        let mut packs = super::super::tests::starter();
+        let sky = packs.packs[0]
+            .config
+            .scenes
+            .iter_mut()
+            .find(|scene| scene.stage == "sn13")
+            .unwrap()
+            .sky
+            .as_mut()
+            .unwrap();
+        sky.time = Some(SkyTime::System {});
+        sky.moon = Some(super::super::config::SkyMoon {
+            color: [0.3, 0.5, 1.0],
+            intensity: 0.25,
+        });
+        let (_, _, cycle) = scene(&packs, "sn13").unwrap();
+        assert!(matches!(cycle.unwrap().clock, SkyClock::System(_)));
+        let mut moon_sky = Sky::default();
+        moon_sky.moon = Some(super::super::config::SkyMoon {
+            color: [0.3, 0.5, 1.0],
+            intensity: 0.25,
+        });
+        let mut moon_light = Environment::default();
+        sample_time(&mut moon_sky, &mut moon_light, 0.0);
+        assert!(moon_sky.moon_active && moon_light.sun_direction[1] > 0.0);
+        assert_eq!(moon_light.sun_color, [0.3, 0.5, 1.0]);
+        assert!(moon_light.sun_intensity > 0.20 && moon_light.sun_intensity <= 0.25);
+    }
+
+    #[test]
+    fn clock_updates_lighting_without_a_cloud_rendering_material() {
+        let mut app = App::new();
+        app.init_resource::<Assets<CloudSkyMaterial>>()
+            .init_resource::<FrameUniforms>()
+            .add_systems(Update, update_cycle);
+        let base = (Sky::default(), Environment::default());
+        let (mut night, mut night_light) = base.clone();
+        sample_time(&mut night, &mut night_light, 0.0);
+        let entity = app
+            .world_mut()
+            .spawn((
+                CloudSky(Some(atmosphere_lighting(&night, &night_light))),
+                SkyCycle {
+                    base,
+                    clock: SkyClock::Cycle(clock::Cycle::new(0, 60.0, 15)),
+                },
+            ))
+            .id();
+        app.update();
+        let night = app.world().get::<CloudSky>(entity).unwrap().0.unwrap();
+        app.world_mut().resource_mut::<FrameUniforms>().seconds = 720.0;
+        app.update();
+        let noon = app.world().get::<CloudSky>(entity).unwrap().0.unwrap();
+        assert!(night.sun.w > 0.0 && night.sun_color.z > night.sun_color.x);
+        assert!(noon.sun.w > night.sun.w * 2.0 && noon.sky.length() > night.sky.length());
+    }
+
+    #[test]
+    fn sun_moon_handoff_has_no_light_jump_or_invalid_direction() {
+        for center in [342.0f32, 1098.0] {
+            let mut previous: Option<(bool, f32)> = None;
+            let mut switches = 0;
+            for second in -600..=600 {
+                let mut sky = Sky::default();
+                let mut environment = Environment::default();
+                sample_time(&mut sky, &mut environment, center + second as f32 / 60.0);
+                let direction = Vec3::from_array(environment.sun_direction);
+                assert!(direction.is_finite() && (direction.length() - 1.0).abs() < 0.001);
+                assert!(environment.sun_intensity.is_finite() && environment.sun_intensity >= 0.0);
+                if let Some((was_moon, prior)) = previous {
+                    assert!((prior - environment.sun_intensity).abs() < 0.005);
+                    if was_moon != sky.moon_active {
+                        switches += 1;
+                        assert!(
+                            prior < 0.001 && environment.sun_intensity < 0.001,
+                            "the source changes only after direct light has faded"
+                        );
+                    }
+                }
+                previous = Some((sky.moon_active, environment.sun_intensity));
+            }
+            assert_eq!(switches, 1, "each horizon transition changes source once");
         }
     }
 }

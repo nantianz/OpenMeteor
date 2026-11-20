@@ -74,6 +74,64 @@ pub struct MrcPlayback {
 
     pub prev_c: i32,
     pub(crate) burst_tracks: HashMap<u16, Vec<MrcRemoteBurst>>,
+
+    pub(crate) frame_times: Vec<f32>,
+
+    pub(crate) frame_cursor: usize,
+
+    pub(crate) frame_wall: f64,
+
+    pub(crate) frame_target: Option<f32>,
+}
+
+pub(crate) const MRC_MAX_FRAMES_PER_UPDATE: usize = 8;
+
+pub(crate) fn mrc_recorded_frame_times(doc: &meteor_asset::mrc::MrcDocument) -> Vec<f32> {
+    let mut stamps: Vec<f64> = doc
+        .queue_d
+        .iter()
+        .map(|e| f64::from(e.time))
+        .chain(doc.queue_e.iter().map(|e| f64::from(e.time)))
+        .filter(|t| t.is_finite() && *t >= 0.0)
+        .collect();
+    stamps.sort_by(f64::total_cmp);
+    stamps.dedup_by(|a, b| (*a - *b).abs() < 1e-5);
+    let mut gaps: Vec<f64> = stamps
+        .windows(2)
+        .map(|w| w[1] - w[0])
+        .filter(|g| (0.004..0.0125).contains(g))
+        .collect();
+    if gaps.len() < 16 {
+        return Vec::new();
+    }
+    gaps.sort_by(f64::total_cmp);
+    let period = gaps[gaps.len() / 2];
+    let end = f64::from(doc.duration()) + period;
+    let mut frames = Vec::new();
+    let mut push_span = |from: f64, to: f64, frames: &mut Vec<f32>| {
+        let count = ((to - from) / period).round().max(1.0) as usize;
+        for k in 1..=count {
+            frames.push((from + (to - from) * k as f64 / count as f64) as f32);
+        }
+    };
+    let first = stamps[0];
+    let lead = (first / period).floor() as usize;
+    for k in 0..lead {
+        frames.push((first - period * (lead - k) as f64) as f32);
+    }
+    frames.push(first as f32);
+    for w in stamps.windows(2) {
+        push_span(w[0], w[1], &mut frames);
+    }
+    let last = *stamps.last().unwrap();
+    if end > last {
+        let count = ((end - last) / period).ceil() as usize;
+        for k in 1..=count {
+            frames.push((last + period * k as f64) as f32);
+        }
+    }
+    frames.retain(|t| *t > 0.0);
+    frames
 }
 
 #[derive(Debug, Clone)]
@@ -321,6 +379,14 @@ impl MrcPlayback {
     pub fn load_bytes(&mut self, file_name: String, bytes: &[u8]) -> Result<(), String> {
         let doc = meteor_asset::mrc::decode_mrc(bytes).map_err(|e| e.to_string())?;
         self.burst_tracks = mrc_remote_bursts(&doc);
+        self.frame_times = if doc.mark0 == 9 && doc.mark1 == 7 {
+            mrc_recorded_frame_times(&doc)
+        } else {
+            Vec::new()
+        };
+        self.frame_cursor = 0;
+        self.frame_wall = 0.0;
+        self.frame_target = None;
         self.doc = Some(doc);
         self.index_a = 0;
         self.index_b = 0;
@@ -643,7 +709,12 @@ fn tick_mrc_playback(
     if !playback.active || playback.paused {
         return;
     }
-    playback.elapsed += crate::plugins::simulation_dt(frame_clock.as_deref(), time.delta_secs());
+    if let Some(target) = playback.frame_target.take() {
+        playback.elapsed = target;
+    } else {
+        playback.elapsed +=
+            crate::plugins::simulation_dt(frame_clock.as_deref(), time.delta_secs());
+    }
     let t = playback.elapsed;
     let scene_frame = mrc_scene_frame(&playback, waypoints.as_deref());
     synthetic.set_frame_clock_seconds(f64::from(t));
@@ -1436,6 +1507,17 @@ fn apply_mrc_session_events(
                 session.pending_actions.push((actor_id, chain, start));
                 continue;
             };
+
+            if pose.pose_id == chain.pose_id
+                && matches!(
+                    sm.current,
+                    meteor_core::FighterState::Attack1
+                        | meteor_core::FighterState::Attack2
+                        | meteor_core::FighterState::Attack3
+                )
+            {
+                continue;
+            }
             if !apply_mrc_discrete_pose(
                 assets.as_deref(),
                 fighter,
@@ -1809,10 +1891,7 @@ fn apply_mrc_hit_events(
                 continue;
             };
 
-            if std::env::var_os("NO_BUCKET").is_none()
-                && !guarded
-                && playback.stock_scene_coordinates()
-            {
+            if !guarded && playback.stock_scene_coordinates() {
                 if let (Some((transform, motion)), Some(assets)) =
                     (placement.as_mut(), assets.as_deref())
                 {
@@ -2374,6 +2453,9 @@ fn apply_replay_seek(
 
     if playback.active {
         let t = target.clamp(0.0, playback.duration());
+        playback.frame_cursor = playback.frame_times.partition_point(|frame| *frame <= t);
+        playback.frame_wall = f64::from(t);
+        playback.frame_target = None;
         let scene_frame = mrc_scene_frame(&playback, waypoints.as_deref());
         session.pending.clear();
         session.pending_actions.clear();

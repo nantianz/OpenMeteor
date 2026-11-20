@@ -24,17 +24,44 @@ pub struct GraphicsFrame {
 
     pub water_wind: Vec4,
     pub water_wind_cross: Vec4,
+
+    pub color_pipeline: Vec4,
 }
 
 impl GraphicsFrame {
+    pub(crate) fn grass_light_direction(&self) -> Vec4 {
+        if self.counts.w <= 0.5 {
+            return Vec4::new(0.78, 0.63, 1.0, 0.0);
+        }
+        let horizontal = Vec2::new(self.sun.x, self.sun.z)
+            .try_normalize()
+            .unwrap_or(Vec2::new(0.78, 0.63).normalize());
+        Vec4::new(
+            horizontal.x,
+            horizontal.y,
+            (self.sun.w * 2.0).clamp(0.0, 1.0),
+            0.0,
+        )
+    }
+
     pub(crate) fn grass_light(&self) -> Vec4 {
         if self.counts.w <= 0.5 {
             return Vec4::ONE;
         }
         let diffuse = self.sky.truncate() * 1.45;
         let sun = self.sun_color.truncate() * (self.sun.w * self.sun.y.max(0.0) * 0.45);
-        ((diffuse + sun) * self.environment.z)
-            .clamp(Vec3::ZERO, Vec3::splat(1.4))
+        let exposure = if self.color_pipeline.x > 0.5 {
+            1.0
+        } else {
+            self.environment.z
+        };
+        let ceiling = if self.color_pipeline.x > 0.5 {
+            16.0
+        } else {
+            1.4
+        };
+        ((diffuse + sun) * exposure)
+            .clamp(Vec3::ZERO, Vec3::splat(ceiling))
             .extend(1.0)
     }
 }
@@ -56,6 +83,13 @@ pub(super) fn update_frame(
     camera: Query<&GlobalTransform, With<crate::plugins::camera_plugin::GameplayCamera>>,
     grass: Query<(), With<super::grass::GrassField>>,
     sky: Query<&super::sky::CloudSky>,
+    color_pipeline: Query<
+        (),
+        (
+            With<crate::plugins::camera_plugin::GameplayCamera>,
+            With<super::color_pipeline::UnifiedColorPipeline>,
+        ),
+    >,
     mut frame: Option<ResMut<FrameUniforms>>,
 ) {
     let Some(frame) = frame.as_deref_mut() else {
@@ -68,6 +102,7 @@ pub(super) fn update_frame(
     let Some(loaded) = loaded else {
         return;
     };
+    frame.graphics.color_pipeline.x = f32::from(!color_pipeline.is_empty());
     if let Some((wind, response)) = packs
         .wind(&loaded.stage_id)
         .and_then(|wind| wind.response.map(|response| (wind, response.water)))
@@ -126,7 +161,8 @@ pub(super) fn update_frame(
         frame.graphics.sun_color = Vec3::from_array(e.sun_color).extend(0.);
         frame.graphics.environment = Vec4::new(e.intensity, 0., e.exposure, 0.);
     }
-    if let Some(light) = sky.iter().find_map(|sky| sky.0) {
+    let atmosphere = sky.iter().find_map(|sky| sky.0);
+    if let Some(light) = atmosphere {
         frame.graphics.sky = light.sky.extend(0.0);
         frame.graphics.ground = light.ground.extend(0.0);
         frame.graphics.sun = light.sun;
@@ -137,7 +173,10 @@ pub(super) fn update_frame(
         frame.graphics.counts.x = fog.len() as f32;
         for (i, f) in fog.iter().enumerate() {
             frame.graphics.fog_bounds[i] = Vec3::from_array(f.center).extend(f.radius);
-            frame.graphics.fog_colors[i] = Vec3::from_array(f.color).extend(f.density);
+            let day_color = Vec3::from_array(f.color);
+            let night_color = day_color * Vec3::new(0.12, 0.17, 0.26);
+            let night = atmosphere.map_or(0.0, |light| light.night_factor);
+            frame.graphics.fog_colors[i] = day_color.lerp(night_color, night).extend(f.density);
         }
     }
     if let Some(c) = contact {

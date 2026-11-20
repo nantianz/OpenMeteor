@@ -102,7 +102,7 @@ ZIP 包含 `OpenMeteor.exe`、`config/` 配置、`fonts/ui.ttf` 中文字体和�
 
 五张界面图片内置在 `OpenMeteor.exe`，不需要额外图片目录。打包时检查每张图片的尺寸和实际 EXE 内容，缺图或仍使用 1×1 占位图时停止发布。
 
-图形增强包默认关闭，可编辑 `config/graphics-enhancement.json` 启用随包提供的示例。安装方式、贴图规范和各项参数见[图形增强包指南](docs/guides/graphics-enhancement-packs.md)。
+图形增强包默认开启，包含四方阵、长剑、交互草地和昼夜光照；桌面支持的后端还启用四方阵 HDR 色调。已有图形设置继续沿用。安装方式、平台限制和参数见[图形增强包指南](docs/guides/graphics-enhancement-packs.md)。
 
 ## 测试
 

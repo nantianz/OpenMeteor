@@ -74,6 +74,8 @@ pub struct Scene {
     #[serde(default)]
     pub environment: Option<Environment>,
     #[serde(default)]
+    pub color_pipeline: Option<ColorPipeline>,
+    #[serde(default)]
     pub wind: Option<Wind>,
     #[serde(default)]
     pub clothing: Option<Clothing>,
@@ -86,9 +88,22 @@ pub struct Scene {
     #[serde(default)]
     pub surfaces: Vec<Surface>,
     #[serde(default)]
+    pub weapons: Vec<WeaponSurface>,
+    #[serde(default)]
     pub meshlet_replacements: Vec<MeshletReplacement>,
     #[serde(default)]
     pub meshlet_props: Vec<MeshletProp>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ColorPipeline {
+    pub enabled: bool,
+    #[serde(default)]
+    pub exposure_ev: f32,
+
+    #[serde(default)]
+    pub night_exposure_ev: f32,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -422,10 +437,15 @@ pub struct Sky {
     pub steps: u32,
     pub cloud_update_hz: u32,
     pub sun: Option<SkySun>,
+    pub moon: Option<SkyMoon>,
     pub time: Option<SkyTime>,
     pub fixed_time: Option<String>,
     pub ambient_strength: f32,
     pub ground_bounce: f32,
+    #[serde(skip)]
+    pub(crate) moon_active: bool,
+    #[serde(skip)]
+    pub(crate) night_factor: f32,
 }
 
 impl Default for Sky {
@@ -449,10 +469,13 @@ impl Default for Sky {
             steps: 24,
             cloud_update_hz: 15,
             sun: None,
+            moon: None,
             time: None,
             fixed_time: None,
             ambient_strength: 1.0,
             ground_bounce: 0.24,
+            moon_active: false,
+            night_factor: 0.0,
         }
     }
 }
@@ -476,6 +499,13 @@ pub struct SkyIdentity {
 #[serde(deny_unknown_fields)]
 pub struct SkySun {
     pub direction: [f32; 3],
+    pub color: [f32; 3],
+    pub intensity: f32,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkyMoon {
     pub color: [f32; 3],
     pub intensity: f32,
 }
@@ -557,6 +587,10 @@ impl Sky {
             validate_sun_direction(sun.direction)?;
             color("sky sun color", sun.color)?;
             range("sky sun intensity", sun.intensity, 0., 32.)?;
+        }
+        if let Some(moon) = &self.moon {
+            color("sky moon color", moon.color)?;
+            range("sky moon intensity", moon.intensity, 0., 4.)?;
         }
         for speed in self.wind {
             range("cloud wind", speed, -40., 40.)?;
@@ -936,7 +970,24 @@ pub struct Surface {
     #[serde(default)]
     pub material: Option<String>,
     #[serde(default)]
+    pub additive_texture: Option<String>,
+    #[serde(default)]
+    pub waterfall_lighting: bool,
+    #[serde(default)]
+    pub waterfall_layers: bool,
+    #[serde(default)]
+    pub waterfall_floor: Option<f32>,
+    #[serde(default)]
     pub wind: Option<WindSurface>,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WeaponSurface {
+    pub weapon: u8,
+    pub variant: u8,
+    pub object: String,
+    pub texture: String,
+    pub material: String,
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1092,6 +1143,32 @@ impl Pack {
             range("fog_strength", p.fog_strength, 0., 4.)?;
         }
         for s in &self.scenes {
+            if let Some(pipeline) = &s.color_pipeline {
+                range(
+                    "color pipeline exposure EV",
+                    pipeline.exposure_ev,
+                    -6.0,
+                    6.0,
+                )?;
+                range(
+                    "color pipeline night exposure EV",
+                    pipeline.night_exposure_ev,
+                    -6.0,
+                    6.0,
+                )?;
+            }
+            if s.weapons.len() > 128 {
+                return Err("too many weapon material rules".into());
+            }
+            for rule in &s.weapons {
+                if rule.weapon == 0
+                    || rule.object.is_empty()
+                    || rule.texture.is_empty()
+                    || !self.materials.contains_key(&rule.material)
+                {
+                    return Err("invalid weapon material rule".into());
+                }
+            }
             if s.stage.is_empty() || s.surfaces.len() > 256 {
                 return Err("invalid stage/surface budget".into());
             }
@@ -1331,6 +1408,23 @@ impl Pack {
                     if !self.materials.contains_key(id) {
                         return Err(format!("unknown material: {id}"));
                     }
+                }
+                if let Some(id) = &r.additive_texture {
+                    if r.object.as_ref().is_none_or(|name| name.is_empty())
+                        || r.texture.as_ref().is_none_or(|name| name.is_empty())
+                    {
+                        return Err("additive texture requires an exact object and texture".into());
+                    }
+                    resource(id)?;
+                }
+                if r.waterfall_layers && r.additive_texture.is_none() {
+                    return Err("waterfall layers require an additive texture".into());
+                }
+                if let Some(floor) = r.waterfall_floor {
+                    if !r.waterfall_layers {
+                        return Err("waterfall floor requires layers".into());
+                    }
+                    range("waterfall floor", floor, -10000., 10000.)?;
                 }
                 if let Some(w) = &r.wind {
                     range("wind amplitude", w.amplitude, 0., 2.)?;

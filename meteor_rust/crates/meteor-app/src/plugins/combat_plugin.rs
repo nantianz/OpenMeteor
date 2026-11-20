@@ -1164,7 +1164,11 @@ fn lock_on_tick(
     collider: Option<Res<StageCollider>>,
     cameras: Query<(&Transform, &Projection), With<crate::plugins::camera_plugin::GameplayCamera>>,
     mut visibility: Local<LockVisibility>,
+    mrc: Option<Res<crate::plugins::replay_plugin::MrcPlayback>>,
 ) {
+    let stock_replay = mrc
+        .as_deref()
+        .is_some_and(|mrc| mrc.active && mrc.stock_scene_coordinates());
     let Ok((
         player_entity,
         player_fighter,
@@ -1261,14 +1265,10 @@ fn lock_on_tick(
             });
             clear && on_screen
         });
-        let hidden = visibility.expired(Some(target.id), visible, dt);
-        if (!defer_attack_facing
-            && meteor_combat::lock_on::locked_attack_gate_failed(
-                (p.x, p.y, p.z),
-                (target.x, target.y, target.z),
-            ))
-            || hidden
-        {
+        let hidden = !stock_replay && visibility.expired(Some(target.id), visible, dt);
+
+        let _ = defer_attack_facing;
+        if hidden {
             controller.system.clear_lock();
             *visibility = LockVisibility::default();
         }
@@ -8772,6 +8772,77 @@ mod tests {
     }
 
     #[test]
+    fn lock_out_of_range_outside_ground_and_attack_entry_is_kept() {
+        let mut time: Time = Time::default();
+        time.advance_by(std::time::Duration::from_secs_f32(0.05));
+        let mut app = App::new();
+        app.insert_resource(time)
+            .init_resource::<NetState>()
+            .init_resource::<LockOnController>()
+            .init_resource::<crate::plugins::camera_plugin::CameraBasis>()
+            .add_systems(
+                Update,
+                (
+                    lock_on_tick,
+                    local_attack_lock_facing,
+                    crate::plugins::movement_plugin::finalize_ground_lock_facing,
+                )
+                    .chain(),
+            );
+        let fighter = |slot| Fighter {
+            character_id: 0,
+            player_slot: slot,
+            weapon: 6,
+            weapon_slots: [6, 5],
+            weapon_slot: 0,
+            weapon_slot_variants: [0, 0],
+            weapon_variant: 0,
+        };
+        app.world_mut().spawn((
+            LocalFighter,
+            fighter(0),
+            Health {
+                current: 100.0,
+                ..default()
+            },
+            SmState {
+                current: FighterState::Jump,
+                ..default()
+            },
+            PoseRuntime::default(),
+            EntryBlend::default(),
+            MotionState {
+                movement_mode: meteor_core::MovementMode::Airborne,
+                velocity: Vec3::ZERO,
+                facing: 0.75,
+            },
+            Transform::default(),
+            HeadTrackState::default(),
+            crate::plugins::movement_plugin::FighterAir::default(),
+        ));
+        let target = app
+            .world_mut()
+            .spawn((
+                fighter(1),
+                Health::default(),
+                Transform::from_xyz(0.0, 13.0, 29.0),
+            ))
+            .id();
+        {
+            let mut lock = app.world_mut().resource_mut::<LockOnController>();
+            lock.system.lock_target = Some(target.to_bits());
+            lock.lock_entity = Some(target);
+        }
+        for _ in 0..5 {
+            app.update();
+            assert_eq!(
+                app.world().resource::<LockOnController>().lock_entity,
+                Some(target)
+            );
+        }
+    }
+
+    #[test]
     fn production_idle_lock_releases_at_range_or_after_losing_sight() {
         for (distance, occluded) in [(29.0, false), (3.0, true), (3.0, false)] {
             let mut time: Time = Time::default();
@@ -8781,7 +8852,15 @@ mod tests {
                 .init_resource::<NetState>()
                 .init_resource::<LockOnController>()
                 .init_resource::<crate::plugins::camera_plugin::CameraBasis>()
-                .add_systems(Update, (lock_on_tick, local_attack_lock_facing).chain());
+                .add_systems(
+                    Update,
+                    (
+                        lock_on_tick,
+                        local_attack_lock_facing,
+                        crate::plugins::movement_plugin::finalize_ground_lock_facing,
+                    )
+                        .chain(),
+                );
             app.world_mut().spawn((
                 LocalFighter,
                 Fighter {
@@ -8807,6 +8886,10 @@ mod tests {
                 },
                 Transform::default(),
                 HeadTrackState::default(),
+                crate::plugins::movement_plugin::FighterAir {
+                    ground_lock_facing_pending: distance > 10.0,
+                    ..default()
+                },
             ));
             let target = app
                 .world_mut()
@@ -17973,6 +18056,23 @@ mod tests {
         until: Option<f32>,
         with_lock: bool,
     ) -> MrcDriftAudit {
+        run_mrc_drift_audit_with_clock(
+            file,
+            fps,
+            until,
+            with_lock,
+            std::env::var_os("METEOR_MRC_DRIFT_CLOCK").is_some(),
+        )
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn run_mrc_drift_audit_with_clock(
+        file: &str,
+        fps: u32,
+        until: Option<f32>,
+        with_lock: bool,
+        host_clock: bool,
+    ) -> MrcDriftAudit {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
         let wp = std::fs::read_to_string(root.join("origin_res/Level/sn06.wp")).unwrap();
         let center = meteor_scene::stage_loader::get_stage_center("sn06", Some(&wp));
@@ -18077,10 +18177,16 @@ mod tests {
             ));
         h.app
             .add_plugins(crate::plugins::replay_plugin::ReplayPlugin);
+        let frame_times = if std::env::var_os("METEOR_MRC_DRIFT_NO_PACE").is_some() {
+            Vec::new()
+        } else {
+            crate::plugins::replay_plugin::mrc_recorded_frame_times(&doc)
+        };
         h.app
             .insert_resource(crate::plugins::replay_plugin::MrcPlayback {
                 active: true,
                 doc: Some(doc),
+                frame_times,
                 ..default()
             });
         if with_lock {
@@ -18090,6 +18196,11 @@ mod tests {
                 .entity_mut(h.fighter)
                 .insert(HeadTrackState::default());
             configure_lock_updates(&mut h.app);
+        }
+
+        if host_clock {
+            h.app.world_mut().resource_mut::<Settings>().target_fps = fps;
+            crate::plugins::install_frame_clock(&mut h.app);
         }
 
         if std::env::var_os("METEOR_MRC_DRIFT_NO_CONTACT").is_none() {
@@ -18110,20 +18221,19 @@ mod tests {
         let mut frames = Vec::new();
         let mut previous_pose = h.pose_id();
         let mut transitions = Vec::new();
+        let _ = dt;
         for _ in 0..(duration * fps as f32).ceil() as usize {
-            let now = h
+            let before = h.position();
+            let pose_before = h.pose_id();
+            h.step_duration(std::time::Duration::from_nanos(1_000_000_000 / fps as u64));
+            let consumed = h
                 .app
                 .world()
                 .resource::<crate::plugins::replay_plugin::MrcPlayback>()
-                .elapsed
-                + dt;
-
-            let mut due = None;
-            while next_d < queue_d.len() && queue_d[next_d].time <= now {
-                due = Some(next_d);
-                next_d += 1;
-            }
-            if let Some(index) = due {
+                .index_d;
+            if consumed > next_d {
+                let index = consumed - 1;
+                next_d = consumed;
                 let entry = &queue_d[index];
                 let expected = to_root(Vec3::new(
                     f32::from_bits(entry.a),
@@ -18135,15 +18245,13 @@ mod tests {
                 } else {
                     entry.time - queue_d[index - 1].time
                 };
-                let actual = h.position();
                 anchors.push(serde_json::json!({
                     "time": entry.time, "gap": gap, "expected": expected.to_array(),
-                    "actual": actual.to_array(), "error": actual.distance(expected),
-                    "planarError": Vec2::new(actual.x - expected.x, actual.z - expected.z).length(),
-                    "pose": h.pose_id(),
+                    "actual": before.to_array(), "error": before.distance(expected),
+                    "planarError": Vec2::new(before.x - expected.x, before.z - expected.z).length(),
+                    "pose": pose_before,
                 }));
             }
-            h.step_duration(std::time::Duration::from_nanos(1_000_000_000 / fps as u64));
 
             let modelless: Vec<Entity> = h.app.world_mut()
                 .query_filtered::<(Entity, Option<&Children>), With<crate::plugins::replay_plugin::MrcRemoteFighter>>()
@@ -18205,10 +18313,13 @@ mod tests {
                 .world()
                 .get::<SmState>(h.fighter)
                 .map(|sm| format!("{:?}", sm.current));
+            let air_state = h.app.world().get::<FighterAir>(h.fighter).map(|air| serde_json::json!({
+                "vy": air.air.vertical_speed, "mode": format!("{:?}", air.air.motion_mode),
+                "airborne": air.air.airborne, "launch": air.air.launch_pose_id, "lifted": air.air.launch_lifted}));
             frames.push(
                 serde_json::json!({"time": time, "p": h.position().to_array(), "pose": pose,
                 "facing": facing, "locked": locked, "rustRemote": rust_remote, "reaction": reaction,
-                "frame": frame_index, "blend": blend_active, "sm": sm}),
+                "frame": frame_index, "blend": blend_active, "sm": sm, "air": air_state}),
             );
         }
         MrcDriftAudit {
@@ -18261,6 +18372,21 @@ mod tests {
 
     #[cfg(feature = "original-assets")]
     #[cfg(feature = "original-assets")]
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn original_mrc_replay_steps_on_the_recorder_frames() {
+        let audit = run_mrc_drift_audit_with_clock("忍刀升龙.mrc", 120, Some(49.5), true, true);
+        let a = audit
+            .anchors
+            .iter()
+            .find(|a| (a["time"].as_f64().unwrap() - 49.087).abs() < 0.005)
+            .unwrap();
+        assert!(
+            a["error"].as_f64().unwrap() < 1.5,
+            "49.087 s pre-snap error: {a}"
+        );
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn original_mrc_local_entry_hit_bucket_and_air_carry_follow_the_recording() {
@@ -18330,17 +18456,6 @@ mod tests {
     #[test]
     fn original_ninja_mrc_locked_local_faces_the_remote_without_queue_e() {
         let audit = run_mrc_drift_audit("忍烧.mrc", 120, Some(36.0), true);
-        let frame_at = |t: f32| {
-            audit
-                .frames
-                .iter()
-                .min_by(|a, b| {
-                    (a["time"].as_f64().unwrap() - t as f64)
-                        .abs()
-                        .total_cmp(&(b["time"].as_f64().unwrap() - t as f64).abs())
-                })
-                .unwrap()
-        };
 
         let mut checked = 0;
         let ordinary =

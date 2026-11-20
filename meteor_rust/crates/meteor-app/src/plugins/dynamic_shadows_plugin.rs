@@ -271,6 +271,51 @@ mod tests {
     }
 
     #[test]
+    fn shadow_direction_tracks_the_active_day_or_night_light() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+            .init_resource::<Assets<GmdlMaterial>>()
+            .insert_state(AppState::Playing)
+            .insert_resource(Settings {
+                dynamic_shadows: true,
+                ..default()
+            })
+            .add_plugins(DynamicShadowsPlugin);
+        let sky = app
+            .world_mut()
+            .spawn(crate::plugins::graphics_pack::sky::CloudSky(Some(
+                crate::plugins::graphics_pack::sky::SkyLighting {
+                    sky: Vec3::splat(0.1),
+                    ground: Vec3::splat(0.02),
+                    sun: Vec3::new(0.7, 0.6, 0.3).normalize().extend(1.0),
+                    sun_color: Vec3::ONE,
+                    night_factor: 0.0,
+                },
+            )))
+            .id();
+        app.update();
+        let sun = app
+            .world_mut()
+            .query_filtered::<Entity, With<MeteorDynamicSun>>()
+            .single(app.world())
+            .unwrap();
+        let direction = Vec3::new(-0.6, 0.7, -0.2).normalize();
+        app.world_mut()
+            .get_mut::<crate::plugins::graphics_pack::sky::CloudSky>(sky)
+            .unwrap()
+            .0
+            .as_mut()
+            .unwrap()
+            .sun = direction.extend(0.1);
+        app.update();
+        let actual = app.world().get::<Transform>(sun).unwrap().rotation * Vec3::Z;
+        assert!(
+            actual.dot(direction) > 0.999,
+            "shadow map should face the active moon"
+        );
+    }
+
+    #[test]
     fn lighting_and_shadows_update_independently_while_paused() {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))

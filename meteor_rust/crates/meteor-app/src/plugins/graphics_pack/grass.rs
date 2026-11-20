@@ -98,6 +98,12 @@ impl AsBindGroup for GrassMaterial {
         result
             .bindings
             .push((5, OwnedBindingResource::Buffer(buffers.grass_light()?)));
+        result
+            .bindings
+            .push((6, OwnedBindingResource::Buffer(buffers.grass_direction()?)));
+        result
+            .bindings
+            .push((7, OwnedBindingResource::Buffer(buffers.lighting()?)));
         Ok(result)
     }
 
@@ -108,6 +114,8 @@ impl AsBindGroup for GrassMaterial {
         let mut entries = GrassBindings::bind_group_layout_entries(device, force_no_bindless);
         entries.push(uniform_buffer::<Vec4>(false).build(4, ShaderStages::VERTEX));
         entries.push(uniform_buffer::<Vec4>(false).build(5, ShaderStages::VERTEX));
+        entries.push(uniform_buffer::<Vec4>(false).build(6, ShaderStages::VERTEX));
+        entries.push(uniform_buffer::<Vec4>(false).build(7, ShaderStages::FRAGMENT));
         entries
     }
 }

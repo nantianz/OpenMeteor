@@ -1659,6 +1659,12 @@ struct WeaponPartSpec {
     forms: Option<Vec<u8>>,
 }
 
+#[derive(Component)]
+pub(super) struct WeaponSurfaceName {
+    pub object: String,
+    pub texture: String,
+}
+
 fn weapon_part_specs(weapon_id: u8, variant: u8) -> Vec<WeaponPartSpec> {
     let part =
         |stem: String, left: bool, forms: Option<Vec<u8>>| WeaponPartSpec { stem, left, forms };
@@ -2145,6 +2151,12 @@ fn spawn_gmc_weapon(
                 .iter()
                 .find(|s| s.id == shader_id as usize)
                 .or_else(|| gmc.shaders.first());
+            let texture_name = shader.and_then(|shader| {
+                (shader.texture_index >= 0)
+                    .then(|| gmc.textures.get(shader.texture_index as usize))
+                    .flatten()
+                    .map(String::as_str)
+            });
             let material = material_cache
                 .entry(shader_id as usize)
                 .or_insert_with(|| {
@@ -2239,6 +2251,10 @@ fn spawn_gmc_weapon(
                     InheritedVisibility::default(),
                     Transform::IDENTITY,
                     marker.clone(),
+                    WeaponSurfaceName {
+                        object: object.name.clone(),
+                        texture: texture_name.unwrap_or("").to_owned(),
+                    },
                 ))
                 .insert(ChildOf(attach));
             spawned += 1;
@@ -2352,6 +2368,10 @@ fn spawn_gmdl_weapon(
                     InheritedVisibility::default(),
                     Transform::IDENTITY,
                     marker.clone(),
+                    WeaponSurfaceName {
+                        object: object.name.clone(),
+                        texture: texture_name.unwrap_or("").to_owned(),
+                    },
                 ))
                 .insert(ChildOf(attach));
             spawned += 1;
@@ -2544,7 +2564,13 @@ fn drive_fighter_animation(
 
     let now_seconds = mrc.as_ref().filter(|mrc| mrc.active).map_or_else(
         || super::simulation_now(frame_clock.as_deref(), time.elapsed_secs_f64()),
-        |mrc| f64::from(mrc.elapsed),
+        |mrc| {
+            f64::from(mrc.elapsed)
+                - frame_clock
+                    .as_deref()
+                    .and_then(|clock| clock.substep)
+                    .map_or(0.0, |step| step.remaining_wall_seconds)
+        },
     );
     let root_dt = super::simulation_dt(
         frame_clock.as_deref(),

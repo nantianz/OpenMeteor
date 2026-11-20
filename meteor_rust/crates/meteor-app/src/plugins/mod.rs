@@ -49,6 +49,8 @@ pub(crate) struct FrameClock {
     play_frame_seconds: f64,
 
     pub(crate) substep: Option<ControllerSubstep>,
+
+    pub(crate) replay_steps: Vec<f32>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -75,6 +77,7 @@ impl Default for FrameClock {
             play_elapsed_seconds: None,
             play_frame_seconds: 0.0,
             substep: None,
+            replay_steps: Vec::new(),
         }
     }
 }
@@ -91,6 +94,7 @@ fn advance_frame_clock_seconds(clock: &mut FrameClock, raw_wall_dt: f64, target_
         *elapsed += raw;
     }
     clock.substep = None;
+    clock.replay_steps.clear();
     clock.wall_dt = raw as f32;
     clock.pending_wall += raw;
     if clock.target_fps != target_fps {
@@ -127,12 +131,28 @@ fn begin_frame_clock(
     debug_sim: Option<Res<crate::plugins::debug_plugin::DebugSimControl>>,
     mut clock: ResMut<FrameClock>,
     loading: Option<Res<loading_ui::LoadingPresentation>>,
-    mrc: Option<Res<replay_plugin::MrcPlayback>>,
+    mut mrc: Option<ResMut<replay_plugin::MrcPlayback>>,
+    seek: Option<Res<replay_plugin::ReplaySeekRequest>>,
     player: Option<Res<replay_plugin::ReplayPlayer>>,
 ) {
     advance_frame_clock_seconds(&mut clock, time.delta_secs_f64(), settings.target_fps);
     if loading.is_some_and(|loading| loading.active) {
         clock.sim_dt = 0.0;
+    } else if let Some(mrc) = mrc.as_deref_mut().filter(|mrc| {
+        mrc.active
+            && !mrc.paused
+            && !mrc.frame_times.is_empty()
+            && seek.as_deref().is_none_or(|seek| seek.0.is_none())
+    }) {
+        let speed = debug_sim.as_deref().map_or(1.0, |debug| {
+            if debug.paused {
+                0.0
+            } else {
+                f64::from(debug.time_scale.max(0.0))
+            }
+        });
+        pace_recorded_frames(&mut clock, mrc, time.delta_secs_f64() * speed);
+        return;
     }
     clock.sim_dt *= impact.as_deref().map_or(1.0, |impact| impact.scale);
 
@@ -150,6 +170,54 @@ fn begin_frame_clock(
     {
         suspend_clock_frame(&mut clock);
     }
+}
+
+fn pace_recorded_frames(
+    clock: &mut FrameClock,
+    mrc: &mut replay_plugin::MrcPlayback,
+    raw_wall_dt: f64,
+) {
+    let raw = raw_wall_dt.max(0.0);
+    mrc.frame_wall += raw;
+    let start = mrc.frame_cursor;
+    let mut end = start;
+    while end < mrc.frame_times.len()
+        && f64::from(mrc.frame_times[end]) <= mrc.frame_wall
+        && end - start < replay_plugin::MRC_MAX_FRAMES_PER_UPDATE
+    {
+        end += 1;
+    }
+    if end == mrc.frame_times.len() {
+        mrc.frame_times.clear();
+        return;
+    }
+    if end == start {
+        clock.sim_dt = 0.0;
+        clock.wall_step = 0.0;
+        clock.measured_wall_step = 0.0;
+        clock.replay_steps.clear();
+        return;
+    }
+    let mut previous = mrc.elapsed.min(mrc.frame_times[start]);
+    let steps: Vec<f32> = mrc.frame_times[start..end]
+        .iter()
+        .map(|&frame| {
+            let step = (frame - previous).max(0.0);
+            previous = frame;
+            step
+        })
+        .collect();
+    let total: f32 = steps.iter().sum();
+    if f64::from(mrc.frame_times[end - 1]) + 0.25 < mrc.frame_wall {
+        mrc.frame_wall = f64::from(mrc.frame_times[end - 1]);
+    }
+    mrc.frame_cursor = end;
+    mrc.frame_target = Some(mrc.frame_times[end - 1]);
+    clock.sim_dt = total;
+    clock.wall_step = total;
+    clock.measured_wall_step = f64::from(total);
+    clock.pending_wall = 0.0;
+    clock.replay_steps = steps;
 }
 
 pub(crate) fn simulation_frame(clock: Option<Res<FrameClock>>) -> bool {
@@ -575,6 +643,89 @@ mod tests {
             simulation_play_now(Some(&FrameClock::default()), 7.0),
             7.0,
             "manual fixtures keep their caller's time domain"
+        );
+    }
+
+    #[test]
+    fn stock_mrc_frame_timeline_recovers_the_recorder_rate() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../mrcs/tests");
+        for (file, hz) in [
+            ("剑小跳.mrc", 101.0),
+            ("忍烧.mrc", 125.0),
+            ("指虎大绝.mrc", 131.0),
+        ] {
+            let doc =
+                meteor_asset::mrc::decode_mrc(&std::fs::read(root.join(file)).unwrap()).unwrap();
+            let frames = replay_plugin::mrc_recorded_frame_times(&doc);
+            let mut gaps: Vec<f32> = frames.windows(2).map(|w| w[1] - w[0]).collect();
+            gaps.sort_by(f32::total_cmp);
+            let median = gaps[gaps.len() / 2];
+            assert!(
+                (1.0 / median - hz).abs() < 1.0,
+                "{file}: {} Hz",
+                1.0 / median
+            );
+            assert!(
+                frames.windows(2).all(|w| w[1] > w[0]),
+                "{file}: timeline must be increasing"
+            );
+
+            for entry in doc.queue_d.iter().take(200) {
+                let nearest = frames
+                    .iter()
+                    .map(|t| (t - entry.time).abs())
+                    .fold(f32::MAX, f32::min);
+                assert!(
+                    nearest < 1e-4,
+                    "{file}: D at {} is not a frame end",
+                    entry.time
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stock_mrc_pacing_idles_merges_and_steps_recorded_intervals() {
+        let mut clock = FrameClock::default();
+        let mut mrc = replay_plugin::MrcPlayback {
+            active: true,
+            frame_times: (1..=200).map(|k| k as f32 * 0.008).collect(),
+            ..Default::default()
+        };
+
+        let mut runs = Vec::new();
+        for _ in 0..120 {
+            pace_recorded_frames(&mut clock, &mut mrc, 1.0 / 120.0);
+            runs.push(clock.replay_steps.len());
+            if let Some(target) = mrc.frame_target.take() {
+                mrc.elapsed = target;
+            }
+            assert!((clock.sim_dt - clock.replay_steps.iter().sum::<f32>()).abs() < 1e-6);
+            assert!(clock
+                .replay_steps
+                .iter()
+                .all(|step| (step - 0.008).abs() < 1e-5));
+        }
+        assert!(runs.contains(&2) && !runs.contains(&0) && !runs.iter().any(|n| *n > 2));
+        assert_eq!(mrc.frame_cursor, runs.iter().sum::<usize>());
+
+        let mut slow = replay_plugin::MrcPlayback {
+            active: true,
+            frame_times: (1..=200).map(|k| k as f32 * 0.0099).collect(),
+            ..Default::default()
+        };
+        let idle = (0..120)
+            .filter(|_| {
+                pace_recorded_frames(&mut clock, &mut slow, 1.0 / 120.0);
+                if let Some(target) = slow.frame_target.take() {
+                    slow.elapsed = target;
+                }
+                clock.sim_dt == 0.0
+            })
+            .count();
+        assert!(
+            idle >= 15,
+            "only {idle} idle Updates for a 101 Hz recording"
         );
     }
 

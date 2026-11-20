@@ -1,4 +1,4 @@
-#import bevy_pbr::{mesh_functions, mesh_view_bindings::{globals, view}}
+#import bevy_pbr::{mesh_functions, mesh_view_bindings::{globals, view, lights}, shadows::fetch_directional_shadow}
 
 struct GrassUniform {
     root_color: vec4<f32>,
@@ -15,6 +15,7 @@ struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) color: vec3<f32>,
     @location(1) plume: vec3<f32>,
+    @location(2) world_position: vec3<f32>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> field: GrassUniform;
@@ -23,6 +24,8 @@ struct VertexOutput {
 @group(#{MATERIAL_BIND_GROUP}) @binding(3) var bend_sampler: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(4) var<uniform> wind_clock: vec4<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(5) var<uniform> grass_light: vec4<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(6) var<uniform> grass_light_direction: vec4<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(7) var<uniform> scene_lighting: vec4<f32>;
 
 @vertex
 fn vertex(
@@ -35,6 +38,7 @@ fn vertex(
     out.position = vec4<f32>(2.0, 2.0, 0.0, 1.0);
     out.color = vec3<f32>(0.0);
     out.plume = vec3<f32>(0.0);
+    out.world_position = vec3<f32>(0.0);
     if (source.w == 0.0) {
         return out;
     }
@@ -120,7 +124,8 @@ fn vertex(
             wind = field.wind.xy * field.wind.z * (0.53 + 0.47 * sin(swell + seed * 0.4));
         }
     }
-    let light = 0.61 + 0.25 * growth + 0.13 * abs(dot(facing, vec2<f32>(0.78, 0.63)));
+    let directional = 0.13 * abs(dot(facing, grass_light_direction.xy));
+    let light = 0.61 + 0.25 * growth + mix(0.065, directional, grass_light_direction.z);
     out.color = mix(bottom, tip, t * (1.34 - 0.34 * t)) * light * grass_light.rgb;
     if (painted_plume) {
         out.color = light * grass_light.rgb * mix(0.82, 1.22, seed);
@@ -132,22 +137,32 @@ fn vertex(
         let sample = textureSampleLevel(bends, bend_sampler, sample_pos, 0.0);
         let feet = field.contact.x + clamp(sample.a / max(sample.b, 0.005), 0.0, 1.0) * field.contact.y;
         let floor_match = 1.0 - smoothstep(0.35, 0.85, abs(feet - root.y));
-        bend = (sample.rg * 255.0 - 128.0) / 127.0 * floor_match;
+
+        bend = (sample.rg * 255.0 - 128.0) / 127.0 * inverseSqrt(max(sample.b, 0.04)) * floor_match;
         pressure = sample.b * floor_match;
     }
     let clump = facing * (field.root_color.w * leaf.w * mix(0.45, 1.0, edge));
-    let curved = (facing * lean + wind + bend * 1.13) * (t * t * height);
+
+    let curved = (facing * lean + wind * (1.0 - pressure) + bend * 1.65) * (t * t * height);
     let lateral = side * (blade.z * width * 0.5 * taper);
-    let y = height * rise * (1.0 - pressure * 0.76 * t) + dot(slope, clump + lateral)
+    let y = height * rise * (1.0 - pressure * 0.94 * t) + dot(slope, clump + lateral)
         + select(width * 0.08 * t * blade.z, 0.0, painted_plume);
     let offset = clump + curved + lateral;
     let displaced = root + vec3<f32>(offset.x, y, offset.y);
+    out.world_position = displaced;
     out.position = view.clip_from_world * vec4<f32>(displaced, 1.0);
     return out;
 }
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
+    var shadow = 1.0;
+    if (scene_lighting.w > 0.0 && lights.n_directional_lights > 0u) {
+        let world = vec4<f32>(in.world_position, 1.0);
+        let visibility = fetch_directional_shadow(0u, world, vec3<f32>(0.0, 1.0, 0.0),
+            (view.view_from_world * world).z, in.position.xy);
+        shadow = mix(1.0, visibility, scene_lighting.w * 0.7);
+    }
     let plume_height_step = fwidth(in.plume.y);
 #ifdef MULTISAMPLED
     let plume_width_step = fwidth(in.plume.x);
@@ -168,7 +183,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
 #endif
         let shaft = mix(field.root_color.rgb, field.tip_color.rgb, t);
         let bristle = field.meadow.rgb * mix(0.74, 1.15, smoothstep(0.62, 0.94, t));
-        return vec4<f32>(mix(shaft, bristle, smoothstep(0.54, 0.74, t)) * in.color, coverage);
+        return vec4<f32>(mix(shaft, bristle, smoothstep(0.54, 0.74, t)) * in.color * shadow, coverage);
     }
-    return vec4<f32>(in.color, 1.0);
+    return vec4<f32>(in.color * shadow, 1.0);
 }

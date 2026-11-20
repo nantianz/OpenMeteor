@@ -323,6 +323,13 @@ impl Material for GmdlMaterial {
         if is_prepass_pipeline(descriptor) {
             return Ok(());
         }
+        if let Some(fragment) = &mut descriptor.fragment {
+            if fragment.targets.iter().flatten().any(|target| {
+                target.format == bevy::render::render_resource::TextureFormat::Rgba16Float
+            }) {
+                fragment.shader_defs.push("METEOR_HDR_TARGET".into());
+            }
+        }
         if key.bind_group_data.contains(GmdlMaterialKey::WATER_SKY) {
             if let Some(fragment) = &mut descriptor.fragment {
                 fragment.shader_defs.push("WATER_SKY_REFLECTION".into());

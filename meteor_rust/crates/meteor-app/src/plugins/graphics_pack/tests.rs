@@ -6,11 +6,108 @@ fn config_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config")
 }
 pub(super) fn starter() -> GraphicsPacks {
-    load_with_reader(
+    let mut packs = load_with_reader(
         br#"{"schema_version":1,"enabled":true,"packs":["graphics-packs/starter/pack.json"]}"#,
         |name| std::fs::read(config_root().join(name)).map_err(|e| e.to_string()),
     )
+    .unwrap();
+
+    for scene in &mut packs.packs[0].config.scenes {
+        if let Some(sky) = &mut scene.sky {
+            sky.time = None;
+        }
+    }
+    packs
+}
+
+#[test]
+fn sn06_nextgen_sample_loads_stage_and_longsword_resources() {
+    let base = config_root();
+    let mut packs = super::loader::load_catalog_with_reader(
+        &std::fs::read(base.join("graphics-enhancement-sn06-nextgen.json")).unwrap(),
+        |name| std::fs::read(base.join(name)).map_err(|e| e.to_string()),
+    )
     .unwrap()
+    .with_test_loose_root(base);
+    packs.prepare_stage("sn06");
+    let sample = packs
+        .packs
+        .iter()
+        .find(|pack| pack.config.id == "sn06-nextgen-sample")
+        .unwrap();
+    assert!(sample.config.scenes[0].sky.as_ref().unwrap().enabled);
+    assert!(sample.config.scenes[0].grass.as_ref().unwrap().enabled);
+    let sword = packs
+        .packs
+        .iter()
+        .find(|pack| pack.config.id == "longsword-pbr-preview")
+        .unwrap();
+    assert!(sword.images.contains_key("longsword-orm"));
+    assert_eq!(sword.config.scenes[0].weapons[0].weapon, 6);
+}
+
+#[test]
+fn additive_texture_only_matches_selected_additive_surfaces() {
+    let base = config_root();
+    let packs = load_with_reader(
+        &std::fs::read(base.join("graphics-enhancement-sn06-waterfall-experiment.json")).unwrap(),
+        |name| std::fs::read(base.join(name)).map_err(|e| e.to_string()),
+    )
+    .unwrap();
+    let mut images = Assets::<Image>::default();
+    let mut scene = SceneGraphics::new(Some(&packs), "sn06");
+    let mut material = GmdlMaterial::new(
+        GmdlMaterialParams {
+            opacity: 1.,
+            alpha_cutoff: 0.,
+            mode: 4,
+            has_texture: 0,
+            uv_offset: Vec2::ZERO,
+        },
+        None,
+        false,
+        GmdlMode::SrcColorOne,
+    );
+    scene.configure_additive_texture("wrong", Some("sn06sh.jpg"), &mut material, &mut images);
+    assert!(material.texture.is_none());
+    scene.configure_additive_texture("plane20", Some("SN06SH.JPG"), &mut material, &mut images);
+    assert!(material.texture.is_some());
+    assert_eq!(material.params.has_texture, 1);
+    assert!(scene
+        .configure_additive_texture("Plane19", Some("sn06sh2.jpg"), &mut material, &mut images)
+        .is_some());
+    let mut opaque = plain();
+    scene.configure_additive_texture("Plane20", Some("sn06sh.jpg"), &mut opaque, &mut images);
+    assert!(opaque.texture.is_none());
+}
+
+#[test]
+fn waterfall_lighting_only_marks_selected_additive_surface() {
+    let packs = load_with_reader(
+        br#"{"schema_version":1,"enabled":true,"packs":["p.json"]}"#,
+        |_| Ok(br#"{"schema_version":1,"id":"test","scenes":[{"stage":"sn06","surfaces":[{"texture":"sn06sh2.jpg","waterfall_lighting":true}]}]}"#.to_vec()),
+    ).unwrap();
+    let mut scene = SceneGraphics::new(Some(&packs), "sn06");
+    let mut images = Assets::<Image>::default();
+    let mut additive = GmdlMaterial::new(
+        GmdlMaterialParams {
+            opacity: 1.,
+            alpha_cutoff: 0.,
+            mode: 4,
+            has_texture: 0,
+            uv_offset: Vec2::ZERO,
+        },
+        None,
+        false,
+        GmdlMode::SrcColorOne,
+    );
+    scene.configure_additive_texture("Plane19", Some("other.jpg"), &mut additive, &mut images);
+    assert_eq!(additive.water.x, 0.0);
+    scene.configure_additive_texture("Plane19", Some("SN06SH2.JPG"), &mut additive, &mut images);
+    assert_eq!(additive.water.x, 7.0);
+    let mut opaque = plain();
+    scene.configure_additive_texture("Plane19", Some("sn06sh2.jpg"), &mut opaque, &mut images);
+    assert_eq!(opaque.water.x, 0.0);
 }
 
 #[test]
@@ -146,6 +243,32 @@ fn sky_time_config_accepts_only_complete_and_unambiguous_modes() {
         json!({"time":{"mode":"system"}, "fixed_time":"06:00"}),
     ] {
         assert!(load(source.clone()).is_err(), "{source}");
+    }
+}
+
+#[test]
+fn shipped_sky_presets_use_live_system_time() {
+    for (path, stage) in [
+        ("graphics-packs/starter/pack.json", "sn13"),
+        ("graphics-packs/sn03-mist-ravine/pack.json", "sn03"),
+        ("graphics-packs/sn06-moss-valley/pack.json", "sn06"),
+        ("graphics-packs/sn06-nextgen-sample/pack.json", "sn06"),
+    ] {
+        let pack: config::Pack =
+            serde_json::from_slice(&std::fs::read(config_root().join(path)).unwrap()).unwrap();
+        pack.validate().unwrap();
+        let sky = pack
+            .scenes
+            .iter()
+            .find(|scene| scene.stage == stage)
+            .unwrap()
+            .sky
+            .as_ref()
+            .unwrap();
+        assert!(
+            matches!(sky.time, Some(config::SkyTime::System {})),
+            "{path}"
+        );
     }
 }
 #[test]
@@ -350,6 +473,57 @@ fn atmosphere_lighting_requires_the_replaced_sky_and_restores_pack_lighting() {
     app.world_mut().despawn(dome);
     app.update();
     assert_eq!(app.world().resource::<FrameUniforms>().graphics, baseline);
+}
+
+#[test]
+fn fog_color_follows_day_night_without_changing_density() {
+    use crate::app_state::{AppState, LoadedStageInfo, Settings};
+    let packs = starter();
+    let (profile, light, _) = sky::scene(&packs, "sn13").unwrap();
+    let mut atmosphere = sky::atmosphere_lighting(&profile, &light);
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+        .insert_state(AppState::Playing)
+        .insert_resource(packs)
+        .insert_resource(Settings {
+            volumetric_fog: true,
+            ..default()
+        })
+        .insert_resource(LoadedStageInfo {
+            stage_id: "sn06".into(),
+            ..default()
+        })
+        .init_resource::<FrameUniforms>()
+        .add_systems(Update, runtime::update_frame);
+    atmosphere.night_factor = 0.0;
+    let dome = app.world_mut().spawn(sky::CloudSky(Some(atmosphere))).id();
+    app.update();
+    let day = app.world().resource::<FrameUniforms>().graphics.fog_colors[0];
+    atmosphere.night_factor = 1.0;
+    app.world_mut()
+        .entity_mut(dome)
+        .insert(sky::CloudSky(Some(atmosphere)));
+    app.update();
+    let night = app.world().resource::<FrameUniforms>().graphics.fog_colors[0];
+    assert!(night.truncate().length() < day.truncate().length() * 0.3);
+    assert_eq!(night.w, day.w);
+}
+
+#[test]
+fn grass_uses_active_light_direction_and_keeps_legacy_fallback() {
+    let mut frame = GraphicsFrame::default();
+    assert_eq!(
+        frame.grass_light_direction(),
+        Vec4::new(0.78, 0.63, 1.0, 0.0)
+    );
+    frame.counts.w = 1.0;
+    frame.sun = Vec4::new(1.0, 0.5, 0.0, 1.0);
+    assert_eq!(frame.grass_light_direction().xy(), Vec2::X);
+    frame.sun = Vec4::new(0.0, 0.5, -1.0, 1.0);
+    assert_eq!(frame.grass_light_direction().xy(), Vec2::NEG_Y);
+    frame.sun = Vec4::Y;
+    assert!(frame.grass_light_direction().is_finite());
+    assert_eq!(frame.grass_light_direction().z, 0.0);
 }
 #[test]
 fn wind_is_bounded_and_shared_across_display_consumers() {

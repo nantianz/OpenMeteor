@@ -299,7 +299,10 @@
         "scale": 0.024,
         "cloud_definition": 1.0,
         "weather_scale": 0.00048,
-        "weather_offset": [180.0, 10.0],
+        "weather_offset": [
+          180.0,
+          10.0
+        ],
         "steps": 32,
         "cloud_update_hz": 6,
         "ambient_strength": 0.88,
@@ -316,6 +319,17 @@
             0.77
           ],
           "intensity": 2.27
+        },
+        "time": {
+          "mode": "system"
+        },
+        "moon": {
+          "color": [
+            0.58,
+            0.68,
+            1.0
+          ],
+          "intensity": 0.45
         }
       },
       "wind": {

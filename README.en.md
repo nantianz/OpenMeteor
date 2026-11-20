@@ -139,9 +139,10 @@ All five UI images are embedded in `OpenMeteor.exe`; no separate image directory
 is needed. Packaging checks image dimensions and the actual EXE contents,
 rejecting missing images or 1x1 placeholders before publication.
 
-Graphics packs are disabled by default. Edit `config/graphics-enhancement.json`
-to enable the included sample. See the [graphics pack guide](docs/guides/graphics-enhancement-packs.md)
-for installation, texture formats, and configuration fields.
+Graphics packs are enabled by default, including Si Fang Zhen, the long sword,
+interactive grass and day-night lighting. Supported desktop backends also use
+the Si Fang Zhen HDR color pipeline. Existing saved settings are preserved. See
+the [graphics pack guide](docs/guides/graphics-enhancement-packs.md) for details.
 
 ## Tests
 

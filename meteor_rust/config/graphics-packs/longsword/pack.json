@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "id": "longsword-pbr-preview",
+  "resources": { "longsword-orm": "orm.png" },
+  "materials": {
+    "longsword": {
+      "orm": "longsword-orm",
+      "metallic": 1.0,
+      "roughness": 0.9,
+      "vertex_color": 0.0
+    }
+  },
+  "scenes": [{
+    "stage": "*",
+    "weapons": [{
+      "weapon": 6,
+      "variant": 0,
+      "object": "wpnLS01",
+      "texture": "wpnLS01.jpg",
+      "material": "longsword"
+    }]
+  }]
+}

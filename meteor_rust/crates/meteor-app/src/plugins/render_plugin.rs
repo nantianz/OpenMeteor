@@ -2840,9 +2840,21 @@ pub(super) fn setup_stage_scene(
         });
     let sky_profile = graphics
         .as_deref()
-        .filter(|_| settings.sky_enhance && native_sky)
+        .filter(|_| settings.sky_enhance)
         .and_then(|packs| sky::scene(packs, &loaded.stage_id));
-    if let (Some(materials), Some(noise), Some((profile, lighting, cycle))) = (
+    if !native_sky {
+        if let Some((profile, lighting, cycle)) = sky_profile {
+            if profile.replace_skybox && sky::replacements(&profile, &gmdl, &skip_render).is_ok() {
+                let mut clock = commands.spawn((
+                    PlayingSceneEntity,
+                    sky::CloudSky(Some(sky::atmosphere_lighting(&profile, &lighting))),
+                ));
+                if let Some(cycle) = cycle {
+                    clock.insert(cycle);
+                }
+            }
+        }
+    } else if let (Some(materials), Some(noise), Some((profile, lighting, cycle))) = (
         cloud_materials.as_deref_mut(),
         cloud_noise.as_deref_mut(),
         sky_profile,
@@ -3169,6 +3181,30 @@ pub(super) fn setup_stage_scene(
                     && scene_obj.is_none_or(|o| o.billboard != 1),
                 &mut images,
             );
+            let waterfall_texture = if ifl_frames.is_none()
+                && deform.is_none()
+                && scene_obj.is_none_or(|object| object.billboard != 1)
+            {
+                surfaces.configure_additive_texture(
+                    &object.name,
+                    gmdl.resolve_texture_name(mat),
+                    &mut materials.get_mut(&material_handle).unwrap(),
+                    &mut images,
+                )
+            } else {
+                None
+            };
+            if let Some((texture, floor)) = waterfall_texture {
+                super::graphics_pack::waterfalls::spawn(
+                    &mut commands,
+                    &mesh,
+                    transform,
+                    texture,
+                    floor,
+                    &mut meshes,
+                    &mut materials,
+                );
+            }
             if mode == GmdlMode::Opaque && alpha_cutoff == 0.0 && liquid_surface.is_none() {
                 if let (Some(field), Some(texture)) =
                     (&grass_ground, gmdl.resolve_texture_name(mat))

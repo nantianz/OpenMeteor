@@ -142,6 +142,47 @@ impl<'a> SceneGraphics<'a> {
             last_wind: None,
         })
     }
+    pub fn configure_additive_texture(
+        &mut self,
+        object: &str,
+        texture: Option<&str>,
+        material: &mut GmdlMaterial,
+        images: &mut Assets<Image>,
+    ) -> Option<(Handle<Image>, Option<f32>)> {
+        if material.mode != GmdlMode::SrcColorOne {
+            return None;
+        }
+        if self
+            .rules
+            .iter()
+            .filter(|(_, rule)| rule.matches(object, texture))
+            .any(|(_, rule)| rule.waterfall_lighting)
+        {
+            material.water.x = 7.0;
+        }
+        let selected = self
+            .rules
+            .iter()
+            .filter(|(_, rule)| rule.matches(object, texture))
+            .filter_map(|(index, rule)| {
+                rule.additive_texture.as_ref().map(|id| {
+                    (
+                        *index,
+                        id.clone(),
+                        rule.waterfall_layers,
+                        rule.waterfall_floor,
+                    )
+                })
+            })
+            .last();
+        if let Some((index, id, layers, floor)) = selected {
+            let texture = self.texture(index, &id, false, false, images);
+            material.texture = Some(texture.clone());
+            material.params.has_texture = 1;
+            return layers.then_some((texture, floor));
+        }
+        None
+    }
     pub(in crate::plugins) fn apply_pbr(
         &mut self,
         i: usize,

@@ -14,6 +14,7 @@ struct SkyUniform {
     sun: vec4<f32>,
     sun_color: vec4<f32>,
     weather: vec4<f32>,
+    celestial: vec4<f32>,
 }
 
 #ifdef CLOUD_CACHE_GENERATE
@@ -269,9 +270,14 @@ fn fragment(input: SkyVertex) -> @location(0) vec4<f32> {
     let ray = normalize(input.direction);
     let sun_dot = clamp(dot(ray, sky.sun.xyz), -1.0, 1.0);
     let sunlight = sky.sun_color.xyz * min(sky.sun_color.w, 8.0) * max(sky.sun.y, 0.0);
-    let color = mix(sky.horizon.xyz, sky.zenith.xyz, pow(max(ray.y, 0.0), 0.48))
-        + sunlight * (0.10 * pow(max(sun_dot, 0.0), 14.0)
+    let sun_disc = sunlight * (0.10 * pow(max(sun_dot, 0.0), 14.0)
         + 1.5 * smoothstep(0.999983, 0.999993, sun_dot));
+
+    let moon_visibility = sky.celestial.x * smoothstep(0.0, 0.08, sky.sun.y) * smoothstep(0.0, 0.03, sky.sun_color.w);
+    let moon_disc = moon_visibility * vec3<f32>(0.68, 0.75, 0.88)
+        * (0.50 * smoothstep(0.99986, 0.99991, sun_dot) + 0.08 * pow(max(sun_dot, 0.0), 500.0));
+    let color = mix(sky.horizon.xyz, sky.zenith.xyz, pow(max(ray.y, 0.0), 0.48))
+        + select(sun_disc, moon_disc, sky.celestial.x > 0.5);
     var volume = vec4<f32>(0.0);
     if (sky.layer.z > 0.0 && sky.layer.w > 0.0) {
         if (cache.state.x != 0u) {

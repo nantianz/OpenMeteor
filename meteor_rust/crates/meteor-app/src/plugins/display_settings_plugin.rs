@@ -1138,6 +1138,136 @@ mod tests {
     }
 
     #[test]
+    fn hdr_scene_tonemaps_before_the_separate_ui_camera() {
+        use bevy::{
+            app::PluginsState,
+            ecs::system::RunSystemOnce,
+            render::{
+                gpu_readback::{Readback, ReadbackComplete},
+                render_resource::{PollType, TextureUsages},
+            },
+        };
+        use std::sync::{Arc, Mutex};
+        let mut app = App::new();
+        app.add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: None,
+                    exit_condition: bevy::window::ExitCondition::DontExit,
+                    ..default()
+                })
+                .set(bevy::render::RenderPlugin {
+                    synchronous_pipeline_compilation: true,
+                    ..default()
+                })
+                .disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>()
+                .disable::<bevy::winit::WinitPlugin>()
+                .disable::<bevy::audio::AudioPlugin>(),
+        )
+        .insert_state(AppState::Playing)
+        .init_resource::<Settings>()
+        .init_resource::<crate::app_state::LoadedStageInfo>()
+        .init_resource::<super::super::stage_collider::StageCollider>()
+        .add_plugins(DisplaySettingsPlugin);
+        super::super::frame_work::install(&mut app);
+        super::super::frame_work::serial_post_update(&mut app);
+        app.world_mut()
+            .run_system_once(super::super::camera_plugin::setup_camera)
+            .unwrap();
+        let mut image = Image::new_target_texture(64, 64, TextureFormat::Rgba8UnormSrgb, None);
+        image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
+        let target = app.world_mut().resource_mut::<Assets<Image>>().add(image);
+        let game = app
+            .world_mut()
+            .query_filtered::<Entity, With<GameplayCamera>>()
+            .single(app.world())
+            .unwrap();
+        let ui = app
+            .world_mut()
+            .query_filtered::<Entity, With<super::super::camera_plugin::UiCamera>>()
+            .single(app.world())
+            .unwrap();
+        for camera in [game, ui] {
+            app.world_mut()
+                .entity_mut(camera)
+                .insert(bevy::camera::RenderTarget::Image(target.clone().into()));
+        }
+        app.world_mut().get_mut::<Camera>(game).unwrap().clear_color =
+            ClearColorConfig::Custom(Color::linear_rgb(2.0, 0.1, 0.1));
+        app.world_mut().entity_mut(game).insert((
+            bevy::camera::Hdr,
+            Msaa::Off,
+            bevy::core_pipeline::tonemapping::Tonemapping::AcesFitted,
+            ViewportPostProcessSettings {
+                brightness: 1.0,
+                contrast: 1.0,
+                sharpness: 0.0,
+                grayscale: 0.0,
+                input_size: Vec2::splat(64.0),
+                output_size: Vec2::splat(64.0),
+                underwater: Vec4::ZERO,
+            },
+        ));
+        app.world_mut().spawn((
+            Node {
+                width: Val::Px(16.0),
+                height: Val::Px(16.0),
+                ..default()
+            },
+            BackgroundColor(Color::linear_rgb(0.0, 1.0, 0.0)),
+            UiTargetCamera(ui),
+        ));
+        app.world_mut().spawn((
+            PrimaryWindow,
+            Window {
+                resolution: (64, 64).into(),
+                ..default()
+            },
+        ));
+        let pixels = Arc::new(Mutex::new(Vec::new()));
+        let output = pixels.clone();
+        app.world_mut().spawn(Readback::texture(target)).observe(
+            move |event: On<ReadbackComplete>| *output.lock().unwrap() = event.data.clone(),
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while app.plugins_state() != PluginsState::Ready {
+            assert!(std::time::Instant::now() < deadline);
+            bevy::tasks::tick_global_task_pools_on_main_thread();
+        }
+        app.finish();
+        app.cleanup();
+        let capture = |app: &mut App| {
+            for _ in 0..32 {
+                app.update();
+                app.world()
+                    .resource::<RenderDevice>()
+                    .poll(PollType::Poll)
+                    .unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(4));
+            }
+            pixels.lock().unwrap().clone()
+        };
+        let mapped = capture(&mut app);
+        app.world_mut()
+            .entity_mut(game)
+            .insert(bevy::core_pipeline::tonemapping::Tonemapping::None);
+        let unmapped = capture(&mut app);
+        assert_eq!(mapped.len(), 64 * 64 * 4);
+        let center = (32 * 64 + 32) * 4;
+        let overlay = (8 * 64 + 8) * 4;
+        assert!(
+            (0..3).any(|c| mapped[center + c].abs_diff(unmapped[center + c]) > 8),
+            "scene tone map must change HDR output"
+        );
+        assert!(mapped[overlay + 1] > 245 && mapped[overlay] < 8 && mapped[overlay + 2] < 8);
+        assert_eq!(
+            &mapped[overlay..overlay + 4],
+            &unmapped[overlay..overlay + 4],
+            "UI must not be tone mapped with the scene"
+        );
+    }
+
+    #[test]
     fn production_sync_installs_and_removes_camera_components() {
         let mut app = App::new();
         app.insert_resource(Settings {

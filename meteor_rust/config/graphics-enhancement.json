@@ -1,8 +1,13 @@
 {
   "schema_version": 1,
-  "enabled": false,
+  "enabled": true,
   "packs": [
     "graphics-packs/starter/pack.json",
-    "graphics-packs/sn04-interactive-snow/pack.json"
+    "graphics-packs/sn04-interactive-snow/pack.json",
+    "graphics-packs/sn03-mist-ravine/pack.json",
+    "graphics-packs/sn06-moss-valley/pack.json",
+    "graphics-packs/sn06-nextgen-sample/pack.json",
+    "graphics-packs/longsword/pack.json",
+    "graphics-packs/sn06-color-pipeline/pack.json"
   ]
 }

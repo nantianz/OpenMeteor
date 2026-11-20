@@ -106,6 +106,13 @@ fn stage_resources(config: &Pack, meshlets: bool) -> (BTreeSet<&str>, BTreeSet<&
         );
         images.extend(
             scene
+                .surfaces
+                .iter()
+                .filter_map(|surface| surface.additive_texture.as_deref()),
+        );
+        materials.extend(scene.weapons.iter().map(|weapon| weapon.material.as_str()));
+        images.extend(
+            scene
                 .grass_ground
                 .as_ref()
                 .map(|ground| ground.image.as_str()),
