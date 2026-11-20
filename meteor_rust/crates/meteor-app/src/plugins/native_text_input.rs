@@ -17,6 +17,8 @@ pub(crate) enum TextField {
     Address,
     StockPassword,
     Chat,
+    MatchChat,
+    MatchTeamChat,
     Console,
 }
 
@@ -28,6 +30,8 @@ impl TextField {
             Self::Address => "房主 IP:端口",
             Self::StockPassword => "房间密码（无密码留空）",
             Self::Chat => "发送消息",
+            Self::MatchChat => "全体聊天",
+            Self::MatchTeamChat => "队伍聊天",
             Self::Console => "输入命令",
         }
     }
@@ -37,6 +41,7 @@ impl TextField {
             Self::RoomName => 24,
             Self::Address => 96,
             Self::StockPassword => 127,
+            Self::MatchChat | Self::MatchTeamChat => 255,
             _ => 256,
         }
     }
@@ -60,19 +65,28 @@ pub(crate) struct TextSubmitted {
 struct Pending {
     field: TextField,
     state: AppState,
-    source: Entity,
+    source: Option<Entity>,
     root: Entity,
     editor: Entity,
     submitting: bool,
 }
 
+#[derive(Message)]
+pub(crate) struct OpenTextEditor(pub TextField);
+
 #[derive(Resource, Default)]
-struct NativeTextDialog {
+pub(crate) struct NativeTextDialog {
     pending: Option<Pending>,
 }
 
+impl NativeTextDialog {
+    pub(crate) fn is_open(&self) -> bool {
+        self.pending.is_some()
+    }
+}
+
 #[derive(Resource, Default)]
-struct EditorKeys {
+pub(crate) struct EditorKeys {
     confirm: bool,
     cancel: bool,
 }
@@ -93,6 +107,7 @@ pub(crate) fn install(app: &mut App) {
         .init_resource::<EditorKeys>()
         .init_resource::<InputFocus>()
         .add_message::<TextSubmitted>()
+        .add_message::<OpenTextEditor>()
         .add_systems(Startup, restore_profile)
         .add_systems(
             PreUpdate,
@@ -131,7 +146,7 @@ fn clean(field: TextField, value: &str) -> String {
         .collect()
 }
 
-fn capture_editor_keys(
+pub(crate) fn capture_editor_keys(
     dialog: Res<NativeTextDialog>,
     mut input: ResMut<EditorKeys>,
     mut keys: ResMut<ButtonInput<KeyCode>>,
@@ -174,14 +189,16 @@ fn edit(
     mut focus: ResMut<InputFocus>,
     mut keys: ResMut<ButtonInput<KeyCode>>,
     mut submitted: MessageWriter<TextSubmitted>,
+    mut open: MessageReader<OpenTextEditor>,
 ) {
     let mut block = dialog.pending.is_some();
     if let Some(pending) = dialog.pending.as_mut() {
         let stale = pending.state != *state.get()
-            || fields.get(pending.source).is_err()
-            || fields
-                .get(pending.source)
-                .is_ok_and(|(_, _, _, v)| v.is_some_and(|v| !v.get()));
+            || pending.source.is_some_and(|source| {
+                fields.get(source).map_or(true, |(_, _, _, visibility)| {
+                    visibility.is_some_and(|v| !v.get())
+                })
+            });
         let editor = editors.get(pending.editor).ok();
         let busy = editor.is_some_and(ime_busy);
         let cancel = input.cancel && !busy
@@ -216,24 +233,47 @@ fn edit(
             dialog.pending = None;
         }
     }
+    let requested = open.read().last().map(|request| request.0);
     if !block {
-        for (entity, interaction, field, visible) in &fields {
-            if *interaction != Interaction::Pressed || visible.is_some_and(|v| !v.get()) {
-                continue;
-            }
+        let opening = requested
+            .map(|field| {
+                (
+                    None,
+                    NativeTextEdit {
+                        field,
+                        value: String::new(),
+                    },
+                )
+            })
+            .or_else(|| {
+                fields
+                    .iter()
+                    .find_map(|(entity, interaction, field, visible)| {
+                        (*interaction == Interaction::Pressed && visible.is_none_or(|v| v.get()))
+                            .then(|| {
+                                (
+                                    Some(entity),
+                                    NativeTextEdit {
+                                        field: field.field,
+                                        value: field.value.clone(),
+                                    },
+                                )
+                            })
+                    })
+            });
+        if let Some((source, field)) = opening {
             let font = font.as_ref().map(|font| font.0.clone()).unwrap_or_default();
-            let (root, editor) = spawn_editor(&mut commands, field, font);
+            let (root, editor) = spawn_editor(&mut commands, &field, font);
             focus.set(editor, FocusCause::Navigated);
             dialog.pending = Some(Pending {
                 field: field.field,
                 state: *state.get(),
-                source: entity,
+                source,
                 root,
                 editor,
                 submitting: false,
             });
             block = true;
-            break;
         }
     }
     if block {
@@ -569,6 +609,7 @@ mod tests {
             .init_resource::<NativeTextDialog>()
             .init_resource::<EditorKeys>()
             .add_message::<TextSubmitted>()
+            .add_message::<OpenTextEditor>()
             .add_systems(PreUpdate, capture_editor_keys)
             .add_systems(Update, edit);
         let source = app
@@ -584,6 +625,39 @@ mod tests {
         app.update();
         *app.world_mut().get_mut::<Interaction>(source).unwrap() = Interaction::None;
         (app, source)
+    }
+
+    #[test]
+    fn native_text_opens_match_chat_without_a_source_button_and_escape_closes_it() {
+        let mut app = App::new();
+        app.insert_resource(State::new(AppState::Playing))
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<InputFocus>()
+            .init_resource::<NativeTextDialog>()
+            .init_resource::<EditorKeys>()
+            .add_message::<TextSubmitted>()
+            .add_message::<OpenTextEditor>()
+            .add_systems(PreUpdate, capture_editor_keys)
+            .add_systems(Update, edit);
+        app.world_mut()
+            .write_message(OpenTextEditor(TextField::MatchTeamChat));
+        app.update();
+        let pending = app
+            .world()
+            .resource::<NativeTextDialog>()
+            .pending
+            .as_ref()
+            .unwrap();
+        assert_eq!(pending.field, TextField::MatchTeamChat);
+        assert_eq!(pending.source, None);
+        let root = pending.root;
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Escape);
+        app.update();
+        assert!(!app.world().resource::<NativeTextDialog>().is_open());
+        assert!(app.world().get_entity(root).is_err());
+        assert!(app.world().resource::<Messages<TextSubmitted>>().is_empty());
     }
 
     #[test]

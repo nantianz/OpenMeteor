@@ -176,6 +176,14 @@ const ORIGIN_COMMANDS: &[&str] = &[
     "record",
     "replay",
     "replays",
+    #[cfg(not(target_arch = "wasm32"))]
+    "say",
+    #[cfg(not(target_arch = "wasm32"))]
+    "quickchat",
+    #[cfg(not(target_arch = "wasm32"))]
+    "kick",
+    #[cfg(not(target_arch = "wasm32"))]
+    "ban",
     "quit",
 ];
 
@@ -1919,6 +1927,8 @@ struct ExecEnv<'w> {
 #[derive(bevy::ecs::system::SystemParam)]
 struct ExecWorld<'w> {
     net: Option<Res<'w, crate::plugins::network_plugin::NetState>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    net_tx: Option<Res<'w, crate::plugins::network_plugin::NetTx>>,
     request: Res<'w, LaunchRequest>,
     room: Res<'w, RoomState>,
     keymap: Res<'w, Keymap>,
@@ -2003,6 +2013,73 @@ fn debug_exec_queue(
                         ConsoleTone::Ok,
                     ),
                     Err(error) => env.log.print(error, ConsoleTone::Err),
+                }
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            "say" | "quickchat" | "kick" | "ban" => {
+                let Some((net, tx)) =
+                    world
+                        .net
+                        .as_deref()
+                        .zip(world.net_tx.as_deref())
+                        .filter(|(net, _)| {
+                            net.is_stock_udp()
+                                && net.status == crate::plugins::network_plugin::NetStatus::InRoom
+                        })
+                else {
+                    env.log.print("此命令用于原版 UDP 对局", ConsoleTone::Err);
+                    continue;
+                };
+                match name.as_str() {
+                    "say" => {
+                        let text = line
+                            .trim_start()
+                            .split_once(char::is_whitespace)
+                            .map_or("", |(_, text)| text.trim());
+                        if !text.is_empty() {
+                            tx.send_control(meteor_network::protocol::Message::ChatSend {
+                                text: text.into(),
+                            });
+                        } else {
+                            env.log.print("用法 say <消息>", ConsoleTone::Info);
+                        }
+                    }
+                    "quickchat" => {
+                        let chat = if let [category, index] = args {
+                            category.parse().ok().zip(index.parse().ok()).map(
+                                |(category, index)| {
+                                    meteor_network::stock_protocol::StockQuickChat {
+                                        category,
+                                        index,
+                                    }
+                                },
+                            )
+                        } else {
+                            None
+                        };
+                        if let Some(chat) = chat.filter(|chat| chat.message_id().is_some()) {
+                            tx.send_stock_quick_chat(chat);
+                        } else {
+                            env.log.print(
+                                "用法 quickchat <分类 36–39> <从 0 开始的索引>",
+                                ConsoleTone::Info,
+                            );
+                        }
+                    }
+                    "kick" | "ban" => {
+                        if !net.is_stock_host() {
+                            env.log.print("只有房主可以管理房间成员", ConsoleTone::Err);
+                        } else if let Some(id) = args
+                            .first()
+                            .and_then(|id| id.strip_prefix("stock-").unwrap_or(id).parse().ok())
+                        {
+                            tx.send_stock_expel(id, name == "ban");
+                        } else {
+                            env.log
+                                .print("用法 kick <角色 ID> 或 ban <角色 ID>", ConsoleTone::Info);
+                        }
+                    }
+                    _ => unreachable!(),
                 }
             }
             "help" => help(args, &env.names, &mut env.log),

@@ -1,11 +1,15 @@
-use meteor_asset::des::{StageDescription, StageObject};
-use meteor_asset::res::MeteorRes;
+use meteor_asset::{
+    des::{StageDescription, StageObject},
+    res::MeteorRes,
+};
 use meteor_network::protocol::SceneOp;
-use meteor_network::stock_protocol::{stock_scene_item_option_bit, StockSceneObjectState};
+use meteor_network::stock_protocol::stock_scene_item_option_bit;
+use meteor_network::stock_protocol::StockSceneObjectState;
 use std::collections::HashMap;
 
-pub(super) struct StockSceneObjectMap {
+pub(crate) struct StockSceneObjectMap {
     wire_to_script: Vec<Option<u32>>,
+    #[cfg(any(test, not(target_arch = "wasm32")))]
     script_to_wire: Vec<Option<u32>>,
 }
 
@@ -29,41 +33,42 @@ impl StockSceneObjectMap {
             .filter(|object| (3..=7).contains(&authored_object_type(object)))
             .count();
         let mut wire_to_script = vec![None; static_count];
-        let script_to_wire = stage
-            .dummies
-            .iter()
-            .enumerate()
-            .map(|(script, object)| {
-                let kind = authored_object_type(object);
-                let admitted = if (10..=15).contains(&kind) {
-                    object
-                        .model
-                        .as_ref()
-                        .and_then(|model| item_bits.get(&model.to_ascii_lowercase()))
-                        .copied()
-                        .flatten()
-                        .is_none_or(|bit| room_flags & bit != 0)
-                } else {
-                    object.model.is_none() && object.effect.is_some()
-                };
-                admitted.then(|| {
-                    let wire = wire_to_script.len() as u32;
-                    wire_to_script.push(Some(script as u32));
-                    wire
-                })
-            })
-            .collect();
+        #[cfg(any(test, not(target_arch = "wasm32")))]
+        let mut script_to_wire = vec![None; stage.dummies.len()];
+        for (script, object) in stage.dummies.iter().enumerate() {
+            let kind = authored_object_type(object);
+            let admitted = if (10..=15).contains(&kind) {
+                object
+                    .model
+                    .as_ref()
+                    .and_then(|model| item_bits.get(&model.to_ascii_lowercase()))
+                    .copied()
+                    .flatten()
+                    .is_none_or(|bit| room_flags & bit != 0)
+            } else {
+                object.model.is_none() && object.effect.is_some()
+            };
+            if admitted {
+                #[cfg(any(test, not(target_arch = "wasm32")))]
+                {
+                    script_to_wire[script] = Some(wire_to_script.len() as u32);
+                }
+                wire_to_script.push(Some(script as u32));
+            }
+        }
         Self {
             wire_to_script,
+            #[cfg(any(test, not(target_arch = "wasm32")))]
             script_to_wire,
         }
     }
 
+    #[cfg(any(test, not(target_arch = "wasm32")))]
     pub(super) fn wire_index(&self, script: u32) -> Option<u32> {
         self.script_to_wire.get(script as usize).copied().flatten()
     }
 
-    pub(super) fn script_index(&self, wire: u32) -> Option<u32> {
+    pub(crate) fn script_index(&self, wire: u32) -> Option<u32> {
         self.wire_to_script.get(wire as usize).copied().flatten()
     }
 }
@@ -99,7 +104,7 @@ fn authored_object_type(object: &StageObject) -> u8 {
     }
 }
 
-pub(super) fn snapshot_ops(object: StockSceneObjectState, reference: u32) -> Vec<SceneOp> {
+pub(crate) fn snapshot_ops(object: StockSceneObjectState, reference: u32) -> Vec<SceneOp> {
     let set = |field: &str, args: Vec<serde_json::Value>| SceneOp {
         kind: "set".into(),
         reference: reference.into(),

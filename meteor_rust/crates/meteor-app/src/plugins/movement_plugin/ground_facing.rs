@@ -3,7 +3,6 @@ use super::*;
 #[allow(clippy::type_complexity)]
 pub(crate) fn finalize_ground_lock_facing(
     active: Option<Res<super::super::fighter_frame::ActiveFighter>>,
-    playback: Option<Res<crate::plugins::replay_plugin::MrcPlayback>>,
     mut lock: ResMut<LockOnController>,
     mut basis: ResMut<CameraBasis>,
     mut players: Query<(Entity, &Transform, &mut MotionState, &mut FighterAir), With<LocalFighter>>,
@@ -13,9 +12,7 @@ pub(crate) fn finalize_ground_lock_facing(
         if !super::super::fighter_frame::accepts(active.as_deref(), entity) {
             continue;
         }
-        if !std::mem::take(&mut air.ground_lock_facing_pending)
-            || playback.as_ref().is_some_and(|p| p.active)
-        {
+        if !std::mem::take(&mut air.ground_lock_facing_pending) {
             continue;
         }
         let Some((target, target_motion)) = lock.lock_entity.and_then(|e| targets.get(e).ok())

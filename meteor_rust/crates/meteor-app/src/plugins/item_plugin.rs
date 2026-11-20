@@ -475,7 +475,7 @@ fn weapon_respawn_seconds(model: &str) -> Option<f32> {
     })
 }
 
-fn store_picked_weapon(fighter: &mut Fighter, weapon: u8, variant: u8) -> Option<usize> {
+pub(crate) fn store_picked_weapon(fighter: &mut Fighter, weapon: u8, variant: u8) -> Option<usize> {
     if fighter
         .weapon_slots
         .iter()
@@ -888,16 +888,24 @@ fn clear_prop_hit_gate(mut gate: ResMut<PropHitGate>) {
     gate.clear();
 }
 
-fn offline_item_authority_enabled(net: Res<crate::plugins::network_plugin::NetState>) -> bool {
+fn offline_item_authority_enabled(
+    net: Res<crate::plugins::network_plugin::NetState>,
+    replay: Option<Res<super::replay_plugin::MrcPlayback>>,
+) -> bool {
     net.status != crate::plugins::network_plugin::NetStatus::InRoom
+        && !replay.is_some_and(|replay| replay.active && replay.stock_scene_coordinates())
 }
 
 fn network_item_authority_enabled(net: Res<crate::plugins::network_plugin::NetState>) -> bool {
     net.status == crate::plugins::network_plugin::NetStatus::InRoom && !net.is_stock_udp()
 }
 
-fn stock_item_authority_enabled(net: Res<crate::plugins::network_plugin::NetState>) -> bool {
+fn stock_item_authority_enabled(
+    net: Res<crate::plugins::network_plugin::NetState>,
+    replay: Option<Res<super::replay_plugin::MrcPlayback>>,
+) -> bool {
     net.status == crate::plugins::network_plugin::NetStatus::InRoom && net.is_stock_udp()
+        || replay.is_some_and(|replay| replay.active)
 }
 
 fn local_item_timers_enabled(net: Res<crate::plugins::network_plugin::NetState>) -> bool {
@@ -1481,7 +1489,10 @@ pub(crate) fn apply_stock_scene_item_pickups(
     remote_vitals: Query<&super::network_plugin::RemoteVitalsStatus>,
     mut remote_buffs: Local<HashMap<Entity, ItemBuffs>>,
     item_views: Query<(Entity, &StockSceneItemView)>,
+    replay: Option<Res<super::replay_plugin::MrcPlayback>>,
 ) {
+    let replay = replay.is_some_and(|replay| replay.active);
+
     let dt = super::simulation_dt(
         frame_clock.as_deref(),
         time.as_deref().map_or(0.0, Time::delta_secs),
@@ -1565,34 +1576,53 @@ pub(crate) fn apply_stock_scene_item_pickups(
             continue;
         };
         let player_id = format!("stock-{}", pickup.actor_id);
-        net.dynamic_weapon_drops
-            .remove(&format!("D_wpStock{}", pickup.record_id));
         let script_character_id = net
             .members
             .iter()
             .position(|member| member.player_id == player_id)
             .map_or(-1.0, |index| index as f64);
-        let prop_entity = views
-            .iter()
-            .find_map(|(entity, view)| (view.record_id == pickup.record_id).then_some(*entity))
-            .or_else(|| {
-                pickup
-                    .position
-                    .and_then(|position| nearest_stock_prop(&mut props, model, position, false))
-            });
+        let prop_entity = if let Some(reference) = pickup.scene_reference {
+            script
+                .script()
+                .and_then(|runtime| runtime.host().instance(reference as usize))
+                .and_then(|instance| {
+                    props.iter_mut().find_map(|(entity, prop, _, _)| {
+                        prop.name
+                            .eq_ignore_ascii_case(&instance.name)
+                            .then_some(entity)
+                    })
+                })
+        } else {
+            net.dynamic_weapon_drops
+                .remove(&format!("D_wpStock{}", pickup.record_id));
+            views
+                .iter()
+                .find_map(|(entity, view)| (view.record_id == pickup.record_id).then_some(*entity))
+                .or_else(|| {
+                    pickup
+                        .position
+                        .and_then(|position| nearest_stock_prop(&mut props, model, position, false))
+                })
+        };
         if let Some(entity) = prop_entity {
-            let current = views
-                .get(&entity)
-                .is_none_or(|view| view.record_id == pickup.record_id);
+            let current = pickup.scene_reference.is_some()
+                || views
+                    .get(&entity)
+                    .is_none_or(|view| view.record_id == pickup.record_id);
             if let Ok((_, prop, _, _)) = props.get_mut(entity) {
                 let name = prop.name.clone();
                 if current {
+                    let record_id = if pickup.scene_reference.is_some() {
+                        views.get(&entity).map_or(u32::MAX, |view| view.record_id)
+                    } else {
+                        pickup.record_id
+                    };
                     set_stock_prop_availability(
                         &mut commands,
                         &mut props,
                         &mut views,
                         &name,
-                        pickup.record_id,
+                        record_id,
                         false,
                     );
                 }
@@ -1605,20 +1635,21 @@ pub(crate) fn apply_stock_scene_item_pickups(
                                 meteor_scene::scene_script_runtime::PstValue::Num(value),
                             );
                         }
-                        if let Err(error) = runtime.call_item(
-                            &name,
-                            "OnPickUp",
-                            &[meteor_scene::scene_script_runtime::PstValue::Num(
-                                script_character_id,
-                            )],
-                        ) {
-                            warn!("stock item OnPickUp failed: {error}");
+                        if !replay {
+                            if let Err(error) =
+                                runtime.item_picked_up(&name, script_character_id as i64, None)
+                            {
+                                warn!("stock item OnPickUp failed: {error}");
+                            }
                         }
                     }
                 }
             }
         }
 
+        if replay {
+            continue;
+        }
         for (entity, local, remote, mut health, mut qi, mut fighter, mut worn, mut concealment) in
             &mut fighters
         {
@@ -1877,13 +1908,7 @@ fn apply_network_item_claims(
                 .position(|member| member.player_id == player_id)
                 .map_or(-1.0, |index| index as f64);
             if let Some(runtime) = script.script_mut() {
-                if let Err(error) = runtime.call_item(
-                    &reference,
-                    "OnPickUp",
-                    &[meteor_scene::scene_script_runtime::PstValue::Num(
-                        character_id,
-                    )],
-                ) {
+                if let Err(error) = runtime.item_picked_up(&reference, character_id as i64, None) {
                     warn!("script callItem OnPickUp failed: {error}");
                 }
             }
@@ -2449,6 +2474,7 @@ mod tests {
                     record_id: 44,
                     category: 2,
                     item_id: 2,
+                    scene_reference: None,
                     position: None,
                 });
             app.update();
@@ -2643,6 +2669,7 @@ mod tests {
                             record_id: 11,
                             category: 2,
                             item_id,
+                            scene_reference: None,
                             position: Some([5.0, 2.0, 7.0]),
                         });
                     app.world_mut()
@@ -2895,6 +2922,7 @@ mod tests {
                         record_id: 44,
                         category: 2,
                         item_id: 1,
+                        scene_reference: None,
                         position: Some([1.0, 2.0, 3.0]),
                     },
                 ],
@@ -2967,6 +2995,7 @@ mod tests {
                     record_id,
                     category: 2,
                     item_id,
+                    scene_reference: None,
                     position: None,
                 }
             }));

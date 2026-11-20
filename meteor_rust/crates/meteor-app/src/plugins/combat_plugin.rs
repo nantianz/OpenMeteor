@@ -13484,6 +13484,7 @@ mod tests {
 
         fn press_binding(&mut self, binding: crate::app_state::InputBinding) {
             match binding {
+                crate::app_state::InputBinding::Unbound => {}
                 crate::app_state::InputBinding::Key(code) => self.press_key(code),
                 crate::app_state::InputBinding::Mouse(button) => self.press_mouse(button),
             }
@@ -13491,6 +13492,7 @@ mod tests {
 
         fn release_binding(&mut self, binding: crate::app_state::InputBinding) {
             match binding {
+                crate::app_state::InputBinding::Unbound => {}
                 crate::app_state::InputBinding::Key(code) => self.release_key(code),
                 crate::app_state::InputBinding::Mouse(button) => self.release_mouse(button),
             }
@@ -13523,6 +13525,7 @@ mod tests {
             action: Option<crate::plugins::input_plugin::SyntheticAction>,
         ) {
             match binding {
+                crate::app_state::InputBinding::Unbound => {}
                 crate::app_state::InputBinding::Key(key) => {
                     let mut input = self.app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
                     if pressed {
@@ -17950,6 +17953,334 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "original-assets")]
+    #[cfg(not(target_arch = "wasm32"))]
+    struct MrcDriftAudit {
+        center: [f32; 3],
+        local_slot: u16,
+
+        anchors: Vec<serde_json::Value>,
+        frames: Vec<serde_json::Value>,
+        transitions: Vec<serde_json::Value>,
+        remote: Vec<(f32, u16, Vec3, u16)>,
+    }
+
+    #[cfg(feature = "original-assets")]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn run_mrc_drift_audit(
+        file: &str,
+        fps: u32,
+        until: Option<f32>,
+        with_lock: bool,
+    ) -> MrcDriftAudit {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let wp = std::fs::read_to_string(root.join("origin_res/Level/sn06.wp")).unwrap();
+        let center = meteor_scene::stage_loader::get_stage_center("sn06", Some(&wp));
+        let mesh = landing_roof_tests::original_stage_mesh("sn06");
+        let to_root = |source: Vec3| {
+            Vec3::new(
+                (source.x - center[0]) * meteor_core::MODEL_SCALE,
+                (source.z - center[2]) * meteor_core::MODEL_SCALE,
+                (center[1] - source.y) * meteor_core::MODEL_SCALE,
+            )
+        };
+        let doc = meteor_asset::mrc::decode_mrc(
+            &std::fs::read(root.join("mrcs/tests").join(file)).unwrap(),
+        )
+        .unwrap();
+        let local_slot = u32::from_le_bytes(doc.state[4..8].try_into().unwrap()) as u16;
+        let weapon_item = u32::from_le_bytes(doc.state[..4].try_into().unwrap()) as i64;
+        let (weapon, _) =
+            crate::plugins::character_plugin::weapon_slot_from_item(weapon_item).unwrap_or((12, 0));
+        let (mut h, _target, _hits) = spawn_local_stock_hit_harness_with_order(weapon, true);
+        h.app.insert_resource(State::new(AppState::Playing));
+        let models: Vec<_> = h
+            .app
+            .world_mut()
+            .query::<(Entity, &FighterModel)>()
+            .iter(h.app.world())
+            .map(|(entity, _)| entity)
+            .collect();
+        for model in models {
+            h.app.world_mut().despawn(model);
+        }
+        let p0 = crate::plugins::character_plugin::load_character_asset_for_test(
+            std::slice::from_ref(&root.join("origin_res")),
+            "p0",
+        )
+        .expect("original p0");
+        h.app
+            .world_mut()
+            .resource_mut::<CharacterAssetsSet>()
+            .0
+            .insert("p0".into(), p0);
+        h.app
+            .world_mut()
+            .get_mut::<Fighter>(h.fighter)
+            .unwrap()
+            .character_id = 0;
+        h.app
+            .world_mut()
+            .entity_mut(h.fighter)
+            .insert(crate::components::fighter::VisualRootPin::default());
+        crate::plugins::character_plugin::spawn_fighter_model_for_test(
+            h.app.world_mut(),
+            h.fighter,
+        );
+        crate::plugins::character_plugin::install_crowd_animation_for_test(&mut h.app);
+
+        let first = &doc.queue_d[0];
+        h.app
+            .world_mut()
+            .get_mut::<Transform>(h.fighter)
+            .unwrap()
+            .translation = to_root(Vec3::new(
+            f32::from_bits(first.a),
+            f32::from_bits(first.b),
+            f32::from_bits(first.c),
+        ));
+        let queue_d = doc.queue_d.clone();
+        let remote: Vec<_> = doc
+            .queue_a
+            .iter()
+            .filter(|e| e.id == 2)
+            .flat_map(|e| {
+                let time = e.time;
+                e.blob
+                    .chunks_exact(16)
+                    .filter_map(move |chunk| {
+                        let actor = u16::from_le_bytes([chunk[0], chunk[1]]);
+                        (actor != local_slot && actor != 0)
+                            .then(|| {
+                                let state =
+                                    meteor_network::role_state::decode_event2_state(&chunk[2..])
+                                        .ok()?;
+                                let state = meteor_network::stock_protocol::StockSceneFrame(center)
+                                    .to_scene(state);
+                                Some((
+                                    time,
+                                    actor,
+                                    Vec3::new(state.position.x, state.position.y, state.position.z),
+                                    state.state_words.pose_id,
+                                ))
+                            })
+                            .flatten()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let duration = until.unwrap_or(doc.duration()).min(doc.duration());
+        h.replace_stage_mesh(mesh);
+        h.app
+            .insert_resource(meteor_scene::stage_loader::parse_waypoint_graph(
+                &wp, center,
+            ));
+        h.app
+            .add_plugins(crate::plugins::replay_plugin::ReplayPlugin);
+        h.app
+            .insert_resource(crate::plugins::replay_plugin::MrcPlayback {
+                active: true,
+                doc: Some(doc),
+                ..default()
+            });
+        if with_lock {
+            h.app.insert_resource(NetState::default());
+            h.app
+                .world_mut()
+                .entity_mut(h.fighter)
+                .insert(HeadTrackState::default());
+            configure_lock_updates(&mut h.app);
+        }
+        let dt = 1.0 / fps as f32;
+        let mut next_d = 0;
+        let mut anchors = Vec::new();
+        let mut frames = Vec::new();
+        let mut previous_pose = h.pose_id();
+        let mut transitions = Vec::new();
+        for _ in 0..(duration * fps as f32).ceil() as usize {
+            let now = h
+                .app
+                .world()
+                .resource::<crate::plugins::replay_plugin::MrcPlayback>()
+                .elapsed
+                + dt;
+
+            let mut due = None;
+            while next_d < queue_d.len() && queue_d[next_d].time <= now {
+                due = Some(next_d);
+                next_d += 1;
+            }
+            if let Some(index) = due {
+                let entry = &queue_d[index];
+                let expected = to_root(Vec3::new(
+                    f32::from_bits(entry.a),
+                    f32::from_bits(entry.b),
+                    f32::from_bits(entry.c),
+                ));
+                let gap = if index == 0 {
+                    0.0
+                } else {
+                    entry.time - queue_d[index - 1].time
+                };
+                let actual = h.position();
+                anchors.push(serde_json::json!({
+                    "time": entry.time, "gap": gap, "expected": expected.to_array(),
+                    "actual": actual.to_array(), "error": actual.distance(expected),
+                    "planarError": Vec2::new(actual.x - expected.x, actual.z - expected.z).length(),
+                    "pose": h.pose_id(),
+                }));
+            }
+            h.step_duration(std::time::Duration::from_nanos(1_000_000_000 / fps as u64));
+            let time = h
+                .app
+                .world()
+                .resource::<crate::plugins::replay_plugin::MrcPlayback>()
+                .elapsed;
+            let pose = h.pose_id();
+            if pose != previous_pose {
+                transitions.push(serde_json::json!({"time": time, "pose": pose}));
+                previous_pose = pose;
+            }
+            let locked = h
+                .app
+                .world()
+                .get_resource::<LockOnController>()
+                .is_some_and(|lock| lock.lock_entity.is_some());
+            let rust_remote: Vec<_> = h.app.world_mut()
+                .query_filtered::<(&crate::plugins::replay_plugin::MrcRemoteFighter, &Transform), Without<LocalFighter>>()
+                .iter(h.app.world())
+                .map(|(remote, transform)| serde_json::json!({"actor": remote.actor_id, "p": transform.translation.to_array()}))
+                .collect();
+            let facing = h
+                .app
+                .world()
+                .get::<MotionState>(h.fighter)
+                .map_or(0.0, |motion| motion.facing);
+            frames.push(
+                serde_json::json!({"time": time, "p": h.position().to_array(), "pose": pose,
+                "facing": facing, "locked": locked, "rustRemote": rust_remote}),
+            );
+        }
+        MrcDriftAudit {
+            center,
+            local_slot,
+            anchors,
+            frames,
+            transitions,
+            remote,
+        }
+    }
+
+    #[cfg(feature = "original-assets")]
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "writes local drift diagnostics for mrcs/tests under analysis/"]
+    fn diagnose_mrc_local_drift_between_queue_d_samples() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let output = root.join("analysis/mrc-moves-20260928");
+        let files: Vec<String> = std::env::var("METEOR_MRC_DRIFT_FILES")
+            .map(|list| list.split(',').map(str::to_owned).collect())
+            .unwrap_or_else(|_| vec!["忍烧.mrc".into()]);
+        let fps: u32 = std::env::var("METEOR_MRC_DRIFT_FPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(120);
+        let with_lock = std::env::var_os("METEOR_MRC_DRIFT_NO_LOCK").is_none();
+        for file in files {
+            let audit = run_mrc_drift_audit(&file, fps, None, with_lock);
+            let worst = audit
+                .anchors
+                .iter()
+                .map(|a| a["error"].as_f64().unwrap())
+                .fold(0.0_f64, f64::max);
+            eprintln!(
+                "{file} fps={fps}: D anchors={} worst pre-snap error={worst:.3} world",
+                audit.anchors.len()
+            );
+            let stem = file.trim_end_matches(".mrc");
+            std::fs::write(
+                output.join(format!("local-drift-{stem}-{fps}.json")),
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "file": file, "fps": fps, "center": audit.center, "localSlot": audit.local_slot,
+                    "anchors": audit.anchors, "transitions": audit.transitions, "frames": audit.frames,
+                    "remote": audit.remote.iter().map(|(t, a, p, pose)| serde_json::json!({"time": t, "actor": a, "p": p.to_array(), "pose": pose})).collect::<Vec<_>>(),
+                })).unwrap(),
+            ).unwrap();
+        }
+    }
+
+    #[cfg(feature = "original-assets")]
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn original_ninja_mrc_locked_local_faces_the_remote_without_queue_e() {
+        let audit = run_mrc_drift_audit("忍烧.mrc", 120, Some(36.0), true);
+        let frame_at = |t: f32| {
+            audit
+                .frames
+                .iter()
+                .min_by(|a, b| {
+                    (a["time"].as_f64().unwrap() - t as f64)
+                        .abs()
+                        .total_cmp(&(b["time"].as_f64().unwrap() - t as f64).abs())
+                })
+                .unwrap()
+        };
+
+        for t in [8.5_f32, 9.0, 9.5, 10.0, 11.0] {
+            let frame = frame_at(t);
+            assert!(
+                frame["locked"].as_bool().unwrap(),
+                "lock lost at {t}: {frame}"
+            );
+            let p = frame["p"].as_array().unwrap();
+            let r = frame["rustRemote"][0]["p"].as_array().unwrap();
+            let bearing = (r[0].as_f64().unwrap() - p[0].as_f64().unwrap())
+                .atan2(r[2].as_f64().unwrap() - p[2].as_f64().unwrap());
+            let facing = frame["facing"].as_f64().unwrap();
+            let delta = ((facing - bearing + std::f64::consts::PI)
+                .rem_euclid(std::f64::consts::TAU)
+                - std::f64::consts::PI)
+                .abs();
+            assert!(
+                delta < 0.35,
+                "at {t}s facing {facing:.2} vs bearing {bearing:.2} (delta {delta:.2})"
+            );
+        }
+
+        let anchor = audit
+            .anchors
+            .iter()
+            .find(|a| (a["time"].as_f64().unwrap() - 11.558).abs() < 0.01)
+            .unwrap();
+        assert!(
+            anchor["error"].as_f64().unwrap() < 8.0,
+            "11.558 s pre-snap error: {anchor}"
+        );
+
+        let anchor_at = |t: f64| {
+            audit
+                .anchors
+                .iter()
+                .find(|a| (a["time"].as_f64().unwrap() - t).abs() < 0.01)
+                .unwrap()
+        };
+        let (a0, a1) = (anchor_at(34.389), anchor_at(35.136));
+        let e0 = a0["expected"].as_array().unwrap();
+        let e1 = a1["expected"].as_array().unwrap();
+        let actual = a1["actual"].as_array().unwrap();
+        let recorded = (e1[0].as_f64().unwrap() - e0[0].as_f64().unwrap())
+            .atan2(e1[2].as_f64().unwrap() - e0[2].as_f64().unwrap());
+        let rust = (actual[0].as_f64().unwrap() - e0[0].as_f64().unwrap())
+            .atan2(actual[2].as_f64().unwrap() - e0[2].as_f64().unwrap());
+        let delta = ((rust - recorded + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU)
+            - std::f64::consts::PI)
+            .abs();
+        assert!(
+            delta < 0.45,
+            "466 dash direction: rust {rust:.2} vs recorded {recorded:.2} ({delta:.2} rad)"
+        );
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn mrc_playback_does_not_resolve_a_second_melee_hit() {
@@ -20610,6 +20941,7 @@ mod tests {
             assert_eq!(h.state(), FighterState::Fake);
 
             match keys.guard {
+                crate::app_state::InputBinding::Unbound => {}
                 crate::app_state::InputBinding::Key(code) => {
                     h.app
                         .world_mut()
@@ -21426,6 +21758,7 @@ mod tests {
         guarded_in_air
     }
 
+    #[cfg(feature = "original-assets")]
     #[test]
     fn production_air_attack_held_guard_releases_after_landing() {
         let mut failures = Vec::new();
@@ -21465,6 +21798,7 @@ mod tests {
         assert!(failures.is_empty(), "{failures:#?}");
     }
 
+    #[cfg(feature = "original-assets")]
     #[test]
     fn production_air_attack_guard_blocks_attack_until_release_and_recovers() {
         let mut failures = Vec::new();
@@ -22080,6 +22414,7 @@ mod tests {
     include!("combat_tests/prop5_speed.rs");
     include!("combat_tests/dagger_double_stomp.rs");
     include!("combat_tests/authored_motion_audit.rs");
+    include!("combat_tests/low_air_a.rs");
     include!("combat_tests/mrc_small_jump.rs");
     mod lightfoot_mrc_tests {
         use super::*;
@@ -22324,12 +22659,9 @@ mod tests {
             let mut samples = Vec::new();
             let mut expected_carry = entry_carry_z;
             let mut expected_travel = 0.0;
-            for tick in 0..12 {
-                let decay = if attack_delay == 0 && tick == 0 {
-                    9.0
-                } else {
-                    0.2
-                };
+
+            let decay = if attack_delay == 0 { 9.0 } else { 0.2 };
+            for _ in 0..12 {
                 expected_carry *= 1.0 - decay * HARNESS_DT;
                 expected_travel += expected_carry * HARNESS_DT;
                 harness.step();

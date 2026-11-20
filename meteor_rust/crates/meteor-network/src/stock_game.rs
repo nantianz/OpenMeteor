@@ -7,6 +7,7 @@ use crate::role_state::{RoleState, RoleVec3, ROLE_DOWNLINK_HZ, ROLE_UPLINK_HZ};
 use crate::stock_file_transfer::{
     Frame as FileFrame, Receiver as FileReceiver, Sender as FileSender,
 };
+use crate::stock_protocol as stock;
 use crate::stock_protocol::{
     decode_role_state_event, decode_role_state_request, decode_stock_roster,
     encode_role_state_event, encode_role_state_request, stock_base_weapon_item_id,
@@ -341,6 +342,16 @@ fn decode_player_name(payload: &[u8]) -> Option<StockGameEvent> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum StockGameEvent {
+    Chat(stock::StockChatEvent),
+    TeamChat(stock::StockChatEvent),
+    QuickChat(stock::StockQuickChatEvent),
+    EntryPrepared(u32),
+    PlayerExpelled(u32),
+    PlayerRestricted(u32),
+    ForcedDeath(u32),
+    TargetClear(stock::StockTargetClearEvent),
+    CarriedItem(stock::StockCarriedItemEvent),
+    PoseStart(stock::StockPoseChainEvent),
     BattleRules(meteor_combat::battle_rules::BattleRules),
     PlayerName {
         actor_id: u32,
@@ -394,6 +405,7 @@ pub enum StockGameEvent {
         throw_id: u32,
         record_id: u32,
     },
+    WeaponExpired(u32),
     SceneOps(StockSceneOpsEvent),
     SceneState(StockSceneStateEvent),
     SceneTransfer(StockSceneTransferEvent),
@@ -431,6 +443,13 @@ struct PendingLocalWeaponDrop {
     copy_only: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct UnpairedWeaponNotice {
+    throw: StockWeaponThrowEvent,
+    from_object: bool,
+    expires_at_ms: u64,
+}
+
 pub struct StockGameClient {
     last_latency_request_ms: Option<u64>,
     rules_transfer: Option<FileReceiver<Vec<u8>>>,
@@ -458,7 +477,8 @@ pub struct StockGameClient {
     weapons: HashMap<u32, u32>,
     scene_items: HashMap<u32, StockSceneItemRecord>,
     pending_weapon_drops: Vec<PendingLocalWeaponDrop>,
-    observed_weapon_throws: VecDeque<StockWeaponThrowEvent>,
+    observed_weapon_throws: VecDeque<(StockWeaponThrowEvent, u64)>,
+    unpaired_weapon_notices: VecDeque<UnpairedWeaponNotice>,
     next_weapon_throw_id: u32,
     dead_actors: HashSet<u32>,
     round_restart_at_ms: Option<u64>,
@@ -503,6 +523,7 @@ impl StockGameClient {
             scene_items: HashMap::new(),
             pending_weapon_drops: Vec::new(),
             observed_weapon_throws: VecDeque::new(),
+            unpaired_weapon_notices: VecDeque::new(),
             next_weapon_throw_id: 1,
             dead_actors: HashSet::new(),
             round_restart_at_ms: None,
@@ -634,6 +655,7 @@ impl StockGameClient {
             self.vips = [None, None];
             self.pending_weapon_drops.clear();
             self.observed_weapon_throws.clear();
+            self.unpaired_weapon_notices.clear();
             events.push(StockGameEvent::RoundRestart);
             events.extend(
                 self.pending_spawn_pads
@@ -865,8 +887,15 @@ impl StockGameClient {
                         self.camps.remove(&left.actor_id);
                         self.states.remove(&left.actor_id);
                         self.weapons.remove(&left.actor_id);
-                        self.observed_weapon_throws
-                            .retain(|throw| throw.actor_id != left.actor_id);
+                        self.observed_weapon_throws.retain(|(throw, _)| {
+                            if throw.actor_id != left.actor_id {
+                                return true;
+                            }
+                            events.push(StockGameEvent::WeaponExpired(throw.throw_id));
+                            false
+                        });
+                        self.unpaired_weapon_notices
+                            .retain(|notice| notice.throw.actor_id != left.actor_id);
                         self.dead_actors.remove(&left.actor_id);
                         for vip in &mut self.vips {
                             if *vip == Some(left.actor_id) {
@@ -926,6 +955,65 @@ impl StockGameClient {
                             crate::stock_protocol::StockPoseChainEvent::decode(&packet.payload)?,
                         ));
                     }
+                    stock::STOCK_EVENT_CHAT | stock::STOCK_EVENT_TEAM_CHAT => {
+                        if let Ok(chat) = stock::StockChatEvent::decode(&packet.payload) {
+                            events.push(if packet.opcode == stock::STOCK_EVENT_TEAM_CHAT {
+                                StockGameEvent::TeamChat(chat)
+                            } else {
+                                StockGameEvent::Chat(chat)
+                            });
+                        }
+                    }
+                    stock::STOCK_EVENT_QUICK_CHAT => {
+                        if let Ok(chat) = stock::StockQuickChatEvent::decode(&packet.payload) {
+                            events.push(StockGameEvent::QuickChat(chat));
+                        }
+                    }
+                    stock::STOCK_EVENT_ENTRY_PREPARED
+                    | stock::STOCK_EVENT_PLAYER_EXPELLED
+                    | stock::STOCK_EVENT_PLAYER_RESTRICTED
+                    | stock::STOCK_EVENT_FORCED_DEATH => {
+                        if let Ok(actor) = StockRoleLeftEvent::decode(&packet.payload) {
+                            let id = actor.actor_id;
+                            match packet.opcode {
+                                stock::STOCK_EVENT_ENTRY_PREPARED => {
+                                    events.push(StockGameEvent::EntryPrepared(id))
+                                }
+                                stock::STOCK_EVENT_PLAYER_EXPELLED => {
+                                    events.push(StockGameEvent::PlayerExpelled(id))
+                                }
+                                stock::STOCK_EVENT_PLAYER_RESTRICTED => {
+                                    events.push(StockGameEvent::PlayerRestricted(id))
+                                }
+                                stock::STOCK_EVENT_FORCED_DEATH if self.dead_actors.insert(id) => {
+                                    events.push(StockGameEvent::ForcedDeath(id));
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    stock::STOCK_EVENT_TARGET_CLEAR => {
+                        if let Ok(target) = stock::StockTargetClearEvent::decode(&packet.payload) {
+                            events.push(StockGameEvent::TargetClear(target));
+                        }
+                    }
+                    stock::STOCK_EVENT_CARRIED_ITEM => {
+                        if let Ok(item) = stock::StockCarriedItemEvent::decode(&packet.payload) {
+                            events.push(StockGameEvent::CarriedItem(item));
+                        }
+                    }
+                    stock::STOCK_EVENT_POSE_START => {
+                        if let Ok(pose) = stock::StockPoseChainEvent::decode(&packet.payload) {
+                            events.push(StockGameEvent::PoseStart(pose));
+                        }
+                    }
+                    STOCK_EVENT_WEAPON_OBJECT => {
+                        if let Ok(object) = stock::StockWeaponObjectEvent::decode(&packet.payload) {
+                            if let Some(throw) = self.weapon_throw_from_object(object, now_ms) {
+                                events.push(StockGameEvent::WeaponThrown(throw));
+                            }
+                        }
+                    }
                     STOCK_EVENT_BE_HIT | STOCK_EVENT_GUARD_HIT => {
                         events.push(StockGameEvent::HitReaction {
                             guarded: packet.opcode == STOCK_EVENT_GUARD_HIT,
@@ -970,13 +1058,17 @@ impl StockGameClient {
                         let mut ordinary = Vec::new();
                         for record in records {
                             if dropped && record.category == 1 {
-                                if let Some(index) = self
-                                    .observed_weapon_throws
-                                    .iter()
-                                    .position(|throw| throw.item_id == record.item_id)
-                                {
-                                    if let Some(settled) = self.observed_weapon_throws.remove(index)
+                                if let Some(index) = self.observed_weapon_throws.iter().position(
+                                    |(throw, expires)| {
+                                        throw.item_id == record.item_id && now_ms <= *expires
+                                    },
+                                ) {
+                                    if let Some((settled, _)) =
+                                        self.observed_weapon_throws.remove(index)
                                     {
+                                        self.unpaired_weapon_notices.retain(|entry| {
+                                            entry.throw.throw_id != settled.throw_id
+                                        });
                                         events.push(StockGameEvent::WeaponSettled {
                                             throw_id: settled.throw_id,
                                             record_id: record.record_id,
@@ -1026,7 +1118,9 @@ impl StockGameClient {
                     }
                     STOCK_EVENT_DROP_ITEM => {
                         let dropped = StockDropItemEvent::decode(&packet.payload)?;
-                        if let Some(event) = self.weapon_throw_from_event55(dropped.actor_id) {
+                        if let Some(event) =
+                            self.weapon_throw_from_event55(dropped.actor_id, now_ms)
+                        {
                             events.push(StockGameEvent::WeaponThrown(event));
                         }
                     }
@@ -1073,6 +1167,12 @@ impl StockGameClient {
                                 .fold(f32::from(vitals.anger), |anger, (_, spend)| {
                                     spend.remaining(anger)
                                 }) as u16;
+                            if self
+                                .actor_id
+                                .is_some_and(|actor| self.dead_actors.contains(&actor))
+                            {
+                                vitals.health = 0;
+                            }
                             events.push(StockGameEvent::Vitals(vitals));
                         }
                     }
@@ -1138,22 +1238,25 @@ impl StockGameClient {
                 | StockSessionEvent::DiscoveryReply { .. } => {}
             }
         }
-        let expired: Vec<_> = self
-            .pending_weapon_drops
-            .iter()
-            .filter(|drop| now_ms > drop.expires_at_ms)
-            .map(|drop| drop.throw.throw_id)
-            .collect();
         self.pending_weapon_drops
             .retain(|drop| now_ms <= drop.expires_at_ms);
-        self.observed_weapon_throws
-            .retain(|throw| !expired.contains(&throw.throw_id));
+        self.unpaired_weapon_notices
+            .retain(|notice| now_ms <= notice.expires_at_ms);
+        self.observed_weapon_throws.retain(|(throw, expires)| {
+            if now_ms <= *expires {
+                return true;
+            }
+            events.push(StockGameEvent::WeaponExpired(throw.throw_id));
+            false
+        });
         self.maybe_send_role_rate(now_ms)?;
         Ok(events)
     }
 
     fn maybe_send_role_rate(&mut self, now_ms: u64) -> Result<(), StockGameError> {
-        if self.actor_id.is_none() {
+        if self.actor_id.is_none()
+            || self.transport.state() != crate::stock_session::StockClientState::Connected
+        {
             return Ok(());
         }
         let Some(last_sample) = self.role_rate_sample_ms else {
@@ -1201,6 +1304,83 @@ impl StockGameClient {
         self.transport.send_application(
             crate::stock_protocol::STOCK_REQUEST_POSE_CHAIN,
             request.encode(),
+            0,
+            now_ms,
+        )?;
+        Ok(())
+    }
+
+    pub fn send_pose_start(
+        &mut self,
+        request: stock::StockPoseChainRequest,
+        now_ms: u64,
+    ) -> Result<(), StockGameError> {
+        self.actor_id.ok_or(StockGameError::RoleNotEntered)?;
+        self.transport.send_application(
+            stock::STOCK_REQUEST_POSE_START,
+            request.encode(),
+            0,
+            now_ms,
+        )?;
+        Ok(())
+    }
+
+    pub fn send_chat(&mut self, text: &str, now_ms: u64) -> Result<(), StockGameError> {
+        self.send_chat_request(stock::STOCK_REQUEST_CHAT, text, now_ms)
+    }
+
+    pub fn send_team_chat(&mut self, text: &str, now_ms: u64) -> Result<(), StockGameError> {
+        self.send_chat_request(stock::STOCK_REQUEST_TEAM_CHAT, text, now_ms)
+    }
+
+    fn send_chat_request(
+        &mut self,
+        opcode: u16,
+        text: &str,
+        now_ms: u64,
+    ) -> Result<(), StockGameError> {
+        self.actor_id.ok_or(StockGameError::RoleNotEntered)?;
+        self.transport.send_application(
+            opcode,
+            stock::StockChatEvent::encode_request(text)?,
+            STOCK_DISCRETE_RELIABLE_FLAGS,
+            now_ms,
+        )?;
+        Ok(())
+    }
+
+    pub fn send_quick_chat(
+        &mut self,
+        chat: stock::StockQuickChat,
+        now_ms: u64,
+    ) -> Result<(), StockGameError> {
+        self.actor_id.ok_or(StockGameError::RoleNotEntered)?;
+        chat.message_id()
+            .ok_or(StockProtocolError::InvalidStockMessage("quick chat"))?;
+        self.transport.send_application(
+            stock::STOCK_REQUEST_QUICK_CHAT,
+            chat.encode(),
+            STOCK_DISCRETE_RELIABLE_FLAGS,
+            now_ms,
+        )?;
+        Ok(())
+    }
+
+    pub fn send_entry_prepared(&mut self, now_ms: u64) -> Result<(), StockGameError> {
+        self.transport.send_application(
+            stock::STOCK_REQUEST_ENTRY_PREPARED,
+            [],
+            STOCK_DISCRETE_RELIABLE_FLAGS,
+            now_ms,
+        )?;
+        Ok(())
+    }
+
+    pub fn send_target_clear(&mut self, target_id: u32, now_ms: u64) -> Result<(), StockGameError> {
+        self.actor_id.ok_or(StockGameError::RoleNotEntered)?;
+        self.transport.send_application(
+            stock::STOCK_REQUEST_TARGET_CLEAR,
+            target_id.to_le_bytes(),
             0,
             now_ms,
         )?;
@@ -1334,6 +1514,15 @@ impl StockGameClient {
         command: StockWeaponDropCommand,
         now_ms: u64,
     ) -> Result<Option<StockGameEvent>, StockGameError> {
+        self.send_weapon_drop_in_scene(command, None, now_ms)
+    }
+
+    pub fn send_weapon_drop_in_scene(
+        &mut self,
+        command: StockWeaponDropCommand,
+        frame: Option<StockSceneFrame>,
+        now_ms: u64,
+    ) -> Result<Option<StockGameEvent>, StockGameError> {
         let actor_id = self.actor_id.ok_or(StockGameError::RoleNotEntered)?;
         if stock_weapon_from_item_id(command.item_id).is_none() {
             return Err(StockGameError::InvalidSceneItem {
@@ -1341,11 +1530,18 @@ impl StockGameClient {
                 item_id: command.item_id,
             });
         }
+        let position = frame.map_or(command.position, |frame| {
+            frame.position_to_stock(command.position)
+        });
+        let mut forward = command.forward;
+        if frame.is_some() {
+            forward.z = -forward.z;
+        }
         let request = StockWeaponObjectRequest::from_role_vectors(
             command.item_id,
             u32::from(!command.copy_only),
-            command.position,
-            command.forward,
+            position,
+            forward,
         );
         self.transport.send_application(
             STOCK_REQUEST_WEAPON_OBJECT,
@@ -1373,7 +1569,8 @@ impl StockGameClient {
             position: command.position,
             forward: command.forward,
         };
-        self.observed_weapon_throws.push_back(throw);
+        self.observed_weapon_throws
+            .push_back((throw, now_ms.saturating_add(STOCK_WEAPON_THROW_TIMEOUT_MS)));
         self.pending_weapon_drops.push(PendingLocalWeaponDrop {
             throw,
             expires_at_ms: now_ms.saturating_add(STOCK_WEAPON_THROW_TIMEOUT_MS),
@@ -1410,7 +1607,76 @@ impl StockGameClient {
         id
     }
 
-    fn weapon_throw_from_event55(&mut self, actor_id: u32) -> Option<StockWeaponThrowEvent> {
+    fn take_weapon_notice(
+        &mut self,
+        actor_id: u32,
+        from_object: bool,
+        now_ms: u64,
+    ) -> Option<StockWeaponThrowEvent> {
+        let index = self.unpaired_weapon_notices.iter().position(|entry| {
+            entry.throw.actor_id == actor_id
+                && entry.from_object == from_object
+                && now_ms <= entry.expires_at_ms
+        })?;
+        self.unpaired_weapon_notices
+            .remove(index)
+            .map(|entry| entry.throw)
+    }
+
+    fn note_weapon_notice(&mut self, throw: StockWeaponThrowEvent, from_object: bool, now_ms: u64) {
+        if self.unpaired_weapon_notices.len() >= 128 {
+            self.unpaired_weapon_notices.pop_front();
+        }
+        self.unpaired_weapon_notices
+            .push_back(UnpairedWeaponNotice {
+                throw,
+                from_object,
+                expires_at_ms: now_ms.saturating_add(500),
+            });
+    }
+
+    fn weapon_throw_from_object(
+        &mut self,
+        event: stock::StockWeaponObjectEvent,
+        now_ms: u64,
+    ) -> Option<StockWeaponThrowEvent> {
+        if Some(event.actor_id) == self.actor_id
+            || stock_weapon_from_item_id(event.object.record_key).is_none()
+        {
+            return None;
+        }
+        let copy = event.object.selector != 1;
+        let previous = copy
+            .then(|| self.take_weapon_notice(event.actor_id, false, now_ms))
+            .flatten();
+        let throw = StockWeaponThrowEvent {
+            throw_id: previous.map_or_else(|| self.allocate_weapon_throw_id(), |old| old.throw_id),
+            actor_id: event.actor_id,
+            item_id: event.object.record_key,
+            position: event.position(),
+            forward: event.forward(),
+        };
+        if let Some((entry, _)) = self
+            .observed_weapon_throws
+            .iter_mut()
+            .find(|(entry, _)| entry.throw_id == throw.throw_id)
+        {
+            *entry = throw;
+        } else {
+            self.observed_weapon_throws
+                .push_back((throw, now_ms.saturating_add(STOCK_WEAPON_THROW_TIMEOUT_MS)));
+        }
+        if copy && previous.is_none() {
+            self.note_weapon_notice(throw, true, now_ms);
+        }
+        Some(throw)
+    }
+
+    fn weapon_throw_from_event55(
+        &mut self,
+        actor_id: u32,
+        now_ms: u64,
+    ) -> Option<StockWeaponThrowEvent> {
         if Some(actor_id) == self.actor_id {
             return self
                 .pending_weapon_drops
@@ -1418,6 +1684,9 @@ impl StockGameClient {
                 .rev()
                 .find(|pending| pending.copy_only)
                 .map(|pending| pending.throw);
+        }
+        if self.take_weapon_notice(actor_id, true, now_ms).is_some() {
+            return None;
         }
         let item_id = self.weapons.get(&actor_id).copied()?;
         let state = self.states.get(&actor_id).copied()?;
@@ -1428,7 +1697,9 @@ impl StockGameClient {
             position: state.position,
             forward: state.forward,
         };
-        self.observed_weapon_throws.push_back(throw);
+        self.observed_weapon_throws
+            .push_back((throw, now_ms.saturating_add(STOCK_WEAPON_THROW_TIMEOUT_MS)));
+        self.note_weapon_notice(throw, false, now_ms);
         Some(throw)
     }
 
@@ -1490,6 +1761,7 @@ impl StockGameClient {
         if self.enter_sent {
             return Ok(());
         }
+        self.send_entry_prepared(now_ms)?;
         self.transport.send_application(
             STOCK_REQUEST_ENTER_ROLE,
             self.enter_request.encode(),
@@ -2087,6 +2359,38 @@ impl StockGameServer {
         &mut self.transport
     }
 
+    pub fn expel_actor(
+        &mut self,
+        actor_id: u32,
+        restrict: bool,
+        now_ms: u64,
+    ) -> Result<bool, StockGameError> {
+        let Some(peer) = self
+            .transport
+            .peer_addresses()
+            .into_iter()
+            .find(|&peer| self.transport.peer_transport_id(peer) == Some(actor_id))
+        else {
+            return Ok(false);
+        };
+        if restrict {
+            self.transport.restrict_peer(peer);
+            self.broadcast_discrete(
+                stock::STOCK_EVENT_PLAYER_RESTRICTED,
+                &actor_id.to_le_bytes(),
+                now_ms,
+            )?;
+        }
+        self.broadcast_discrete(
+            stock::STOCK_EVENT_PLAYER_EXPELLED,
+            &actor_id.to_le_bytes(),
+            now_ms,
+        )?;
+        self.transport.disconnect_peer(peer, 0x80)?;
+        self.remove_disconnected_peer(peer, 0x80, now_ms, &mut Vec::new())?;
+        Ok(true)
+    }
+
     pub fn rule(&self) -> i32 {
         self.rule
     }
@@ -2549,7 +2853,8 @@ impl StockGameServer {
                     | STOCK_REQUEST_DROP_ITEM
                     | STOCK_REQUEST_SPAWN_SCENE_ITEM
                     | STOCK_REQUEST_CURE
-                    | crate::stock_protocol::STOCK_REQUEST_POSE_CHAIN
+                    | stock::STOCK_REQUEST_POSE_CHAIN
+                    | stock::STOCK_REQUEST_POSE_START
                     | crate::stock_protocol::STOCK_EVENT_SCENE_OPS
             )
         {
@@ -2571,6 +2876,84 @@ impl StockGameServer {
             }
         }
         match opcode {
+            stock::STOCK_REQUEST_CHAT | stock::STOCK_REQUEST_TEAM_CHAT => {
+                let Some(role) = self.roles.get(&peer) else {
+                    return Ok(());
+                };
+                let Ok(payload) = stock::StockChatEvent::relay(role.actor_id, payload) else {
+                    return Ok(());
+                };
+                let chat = stock::StockChatEvent::decode(&payload)?;
+                if opcode == stock::STOCK_REQUEST_TEAM_CHAT {
+                    let camp = role.camp;
+                    for (&recipient, member) in &self.roles {
+                        if camp != 0 && member.camp == camp {
+                            self.transport.send_application(
+                                recipient,
+                                stock::STOCK_EVENT_TEAM_CHAT,
+                                payload.as_slice(),
+                                STOCK_DISCRETE_RELIABLE_FLAGS,
+                                now_ms,
+                            )?;
+                        }
+                    }
+                    events.push(StockGameEvent::TeamChat(chat));
+                } else {
+                    self.broadcast_discrete(stock::STOCK_EVENT_CHAT, &payload, now_ms)?;
+                    events.push(StockGameEvent::Chat(chat));
+                }
+            }
+            stock::STOCK_REQUEST_QUICK_CHAT => {
+                let Some(role) = self.roles.get(&peer) else {
+                    return Ok(());
+                };
+                let Ok(chat) = stock::StockQuickChat::decode(payload) else {
+                    return Ok(());
+                };
+                let camp = role.camp;
+                let event = stock::StockQuickChatEvent {
+                    actor_id: role.actor_id,
+                    chat,
+                };
+                for recipient in self.transport.peer_addresses() {
+                    if chat.category == 39
+                        || (camp != 0
+                            && self
+                                .roles
+                                .get(&recipient)
+                                .is_some_and(|role| role.camp == camp))
+                    {
+                        self.transport.send_application(
+                            recipient,
+                            stock::STOCK_EVENT_QUICK_CHAT,
+                            event.encode(),
+                            0,
+                            now_ms,
+                        )?;
+                    }
+                }
+                events.push(StockGameEvent::QuickChat(event));
+            }
+            stock::STOCK_REQUEST_TARGET_CLEAR => {
+                let Some(role) = self.roles.get(&peer) else {
+                    return Ok(());
+                };
+                let Ok(bytes) = <[u8; 4]>::try_from(payload) else {
+                    return Ok(());
+                };
+                let event = stock::StockTargetClearEvent {
+                    actor_id: role.actor_id,
+                    target_id: u32::from_le_bytes(bytes),
+                };
+                self.broadcast_application_except(
+                    peer,
+                    stock::STOCK_EVENT_TARGET_CLEAR,
+                    &event.encode(),
+                    0,
+                    now_ms,
+                )?;
+                events.push(StockGameEvent::TargetClear(event));
+            }
             REQUEST_BATTLE_RULES => {
                 if payload == BATTLE_RULES_V7
                     && self.battle_rules != meteor_combat::battle_rules::BattleRules::ORIGINAL
@@ -2717,12 +3100,17 @@ impl StockGameServer {
                     )?;
                 }
             }
-            27 if payload.is_empty() => {
+            stock::STOCK_REQUEST_ENTRY_PREPARED if payload.is_empty() => {
                 let actor_id = self
                     .transport
                     .peer_transport_id(peer)
                     .ok_or(StockTransportError::UnknownPeer(peer))?;
-                self.broadcast_discrete(52, &actor_id.to_le_bytes(), now_ms)?;
+                self.broadcast_discrete(
+                    stock::STOCK_EVENT_ENTRY_PREPARED,
+                    &actor_id.to_le_bytes(),
+                    now_ms,
+                )?;
+                events.push(StockGameEvent::EntryPrepared(actor_id));
                 log::debug!(target: "meteor_network::stock_session",
                     "[stock-lan] request 27 replied: peer={peer}, actor={actor_id}, event=52");
             }
@@ -3091,7 +3479,7 @@ impl StockGameServer {
                 self.broadcast_weapon_equipped(event, now_ms)?;
                 events.push(StockGameEvent::WeaponEquipped(event));
             }
-            crate::stock_protocol::STOCK_REQUEST_POSE_CHAIN => {
+            stock::STOCK_REQUEST_POSE_CHAIN | stock::STOCK_REQUEST_POSE_START => {
                 let Some(role) = self.roles.get(&peer) else {
                     return Ok(());
                 };
@@ -3102,21 +3490,19 @@ impl StockGameServer {
                 bytes[..2].copy_from_slice(&(role.actor_id as u16).to_le_bytes());
                 bytes[2..].copy_from_slice(payload);
                 let event = crate::stock_protocol::StockPoseChainEvent::decode(&bytes)?;
-                for recipient in self
-                    .transport
-                    .peer_addresses()
-                    .into_iter()
-                    .filter(|p| *p != peer)
-                {
-                    self.transport.send_application(
-                        recipient,
-                        crate::stock_protocol::STOCK_EVENT_POSE_CHAIN,
-                        bytes,
-                        0,
-                        now_ms,
-                    )?;
-                }
-                events.push(StockGameEvent::PoseChain(event));
+                let (downlink, event) = if opcode == stock::STOCK_REQUEST_POSE_START {
+                    (
+                        stock::STOCK_EVENT_POSE_START,
+                        StockGameEvent::PoseStart(event),
+                    )
+                } else {
+                    (
+                        stock::STOCK_EVENT_POSE_CHAIN,
+                        StockGameEvent::PoseChain(event),
+                    )
+                };
+                self.broadcast_application_except(peer, downlink, &bytes, 0, now_ms)?;
+                events.push(event);
             }
             STOCK_REQUEST_ROLE_STATE => {
                 let state = decode_role_state_request(payload)?;
@@ -3191,12 +3577,14 @@ impl StockGameServer {
                         }
                         role.actor_id
                     };
-                    let mut event_payload = Vec::with_capacity(4 + payload.len());
-                    event_payload.extend_from_slice(&actor_id.to_le_bytes());
-                    event_payload.extend_from_slice(payload);
-                    self.broadcast_with_flags(
+                    let event = stock::StockWeaponObjectEvent {
+                        object: request,
+                        actor_id,
+                    };
+                    self.broadcast_application_except(
+                        peer,
                         STOCK_EVENT_WEAPON_OBJECT,
-                        &event_payload,
+                        &event.encode(),
                         STOCK_EVENT_WEAPON_OBJECT_FLAGS,
                         now_ms,
                     )?;
@@ -3978,8 +4366,20 @@ impl StockGameServer {
                 .flatten()
                 .filter(|delay| *delay > 0)
                 .map(|delay| now_ms.saturating_add(delay));
+            let scene_reference = item.authored.then_some(item.seed.scene_reference).flatten();
             if item.authored {
                 self.scene_items.insert(record_id, item);
+            }
+            if let Some(scene_reference) = scene_reference {
+                let event = stock::StockCarriedItemEvent {
+                    actor_id,
+                    category: record.category,
+                    item_id: record.item_id,
+                    scene_reference,
+                };
+                self.broadcast_discrete(stock::STOCK_EVENT_CARRIED_ITEM, &event.encode(), now_ms)?;
+                events.push(StockGameEvent::CarriedItem(event));
+                continue;
             }
             let taken = StockSceneTakenEvent {
                 actor_id,
@@ -4185,10 +4585,18 @@ impl StockGameServer {
             self.transport.send_application(
                 peer,
                 STOCK_EVENT_DEATH,
-                0u32.to_le_bytes(),
+                role.actor_id.to_le_bytes(),
                 STOCK_DISCRETE_RELIABLE_FLAGS,
                 now_ms,
             )?;
+
+            self.broadcast_with_flags(
+                stock::STOCK_EVENT_FORCED_DEATH,
+                &role.actor_id.to_le_bytes(),
+                0,
+                now_ms,
+            )?;
+            events.push(StockGameEvent::ForcedDeath(role.actor_id));
             if self.rule == 2
                 && self
                     .escort
@@ -4650,19 +5058,31 @@ impl StockGameServer {
         payload: &[u8],
         now_ms: u64,
     ) -> Result<(), StockGameError> {
+        self.broadcast_application_except(
+            excluded,
+            opcode,
+            payload,
+            STOCK_DISCRETE_RELIABLE_FLAGS,
+            now_ms,
+        )
+    }
+
+    fn broadcast_application_except(
+        &mut self,
+        excluded: SocketAddr,
+        opcode: u16,
+        payload: &[u8],
+        flags: u8,
+        now_ms: u64,
+    ) -> Result<(), StockGameError> {
         for peer in self
             .transport
             .peer_addresses()
             .into_iter()
             .filter(|peer| *peer != excluded)
         {
-            self.transport.send_application(
-                peer,
-                opcode,
-                payload,
-                STOCK_DISCRETE_RELIABLE_FLAGS,
-                now_ms,
-            )?;
+            self.transport
+                .send_application(peer, opcode, payload, flags, now_ms)?;
         }
         Ok(())
     }
@@ -5180,10 +5600,12 @@ mod tests {
             requests.iter().map(|p| p.opcode).collect::<Vec<_>>(),
             [
                 STOCK_REQUEST_STAGE_CHECKSUM,
+                stock::STOCK_REQUEST_ENTRY_PREPARED,
                 STOCK_REQUEST_ENTER_ROLE,
                 STOCK_REQUEST_READY
             ]
         );
+        assert!(requests[1].payload.is_empty() && requests[1].reliable());
         assert_eq!(requests[0].payload, 42u32.to_le_bytes());
         assert!(requests[0].reliable());
         let peer = server.transport.peer_addresses()[0];
@@ -6588,6 +7010,191 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_micros(50));
         }
         output
+    }
+
+    #[test]
+    fn stock_live_messages_route_to_the_correct_observers() {
+        let transport =
+            StockServerTransport::bind("127.0.0.1:0", "serverlist", "live messages").unwrap();
+        let address = transport.local_addr().unwrap();
+        let checksums = [1234; STOCK_HERO_COUNT];
+        let mut server = StockGameServer::with_rule_and_combat_resources(
+            transport,
+            StockHeroCatalog::from_checksums(checksums),
+            5,
+            CombatResourceTable::default(),
+        );
+        let connect = |hero, camp| {
+            StockGameClient::new(
+                StockClientTransport::bind(
+                    "127.0.0.1:0",
+                    address,
+                    StockConnectRecord::for_open_room(),
+                )
+                .unwrap(),
+                StockEnterRoleRequest {
+                    hero,
+                    camp,
+                    hero_checksum: 1234,
+                },
+                6,
+            )
+        };
+        let (mut ally, mut opponent) = (connect(1, 1), connect(2, 2));
+        drive(&mut server, &mut [&mut ally, &mut opponent], 0, 100);
+        let mut owner = connect(0, 1);
+        let joined = drive(
+            &mut server,
+            &mut [&mut owner, &mut ally, &mut opponent],
+            100,
+            100,
+        );
+        let actor = owner.actor_id().unwrap();
+        let opponent_id = opponent.actor_id().unwrap();
+        for events in joined {
+            let ready = events
+                .iter()
+                .position(|event| *event == StockGameEvent::EntryPrepared(actor))
+                .unwrap();
+            let entered = events.iter().position(|event|
+                matches!(event, StockGameEvent::RoleEntered(role) if role.actor_id == actor)).unwrap();
+            assert!(ready < entered);
+        }
+        let team = stock::StockQuickChat {
+            category: 36,
+            index: 0,
+        };
+        let global = stock::StockQuickChat {
+            category: 39,
+            index: 1,
+        };
+        let start = stock::StockPoseChainRequest {
+            pose_id: 530,
+            sequence: 309,
+            blend_seconds: 0.1,
+        };
+        owner.send_chat("竹子，开始", 201).unwrap();
+        owner.send_team_chat("同队集合", 201).unwrap();
+        owner.send_quick_chat(team, 202).unwrap();
+        owner.send_quick_chat(global, 203).unwrap();
+        owner.send_pose_start(start, 204).unwrap();
+        owner.send_target_clear(opponent_id, 205).unwrap();
+        let output = drive(
+            &mut server,
+            &mut [&mut owner, &mut ally, &mut opponent],
+            206,
+            80,
+        );
+        for (index, events) in output.iter().enumerate() {
+            assert!(
+                events.contains(&StockGameEvent::Chat(stock::StockChatEvent {
+                    actor_id: actor,
+                    text: "竹子，开始".into(),
+                }))
+            );
+            assert_eq!(
+                events.contains(&StockGameEvent::TeamChat(stock::StockChatEvent {
+                    actor_id: actor,
+                    text: "同队集合".into(),
+                })),
+                index != 2
+            );
+            assert!(
+                events.contains(&StockGameEvent::QuickChat(stock::StockQuickChatEvent {
+                    actor_id: actor,
+                    chat: global,
+                }))
+            );
+            assert_eq!(
+                events.contains(&StockGameEvent::QuickChat(stock::StockQuickChatEvent {
+                    actor_id: actor,
+                    chat: team,
+                })),
+                index != 2
+            );
+            assert_eq!(events.iter().any(|event| matches!(event, StockGameEvent::PoseStart(pose)
+                if u32::from(pose.actor_id) == actor && pose.pose_id == 530
+                    && pose.sequence == 309 && pose.minimum_seconds == 0.0 && (pose.blend_seconds - 0.1).abs() < 0.001)), index != 0);
+            assert_eq!(
+                events.contains(&StockGameEvent::TargetClear(stock::StockTargetClearEvent {
+                    actor_id: actor,
+                    target_id: opponent_id,
+                })),
+                index != 0
+            );
+        }
+    }
+
+    #[test]
+    fn stock_room_owner_kick_allows_reconnect_and_restriction_rejects_it() {
+        let transport =
+            StockServerTransport::bind("127.0.0.1:0", "serverlist", "moderation").unwrap();
+        let address = transport.local_addr().unwrap();
+        let mut server = StockGameServer::new(
+            transport,
+            StockHeroCatalog::from_checksums([1234; STOCK_HERO_COUNT]),
+        );
+        let connect = |name: &str| {
+            let mut record = StockConnectRecord::for_open_room();
+            record.player_name = name.into();
+            StockGameClient::new(
+                StockClientTransport::bind("127.0.0.1:0", address, record).unwrap(),
+                StockEnterRoleRequest {
+                    hero: 0,
+                    camp: 0,
+                    hero_checksum: 1234,
+                },
+                6,
+            )
+        };
+        let (mut observer, mut guest) = (connect("observer"), connect("guest"));
+        drive(&mut server, &mut [&mut observer, &mut guest], 0, 100);
+        let guest_id = guest.actor_id().unwrap();
+        assert!(server.expel_actor(guest_id, false, 100).unwrap());
+        let kicked = drive(&mut server, &mut [&mut observer, &mut guest], 100, 30);
+        assert!(kicked[0].contains(&StockGameEvent::PlayerExpelled(guest_id)));
+        assert!(
+            kicked[0].contains(&StockGameEvent::RoleLeft(StockRoleLeftEvent {
+                actor_id: guest_id
+            }))
+        );
+        assert!(kicked[1]
+            .iter()
+            .any(|event| matches!(event, StockGameEvent::PeerDisconnected { reason: 0x80, .. })));
+
+        let mut guest = connect("guest");
+        drive(&mut server, &mut [&mut observer, &mut guest], 130, 100);
+        let guest_id = guest.actor_id().unwrap();
+        assert!(server.expel_actor(guest_id, true, 230).unwrap());
+        let banned = drive(&mut server, &mut [&mut observer, &mut guest], 230, 30);
+        let notices: Vec<_> = banned[0]
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    StockGameEvent::PlayerRestricted(_) | StockGameEvent::PlayerExpelled(_)
+                )
+            })
+            .cloned()
+            .collect();
+        assert_eq!(
+            notices,
+            [
+                StockGameEvent::PlayerRestricted(guest_id),
+                StockGameEvent::PlayerExpelled(guest_id)
+            ]
+        );
+
+        let mut retry = connect("renamed");
+        let rejected = drive(&mut server, &mut [&mut observer, &mut retry], 260, 100);
+        assert!(retry.actor_id().is_none());
+        assert!(rejected[1].iter().any(|event| matches!(
+            event,
+            StockGameEvent::PeerDisconnected {
+                reason: crate::stock_session::STOCK_REJECT_RESTRICTED,
+                ..
+            }
+        )));
     }
 
     #[test]
@@ -8172,8 +8779,10 @@ mod tests {
                 events
                     .iter()
                     .filter(|event| matches!(event,
-                        StockGameEvent::SceneItemTaken { event, record: Some(observed) }
-                            if Some(event.actor_id) == peer.actor_id() && *observed == record
+                        StockGameEvent::CarriedItem(event)
+                            if Some(event.actor_id) == peer.actor_id()
+                                && event.category == record.category && event.item_id == record.item_id
+                                && event.scene_reference == 5
                     ))
                     .count(),
                 1
@@ -8406,11 +9015,11 @@ mod tests {
                 events
                     .iter()
                     .filter(|event| matches!(event,
-                StockGameEvent::SceneItemTaken { event, record: Some(_) }
-                    if event.category == 1 && event.item_id == 5))
+                StockGameEvent::CarriedItem(event)
+                    if event.category == 1 && event.item_id == 5 && event.scene_reference == 101))
                     .count(),
                 1,
-                "all clients must resolve exactly one claim, including its grounded record"
+                "all clients must receive one claim for the authored object"
             );
         }
         assert_eq!(
@@ -8483,8 +9092,9 @@ mod tests {
         );
         for observed in &healed {
             assert_eq!(observed.iter().filter(|event| matches!(event,
-                StockGameEvent::SceneItemTaken { event, record: Some(_) }
-                    if event.category == 2 && event.item_id == 1 && Some(event.actor_id) == peer.actor_id()
+                StockGameEvent::CarriedItem(event)
+                    if event.category == 2 && event.item_id == 1 && event.scene_reference == 102
+                        && Some(event.actor_id) == peer.actor_id()
             )).count(), 1, "food pickup must reach the host, collector and other observer");
         }
         assert_eq!(
@@ -9170,13 +9780,13 @@ mod tests {
             })) if observed == actor_id
         ));
         let output = drive(&mut server, &mut [&mut client], 100, 30);
-        assert!(output[0].iter().any(|event| matches!(
+        assert!(!output[0].iter().any(|event| matches!(
             event,
-            StockGameEvent::RawApplication {
-                opcode: STOCK_EVENT_WEAPON_OBJECT,
-                payload,
-                ..
-            } if payload.len() == 36
+            StockGameEvent::WeaponThrown(_)
+                | StockGameEvent::RawApplication {
+                    opcode: STOCK_EVENT_WEAPON_OBJECT,
+                    ..
+                }
         )));
         assert_eq!(
             server.roles.values().next().unwrap().weapon_item_id,
@@ -9373,6 +9983,13 @@ mod tests {
         assert!(died[0]
             .iter()
             .any(|event| matches!(event, StockGameEvent::LocalDeath)));
+        assert_eq!(
+            died[0]
+                .iter()
+                .filter(|event| matches!(event, StockGameEvent::ForcedDeath(id) if *id == actor_id))
+                .count(),
+            1
+        );
         assert!(!died[0]
             .iter()
             .any(|event| matches!(event, StockGameEvent::Kill(_))));
@@ -9415,7 +10032,7 @@ mod tests {
         assert_eq!(server.ready_peer_count(), 1);
 
         for now in (5_000..=55_000).step_by(5_000) {
-            drive(&mut server, &mut [&mut client], now, 1);
+            drive(&mut server, &mut [&mut client], now, 10);
         }
         let output = drive(&mut server, &mut [&mut client], 60_100, 500);
         assert!(

@@ -1307,6 +1307,7 @@ fn spawn_offline_weapon_drop(
     mut materials: ResMut<Assets<GmdlMaterial>>,
     mut images: ResMut<Assets<bevy::image::Image>>,
     loaded: Res<crate::app_state::LoadedStageInfo>,
+    replay: Option<Res<super::replay_plugin::MrcPlayback>>,
     mut local: Query<
         (
             Entity,
@@ -1358,22 +1359,28 @@ fn spawn_offline_weapon_drop(
             }
             continue;
         };
-        serial.0 = serial.0.wrapping_add(1);
-        spawn_network_weapon_drop(
-            &mut commands,
-            &mut meshes,
-            &mut materials,
-            &mut images,
-            &loaded,
-            &crate::plugins::network_plugin::AuthorityWeaponDrop {
-                reference: format!("D_wpDropped{}", serial.0),
-                model,
-                position,
-                velocity: Some(velocity),
-                settled: false,
-                pickup_ready: false,
-            },
-        );
+
+        if !replay
+            .as_ref()
+            .is_some_and(|replay| replay.active && replay.stock_scene_coordinates())
+        {
+            serial.0 = serial.0.wrapping_add(1);
+            spawn_network_weapon_drop(
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &mut images,
+                &loaded,
+                &crate::plugins::network_plugin::AuthorityWeaponDrop {
+                    reference: format!("D_wpDropped{}", serial.0),
+                    model,
+                    position,
+                    velocity: Some(velocity),
+                    settled: false,
+                    pickup_ready: false,
+                },
+            );
+        }
         if drop_weapon {
             commands
                 .entity(fighter_entity)
@@ -1392,9 +1399,14 @@ fn spawn_offline_weapon_death_drops(
     mut materials: ResMut<Assets<GmdlMaterial>>,
     mut images: ResMut<Assets<bevy::image::Image>>,
     loaded: Res<crate::app_state::LoadedStageInfo>,
+    replay: Option<Res<super::replay_plugin::MrcPlayback>>,
 ) {
     for drop in events.read() {
-        if net.status == crate::plugins::network_plugin::NetStatus::InRoom {
+        if net.status == crate::plugins::network_plugin::NetStatus::InRoom
+            || replay
+                .as_ref()
+                .is_some_and(|replay| replay.active && replay.stock_scene_coordinates())
+        {
             continue;
         }
         serial.0 = serial.0.wrapping_add(1);
@@ -1763,8 +1775,11 @@ fn sync_network_weapon_drops(
     mut net: ResMut<crate::plugins::network_plugin::NetState>,
     mut existing: DynamicWeaponDropSyncQuery<'_, '_>,
     mut props: Query<&mut crate::plugins::item_plugin::StageProp, With<DynamicWeaponDrop>>,
+    replay: Option<Res<super::replay_plugin::MrcPlayback>>,
 ) {
-    if net.status != crate::plugins::network_plugin::NetStatus::InRoom {
+    if net.status != crate::plugins::network_plugin::NetStatus::InRoom
+        && !replay.is_some_and(|replay| replay.active)
+    {
         return;
     }
     let throw_events = std::mem::take(&mut net.pending_weapon_drops);

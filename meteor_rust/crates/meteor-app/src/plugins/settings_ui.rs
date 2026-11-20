@@ -791,7 +791,7 @@ fn spawn_keybindings_fieldset(
         .with_children(|fs| {
             fs.spawn(launcher_text("按键设置", 18.0, LAUNCHER_RED_BRIGHT, font));
             fs.spawn(launcher_text(
-                "点击动作后按下新键位或鼠标按键，Esc 取消；键位冲突时自动互换。闪避为双击方向键。",
+                "点击动作后按下新键位或鼠标按键。Esc 取消，冲突键位自动互换。",
                 11.0,
                 theme::MUTED,
                 font,
@@ -804,7 +804,11 @@ fn spawn_keybindings_fieldset(
                 ..default()
             },))
                 .with_children(|keys_grid| {
-                    for field in KeyField::BINDING_ACTIONS {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let fields = KeyField::settings_actions();
+                    #[cfg(target_arch = "wasm32")]
+                    let fields = KeyField::BINDING_ACTIONS;
+                    for field in fields {
                         spawn_keybinding_row(keys_grid, font, field, field.get(keymap).label());
                     }
                 });

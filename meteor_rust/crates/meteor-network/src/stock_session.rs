@@ -3,9 +3,9 @@ use crate::stock_udp::{
     StockDiscoveryInfo, StockPacketError, StockReliability, STOCK_FLAG_XOR_BODY,
     STOCK_MAX_DATAGRAM_BYTES, STOCK_PACKET_TYPE_APPLICATION, STOCK_PACKET_TYPE_CONNECT,
 };
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
-use std::net::{Ipv4Addr, SocketAddr, ToSocketAddrs, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs, UdpSocket};
 
 pub const STOCK_CONNECT_RETRY_MS: u64 = 250;
 pub const STOCK_PING_INTERVAL_MS: u64 = 1_000;
@@ -27,6 +27,7 @@ pub const STOCK_REJECT_VERSION: u32 = 0xff01;
 pub const STOCK_REJECT_CDKEY: u32 = 0xff02;
 pub const STOCK_REJECT_FULL: u32 = 0xff03;
 pub const STOCK_REJECT_PASSWORD: u32 = 0xff04;
+pub const STOCK_REJECT_RESTRICTED: u32 = 0xff05;
 pub const STOCK_REJECT_CHECKSUM: u32 = 0xff06;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -563,6 +564,8 @@ pub struct StockServerTransport {
     room_password: String,
 
     max_players: i32,
+    restricted_names: HashSet<String>,
+    restricted_addresses: HashSet<IpAddr>,
     pending: HashMap<SocketAddr, PendingChallenge>,
     peers: HashMap<SocketAddr, StockServerPeer>,
     next_transport_id: u32,
@@ -598,6 +601,8 @@ impl StockServerTransport {
             discovery_info,
             room_password: String::new(),
             max_players: 16,
+            restricted_names: HashSet::new(),
+            restricted_addresses: HashSet::new(),
             pending: HashMap::new(),
             peers: HashMap::new(),
             next_transport_id: 1,
@@ -648,6 +653,13 @@ impl StockServerTransport {
 
     pub fn set_room_password(&mut self, password: impl Into<String>) {
         self.room_password = password.into();
+    }
+
+    pub(crate) fn restrict_peer(&mut self, peer: SocketAddr) {
+        if let Some(name) = self.peer_player_name(peer).filter(|name| !name.is_empty()) {
+            self.restricted_names.insert(name.to_ascii_lowercase());
+        }
+        self.restricted_addresses.insert(peer.ip());
     }
 
     pub fn peer_identity(&self, peer: SocketAddr) -> Option<&str> {
@@ -814,6 +826,24 @@ impl StockServerTransport {
                         .is_some_and(|record| record.cookie == cookie);
                     if !pending_valid && !peer_valid {
                         log::debug!("[stock-lan] connect ignored from {peer}: challenge mismatch");
+                        continue;
+                    }
+                    let name = &parsed
+                        .as_ref()
+                        .expect("accepted connect record")
+                        .player_name;
+                    if !peer_valid
+                        && (self.restricted_addresses.contains(&peer.ip())
+                            || self.restricted_names.contains(&name.to_ascii_lowercase()))
+                    {
+                        self.pending.remove(&peer);
+                        self.send_untracked_control(
+                            peer,
+                            &StockControlPacket::Disconnect {
+                                reason: STOCK_REJECT_RESTRICTED,
+                            },
+                            0,
+                        )?;
                         continue;
                     }
                     if !self.peers.contains_key(&peer)
@@ -1420,9 +1450,10 @@ mod tests {
         let room = (1..500).find_map(|now_ms| {
             server.tick(now_ms).unwrap();
             let rooms = browser.tick(now_ms).unwrap();
-            let room = rooms
-                .into_iter()
-                .find(|room| room.info.server_name == "原版房间3️⃣" && room.info.stage_id.as_deref() == Some("sn03"));
+            let room = rooms.into_iter().find(|room| {
+                room.info.server_name == "原版房间3️⃣"
+                    && room.info.stage_id.as_deref() == Some("sn03")
+            });
             if room.is_none() {
                 std::thread::sleep(std::time::Duration::from_micros(50));
             }

@@ -206,7 +206,11 @@ fn update_round_countdown(
     }
 
     let remaining = if let Some(tracked) = net.round_remaining_seconds {
-        let dt = crate::plugins::simulation_dt(frame_clock.as_deref(), time.delta_secs());
+        let dt = if request.mode == "replay" {
+            0.0
+        } else {
+            crate::plugins::simulation_dt(frame_clock.as_deref(), time.delta_secs())
+        };
         let next = (tracked - dt.max(0.0)).max(0.0);
         net.round_remaining_seconds = Some(next);
         Some(next)

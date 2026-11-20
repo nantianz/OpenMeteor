@@ -16,6 +16,7 @@ fn r7_action_edge(
 
 fn r7_cancel_jump(h: &mut GameplayHarness, binding: crate::app_state::InputBinding) {
     match binding {
+        crate::app_state::InputBinding::Unbound => {}
         crate::app_state::InputBinding::Key(key) => {
             h.app
                 .world_mut()
@@ -219,11 +220,27 @@ fn production_r7_jump_and_attack_keep_device_event_order() {
 #[test]
 fn production_r7_multiple_jump_taps_keep_the_accepted_release_and_duration() {
     use crate::plugins::input_plugin::SyntheticAction as Input;
+    use meteor_physics::jump::{JUMP_VERTICAL_SPEED, JUMP_VERTICAL_SPEED_STRONG};
+
+    #[derive(Resource, Default)]
+    struct JumpImpulse(Option<f32>);
+
     for fps in [30, 60, 120] {
         for accepted_first in [false, true] {
             for strong in [false, true] {
                 let mut h = recovery_timing_harness(true);
                 crate::plugins::install_frame_clock(&mut h.app);
+                let schedule = super::super::fighter_frame::schedule(&h.app);
+                h.app.init_resource::<JumpImpulse>().add_systems(
+                    schedule,
+                    (|fighters: Query<&FighterAir, With<LocalFighter>>,
+                      mut impulse: ResMut<JumpImpulse>| {
+                        if let Some(air) = fighters.iter().find(|air| air.air.airborne) {
+                            impulse.0.get_or_insert(air.air.vertical_speed);
+                        }
+                    })
+                    .in_set(crate::plugins::FighterFrameSet::HitJudge),
+                );
                 let keys = crate::app_state::Keymap::default();
                 if !accepted_first {
                     h.press_binding(keys.guard);
@@ -279,9 +296,15 @@ fn production_r7_multiple_jump_taps_keep_the_accepted_release_and_duration() {
                     air.air.airborne && air.air.vertical_speed > 0.0,
                     "{context}"
                 );
+                let expected_impulse = if strong {
+                    JUMP_VERTICAL_SPEED_STRONG
+                } else {
+                    JUMP_VERTICAL_SPEED
+                };
+
                 assert_eq!(
-                    air.air.vertical_speed > meteor_physics::jump::JUMP_VERTICAL_SPEED,
-                    strong,
+                    h.app.world().resource::<JumpImpulse>().0,
+                    Some(expected_impulse),
                     "later rejected tap must not change jump strength: {context}"
                 );
                 assert!(!air.jump_charge_active, "{context}");

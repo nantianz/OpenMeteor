@@ -14,6 +14,9 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+mod live;
+pub use live::*;
+
 pub const STOCK_REQUEST_ROLE_STATE: u16 = 1;
 pub const STOCK_EVENT_PROPERTY_EFFECT: u16 = 61;
 
@@ -2180,18 +2183,13 @@ impl StockWeaponObjectRequest {
         position: RoleVec3,
         forward: RoleVec3,
     ) -> Self {
-        let quantize = |value: RoleVec3| {
-            [
-                quantize_scene_coordinate(value.x),
-                quantize_scene_coordinate(value.z),
-                quantize_scene_coordinate(value.y),
-            ]
-        };
         Self {
             record_key,
             selector,
-            position_tenths: quantize(position),
-            forward_tenths: quantize(forward),
+            position_tenths: [position.x, position.z, position.y]
+                .map(|value| (value / ROLE_WORLD_SCALE * 10.0).trunc() as i32),
+            forward_tenths: [forward.x, forward.z, forward.y]
+                .map(|value| (value * 10.0).trunc() as i32),
         }
     }
 
@@ -2751,15 +2749,7 @@ pub fn stock_base_weapon_item_id(weapon: u8) -> Option<u32> {
 }
 
 pub fn stock_weapon_from_item_id(item_id: u32) -> Option<(u8, u8)> {
-    match item_id {
-        1..=45 => Some((((item_id - 1) % 9 + 1) as u8, ((item_id - 1) / 9) as u8)),
-        46 => Some((1, 5)),
-        47..=50 => Some((10, (item_id - 47) as u8)),
-        51..=54 => Some((11, (item_id - 51) as u8)),
-        55..=58 => Some((12, (item_id - 55) as u8)),
-        59 => Some((2, 5)),
-        _ => None,
-    }
+    meteor_core::weapon_kind_and_variant_from_item(item_id)
 }
 
 pub fn stock_weapon_item_id(weapon: u8, variant: u8) -> Option<u32> {
@@ -2776,6 +2766,8 @@ pub fn stock_weapon_item_id(weapon: u8, variant: u8) -> Option<u32> {
 
 #[derive(Debug, thiserror::Error)]
 pub enum StockProtocolError {
+    #[error("invalid stock {0} payload")]
+    InvalidStockMessage(&'static str),
     #[error("stock transfer matrix contains a non-finite value")]
     InvalidTransferMatrix,
     #[error("stock member roster is malformed")]

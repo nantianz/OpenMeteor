@@ -143,7 +143,10 @@ pub fn score_rows(net: &NetState, request: &LaunchRequest, score: &KillScore) ->
                         id.clone()
                     }
                 });
-            let team = if local && net.status != super::network_plugin::NetStatus::InRoom {
+            let team = if local
+                && net.status != super::network_plugin::NetStatus::InRoom
+                && request.mode != "replay"
+            {
                 offline_player_team(request)
             } else {
                 member

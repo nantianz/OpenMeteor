@@ -1364,7 +1364,8 @@ fn load_selected_stage(
         }
         None => {
             info!("stage pst unavailable for {}", request.stage_id);
-            should_load_mission_script(&request).then(String::new)
+
+            (request.mode == "replay" || should_load_mission_script(&request)).then(String::new)
         }
     };
     let descriptor = loaded_assets.des.as_deref().map(|bytes| {
@@ -2340,6 +2341,7 @@ pub(crate) fn tick_stage_script(
         Option<&crate::plugins::item_plugin::StockSceneItemView>,
         Has<crate::plugins::render_plugin::DynamicWeaponDrop>,
     )>,
+    replay: Option<Res<super::replay_plugin::MrcPlayback>>,
 ) {
     #[cfg(not(target_arch = "wasm32"))]
     let _perf = super::perf_plugin::Scope::new(10);
@@ -2352,7 +2354,7 @@ pub(crate) fn tick_stage_script(
             .set_character_team(0, local_scene_player_team(&net));
         runtime.host_mut().set_game_mode(scene_game_mode(&net));
 
-        if network_room {
+        if network_room || replay.is_some_and(|replay| replay.active) {
             if net.is_stock_host() && net.stage == "sn03" && net.mode == "escort" {
                 reconcile_sn03_button_transaction(runtime, &pending_ops);
             }
@@ -5886,6 +5888,7 @@ OnUpdate() { Print(GetWeapon2(0), GetWeaponType2(0)); }
                     record_id: reference,
                     category: seed.category,
                     item_id: seed.item_id,
+                    scene_reference: None,
                     position: Some(position),
                 });
             app.world_mut()

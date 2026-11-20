@@ -177,6 +177,7 @@ fn update(
 ) {
     let playing = *state.get() == AppState::Playing;
     let in_room = net.status == NetStatus::InRoom;
+    let replay_match = request.mode == "replay" && !net.members.is_empty();
     let auto = auto_show_scoreboard(&end, &net);
     let label = if in_room {
         format!(
@@ -188,6 +189,9 @@ fn update(
             },
             ping(&net, &net.player_id)
         )
+    } else if replay_match && meteor_network::modes::is_team_mode(&net.mode) {
+        let [meteor, butterfly] = net.stock_team_wins;
+        format!("流星 {meteor}   蝴蝶 {butterfly}")
     } else {
         "本地对局".into()
     };
@@ -229,7 +233,7 @@ fn update(
     }
     let groups = groups(
         scoreboard_mode(&net, &request),
-        if in_room {
+        if in_room || replay_match {
             score_rows(&net, &request, &score)
         } else {
             offline

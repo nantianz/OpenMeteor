@@ -8,7 +8,7 @@
 
 | AS 声明 | 状态 | PST 对应及差异 |
 | --- | --- | --- |
-| `AddChatCallback` | 等价入口 | 自启动脚本注册 PST 函数名。收到 WS 聊天时提供消息文本。当前聊天投影无统一队伍标志，第二参数为 0。 |
+| `AddChatCallback` | 等价入口 | 自启动脚本注册 PST 函数名。收到 WS 或 Stock UDP 聊天时提供消息文本。当前聊天投影无统一队伍标志，第二参数为 0。 |
 | `AddMessageCallback` | 等价入口 | 自启动脚本注册 PST 函数名，收到其他脚本的 Print/Output。回调自身的输出不再次派发。 |
 | `AddNPC` | 已接入 | 同名入口。见 [任务 PST 宿主](../../../meteor_rust/crates/meteor-scene/src/mission_runtime.rs)。 |
 | `Call` | 已接入 | 同名入口。见 [PST 运行时](../../../meteor_rust/crates/meteor-scene/src/pst_runtime.rs)。 |
@@ -138,7 +138,7 @@
 | `SetSharedVarString` | 已接入 | 同名入口。见 [PST 会话](../../../meteor_rust/crates/meteor-scene/src/pst_game.rs)。 |
 | `SetTarget` | 已接入 | 同名入口。见 [任务 PST 宿主](../../../meteor_rust/crates/meteor-scene/src/mission_runtime.rs)。 |
 | `SetTeam` | 已接入 | 同名入口。见 [PST 会话](../../../meteor_rust/crates/meteor-scene/src/pst_game.rs)。 |
-| `ShowChatText` | 部分 | 可隐藏聊天室聊天区文字。 |
+| `ShowChatText` | 部分 | 可隐藏聊天室聊天区文字。Stock UDP 保留独立系统提示。 |
 | `ShowMouse` | 已接入 | 显示并释放光标，可传 0 恢复游戏光标管理。 |
 | `StopPerform` | 已接入 | 同名入口。见 [任务 PST 宿主](../../../meteor_rust/crates/meteor-scene/src/mission_runtime.rs)。 |
 | `UpdateAIAttrib` | 已接入 | 同名入口。见 [PST 运行时](../../../meteor_rust/crates/meteor-scene/src/pst_runtime.rs)。 |

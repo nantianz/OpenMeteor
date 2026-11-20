@@ -1,5 +1,6 @@
 #[cfg(not(target_arch = "wasm32"))]
-mod stock_scene;
+pub(super) mod stock_chat;
+pub(crate) mod stock_scene;
 
 use bevy::prelude::*;
 use meteor_asset::pos::AttackBlock;
@@ -30,11 +31,13 @@ use meteor_network::stock_game::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 use meteor_network::stock_protocol::{
-    stock_rule3_effect_id, stock_rule3_effect_name, stock_weapon_from_item_id,
-    stock_weapon_item_id, StockHitRequest, StockRoleStateRecord, StockSceneFrame,
-    StockSceneOperation, StockSceneOpsEvent, STOCK_SCENE_OP_ACTIVE, STOCK_SCENE_OP_COLLISION,
-    STOCK_SCENE_OP_DAMAGE, STOCK_SCENE_OP_EFFECT, STOCK_SCENE_OP_FRAME, STOCK_SCENE_OP_INTERACTIVE,
-    STOCK_SCENE_OP_POSE, STOCK_SCENE_OP_VISIBLE,
+    stock_rule3_effect_id, stock_weapon_from_item_id, stock_weapon_item_id, StockHitRequest,
+    StockRoleStateRecord, StockSceneFrame, StockSceneOperation,
+};
+use meteor_network::stock_protocol::{
+    StockSceneOpsEvent, STOCK_SCENE_OP_ACTIVE, STOCK_SCENE_OP_COLLISION, STOCK_SCENE_OP_DAMAGE,
+    STOCK_SCENE_OP_EFFECT, STOCK_SCENE_OP_FRAME, STOCK_SCENE_OP_INTERACTIVE, STOCK_SCENE_OP_POSE,
+    STOCK_SCENE_OP_VISIBLE,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use meteor_network::stock_session::{
@@ -278,6 +281,19 @@ enum NetOutbound {
     #[cfg(not(target_arch = "wasm32"))]
     StockPoseChain(meteor_network::stock_protocol::StockPoseChainRequest),
     #[cfg(not(target_arch = "wasm32"))]
+    StockPoseStart(meteor_network::stock_protocol::StockPoseChainRequest),
+    #[cfg(not(target_arch = "wasm32"))]
+    StockQuickChat(meteor_network::stock_protocol::StockQuickChat),
+    #[cfg(not(target_arch = "wasm32"))]
+    StockTeamChat(String),
+    #[cfg(not(target_arch = "wasm32"))]
+    StockClearTarget(u32),
+    #[cfg(not(target_arch = "wasm32"))]
+    StockExpel {
+        actor_id: u32,
+        restrict: bool,
+    },
+    #[cfg(not(target_arch = "wasm32"))]
     StockSelfEffect(Option<Entity>, u32),
     #[cfg(not(target_arch = "wasm32"))]
     StockHit(StockHitRequest),
@@ -516,6 +532,12 @@ pub struct NetState {
     pub pending_role_states: Vec<(String, RoleState, u32)>,
 
     pub pending_pose_chains: Vec<(String, meteor_network::role_state::PoseChain, u32)>,
+    pub(crate) pending_stock_pose_starts: Vec<(String, meteor_network::role_state::PoseChain, u32)>,
+    pub(crate) pending_stock_target_clears:
+        Vec<meteor_network::stock_protocol::StockTargetClearEvent>,
+    pub stock_entry_prepared: std::collections::HashSet<String>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) stock_quick_chat: Option<std::collections::HashMap<u32, String>>,
     pub remote_chain_ticks: std::collections::HashMap<String, u32>,
 
     pub pending_role_entries: Vec<String>,
@@ -661,6 +683,8 @@ pub struct StockSceneItemPickup {
     pub record_id: u32,
     pub category: u32,
     pub item_id: u32,
+
+    pub scene_reference: Option<u32>,
     pub position: Option<[f32; 3]>,
 }
 
@@ -749,6 +773,11 @@ impl Default for NetState {
             pending_snapshots: Vec::new(),
             pending_role_states: Vec::new(),
             pending_pose_chains: Vec::new(),
+            pending_stock_pose_starts: Vec::new(),
+            pending_stock_target_clears: Vec::new(),
+            stock_entry_prepared: Default::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            stock_quick_chat: None,
             remote_chain_ticks: Default::default(),
             pending_role_entries: Vec::new(),
             pending_stock_vitals: None,
@@ -957,6 +986,23 @@ impl NetTx {
             },
             capture,
         )
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn send_stock_quick_chat(
+        &self,
+        chat: meteor_network::stock_protocol::StockQuickChat,
+    ) {
+        if let Some(tx) = &self.active {
+            let _ = tx.send(NetOutbound::StockQuickChat(chat));
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn send_stock_expel(&self, actor_id: u32, restrict: bool) {
+        if let Some(tx) = &self.active {
+            let _ = tx.send(NetOutbound::StockExpel { actor_id, restrict });
+        }
     }
 
     pub fn send_control(&self, message: Message) {
@@ -1637,6 +1683,7 @@ pub(crate) struct NetworkFrameApply;
 struct StockPostHitStates {
     states: Vec<(String, RoleState, u32)>,
     chains: Vec<(String, meteor_network::role_state::PoseChain, u32)>,
+    starts: Vec<(String, meteor_network::role_state::PoseChain, u32)>,
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -1728,6 +1775,11 @@ fn defer_stock_post_hit_states(
             net.pending_role_states.push((id, state, tick));
         }
     }
+    let (later, current) = std::mem::take(&mut net.pending_stock_pose_starts)
+        .into_iter()
+        .partition(|(id, _, tick)| first_hit.get(id).is_some_and(|first| tick > first));
+    deferred.starts = later;
+    net.pending_stock_pose_starts = current;
     for (id, chain, tick) in std::mem::take(&mut net.pending_pose_chains) {
         if first_hit.get(&id).is_some_and(|first| tick > *first) {
             deferred.chains.push((id, chain, tick));
@@ -1743,6 +1795,7 @@ fn restore_stock_post_hit_states(
 ) {
     net.pending_role_states.append(&mut deferred.states);
     net.pending_pose_chains.append(&mut deferred.chains);
+    net.pending_stock_pose_starts.append(&mut deferred.starts);
 }
 
 #[derive(Resource, Default)]
@@ -1780,6 +1833,8 @@ impl Plugin for NetworkPlugin {
         install_pose_chain_capture(app);
         app.init_resource::<PendingRemoteHitQueue>();
         super::native_text_input::install(app);
+        #[cfg(not(target_arch = "wasm32"))]
+        stock_chat::install(app);
         room_browser::install(app);
         asset_barrier::install(app);
         install_net_key_actions(app);
@@ -1850,6 +1905,7 @@ impl Plugin for NetworkPlugin {
                         .run_if(uses_stock_projection)
                         .run_if(move || !serial),
                     net_apply_authority_respawns,
+                    net_apply_stock_target_clears,
                     net_apply_remote_vitals,
                     net_apply_scene_transfers,
                 )
@@ -3277,15 +3333,17 @@ fn stock_host_player_limit(config: Option<&[u8]>) -> i32 {
         .map_or(16, |value| i32::from(value as i16))
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn stock_read_legacy_file(path: &str) -> Option<Vec<u8>> {
-    meteor_asset::runtime_assets::read_legacy_path(path).or_else(|| {
+pub(crate) fn stock_read_legacy_file(path: &str) -> Option<Vec<u8>> {
+    let bytes = meteor_asset::runtime_assets::read_legacy_path(path);
+    #[cfg(not(target_arch = "wasm32"))]
+    let bytes = bytes.or_else(|| {
         let current = std::env::current_dir().ok()?;
         let relative = path.replace('\\', "/");
         crate::plugins::audio_plugin::resource_roots(&current)
             .into_iter()
             .find_map(|root| crate::resource_io::read(root.join(&relative)).ok())
-    })
+    });
+    bytes
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -3298,14 +3356,23 @@ fn stock_scene_frame(stage_id: &str) -> StockSceneFrame {
     ))
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn stock_scene_objects(stage_id: &str, flags: u32) -> Option<stock_scene::StockSceneObjectMap> {
+pub(crate) fn stock_scene_objects(
+    stage_id: &str,
+    flags: u32,
+) -> Option<stock_scene::StockSceneObjectMap> {
     if !meteor_scene::stage_registry::is_official_stage_id(stage_id) {
         return None;
     }
     let descriptor = stock_read_legacy_file(&format!("{stage_id}/{stage_id}.des"))?;
+    stock_scene_objects_from_des(&descriptor, flags)
+}
+
+pub(crate) fn stock_scene_objects_from_des(
+    descriptor: &[u8],
+    flags: u32,
+) -> Option<stock_scene::StockSceneObjectMap> {
     let descriptor =
-        meteor_asset::des::parse_stage_description(&crate::text_codec::decode_text(&descriptor));
+        meteor_asset::des::parse_stage_description(&crate::text_codec::decode_text(descriptor));
     let resource = stock_resource_registry()?;
     Some(stock_scene::StockSceneObjectMap::new(
         &descriptor,
@@ -3314,21 +3381,21 @@ fn stock_scene_objects(stage_id: &str, flags: u32) -> Option<stock_scene::StockS
     ))
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn stock_resource_registry() -> Option<meteor_asset::res::MeteorRes> {
     let parse = |bytes: Vec<u8>| meteor_asset::res::parse_meteor_res(&bytes).ok();
-    meteor_asset::runtime_assets::read_legacy_path("Meteor.res")
-        .and_then(parse)
-        .or_else(|| {
-            let current = std::env::current_dir().ok()?;
-            crate::plugins::audio_plugin::resource_roots(&current)
-                .into_iter()
-                .find_map(|root| {
-                    crate::resource_io::read(root.join("Meteor.res"))
-                        .ok()
-                        .and_then(parse)
-                })
-        })
+    let registry = meteor_asset::runtime_assets::read_legacy_path("Meteor.res").and_then(parse);
+    #[cfg(not(target_arch = "wasm32"))]
+    let registry = registry.or_else(|| {
+        let current = std::env::current_dir().ok()?;
+        crate::plugins::audio_plugin::resource_roots(&current)
+            .into_iter()
+            .find_map(|root| {
+                crate::resource_io::read(root.join("Meteor.res"))
+                    .ok()
+                    .and_then(parse)
+            })
+    });
+    registry
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -3410,7 +3477,6 @@ fn scene_json_u32(value: Option<&serde_json::Value>) -> Option<u32> {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn scene_ops_from_stock(event: &StockSceneOpsEvent) -> Vec<SceneOp> {
     event
         .operations
@@ -3448,7 +3514,10 @@ pub(crate) fn scene_ops_from_stock(event: &StockSceneOpsEvent) -> Vec<SceneOp> {
                 STOCK_SCENE_OP_EFFECT => Some(SceneOp {
                     kind: "effect".into(),
                     reference,
-                    field: stock_rule3_effect_name(operation.value)?.into(),
+                    field: meteor_network::stock_protocol::stock_rule3_effect_name(
+                        operation.value,
+                    )?
+                    .into(),
                     args: vec![number(operation.extra)],
                 }),
                 _ => None,
@@ -3548,6 +3617,51 @@ fn run_stock_client_loop(
                         }));
                     }
                 }
+                NetOutbound::StockPoseStart(request) => {
+                    if let Err(error) = client.send_pose_start(request, now_ms) {
+                        debug!("stock pose start: {error}");
+                    }
+                }
+                NetOutbound::StockClearTarget(target) => {
+                    if let Err(error) = client.send_target_clear(target, now_ms) {
+                        debug!("stock clear target: {error}");
+                    }
+                }
+                NetOutbound::StockExpel { actor_id, restrict } => {
+                    if let Some(server) = hosted_server.as_mut() {
+                        if client.actor_id() == Some(actor_id) {
+                            continue;
+                        }
+                        match server.expel_actor(actor_id, restrict, now_ms) {
+                            Ok(true) => {}
+                            outcome => {
+                                let _ = to_app.send(NetInbound::Control(Message::Error {
+                                    code: "stock_moderation".into(),
+                                    text: outcome.err().map_or_else(
+                                        || format!("房间中没有角色 {actor_id}"),
+                                        |error| error.to_string(),
+                                    ),
+                                }));
+                            }
+                        }
+                    }
+                }
+                NetOutbound::StockTeamChat(text) => {
+                    if let Err(error) = client.send_team_chat(&text, now_ms) {
+                        let _ = to_app.send(NetInbound::Control(Message::Error {
+                            code: "stock_team_chat".into(),
+                            text: format!("无法发送队伍聊天：{error}"),
+                        }));
+                    }
+                }
+                NetOutbound::StockQuickChat(chat) => {
+                    if let Err(error) = client.send_quick_chat(chat, now_ms) {
+                        let _ = to_app.send(NetInbound::Control(Message::Error {
+                            code: "stock_quick_chat".into(),
+                            text: error.to_string(),
+                        }));
+                    }
+                }
                 NetOutbound::StockPoseChain(request) => {
                     if let Err(error) = client.send_pose_chain(request, now_ms) {
                         let _ = to_app.send(NetInbound::Control(Message::Error {
@@ -3605,7 +3719,7 @@ fn run_stock_client_loop(
                     }
                 }
                 NetOutbound::StockNpcWeaponDrop(entity, command) => {
-                    match npc_bridge.send_weapon_drop(entity, command, now_ms) {
+                    match npc_bridge.send_weapon_drop(entity, command, scene_frame, now_ms) {
                         Ok(Some(event)) => {
                             let _ = to_app.send(NetInbound::StockNpcWeaponEvent(entity, event));
                         }
@@ -3619,7 +3733,14 @@ fn run_stock_client_loop(
                     }
                 }
                 NetOutbound::StockNpcWeaponRest(entity, id, position) => {
-                    if let Err(error) = npc_bridge.confirm_weapon_rest(entity, id, position, now_ms)
+                    let at = RoleVec3 {
+                        x: position[0],
+                        y: position[1],
+                        z: position[2],
+                    };
+                    let at = scene_frame.map_or(at, |frame| frame.position_to_stock(at));
+                    if let Err(error) =
+                        npc_bridge.confirm_weapon_rest(entity, id, [at.x, at.y, at.z], now_ms)
                     {
                         let _ = to_app.send(NetInbound::Control(Message::Error {
                             code: "stock_npc_weapon_rest".into(),
@@ -3707,7 +3828,7 @@ fn run_stock_client_loop(
                     }
                 }
                 NetOutbound::StockWeaponDrop(command) => {
-                    match client.send_weapon_drop(command, now_ms) {
+                    match client.send_weapon_drop_in_scene(command, scene_frame, now_ms) {
                         Ok(Some(event)) => {
                             let _ = to_app.send(NetInbound::StockGame(event));
                         }
@@ -3735,6 +3856,14 @@ fn run_stock_client_loop(
                         reason: "已退出原版 UDP 对战".into(),
                     });
                     return;
+                }
+                NetOutbound::Control(Message::ChatSend { text }) => {
+                    if let Err(error) = client.send_chat(&text, now_ms) {
+                        let _ = to_app.send(NetInbound::Control(Message::Error {
+                            code: "stock_chat".into(),
+                            text: format!("无法发送原版聊天：{error}"),
+                        }));
+                    }
                 }
                 NetOutbound::Control(Message::ScenePropHit {
                     reference,
@@ -3847,6 +3976,13 @@ fn run_stock_client_loop(
                             scene_frame = Some(stock_scene_frame(&stage));
                             scene_objects = stock_scene_objects(&stage, config.field_c);
                         }
+                        StockGameEvent::CarriedItem(item) => {
+                            if let Some(objects) = &scene_objects {
+                                item.scene_reference = objects
+                                    .script_index(item.scene_reference)
+                                    .unwrap_or(u32::MAX);
+                            }
+                        }
                         StockGameEvent::SceneOps(ops) => {
                             if let Some(objects) = &scene_objects {
                                 ops.operations.retain_mut(|operation| {
@@ -3894,6 +4030,12 @@ fn run_stock_client_loop(
                         }
                     }
                     let disconnect_reason = match &event {
+                        StockGameEvent::PeerDisconnected { reason, .. }
+                            if *reason
+                                == meteor_network::stock_session::STOCK_REJECT_RESTRICTED =>
+                        {
+                            Some("你已被限制进入此房间")
+                        }
                         StockGameEvent::PeerDisconnected { .. } if stage_checksum_rejected => {
                             Some("地图 PST 资源与房主不一致，请使用相同版本的资源包")
                         }
@@ -4043,6 +4185,11 @@ fn run_connection(
                     NetOutbound::Input(input) | NetOutbound::OrderedInput(input) => encode_input_frame(wire_format, input),
                     NetOutbound::StockRoleState(_)
                     | NetOutbound::StockPoseChain(_)
+                    | NetOutbound::StockPoseStart(_)
+                    | NetOutbound::StockQuickChat(_)
+                    | NetOutbound::StockTeamChat(_)
+                    | NetOutbound::StockClearTarget(_)
+                    | NetOutbound::StockExpel { .. }
                     | NetOutbound::StockSelfEffect(_, _)
                     | NetOutbound::StockHit(_)
                     | NetOutbound::StockNpcRoster(_)
@@ -4462,7 +4609,8 @@ fn project_npc_weapon_event(net: &mut NetState, entity: Entity, event: StockGame
             }
             net.pending_weapon_drops.push(drop);
         }
-        StockGameEvent::WeaponSettled { throw_id, .. } => {
+        StockGameEvent::WeaponSettled { throw_id, .. }
+        | StockGameEvent::WeaponExpired(throw_id) => {
             let reference = reference(throw_id);
             net.dynamic_weapon_drops.remove(&reference);
             net.pending_weapon_drops
@@ -4484,6 +4632,49 @@ fn handle_stock_game_event(
 ) {
     let actor_key = |actor_id: u32| format!("stock-{actor_id}");
     match event {
+        StockGameEvent::Chat(chat) => queue_stock_chat(net, request, chat.actor_id, chat.text),
+        StockGameEvent::TeamChat(chat) => {
+            queue_stock_chat(net, request, chat.actor_id, format!("[队伍] {}", chat.text));
+        }
+        StockGameEvent::QuickChat(event) => {
+            if let Some(id) = event.chat.message_id() {
+                let table = net
+                    .stock_quick_chat
+                    .get_or_insert_with(super::system_notice::load_stock_quick_chat);
+                let text = table
+                    .get(&id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("快捷喊话 {id}"));
+                queue_stock_chat(net, request, event.actor_id, text);
+            }
+        }
+        StockGameEvent::EntryPrepared(actor_id) => {
+            let id = actor_key(actor_id);
+            net.stock_entry_prepared.insert(id.clone());
+            if let Some(member) = net.members.iter_mut().find(|member| member.player_id == id) {
+                member.ready = true;
+            }
+        }
+        StockGameEvent::PlayerExpelled(actor_id) | StockGameEvent::PlayerRestricted(actor_id) => {
+            let id = actor_key(actor_id);
+            let name = super::system_notice::resolve_actor_name(
+                net,
+                request,
+                &crate::app_state::RoomState::default(),
+                &id,
+            );
+            let notice = if matches!(event, StockGameEvent::PlayerExpelled(_)) {
+                format!("{name} 被踢出房间")
+            } else {
+                format!("{name} 被限制进入房间")
+            };
+            super::system_notice::queue_net_notice(net, notice);
+        }
+        StockGameEvent::TargetClear(event) => {
+            if actor_key(event.actor_id) != net.player_id {
+                net.pending_stock_target_clears.push(event);
+            }
+        }
         StockGameEvent::PlayerName { actor_id, name } => {
             if !name.trim().is_empty() {
                 let player_id = actor_key(actor_id);
@@ -4549,6 +4740,7 @@ fn handle_stock_game_event(
             net_tx.activate();
             net.transport_connected = true;
             net.stock_runtime_generation = None;
+            net.stock_entry_prepared.clear();
             net.projectile_sync_enabled = false;
             net.stock_scene_hit_peers.clear();
             net.pending_projectiles.clear();
@@ -4652,6 +4844,10 @@ fn handle_stock_game_event(
         StockGameEvent::RoleLeft(left) => {
             let player_id = actor_key(left.actor_id);
             net.pending_stock_entry_notices.remove(&player_id);
+            net.stock_entry_prepared.remove(&player_id);
+            net.pending_stock_target_clears.retain(|event| {
+                event.actor_id != left.actor_id && event.target_id != left.actor_id
+            });
             net.stock_scene_hit_peers.remove(&player_id);
             net.pending_projectiles
                 .retain(|state| state.player_id != player_id);
@@ -4758,7 +4954,9 @@ fn handle_stock_game_event(
                 }
             }
         }
-        StockGameEvent::PoseChain(event) => {
+        StockGameEvent::PoseStart(pose) | StockGameEvent::PoseChain(pose) => {
+            let start = matches!(event, StockGameEvent::PoseStart(_));
+            let event = pose;
             let player_id = actor_key(u32::from(event.actor_id));
             if player_id != net.player_id
                 && !net
@@ -4768,8 +4966,12 @@ fn handle_stock_game_event(
             {
                 let tick = net.last_role_snapshot_tick.unwrap_or(0).wrapping_add(1);
                 net.last_role_snapshot_tick = Some(tick);
-                net.pending_pose_chains
-                    .push((player_id, event.into(), tick));
+                let queue = if start {
+                    &mut net.pending_stock_pose_starts
+                } else {
+                    &mut net.pending_pose_chains
+                };
+                queue.push((player_id, event.into(), tick));
             }
         }
         StockGameEvent::RoleStates(records) => {
@@ -4851,7 +5053,7 @@ fn handle_stock_game_event(
                 net.pending_remote_hits.push((target_id, hit));
             }
         }
-        StockGameEvent::EnvironmentDeath(actor_id) => {
+        StockGameEvent::EnvironmentDeath(actor_id) | StockGameEvent::ForcedDeath(actor_id) => {
             let target = actor_key(actor_id);
             let deaths = net.stock_deaths.entry(target.clone()).or_default();
             *deaths = deaths.saturating_add(1);
@@ -5026,6 +5228,16 @@ fn handle_stock_game_event(
                 net.pending_status_effects.push((None, event));
             }
         }
+        StockGameEvent::CarriedItem(event) => {
+            net.pending_stock_scene_items.push(StockSceneItemPickup {
+                actor_id: event.actor_id,
+                record_id: u32::MAX,
+                category: event.category,
+                item_id: event.item_id,
+                position: None,
+                scene_reference: Some(event.scene_reference),
+            });
+        }
         StockGameEvent::SceneItemTaken { event, record } => {
             let position = record.map(|record| {
                 let position = record.role_position();
@@ -5039,6 +5251,7 @@ fn handle_stock_game_event(
                 record_id: event.record_id,
                 category: event.category,
                 item_id: event.item_id,
+                scene_reference: None,
                 position,
             });
             if net.pending_stock_scene_items.len() > 128 {
@@ -5057,6 +5270,14 @@ fn handle_stock_game_event(
                 .retain(|record| record.record_id != event.record_id);
         }
         StockGameEvent::WeaponThrown(mut thrown) => {
+            if net
+                .stock_npc_actors
+                .values()
+                .any(|actor| *actor == thrown.actor_id)
+            {
+                return;
+            }
+
             if actor_key(thrown.actor_id) != net.player_id {
                 if let Some(frame) = net.stock_scene_frame {
                     thrown.position = frame.position_to_scene(thrown.position);
@@ -5086,6 +5307,8 @@ fn handle_stock_game_event(
                         settled: false,
                         pickup_ready: false,
                     };
+                    net.pending_weapon_drops
+                        .retain(|pending| pending.reference != reference);
                     net.dynamic_weapon_drops.insert(reference, drop.clone());
                     if net.pending_weapon_drops.len() >= 64 {
                         net.pending_weapon_drops.remove(0);
@@ -5094,9 +5317,12 @@ fn handle_stock_game_event(
                 }
             }
         }
-        StockGameEvent::WeaponSettled { throw_id, .. } => {
-            net.dynamic_weapon_drops
-                .remove(&format!("D_wpStockThrow{throw_id}"));
+        StockGameEvent::WeaponSettled { throw_id, .. }
+        | StockGameEvent::WeaponExpired(throw_id) => {
+            let reference = format!("D_wpStockThrow{throw_id}");
+            net.dynamic_weapon_drops.remove(&reference);
+            net.pending_weapon_drops
+                .retain(|drop| drop.reference != reference);
         }
         StockGameEvent::Runtime(packet) => {
             use meteor_network::runtime_sync::RuntimePacket;
@@ -5320,7 +5546,7 @@ fn stock_escort_home(net: &NetState) -> [f32; 3] {
     [home.x, home.y, home.z]
 }
 
-fn stock_mode_from_rule(rule: i32) -> &'static str {
+pub(crate) fn stock_mode_from_rule(rule: i32) -> &'static str {
     match rule {
         1 => "leader",
         2 => "escort",
@@ -5376,6 +5602,8 @@ fn hard_disconnect(net: &mut NetState, next_state: &mut NextState<AppState>, cur
     net.round_remaining_seconds = None;
     net.round_time_minutes = None;
     net.pending_pose_chains.clear();
+    net.pending_stock_pose_starts.clear();
+    net.pending_stock_target_clears.clear();
     net.remote_chain_ticks.clear();
     net.error = Some("自动重连已停止，请重新进入联机大厅".into());
     if matches!(current, AppState::NetRoom | AppState::Playing) {
@@ -5446,6 +5674,8 @@ fn handle_net_message(
                 net.applied_scene_transfers.clear();
                 net.pending_role_states.clear();
                 net.pending_pose_chains.clear();
+                net.pending_stock_pose_starts.clear();
+                net.pending_stock_target_clears.clear();
                 net.remote_chain_ticks.clear();
                 net.pending_role_entries.clear();
                 net.pending_hits.clear();
@@ -5586,6 +5816,8 @@ fn handle_net_message(
             net.pending_role_states
                 .retain(|(id, _, _)| id != &player_id);
             net.pending_pose_chains
+                .retain(|(id, _, _)| id != &player_id);
+            net.pending_stock_pose_starts
                 .retain(|(id, _, _)| id != &player_id);
         }
         Message::RoomState {
@@ -5745,6 +5977,8 @@ fn handle_net_message(
                 }
                 net.pending_role_states.clear();
                 net.pending_pose_chains.clear();
+                net.pending_stock_pose_starts.clear();
+                net.pending_stock_target_clears.clear();
                 net.remote_chain_ticks.clear();
                 net.pending_role_entries.clear();
                 net.pending_hits.clear();
@@ -5796,6 +6030,8 @@ fn handle_net_message(
                 net.last_role_snapshot_tick = None;
                 net.pending_role_states.clear();
                 net.pending_pose_chains.clear();
+                net.pending_stock_pose_starts.clear();
+                net.pending_stock_target_clears.clear();
                 net.remote_chain_ticks.clear();
                 net.pending_role_entries.clear();
                 net.pending_hits.clear();
@@ -5856,6 +6092,8 @@ fn handle_net_message(
             net.round_epoch = round_epoch.or(net.round_epoch);
             net.round_active = false;
             net.pending_pose_chains.clear();
+            net.pending_stock_pose_starts.clear();
+            net.pending_stock_target_clears.clear();
 
             net.escort_flag = None;
             net.pending_objective_end = None;
@@ -6196,6 +6434,8 @@ fn handle_net_message(
         } => {
             net.round_active = false;
             net.pending_pose_chains.clear();
+            net.pending_stock_pose_starts.clear();
+            net.pending_stock_target_clears.clear();
 
             let presentation = super::battle_result::NetworkBattleResult {
                 round: net.battle_result.as_ref().map_or(1, |r| r.round),
@@ -6226,6 +6466,8 @@ fn handle_net_message(
             net.battle_pending = false;
             net.round_active = false;
             net.pending_pose_chains.clear();
+            net.pending_stock_pose_starts.clear();
+            net.pending_stock_target_clears.clear();
             net.remote_chain_ticks.clear();
             net.pending_hits.clear();
             net.pending_remote_hits.clear();
@@ -7684,10 +7926,22 @@ fn net_send_snapshot(
     net_tx: Option<Res<NetTx>>,
     mut sequence: ResMut<NetInputSequence>,
     mut last_sent: Local<f32>,
+    #[cfg(not(target_arch = "wasm32"))] mut last_stock_start: Local<Option<(Entity, u32, u16)>>,
+    #[cfg(not(target_arch = "wasm32"))] local_entity: Query<Entity, With<LocalFighter>>,
+    #[cfg(not(target_arch = "wasm32"))] lock_state: Option<Res<LockOnController>>,
+    #[cfg(not(target_arch = "wasm32"))] remotes: Query<&RemoteFighter>,
+    #[cfg(not(target_arch = "wasm32"))] mut previous_stock_lock: Local<
+        Option<(Entity, [Option<u32>; 2])>,
+    >,
     query: LocalSnapshotQuery<'_, '_>,
     score: Res<crate::components::fighter::KillScore>,
 ) {
     if net.status != NetStatus::InRoom || !net.round_active {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            *last_stock_start = None;
+            *previous_stock_lock = None;
+        }
         return;
     }
     let Some(tx) = net_tx else {
@@ -7696,15 +7950,49 @@ fn net_send_snapshot(
     #[cfg(not(target_arch = "wasm32"))]
     if net.is_stock_udp() {
         if let Some(sender) = &tx.active {
+            if let (Ok(owner), Some(lock)) = (local_entity.single(), lock_state.as_deref()) {
+                let actor = |entity: Option<Entity>| -> Option<u32> {
+                    remotes
+                        .get(entity?)
+                        .ok()?
+                        .player_id
+                        .strip_prefix("stock-")?
+                        .parse()
+                        .ok()
+                };
+                let targets = [actor(lock.lock_entity), actor(lock.track_entity)];
+                if let Some((previous_owner, [first, second])) =
+                    previous_stock_lock.replace((owner, targets))
+                {
+                    if owner == previous_owner {
+                        for target in [first, second.filter(|target| Some(*target) != first)]
+                            .into_iter()
+                            .flatten()
+                        {
+                            if !targets.contains(&Some(target)) {
+                                let _ = sender.send(NetOutbound::StockClearTarget(target));
+                            }
+                        }
+                    }
+                }
+            }
             for (_, pose, transform, _, motion, air, state, reaction) in &query {
+                let guard = local_guard_route(state, reaction);
+                if let Ok(entity) = local_entity.single() {
+                    let entry = (entity, pose.pose_instance_id, pose.pose_id);
+                    if guard && *last_stock_start != Some(entry) {
+                        let _ = sender.send(NetOutbound::StockPoseStart(
+                            meteor_network::stock_protocol::StockPoseChainRequest {
+                                pose_id: pose.pose_id,
+                                sequence: pose.pose_instance_id as u16,
+                                blend_seconds: 0.1,
+                            },
+                        ));
+                    }
+                    *last_stock_start = guard.then_some(entry);
+                }
                 let _ = sender.send(NetOutbound::StockRoleState(role_state_from_runtime(
-                    local_request1_runtime(
-                        pose,
-                        transform,
-                        motion,
-                        air,
-                        local_guard_route(state, reaction),
-                    ),
+                    local_request1_runtime(pose, transform, motion, air, guard),
                 )));
             }
         }
@@ -8447,7 +8735,7 @@ fn net_apply_snapshot(
 
     enum PoseInput {
         State(String, RoleState, u32),
-        Chain(String, meteor_network::role_state::PoseChain, u32),
+        Chain(String, meteor_network::role_state::PoseChain, u32, bool),
     }
     let mut inputs: Vec<_> = std::mem::take(&mut net.pending_role_states)
         .into_iter()
@@ -8456,20 +8744,33 @@ fn net_apply_snapshot(
     inputs.extend(
         std::mem::take(&mut net.pending_pose_chains)
             .into_iter()
-            .map(|(id, event, tick)| PoseInput::Chain(id, event, tick)),
+            .map(|(id, event, tick)| PoseInput::Chain(id, event, tick, false)),
+    );
+    inputs.extend(
+        std::mem::take(&mut net.pending_stock_pose_starts)
+            .into_iter()
+            .map(|(id, event, tick)| PoseInput::Chain(id, event, tick, true)),
     );
     inputs.sort_by_key(|input| match input {
         PoseInput::State(_, _, tick) => *tick,
-        PoseInput::Chain(_, _, tick) => *tick,
+        PoseInput::Chain(_, _, tick, _) => *tick,
     });
     let mut waiting_for_bootstrap = Vec::new();
     for input in inputs {
         let (remote_id, state, state_tick) = match input {
             PoseInput::State(id, state, tick) => (id, state, tick),
-            PoseInput::Chain(id, event, tick) => {
+            PoseInput::Chain(id, event, tick, start) => {
+                let pending = |net: &mut NetState, id, event, tick| {
+                    let queue = if start {
+                        &mut net.pending_stock_pose_starts
+                    } else {
+                        &mut net.pending_pose_chains
+                    };
+                    queue.push((id, event, tick));
+                };
                 let Some((entity, _)) = remotes.iter().find(|(_, remote)| remote.player_id == id)
                 else {
-                    net.pending_pose_chains.push((id, event, tick));
+                    pending(&mut net, id, event, tick);
                     continue;
                 };
                 let Ok((mut pose, _, fighter, _, _, _, generation, _, _)) =
@@ -8506,7 +8807,7 @@ fn net_apply_snapshot(
                     .as_deref()
                     .and_then(|assets| assets.0.get(&format!("p{}", fighter.character_id)))
                 else {
-                    net.pending_pose_chains.push((id, event, tick));
+                    pending(&mut net, id, event, tick);
                     continue;
                 };
                 let Ok(mut blend) = entry_blends.get_mut(entity) else {
@@ -8515,25 +8816,30 @@ fn net_apply_snapshot(
                 if !character.poses.contains_key(&event.pose_id) {
                     continue;
                 }
-
-                character.apply_pose_with_blend(
-                    &mut pose,
-                    &mut blend,
-                    event.pose_id,
-                    true,
-                    Some(event.blend_seconds),
-                    crate::components::fighter::EntryBlendKind::Chained,
-                    false,
-                    true,
-                    None,
-                );
-
-                blend.duration = event.blend_seconds.max(0.0);
-
-                pose.loops = false;
+                if start {
+                    super::replay_plugin::apply_stock_start_pose(
+                        character, &mut pose, &mut blend, event,
+                    );
+                } else {
+                    character.apply_pose_with_blend(
+                        &mut pose,
+                        &mut blend,
+                        event.pose_id,
+                        true,
+                        Some(event.blend_seconds),
+                        crate::components::fighter::EntryBlendKind::Chained,
+                        false,
+                        true,
+                        None,
+                    );
+                    blend.duration = event.blend_seconds.max(0.0);
+                    pose.loops = false;
+                }
                 net.remote_pose_ids.insert(id.clone(), event.pose_id);
                 let sequences = net.remote_pose_sequences.entry(id).or_default();
-                sequences.0 = sequences.0.wrapping_add(1);
+                if !start {
+                    sequences.0 = sequences.0.wrapping_add(1);
+                }
                 sequences.1 = event.sequence;
                 continue;
             }
@@ -10090,6 +10396,19 @@ fn net_room_members_text(net: &NetState) -> String {
     lines.join("\n")
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn queue_stock_chat(net: &mut NetState, request: &LaunchRequest, actor: u32, text: String) {
+    let player_id = format!("stock-{actor}");
+    let name = super::system_notice::resolve_actor_name(
+        net,
+        request,
+        &crate::app_state::RoomState::default(),
+        &player_id,
+    );
+    super::system_notice::queue_net_notice(net, format!("{name}  {text}"));
+    push_chat_message(net, name, text);
+}
+
 fn push_chat_message(net: &mut NetState, name: String, text: String) {
     if net.chat_messages.len() >= 20 {
         net.chat_messages.pop_front();
@@ -10099,6 +10418,40 @@ fn push_chat_message(net: &mut NetState, name: String, text: String) {
     }
     net.pst_chat_messages.push_back(text.clone());
     net.chat_messages.push_back((name, text));
+}
+
+fn net_apply_stock_target_clears(
+    mut net: ResMut<NetState>,
+    actors: Query<(Entity, &RemoteFighter)>,
+    local: Query<Entity, With<LocalFighter>>,
+    mut targets: Query<&mut crate::components::fighter::LockTarget>,
+) {
+    let local = local.single().ok();
+    let local_id = net
+        .player_id
+        .strip_prefix("stock-")
+        .and_then(|id| id.parse().ok());
+    for event in std::mem::take(&mut net.pending_stock_target_clears) {
+        let owner = format!("stock-{}", event.actor_id);
+        let target_id = format!("stock-{}", event.target_id);
+        let Some((owner, _)) = actors.iter().find(|(_, actor)| actor.player_id == owner) else {
+            continue;
+        };
+        let target = if local_id == Some(event.target_id) {
+            local
+        } else {
+            actors
+                .iter()
+                .find_map(|(entity, actor)| (actor.player_id == target_id).then_some(entity))
+        };
+        if let Some(target) = target {
+            if let Ok(mut lock) = targets.get_mut(owner) {
+                if lock.target == Some(target) {
+                    lock.target = None;
+                }
+            }
+        }
+    }
 }
 
 fn net_chat_input(
@@ -10113,11 +10466,13 @@ fn net_chat_input(
         }
         let text = event.value.clone();
         input.text.clear();
-        let my_id = net.player_id.clone();
-        net.chat_messages
-            .push_back((format!("{my_id}（我）"), text.clone()));
-        if net.chat_messages.len() > 20 {
-            net.chat_messages.pop_front();
+        if !net.is_stock_udp() {
+            let my_id = net.player_id.clone();
+            net.chat_messages
+                .push_back((format!("{my_id}（我）"), text.clone()));
+            if net.chat_messages.len() > 20 {
+                net.chat_messages.pop_front();
+            }
         }
         if let Some(tx) = net_tx.as_ref() {
             tx.send_control(Message::ChatSend { text });
@@ -10650,6 +11005,102 @@ mod tests {
                 "changing inventory must request the actual weapon model rebuild"
             );
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn stock_live_start_and_target_clear_apply_to_the_observed_fighter() {
+        use meteor_network::stock_game::StockGameEvent;
+        use meteor_network::stock_protocol::{StockPoseChainEvent, StockTargetClearEvent};
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        let character =
+            crate::plugins::character_plugin::load_character_asset_for_test(&[root], "p0").unwrap();
+        let mut app = App::new();
+        app.insert_resource(NetState {
+            address: "udp://127.0.0.1:5230".into(),
+            player_id: "stock-2".into(),
+            pending_role_entries: vec!["stock-1".into()],
+            remote_actor_profiles: [("stock-1".into(), (0, 5))].into(),
+            ..Default::default()
+        })
+        .insert_resource(crate::plugins::character_plugin::CharacterAssetsSet(
+            [("p0".into(), character)].into(),
+        ))
+        .add_systems(
+            Update,
+            (net_apply_snapshot, super::net_apply_stock_target_clears).chain(),
+        );
+        let local = app
+            .world_mut()
+            .spawn(crate::plugins::stage_plugin::LocalFighter)
+            .id();
+        app.update();
+        let remote = app
+            .world_mut()
+            .query_filtered::<Entity, With<RemoteFighter>>()
+            .single(app.world())
+            .unwrap();
+        app.world_mut()
+            .entity_mut(remote)
+            .insert(crate::components::fighter::LockTarget {
+                target: Some(local),
+            });
+
+        let receive = |app: &mut App, event| {
+            super::feed_stock_observer_event_for_test(app.world_mut(), event)
+        };
+        receive(
+            &mut app,
+            StockGameEvent::PoseStart(StockPoseChainEvent {
+                actor_id: 1,
+                pose_id: 24,
+                minimum_seconds: 0.0,
+                sequence: 7,
+                blend_seconds: 0.26,
+            }),
+        );
+        receive(
+            &mut app,
+            StockGameEvent::TargetClear(StockTargetClearEvent {
+                actor_id: 1,
+                target_id: 0,
+            }),
+        );
+        app.update();
+        let pose = app.world().get::<PoseRuntime>(remote).unwrap();
+        assert_eq!(pose.pose_id, 24);
+        assert!(pose.link_past_end);
+        assert_eq!(
+            app.world()
+                .get::<crate::components::fighter::EntryBlend>(remote)
+                .unwrap()
+                .duration,
+            0.26
+        );
+        assert_eq!(
+            app.world()
+                .get::<crate::components::fighter::LockTarget>(remote)
+                .unwrap()
+                .target,
+            Some(local)
+        );
+
+        receive(
+            &mut app,
+            StockGameEvent::TargetClear(StockTargetClearEvent {
+                actor_id: 1,
+                target_id: 2,
+            }),
+        );
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<crate::components::fighter::LockTarget>(remote)
+                .unwrap()
+                .target,
+            None
+        );
     }
 
     #[test]
@@ -11577,6 +12028,7 @@ mod tests {
                 record_id: 42,
                 category: 1,
                 item_id: 3,
+                scene_reference: None,
                 position: None,
             });
         app.world_mut()
@@ -14273,9 +14725,16 @@ mod tests {
                 .unwrap()
                 .movement_mode = meteor_core::MovementMode::Idle;
             app.update();
+            let NetOutbound::StockPoseStart(start) = receiver.try_recv().unwrap() else {
+                panic!("guard must publish its discrete Start before request 1")
+            };
             let NetOutbound::StockRoleState(guard) = receiver.try_recv().unwrap() else {
                 panic!()
             };
+            assert_eq!(
+                (start.pose_id, start.sequence, start.blend_seconds),
+                (guard_pose, guard.state_words.pose_sequence, 0.1)
+            );
             let packet = meteor_network::role_state::encode_request1_state(guard);
             let decoded = meteor_network::role_state::decode_request1_state(&packet).unwrap();
             assert_eq!(decoded.state_words.pose_id, guard_pose);
@@ -14285,6 +14744,15 @@ mod tests {
                 "original must keep looping its guard stance"
             );
             assert!(decoded.state_words.pose_sequence > dodge.state_words.pose_sequence);
+            app.update();
+            assert!(matches!(
+                receiver.try_recv(),
+                Ok(NetOutbound::StockRoleState(_))
+            ));
+            assert!(
+                receiver.try_recv().is_err(),
+                "holding guard must not restart Start"
+            );
         }
         character.apply_pose(
             &mut app.world_mut().get_mut::<PoseRuntime>(entity).unwrap(),
@@ -17312,6 +17780,7 @@ mod tests {
                 record_id: 77,
                 category: 2,
                 item_id: 1,
+                scene_reference: None,
                 position: Some(observed),
             }]
         );

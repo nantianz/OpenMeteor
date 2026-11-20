@@ -1236,6 +1236,9 @@ pub(crate) fn capture_local_command_input(
     mut state: LocalInputFrameState<'_>,
     net: Option<Res<super::network_plugin::NetState>>,
     app_state: Option<Res<State<AppState>>>,
+    #[cfg(not(target_arch = "wasm32"))] stock_chat: Option<
+        Res<super::network_plugin::stock_chat::StockChatKeyboard>,
+    >,
 ) {
     if app_state.is_some_and(|state| *state.get() != AppState::Playing) {
         input.window_events.clear();
@@ -1245,6 +1248,15 @@ pub(crate) fn capture_local_command_input(
     if net.is_some_and(|net| net.battle_result.is_some()) {
         input.window_events.read().for_each(drop);
         input.synthetic.clear();
+        state.command_input.0.clear();
+        state.combat.clear();
+        state.dodge.clear();
+        state.jump.clear();
+        return;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if stock_chat.is_some_and(|chat| chat.captures_gameplay()) {
+        input.window_events.clear();
         state.command_input.0.clear();
         state.combat.clear();
         state.dodge.clear();

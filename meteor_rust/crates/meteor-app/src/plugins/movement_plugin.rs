@@ -28,7 +28,9 @@ use meteor_input::command_parser::Dir;
 use meteor_physics::carry_velocity::{
     clamp_composed_delta_3d, clamp_composed_velocity_3d, CARRY_MAX_SPEED as MOVER_MAX_SPEED,
 };
-use meteor_physics::collision::{CollisionSystem, FootHit, GroundHit, Point3, WALKABLE_SURFACE_NY};
+use meteor_physics::collision::{
+    CollisionSystem, FootHit, GroundHit, Point3, FOOT_PROBE_DOWN, WALKABLE_SURFACE_NY,
+};
 use meteor_physics::dodge::DodgeState;
 use meteor_physics::jump::{self, AirMotionMode, AirState, JumpStartInput};
 use meteor_physics::locomotion::{
@@ -51,6 +53,7 @@ const FORWARD_STRAFE_SCALE: f32 = 0.2;
 const WALL_CLING_DELAY: f32 = 0.1;
 const STEEP_SUPPORT_SNAP: f32 = 2.5;
 const CARRY_DECAY_STEEP: f32 = 0.2;
+const DAGGER_AIR_LIGHT_POSE: u16 = 245;
 
 #[derive(Component, Default)]
 #[require(FighterWall)]
@@ -2525,7 +2528,6 @@ fn air_curve_root_motion(
             &mover,
             Point3::new(tick_start.x, tick_start.y, tick_start.z),
         );
-        let _ = tick_ground;
         let switching_weapon_air = switch.is_some() && pose.pose_id == WEAPON_SWITCH_POSE_AIR;
         if !air_curve_motion_owned(air.air.motion_mode, switching_weapon_air) {
             continue;
@@ -2671,31 +2673,85 @@ fn air_curve_root_motion(
             transform.translation.y,
             transform.translation.z,
         );
-        if mover.blocks_motion_sweep(pos, Point3::new(vx * dt, world_disp, vz * dt)) {
-            air.air.planar_x = 0.0;
-            air.air.planar_z = 0.0;
-            air.air.vertical_speed = 0.0;
-            motion.velocity = Vec3::ZERO;
-            if let Some(attack_motion) = attack_motion.as_deref_mut() {
-                attack_motion.carry_x = 0.0;
-                attack_motion.carry_z = 0.0;
-            }
-
-            continue;
-        }
         let requested_x = vx * dt;
         let requested_z = vz * dt;
-        let (rx, rz, ry, planar_surface) =
-            super::character_contact_plugin::resolve_fighter_xz_with_surface(
+        let contact_speed = vy;
+        let probe_dagger_ascent = pose.pose_id == DAGGER_AIR_LIGHT_POSE
+            && anim_driven
+            && world_disp > 0.0
+            && tick_ground.is_some_and(|ground| pos.y - ground.y <= FOOT_PROBE_DOWN);
+        let (rx, rz) = if probe_dagger_ascent {
+            let step = super::character_contact_plugin::resolve_fighter_ordinary_motion(
                 contacts.as_deref_mut(),
                 entity,
                 &mover,
                 pos,
-                requested_x,
-                requested_z,
-                true,
+                Point3::new(vx, vy, vz),
+                dt,
             );
-        project_planar_air_velocity_on_contact(&mut air.air, requested_x, requested_z, rx, rz);
+            transform.translation = Vec3::new(step.position.x, step.position.y, step.position.z);
+            record_scene_mover_result(&mut air, &step, dt);
+            (step.position.x - pos.x, step.position.z - pos.z)
+        } else {
+            if mover.blocks_motion_sweep(pos, Point3::new(requested_x, world_disp, requested_z)) {
+                air.air.planar_x = 0.0;
+                air.air.planar_z = 0.0;
+                air.air.vertical_speed = 0.0;
+                motion.velocity = Vec3::ZERO;
+                if let Some(attack_motion) = attack_motion.as_deref_mut() {
+                    attack_motion.carry_x = 0.0;
+                    attack_motion.carry_z = 0.0;
+                }
+
+                continue;
+            }
+            let (rx, rz, ry, planar_surface) =
+                super::character_contact_plugin::resolve_fighter_xz_with_surface(
+                    contacts.as_deref_mut(),
+                    entity,
+                    &mover,
+                    pos,
+                    requested_x,
+                    requested_z,
+                    true,
+                );
+            project_planar_air_velocity_on_contact(&mut air.air, requested_x, requested_z, rx, rz);
+            transform.translation.x += rx;
+            transform.translation.z += rz;
+            let vertical_origin = Point3::new(
+                transform.translation.x,
+                transform.translation.y + ry,
+                transform.translation.z,
+            );
+            let (dy, foot, surface, blocked) = if world_disp >= 0.0 {
+                let (dy, hit, blocked) = mover.resolve_y(vertical_origin, world_disp);
+                (dy, None, hit.map(|hit| (hit.nx, hit.ny, hit.nz)), blocked)
+            } else {
+                let (dy, hit, blocked) =
+                    mover.resolve_descent_with_surface(vertical_origin, world_disp, planar_surface);
+                (dy, hit, hit.map(|hit| (hit.nx, hit.ny, hit.nz)), blocked)
+            };
+            air.mover_vertical_contact = surface.is_some() || blocked;
+            update_descent_slide(&mut air, foot, contact_speed, dt);
+            record_carry_support(
+                &mut air,
+                world_disp,
+                surface,
+                planar_surface.is_some()
+                    || (rx - requested_x).abs() > 1e-5
+                    || (rz - requested_z).abs() > 1e-5,
+            );
+            if let Some((nx, ny, nz)) = surface {
+                project_air_velocity_on_surface(&mut air.air, nx, ny, nz);
+            }
+            if blocked {
+                air.air.vertical_speed = 0.0;
+            }
+            transform.translation.y += ry + dy;
+            air.ground_contact =
+                world_disp < 0.0 && meteor_physics::collision::descent_has_support(foot, blocked);
+            (rx, rz)
+        };
         if attack_planar_owned {
             if let Some(attack_motion) = attack_motion.as_deref_mut() {
                 if rx == 0.0 && requested_x != 0.0 {
@@ -2706,47 +2762,6 @@ fn air_curve_root_motion(
                 }
             }
         }
-        transform.translation.x += rx;
-        transform.translation.z += rz;
-        let vertical_origin = Point3::new(
-            transform.translation.x,
-            transform.translation.y + ry,
-            transform.translation.z,
-        );
-        let (dy, foot, surface, blocked) = if world_disp >= 0.0 {
-            let (dy, hit, blocked) = mover.resolve_y(vertical_origin, world_disp);
-            (
-                dy,
-                None::<FootHit>,
-                hit.map(|hit| (hit.nx, hit.ny, hit.nz)),
-                blocked,
-            )
-        } else {
-            let (dy, hit, blocked) =
-                mover.resolve_descent_with_surface(vertical_origin, world_disp, planar_surface);
-            (dy, hit, hit.map(|hit| (hit.nx, hit.ny, hit.nz)), blocked)
-        };
-        air.mover_vertical_contact = surface.is_some() || blocked;
-        let contact_speed = air.air.vertical_speed;
-        update_descent_slide(&mut air, foot, contact_speed, dt);
-        record_carry_support(
-            &mut air,
-            world_disp,
-            surface,
-            planar_surface.is_some()
-                || (rx - requested_x).abs() > 1e-5
-                || (rz - requested_z).abs() > 1e-5,
-        );
-        if let Some((nx, ny, nz)) = surface {
-            project_air_velocity_on_surface(&mut air.air, nx, ny, nz);
-        }
-        if blocked {
-            air.air.vertical_speed = 0.0;
-        }
-        transform.translation.y += ry + dy;
-
-        air.ground_contact =
-            world_disp < 0.0 && meteor_physics::collision::descent_has_support(foot, blocked);
         air.peak_lift = air
             .peak_lift
             .max((transform.translation.y - air.ground_y).max(0.0));
@@ -3540,6 +3555,11 @@ pub(crate) fn move_local_fighter(
         {
             let preserve_post_jump_action =
                 preserve_post_jump_action(jump_action_accepted, sm.current);
+            let dagger_air_attack_on_release = jump_request == JumpChargeRequest::Released
+                && !air.air.airborne
+                && preserve_post_jump_action
+                && is_attacking_state(sm.current)
+                && pose.pose_id == DAGGER_AIR_LIGHT_POSE;
             let strong = air.jump_hold >= STRONG_JUMP_HOLD;
             let jump_pose = meteor_physics::locomotion::jump_pose_for_input(input.x, input.z);
 
@@ -3549,6 +3569,9 @@ pub(crate) fn move_local_fighter(
             });
             air.recovery_ground_mode = None;
             start_jump_with_velocity_transfer(&mut air.air, &mut motion, strong, impulse);
+            if dagger_air_attack_on_release {
+                air.air.start_curve(false, pose.pose_id);
+            }
             took_off_this_tick = true;
 
             air.peak_lift = 0.0;

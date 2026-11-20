@@ -65,6 +65,7 @@ fn stock_pickup_batches_stay_hidden_until_authoritative_respawn() {
             record_id,
             category: 2,
             item_id: 1,
+            scene_reference: None,
             position: None,
         };
         let assert_state = |app: &mut App, record_id, available| {
@@ -175,6 +176,7 @@ fn stock_remote_food_and_concealment_apply_once_and_visual_effects_expire() {
                 record_id: item_id,
                 category: 2,
                 item_id,
+                scene_reference: None,
                 position: None,
             });
     }
@@ -273,4 +275,67 @@ fn stock_room_rule_filtered_generators_stay_hidden_after_script_sync() {
         .world()
         .get::<StockSceneItemView>(prop)
         .is_some_and(|view| !view.available));
+}
+
+#[test]
+fn stock_event45_disables_only_the_authored_object_with_the_matching_index() {
+    let mut app = App::new();
+    let instances = ["D_Item01", "D_Item02"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| SceneItemInstance {
+            name: name.into(),
+            index,
+            props: [("active".into(), PstValue::Num(1.0))].into(),
+        })
+        .collect();
+    let script = SceneScriptRuntime::load("Scene_OnLoad() {}", instances, 10_000).unwrap();
+    app.init_resource::<ItemBuffs>()
+        .insert_resource(StageScriptRuntime::from_script(script))
+        .insert_resource(NetState::default())
+        .add_systems(Update, apply_stock_scene_item_pickups);
+    let mut spawn = |name: &str| {
+        app.world_mut()
+            .spawn((
+                StageProp {
+                    name: name.into(),
+                    model: "item01".into(),
+                    center_offset: Vec3::ZERO,
+                    half_extents: Vec3::ONE,
+                    hit_count: 0,
+                    respawn_timer: 0.0,
+                    interactive: true,
+                    collision_enabled: false,
+                    breakable: false,
+                    broken: false,
+                },
+                Transform::default(),
+                Visibility::Visible,
+            ))
+            .id()
+    };
+    let first = spawn("D_Item01");
+    let second = spawn("D_Item02");
+    app.world_mut()
+        .resource_mut::<NetState>()
+        .pending_stock_scene_items
+        .push(StockSceneItemPickup {
+            actor_id: 1,
+            record_id: u32::MAX,
+            category: 2,
+            item_id: 1,
+            scene_reference: Some(1),
+            position: None,
+        });
+    app.update();
+    assert_eq!(
+        app.world().get::<Visibility>(first),
+        Some(&Visibility::Visible)
+    );
+    assert_eq!(
+        app.world().get::<Visibility>(second),
+        Some(&Visibility::Hidden)
+    );
+    assert!(app.world().get::<StageProp>(first).unwrap().interactive);
+    assert!(!app.world().get::<StageProp>(second).unwrap().interactive);
 }

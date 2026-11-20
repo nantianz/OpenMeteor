@@ -1845,6 +1845,7 @@ fn set_binding(
     pressed: bool,
 ) {
     match (binding, pressed) {
+        (InputBinding::Unbound, _) => {}
         (InputBinding::Key(key), true) => keys.press(key),
         (InputBinding::Key(key), false) => keys.release(key),
         (InputBinding::Mouse(button), true) => mouse.press(button),
@@ -1858,6 +1859,7 @@ fn cancel_binding(
     binding: InputBinding,
 ) {
     match binding {
+        InputBinding::Unbound => {}
         InputBinding::Key(key) => keys.reset(key),
         InputBinding::Mouse(button) => mouse.reset(button),
     }

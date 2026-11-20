@@ -365,6 +365,19 @@ pub fn queue_net_notice(net: &mut NetState, text: impl Into<String>) {
     }
 }
 
+pub(crate) fn load_stock_quick_chat() -> std::collections::HashMap<u32, String> {
+    let bytes = super::network_plugin::stock_read_legacy_file("mgstringtableHT.ini")
+        .or_else(|| meteor_asset::runtime_assets::read_entry("common/mgstringtableht.ini"))
+        .unwrap_or_default();
+    let (text, _, _) = encoding_rs::GBK.decode(&bytes);
+    text.lines()
+        .filter_map(|line| {
+            let (id, message) = line.trim().split_once(char::is_whitespace)?;
+            Some((id.parse().ok()?, message.trim_start().to_owned()))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

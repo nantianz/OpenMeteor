@@ -378,6 +378,7 @@ mod tests {
                 attack: 110,
                 defense: 15,
                 speed_percent: 100,
+                speed_delta: 0,
             })
         );
     }

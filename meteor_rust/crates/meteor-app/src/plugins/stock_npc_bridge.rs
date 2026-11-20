@@ -94,12 +94,13 @@ impl Bridge {
         &mut self,
         entity: Entity,
         command: StockWeaponDropCommand,
+        frame: Option<meteor_network::stock_protocol::StockSceneFrame>,
         now_ms: u64,
     ) -> Result<Option<StockGameEvent>, StockGameError> {
         self.clients
             .get_mut(&entity)
             .ok_or(StockGameError::RoleNotEntered)?
-            .send_weapon_drop(command, now_ms)
+            .send_weapon_drop_in_scene(command, frame, now_ms)
     }
 
     pub(super) fn confirm_weapon_rest(
@@ -154,7 +155,16 @@ impl Bridge {
     ) -> Result<(), StockGameError> {
         for (&entity, client) in &mut self.clients {
             for event in client.tick(now_ms)? {
-                if matches!(event, StockGameEvent::WeaponSettled { .. }) {
+                if let StockGameEvent::WeaponThrown(throw) = &event {
+                    if Some(throw.actor_id) == client.actor_id() {
+                        let _ = to_app.send(NetInbound::StockNpcWeaponEvent(entity, event));
+                    }
+                    continue;
+                }
+                if matches!(
+                    event,
+                    StockGameEvent::WeaponSettled { .. } | StockGameEvent::WeaponExpired(_)
+                ) {
                     let _ = to_app.send(NetInbound::StockNpcWeaponEvent(entity, event));
                     continue;
                 }

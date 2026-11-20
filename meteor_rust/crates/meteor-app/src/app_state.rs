@@ -265,6 +265,7 @@ impl Settings {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InputBinding {
+    Unbound,
     Key(KeyCode),
     Mouse(MouseButton),
 }
@@ -272,6 +273,7 @@ pub enum InputBinding {
 impl InputBinding {
     pub fn pressed(self, keys: &ButtonInput<KeyCode>, mouse: &ButtonInput<MouseButton>) -> bool {
         match self {
+            Self::Unbound => false,
             Self::Key(key) => keys.pressed(key),
             Self::Mouse(button) => mouse.pressed(button),
         }
@@ -283,6 +285,7 @@ impl InputBinding {
         mouse: &ButtonInput<MouseButton>,
     ) -> bool {
         match self {
+            Self::Unbound => false,
             Self::Key(key) => keys.just_pressed(key),
             Self::Mouse(button) => mouse.just_pressed(button),
         }
@@ -294,6 +297,7 @@ impl InputBinding {
         mouse: &ButtonInput<MouseButton>,
     ) -> bool {
         match self {
+            Self::Unbound => false,
             Self::Key(key) => keys.just_released(key),
             Self::Mouse(button) => mouse.just_released(button),
         }
@@ -302,12 +306,13 @@ impl InputBinding {
     pub fn as_key(self) -> Option<KeyCode> {
         match self {
             Self::Key(key) => Some(key),
-            Self::Mouse(_) => None,
+            Self::Mouse(_) | Self::Unbound => None,
         }
     }
 
     pub fn name(self) -> String {
         match self {
+            Self::Unbound => "Unbound".into(),
             Self::Key(key) => key_name(key),
             Self::Mouse(MouseButton::Left) => "Mouse0".to_string(),
             Self::Mouse(MouseButton::Right) => "Mouse2".to_string(),
@@ -322,6 +327,7 @@ impl InputBinding {
 
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
+            "Unbound" => Some(Self::Unbound),
             "Mouse0" => Some(Self::Mouse(MouseButton::Left)),
             "Mouse1" => Some(Self::Mouse(MouseButton::Middle)),
             "Mouse2" => Some(Self::Mouse(MouseButton::Right)),
@@ -357,6 +363,10 @@ pub struct Keymap {
     pub debug_panel: InputBinding,
 
     pub dodge: InputBinding,
+    pub chat_all: InputBinding,
+    pub chat_team: InputBinding,
+    pub quick_chat_all: InputBinding,
+    pub quick_chat_team: InputBinding,
 }
 
 impl Default for Keymap {
@@ -385,6 +395,11 @@ impl Default for Keymap {
             radar: InputBinding::Key(KeyCode::KeyI),
             debug_panel: InputBinding::Key(KeyCode::Backquote),
             dodge: InputBinding::Key(KeyCode::KeyV),
+            chat_all: InputBinding::Key(KeyCode::KeyP),
+            chat_team: InputBinding::Key(KeyCode::KeyO),
+            quick_chat_all: InputBinding::Key(KeyCode::KeyB),
+
+            quick_chat_team: InputBinding::Key(KeyCode::KeyN),
         }
     }
 }
@@ -413,6 +428,10 @@ pub enum KeyField {
     Radar,
     DebugPanel,
     Dodge,
+    ChatAll,
+    ChatTeam,
+    QuickChatAll,
+    QuickChatTeam,
 }
 
 impl KeyField {
@@ -439,6 +458,10 @@ impl KeyField {
             Self::LockToggle => "锁定 / 解除锁定",
             Self::Radar => "雷达开关",
             Self::DebugPanel => "调试面板",
+            Self::ChatAll => "全体聊天",
+            Self::ChatTeam => "队伍聊天",
+            Self::QuickChatAll => "全体快捷喊话",
+            Self::QuickChatTeam => "队伍快捷喊话",
             Self::Dodge => "闪避",
         }
     }
@@ -466,6 +489,10 @@ impl KeyField {
             Self::LockToggle => keymap.lock_toggle,
             Self::Radar => keymap.radar,
             Self::DebugPanel => keymap.debug_panel,
+            Self::ChatAll => keymap.chat_all,
+            Self::ChatTeam => keymap.chat_team,
+            Self::QuickChatAll => keymap.quick_chat_all,
+            Self::QuickChatTeam => keymap.quick_chat_team,
             Self::Dodge => keymap.dodge,
         }
     }
@@ -497,8 +524,26 @@ impl KeyField {
             Self::LockToggle => keymap.lock_toggle = binding,
             Self::Radar => keymap.radar = binding,
             Self::DebugPanel => keymap.debug_panel = binding,
+            Self::ChatAll => keymap.chat_all = binding,
+            Self::ChatTeam => keymap.chat_team = binding,
+            Self::QuickChatAll => keymap.quick_chat_all = binding,
+            Self::QuickChatTeam => keymap.quick_chat_team = binding,
             Self::Dodge => keymap.dodge = binding,
         }
+    }
+
+    pub const STOCK_CHAT_ACTIONS: [Self; 4] = [
+        Self::ChatAll,
+        Self::ChatTeam,
+        Self::QuickChatAll,
+        Self::QuickChatTeam,
+    ];
+
+    pub fn settings_actions() -> impl Iterator<Item = Self> {
+        Self::BINDING_ACTIONS
+            .into_iter()
+            .chain([Self::Dodge])
+            .chain(Self::STOCK_CHAT_ACTIONS)
     }
 
     pub const BINDING_ACTIONS: [KeyField; 21] = [
@@ -531,8 +576,12 @@ pub fn assign_key_binding(keymap: &mut Keymap, field: KeyField, binding: InputBi
     if previous == binding {
         return;
     }
-    for other in KeyField::BINDING_ACTIONS {
-        if other != field && other.get(keymap) == binding {
+    #[cfg(not(target_arch = "wasm32"))]
+    let actions = KeyField::settings_actions();
+    #[cfg(target_arch = "wasm32")]
+    let actions = KeyField::BINDING_ACTIONS;
+    for other in actions {
+        if binding != InputBinding::Unbound && other != field && other.get(keymap) == binding {
             other.set_binding(keymap, previous);
             break;
         }
@@ -664,6 +713,7 @@ pub fn key_name(key: KeyCode) -> String {
 
 pub fn format_binding_label(binding: InputBinding) -> String {
     match binding {
+        InputBinding::Unbound => "未绑定".into(),
         InputBinding::Mouse(MouseButton::Left) => "鼠标左键".into(),
         InputBinding::Mouse(MouseButton::Middle) => "鼠标中键".into(),
         InputBinding::Mouse(MouseButton::Right) => "鼠标右键".into(),
@@ -821,11 +871,10 @@ touch_controls={}
         u8::from(settings.fullscreen),
         u8::from(settings.borderless_window)
     ));
-    for field in KeyField::BINDING_ACTIONS {
+    for field in KeyField::settings_actions() {
         let storage_key = key_field_storage_key(field);
         append_binding(&mut text, storage_key, field.get(keymap));
     }
-    append_binding(&mut text, "dodge", keymap.dodge);
     text
 }
 
@@ -866,6 +915,10 @@ fn key_field_storage_key(field: KeyField) -> &'static str {
         KeyField::LockToggle => "lock_toggle",
         KeyField::Radar => "radar",
         KeyField::DebugPanel => "debug_panel",
+        KeyField::ChatAll => "chat_all",
+        KeyField::ChatTeam => "chat_team",
+        KeyField::QuickChatAll => "quick_chat_all",
+        KeyField::QuickChatTeam => "quick_chat_team",
         KeyField::Dodge => "dodge",
     }
 }
@@ -893,6 +946,7 @@ pub fn load_settings() -> (Settings, Keymap) {
 fn parse_settings(text: &str) -> (Settings, Keymap) {
     let mut settings = Settings::default();
     let mut keymap = Keymap::default();
+    let mut loaded_chat = [false; KeyField::STOCK_CHAT_ACTIONS.len()];
     let has_hd_scene = text.lines().any(|line| {
         line.split_once('=')
             .is_some_and(|(key, _)| key.trim() == "hd_scene")
@@ -1007,12 +1061,27 @@ fn parse_settings(text: &str) -> (Settings, Keymap) {
             }
             "radar" => apply_binding_value(&mut keymap, KeyField::Radar, value),
             "debug_panel" => apply_binding_value(&mut keymap, KeyField::DebugPanel, value),
-            "dodge" => {
-                if let Some(binding) = InputBinding::from_name(value) {
-                    keymap.dodge = binding;
+            "dodge" => apply_binding_value(&mut keymap, KeyField::Dodge, value),
+            other => {
+                if let Some(index) = KeyField::STOCK_CHAT_ACTIONS
+                    .iter()
+                    .position(|field| key_field_storage_key(*field) == other)
+                {
+                    if let Some(binding) = InputBinding::from_name(value) {
+                        KeyField::STOCK_CHAT_ACTIONS[index].set_binding(&mut keymap, binding);
+                        loaded_chat[index] = true;
+                    }
                 }
             }
-            _ => {}
+        }
+    }
+
+    for (field, loaded) in KeyField::STOCK_CHAT_ACTIONS.into_iter().zip(loaded_chat) {
+        if !loaded
+            && KeyField::settings_actions()
+                .any(|other| other != field && other.get(&keymap) == field.get(&keymap))
+        {
+            field.set_binding(&mut keymap, InputBinding::Unbound);
         }
     }
     (settings, keymap)
@@ -1369,6 +1438,45 @@ pub struct ResultRetryButton;
 mod keymap_tests {
     use super::*;
 
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn stock_chat_bindings_preserve_older_actions_and_can_swap_with_dodge() {
+        let (settings, mut keymap) = parse_settings(
+            "attack=KeyP
+dodge=KeyV
+move_left=KeyN
+chat_team=KeyJ
+quick_chat_all=Mouse1
+",
+        );
+        assert_eq!(keymap.attack, InputBinding::Key(KeyCode::KeyP));
+        assert_eq!(keymap.move_left, InputBinding::Key(KeyCode::KeyN));
+        assert_eq!(keymap.dodge, InputBinding::Key(KeyCode::KeyV));
+        assert_eq!(keymap.chat_all, InputBinding::Unbound);
+        assert_eq!(keymap.chat_team, InputBinding::Key(KeyCode::KeyJ));
+        assert_eq!(
+            keymap.quick_chat_all,
+            InputBinding::Mouse(MouseButton::Middle)
+        );
+        assert_eq!(keymap.quick_chat_team, InputBinding::Unbound);
+        assign_key_binding(
+            &mut keymap,
+            KeyField::QuickChatTeam,
+            InputBinding::Key(KeyCode::KeyY),
+        );
+        assign_key_binding(
+            &mut keymap,
+            KeyField::QuickChatTeam,
+            InputBinding::Key(KeyCode::KeyV),
+        );
+        assert_eq!(keymap.dodge, InputBinding::Key(KeyCode::KeyY));
+        assert_eq!(keymap.quick_chat_team, InputBinding::Key(KeyCode::KeyV));
+        let (_, restored) = parse_settings(&settings_text(&settings, &keymap));
+        for field in KeyField::settings_actions() {
+            assert_eq!(field.get(&restored), field.get(&keymap));
+        }
+    }
+
     #[test]
     fn legacy_run_binding_is_ignored_and_not_saved() {
         let (settings, mut keymap) = parse_settings("run=Mouse0\njump=ControlLeft\n");
@@ -1424,10 +1532,7 @@ mod keymap_tests {
     fn default_keymap_has_no_duplicate_bindings() {
         let keymap = Keymap::default();
         let mut seen: Vec<(KeyField, InputBinding)> = Vec::new();
-        for field in KeyField::BINDING_ACTIONS
-            .into_iter()
-            .chain([KeyField::Dodge])
-        {
+        for field in KeyField::settings_actions() {
             let binding = field.get(&keymap);
             if let Some((other, _)) = seen.iter().find(|(_, b)| *b == binding) {
                 panic!("{field:?} 与 {other:?} 重复绑定 {binding:?}");

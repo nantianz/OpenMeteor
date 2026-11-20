@@ -120,7 +120,7 @@ fn stock_npc_spare_drop_uses_own_actor_once_and_preserves_equipped_weapon() {
         200,
     );
     assert!(picked[0].iter().any(|event| matches!(event,
-        StockGameEvent::SceneItemTaken { event, .. } if event.actor_id == actor && event.item_id == spare)),
+        StockGameEvent::CarriedItem(event) if event.actor_id == actor && event.item_id == spare && event.scene_reference == 0)),
         "the spare must first exist in the server's actual NPC inventory");
     let position = RoleVec3 {
         x: 15.0,
@@ -139,7 +139,7 @@ fn stock_npc_spare_drop_uses_own_actor_once_and_preserves_equipped_weapon() {
         remaining_item_id: Some(current),
     };
     let Some(StockGameEvent::WeaponThrown(thrown)) =
-        bridge.send_weapon_drop(npc, command, 501).unwrap()
+        bridge.send_weapon_drop(npc, command, None, 501).unwrap()
     else {
         panic!("drop must use the NPC's private role");
     };
@@ -154,9 +154,15 @@ fn stock_npc_spare_drop_uses_own_actor_once_and_preserves_equipped_weapon() {
         501,
         200,
     );
-    assert_eq!(events[0].iter().filter(|event| matches!(event,
-        StockGameEvent::RawApplication { opcode: meteor_network::stock_protocol::STOCK_EVENT_WEAPON_OBJECT, payload, .. }
-            if payload.len() == 36 && u32::from_le_bytes(payload[..4].try_into().unwrap()) == actor)).count(), 1);
+    assert_eq!(
+        events[0]
+            .iter()
+            .filter(|event| matches!(event,
+        StockGameEvent::WeaponThrown(observed)
+            if observed.actor_id == actor && observed.item_id == spare))
+            .count(),
+        1
+    );
     let mut unchanged = role(npc);
     unchanged.state.position = position;
     bridge.sync(&server, vec![unchanged], 702).unwrap();
@@ -230,12 +236,14 @@ fn stock_npc_spare_drop_uses_own_actor_once_and_preserves_equipped_weapon() {
         200,
     );
     assert_eq!(events[0].iter().filter(|event| matches!(event,
-        StockGameEvent::SceneItemTaken { event, .. } if event.actor_id == actor && event.item_id == replacement)).count(), 1,
+        StockGameEvent::CarriedItem(event) if event.actor_id == actor && event.item_id == replacement && event.scene_reference == 1)).count(), 1,
         "the NPC can pick a different weapon into the slot released by command20");
     let mut missing_world = World::new();
     missing_world.spawn_empty();
     let missing = missing_world.spawn_empty().id();
-    assert!(bridge.send_weapon_drop(missing, command, 1003).is_err());
+    assert!(bridge
+        .send_weapon_drop(missing, command, None, 1003)
+        .is_err());
 }
 
 #[test]
