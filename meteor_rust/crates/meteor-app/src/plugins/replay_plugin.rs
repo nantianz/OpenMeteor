@@ -622,7 +622,18 @@ fn tick_mrc_playback(
     mut frame_override: ResMut<MrcFrameOverride>,
     mut session: ResMut<MrcSessionRuntime>,
     mut basis: ResMut<CameraBasis>,
-    mut fighters: Query<(&mut Transform, &mut MotionState), With<LocalFighter>>,
+    mut lock: Option<ResMut<crate::components::fighter::LockOnController>>,
+    mut fighters: Query<
+        (
+            &mut Transform,
+            &mut MotionState,
+            Option<&crate::components::fighter::SmState>,
+            Option<&mut crate::plugins::movement_plugin::FighterAir>,
+            Option<&mut Visibility>,
+        ),
+        With<LocalFighter>,
+    >,
+    lock_targets: Query<(&Transform, Option<&MotionState>), Without<LocalFighter>>,
 ) {
     frame_override.position_applied = false;
     frame_override.facing_applied = false;
@@ -637,7 +648,18 @@ fn tick_mrc_playback(
     let scene_frame = mrc_scene_frame(&playback, waypoints.as_deref());
     synthetic.set_frame_clock_seconds(f64::from(t));
 
-    let (index_a, index_b, index_c, index_d, index_e, packed, pose, facing, finished) = {
+    let (
+        index_a,
+        index_b,
+        index_c,
+        index_d,
+        index_e,
+        packed,
+        pose,
+        facing,
+        finished,
+        (pre_entry, entered_now),
+    ) = {
         let Some(doc) = playback.doc.as_ref() else {
             return;
         };
@@ -663,6 +685,16 @@ fn tick_mrc_playback(
                 .map(|position| mrc_scene_pose(position, scene_frame))
                 .or(pose);
             i_d += 1;
+        }
+
+        let pre_entry = scene_frame.is_some() && i_d == 0;
+        let entered_now = scene_frame.is_some() && playback.index_d == 0 && i_d > 0;
+        if pre_entry {
+            pose = doc
+                .queue_d
+                .first()
+                .and_then(decode_mrc_pose)
+                .map(|position| mrc_scene_pose(position, scene_frame));
         }
         let mut facing = None;
         let mut i_e = playback.index_e;
@@ -726,6 +758,7 @@ fn tick_mrc_playback(
                 && i_c >= doc.queue_c.len()
                 && i_d >= doc.queue_d.len()
                 && i_e >= doc.queue_e.len(),
+            (pre_entry, entered_now),
         )
     };
     playback.index_a = index_a;
@@ -734,16 +767,56 @@ fn tick_mrc_playback(
     playback.index_d = index_d;
     playback.index_e = index_e;
     if pose.is_some() || facing.is_some() {
-        if let Ok((mut transform, mut motion)) = fighters.single_mut() {
+        if let Ok((mut transform, mut motion, sm, mut air, visibility)) = fighters.single_mut() {
+            if let Some(mut visibility) = visibility {
+                if pre_entry && *visibility != Visibility::Hidden {
+                    *visibility = Visibility::Hidden;
+                } else if entered_now && *visibility == Visibility::Hidden {
+                    *visibility = Visibility::Inherited;
+                }
+            }
+            if pre_entry {
+                if let Some(air) = air.as_deref_mut() {
+                    air.air.vertical_speed = 0.0;
+                    air.air.planar_x = 0.0;
+                    air.air.planar_z = 0.0;
+                }
+            }
             if let Some(position) = pose {
                 transform.translation = position;
 
                 frame_override.position_applied = true;
+
+                let ordinary_ground = sm
+                    .is_some_and(|sm| sm.current == meteor_core::FighterState::Name)
+                    && air.as_deref().is_none_or(|air| !air.air.airborne);
+                if facing.is_none() && ordinary_ground && playback.stock_scene_coordinates() {
+                    if let Some((target, target_motion)) = lock
+                        .as_deref()
+                        .and_then(|lock| lock.lock_entity)
+                        .and_then(|entity| lock_targets.get(entity).ok())
+                    {
+                        if let Some(yaw) = meteor_combat::lock_on::locked_facing_yaw(
+                            position.to_array().into(),
+                            target.translation.to_array().into(),
+                            target_motion.map(|motion| motion.facing),
+                        ) {
+                            motion.facing = yaw;
+                        }
+                    }
+                }
             }
             if let Some(yaw) = facing {
                 motion.facing = yaw;
                 basis.yaw = yaw;
                 frame_override.facing_applied = true;
+
+                if playback.stock_scene_coordinates() {
+                    if let Some(lock) = lock.as_deref_mut() {
+                        lock.system.clear_lock();
+                        lock.lock_entity = None;
+                    }
+                }
             }
         }
     }
@@ -1618,6 +1691,64 @@ fn restore_mrc_scene(
     }
 }
 
+fn recorded_reaction_facing(
+    defender: Vec3,
+    facing: f32,
+    attacker: Vec3,
+    attacks: &[meteor_asset::pos::AttackBlock],
+    reaction_pose: u16,
+) -> Option<f32> {
+    use meteor_combat::hit_reaction::{facing_bucket, FacingBucket};
+    let mut allowed = Vec::new();
+    for attack in attacks {
+        for (bucket, field) in [
+            (FacingBucket::Front, attack.target_pose_front),
+            (FacingBucket::Back, attack.target_pose_back),
+            (FacingBucket::Left, attack.target_pose_left),
+            (FacingBucket::Right, attack.target_pose_right),
+        ] {
+            if field == Some(reaction_pose) && !allowed.contains(&bucket) {
+                allowed.push(bucket);
+            }
+        }
+    }
+    let current = facing_bucket(attacker.x, attacker.z, defender.x, defender.z, facing);
+    if allowed.is_empty() || allowed.contains(&current) {
+        return None;
+    }
+    let to_attacker = (attacker.x - defender.x).atan2(attacker.z - defender.z);
+    let wrap = |a: f32| {
+        (a + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
+    };
+    let rel = wrap(to_attacker - facing);
+    let (q, t, e) = (
+        std::f32::consts::FRAC_PI_4,
+        3.0 * std::f32::consts::FRAC_PI_4,
+        0.01,
+    );
+    allowed
+        .into_iter()
+        .filter_map(|bucket| {
+            let target = match bucket {
+                FacingBucket::Front => rel.clamp(-q + e, q - e),
+                FacingBucket::Left => rel.clamp(q + e, t - e),
+                FacingBucket::Right => rel.clamp(-t + e, -q - e),
+                FacingBucket::Back => {
+                    if rel >= 0.0 {
+                        rel.max(t + e)
+                    } else {
+                        rel.min(-t - e)
+                    }
+                }
+                FacingBucket::Default => return None,
+            };
+            let yaw = to_attacker - target;
+            Some((wrap(yaw - facing).abs(), facing + wrap(yaw - facing)))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, yaw)| yaw)
+}
+
 fn apply_mrc_hit_events(
     assets: Option<Res<crate::plugins::character_plugin::CharacterAssetsSet>>,
     playback: Res<MrcPlayback>,
@@ -1631,6 +1762,7 @@ fn apply_mrc_hit_events(
             &crate::plugins::movement_plugin::FighterAir,
             &mut crate::components::fighter::CombatState,
             &mut crate::components::fighter::SmState,
+            Option<(&Transform, &mut MotionState)>,
         ),
         (With<LocalFighter>, Without<MrcRemoteFighter>),
     >,
@@ -1643,6 +1775,7 @@ fn apply_mrc_hit_events(
             &mut crate::components::fighter::FighterHitReaction,
             &crate::plugins::movement_plugin::FighterAir,
             &mut crate::plugins::network_plugin::RemoteHitMotionWindow,
+            Option<&Transform>,
         ),
         (With<MrcRemoteFighter>, Without<LocalFighter>),
     >,
@@ -1661,12 +1794,58 @@ fn apply_mrc_hit_events(
             continue;
         }
         if playback.local_slot() == Some(event.target_actor_id) {
-            let Ok((fighter, mut pose, mut blend, mut reaction, air, mut combat, mut sm)) =
-                local.single_mut()
+            let Ok((
+                fighter,
+                mut pose,
+                mut blend,
+                mut reaction,
+                air,
+                mut combat,
+                mut sm,
+                mut placement,
+            )) = local.single_mut()
             else {
                 session.pending_hits.push((guarded, event));
                 continue;
             };
+
+            if std::env::var_os("NO_BUCKET").is_none()
+                && !guarded
+                && playback.stock_scene_coordinates()
+            {
+                if let (Some((transform, motion)), Some(assets)) =
+                    (placement.as_mut(), assets.as_deref())
+                {
+                    let attackers = remotes
+                        .iter()
+                        .filter_map(|(remote, attacker, attacker_pose, .., at)| {
+                            let at = at?;
+                            let attacks = &assets
+                                .0
+                                .get(&format!("p{}", attacker.character_id))?
+                                .poses
+                                .get(&attacker_pose.pose_id)?
+                                .attacks;
+                            Some((remote.actor_id, at.translation, attacks.clone()))
+                        })
+                        .filter(|(actor, ..)| u32::from(*actor) != event.target_actor_id);
+                    let best = attackers
+                        .filter_map(|(_, at, attacks)| {
+                            recorded_reaction_facing(
+                                transform.translation,
+                                motion.facing,
+                                at,
+                                &attacks,
+                                event.pose_id as u16,
+                            )
+                            .map(|yaw| (at.distance_squared(transform.translation), yaw))
+                        })
+                        .min_by(|a, b| a.0.total_cmp(&b.0));
+                    if let Some((_, yaw)) = best {
+                        motion.facing = yaw;
+                    }
+                }
+            }
             let Some(character) = assets
                 .as_deref()
                 .and_then(|assets| assets.0.get(&format!("p{}", fighter.character_id)))
@@ -1724,6 +1903,10 @@ fn apply_mrc_hit_events(
                 },
                 air.air.airborne,
             );
+
+            if let Some((_, motion)) = placement.as_ref() {
+                reaction.bank_be_hit_carry(motion.velocity, true);
+            }
             let state = if guarded {
                 meteor_core::FighterState::Guard
             } else {
@@ -1740,7 +1923,7 @@ fn apply_mrc_hit_events(
             sm.exe_ground_mode_ticks = 0;
             continue;
         }
-        let Some((mut remote, fighter, mut pose, mut blend, mut reaction, air, mut window)) =
+        let Some((mut remote, fighter, mut pose, mut blend, mut reaction, air, mut window, _)) =
             remotes
                 .iter_mut()
                 .find(|(remote, ..)| u32::from(remote.actor_id) == event.target_actor_id)

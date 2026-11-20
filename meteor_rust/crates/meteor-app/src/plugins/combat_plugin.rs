@@ -18091,6 +18091,19 @@ mod tests {
                 .insert(HeadTrackState::default());
             configure_lock_updates(&mut h.app);
         }
+
+        if std::env::var_os("METEOR_MRC_DRIFT_NO_CONTACT").is_none() {
+            h.app
+                .add_plugins(crate::plugins::character_contact_plugin::CharacterContactPlugin);
+        }
+        let actor_schedule = super::super::fighter_frame::schedule(&mut h.app);
+        h.app.add_systems(
+            actor_schedule,
+            hit_reaction_root_motion
+                .in_set(crate::plugins::FighterFrameSet::RootMotion)
+                .after(crate::plugins::movement_plugin::attack_root_motion)
+                .after(crate::plugins::movement_plugin::dodge_root_motion),
+        );
         let dt = 1.0 / fps as f32;
         let mut next_d = 0;
         let mut anchors = Vec::new();
@@ -18131,6 +18144,19 @@ mod tests {
                 }));
             }
             h.step_duration(std::time::Duration::from_nanos(1_000_000_000 / fps as u64));
+
+            let modelless: Vec<Entity> = h.app.world_mut()
+                .query_filtered::<(Entity, Option<&Children>), With<crate::plugins::replay_plugin::MrcRemoteFighter>>()
+                .iter(h.app.world())
+                .filter(|(_, children)| children.is_none_or(|children| children.is_empty()))
+                .map(|(entity, _)| entity)
+                .collect();
+            for remote in modelless {
+                crate::plugins::character_plugin::spawn_fighter_model_for_test(
+                    h.app.world_mut(),
+                    remote,
+                );
+            }
             let time = h
                 .app
                 .world()
@@ -18147,18 +18173,42 @@ mod tests {
                 .get_resource::<LockOnController>()
                 .is_some_and(|lock| lock.lock_entity.is_some());
             let rust_remote: Vec<_> = h.app.world_mut()
-                .query_filtered::<(&crate::plugins::replay_plugin::MrcRemoteFighter, &Transform), Without<LocalFighter>>()
+                .query_filtered::<(&crate::plugins::replay_plugin::MrcRemoteFighter, &Transform, &PoseRuntime,
+                    &FighterHitReaction, Option<&crate::plugins::network_plugin::RemoteTransformTarget>,
+                    Option<&crate::plugins::network_plugin::RemoteHitMotionWindow>), Without<LocalFighter>>()
                 .iter(h.app.world())
-                .map(|(remote, transform)| serde_json::json!({"actor": remote.actor_id, "p": transform.translation.to_array()}))
+                .map(|(remote, transform, pose, reaction, target, window)| serde_json::json!({
+                    "actor": remote.actor_id, "p": transform.translation.to_array(), "pose": pose.pose_id,
+                    "frame": pose.frame, "reaction": reaction.current.as_ref().map(|r| (r.pose_id, r.motion_scale)),
+                    "target": target.map(|t| t.translation.to_array()), "window": window.map(|w| w.remaining)}))
                 .collect();
             let facing = h
                 .app
                 .world()
                 .get::<MotionState>(h.fighter)
                 .map_or(0.0, |motion| motion.facing);
+            let reaction = h.app.world().get::<FighterHitReaction>(h.fighter).and_then(|runtime| runtime.current.as_ref().map(|r|
+                serde_json::json!({"kind": format!("{:?}", r.kind), "pose": r.pose_id, "move": r.motion_scale,
+                    "rootStarted": runtime.root_started, "held": runtime.entry_blend_held})));
+            let frame_index = h
+                .app
+                .world()
+                .get::<PoseRuntime>(h.fighter)
+                .map_or(0.0, |p| p.frame);
+            let blend_active = h
+                .app
+                .world()
+                .get::<EntryBlend>(h.fighter)
+                .is_some_and(|b| b.is_active_for(pose));
+            let sm = h
+                .app
+                .world()
+                .get::<SmState>(h.fighter)
+                .map(|sm| format!("{:?}", sm.current));
             frames.push(
                 serde_json::json!({"time": time, "p": h.position().to_array(), "pose": pose,
-                "facing": facing, "locked": locked, "rustRemote": rust_remote}),
+                "facing": facing, "locked": locked, "rustRemote": rust_remote, "reaction": reaction,
+                "frame": frame_index, "blend": blend_active, "sm": sm}),
             );
         }
         MrcDriftAudit {
@@ -18210,6 +18260,72 @@ mod tests {
     }
 
     #[cfg(feature = "original-assets")]
+    #[cfg(feature = "original-assets")]
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn original_mrc_local_entry_hit_bucket_and_air_carry_follow_the_recording() {
+        let anchor = |audit: &MrcDriftAudit, time: f64| {
+            audit
+                .anchors
+                .iter()
+                .find(|a| (a["time"].as_f64().unwrap() - time).abs() < 0.002)
+                .cloned()
+                .unwrap_or_else(|| panic!("no D at {time}"))
+        };
+        let burn = run_mrc_drift_audit("忍烧.mrc", 120, Some(5.3), true);
+        for time in [4.8687, 4.8767] {
+            let a = anchor(&burn, time);
+            assert!(
+                a["error"].as_f64().unwrap() < 0.1,
+                "entry fall at {time}: {a}"
+            );
+        }
+        let ultimate = run_mrc_drift_audit("忍刀  大绝.mrc", 120, Some(45.5), true);
+        for (time, limit) in [(43.9044, 2.5), (45.0355, 0.5), (45.3346, 0.5)] {
+            let a = anchor(&ultimate, time);
+            assert!(
+                a["error"].as_f64().unwrap() < limit,
+                "{time} s pre-snap error: {a}"
+            );
+        }
+        let fist = run_mrc_drift_audit("指虎大招.mrc", 120, Some(27.1), true);
+        let a = anchor(&fist, 26.9834);
+        assert!(
+            a["error"].as_f64().unwrap() < 2.5,
+            "26.983 s pre-snap error: {a}"
+        );
+    }
+
+    #[cfg(feature = "original-assets")]
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn original_dagger_mrc_queue_e_sample_releases_a_resimulated_lock() {
+        let audit = run_mrc_drift_audit("匕首小跳.mrc", 120, Some(36.0), true);
+        let locked_after = audit
+            .frames
+            .iter()
+            .filter(|frame| {
+                (28.87..36.0).contains(&frame["time"].as_f64().unwrap())
+                    && frame["locked"].as_bool().unwrap()
+            })
+            .count();
+        assert_eq!(
+            locked_after, 0,
+            "E samples from 28.859 s prove the original had no Lock"
+        );
+        for time in [34.369, 34.719, 35.493] {
+            let anchor = audit
+                .anchors
+                .iter()
+                .find(|a| (a["time"].as_f64().unwrap() - time).abs() < 0.005)
+                .unwrap();
+            assert!(
+                anchor["error"].as_f64().unwrap() < 1.0,
+                "{time} s pre-snap error: {anchor}"
+            );
+        }
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn original_ninja_mrc_locked_local_faces_the_remote_without_queue_e() {
@@ -18226,16 +18342,34 @@ mod tests {
                 .unwrap()
         };
 
-        for t in [8.5_f32, 9.0, 9.5, 10.0, 11.0] {
-            let frame = frame_at(t);
+        let mut checked = 0;
+        let ordinary =
+            |frame: &serde_json::Value| matches!(frame["pose"].as_u64(), Some(0 | 144 | 404));
+
+        for frame in audit
+            .frames
+            .windows(3)
+            .filter(|w| {
+                let t = w[2]["time"].as_f64().unwrap();
+                (8.3..11.5).contains(&t) && w.iter().all(ordinary)
+            })
+            .map(|w| &w[2])
+        {
+            let t = frame["time"].as_f64().unwrap();
             assert!(
                 frame["locked"].as_bool().unwrap(),
                 "lock lost at {t}: {frame}"
             );
             let p = frame["p"].as_array().unwrap();
             let r = frame["rustRemote"][0]["p"].as_array().unwrap();
-            let bearing = (r[0].as_f64().unwrap() - p[0].as_f64().unwrap())
-                .atan2(r[2].as_f64().unwrap() - p[2].as_f64().unwrap());
+            let (dx, dz) = (
+                r[0].as_f64().unwrap() - p[0].as_f64().unwrap(),
+                r[2].as_f64().unwrap() - p[2].as_f64().unwrap(),
+            );
+            if dx.hypot(dz) < 1.0 {
+                continue;
+            }
+            let bearing = dx.atan2(dz);
             let facing = frame["facing"].as_f64().unwrap();
             let delta = ((facing - bearing + std::f64::consts::PI)
                 .rem_euclid(std::f64::consts::TAU)
@@ -18245,6 +18379,27 @@ mod tests {
                 delta < 0.35,
                 "at {t}s facing {facing:.2} vs bearing {bearing:.2} (delta {delta:.2})"
             );
+            checked += 1;
+        }
+        assert!(checked > 100, "too few ordinary locked frames: {checked}");
+
+        let dodges: Vec<_> = audit
+            .transitions
+            .iter()
+            .filter(|t| (501..=504).contains(&t["pose"].as_u64().unwrap()))
+            .filter(|t| (7.0..10.0).contains(&t["time"].as_f64().unwrap()))
+            .map(|t| (t["time"].as_f64().unwrap(), t["pose"].as_u64().unwrap()))
+            .collect();
+        assert_eq!(
+            dodges.len(),
+            3,
+            "recorded W/D/A double-tap dodges: {dodges:?}"
+        );
+        for ((time, _), recorded) in dodges.iter().zip([7.763, 8.800, 9.250]) {
+            assert!(
+                (time - recorded).abs() < 0.05,
+                "dodge at {time} vs second tap {recorded}"
+            );
         }
 
         let anchor = audit
@@ -18253,8 +18408,18 @@ mod tests {
             .find(|a| (a["time"].as_f64().unwrap() - 11.558).abs() < 0.01)
             .unwrap();
         assert!(
-            anchor["error"].as_f64().unwrap() < 8.0,
+            anchor["error"].as_f64().unwrap() < 2.0,
             "11.558 s pre-snap error: {anchor}"
+        );
+
+        let landing = audit
+            .anchors
+            .iter()
+            .find(|a| (a["time"].as_f64().unwrap() - 6.088).abs() < 0.01)
+            .unwrap();
+        assert!(
+            landing["error"].as_f64().unwrap() < 2.0,
+            "6.088 s pre-snap error: {landing}"
         );
 
         let anchor_at = |t: f64| {
@@ -18272,13 +18437,14 @@ mod tests {
             .atan2(e1[2].as_f64().unwrap() - e0[2].as_f64().unwrap());
         let rust = (actual[0].as_f64().unwrap() - e0[0].as_f64().unwrap())
             .atan2(actual[2].as_f64().unwrap() - e0[2].as_f64().unwrap());
-        let delta = ((rust - recorded + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU)
-            - std::f64::consts::PI)
-            .abs();
-        assert!(
-            delta < 0.45,
-            "466 dash direction: rust {rust:.2} vs recorded {recorded:.2} ({delta:.2} rad)"
-        );
+        let wrap = |a: f64| {
+            ((a + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI)
+                .abs()
+        };
+        let delta = wrap(rust - recorded);
+
+        let stale = wrap(0.5038 - recorded);
+        assert!(delta < stale * 0.5, "466 dash direction: rust {rust:.2} vs recorded {recorded:.2} ({delta:.2} rad, stale {stale:.2})");
     }
 
     #[cfg(not(target_arch = "wasm32"))]

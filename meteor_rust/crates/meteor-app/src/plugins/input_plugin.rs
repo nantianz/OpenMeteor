@@ -263,7 +263,7 @@ impl SyntheticInputStream {
                 repeat: false,
             },
             record_direction: true,
-            detect_dodge: false,
+            detect_dodge: true,
             event_seconds,
         });
     }
