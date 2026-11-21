@@ -571,12 +571,18 @@ impl Plugin for InputPlugin {
             .add_systems(
                 Update,
                 capture_local_command_input
+                    .run_if(bevy::ecs::schedule::common_conditions::not(
+                        super::replay_plugin::use_recorded_substeps,
+                    ))
                     .in_set(crate::plugins::FighterFrameSet::Movement)
                     .before(crate::plugins::FighterFrameSet::PoseDecision),
             )
             .add_systems(
                 Update,
                 capture_local_hold_inputs
+                    .run_if(bevy::ecs::schedule::common_conditions::not(
+                        super::replay_plugin::use_recorded_substeps,
+                    ))
                     .after(capture_local_command_input)
                     .in_set(crate::plugins::FighterFrameSet::Movement)
                     .before(crate::plugins::FighterFrameSet::PoseDecision)

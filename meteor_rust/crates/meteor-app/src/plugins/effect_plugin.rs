@@ -3768,6 +3768,69 @@ mod tests {
     include!("effect_plugin/stock_impact_feedback_tests.rs");
 
     #[test]
+    fn recorded_impact_feedback_plays_authored_hit_and_guard_wavs() {
+        use crate::plugins::impact_fx_plugin::{CombatImpactEvent, CombatImpactKind};
+        use meteor_asset::pon_ef::PonEfTail;
+
+        for (kind, effect_pose, visible_pose, wav) in [
+            (CombatImpactKind::Hit, 99, 99, "W01HIT02.wav"),
+            (CombatImpactKind::Guard, 98, 56, "W01GRD02.wav"),
+        ] {
+            let mut app = feedback_test_app();
+            let defender = app
+                .world_mut()
+                .spawn((
+                    feedback_fighter(6),
+                    PoseRuntime {
+                        pose_id: visible_pose,
+                        ..PoseRuntime::idle()
+                    },
+                    Transform::IDENTITY,
+                    crate::plugins::network_plugin::RemoteFighter {
+                        player_id: "mrc:2".into(),
+                    },
+                ))
+                .id();
+            app.update();
+            app.world_mut().write_message(CombatImpactEvent {
+                kind,
+                attacker: defender,
+                defender,
+                reaction_pose: Some(effect_pose),
+                effect_strategy: Some(1),
+                contact: Vec3::ZERO,
+                direction: Vec3::ZERO,
+            });
+            let mut played = false;
+            for _ in 0..8 {
+                app.update();
+                let Some(player) = app
+                    .world_mut()
+                    .query::<&PonEfInstance>()
+                    .iter(app.world())
+                    .next()
+                else {
+                    continue;
+                };
+                played |= player
+                    .ef
+                    .nodes
+                    .iter()
+                    .zip(&player.audio_playing)
+                    .any(|(node, audio)| {
+                        matches!(&node.tail, PonEfTail::Audio { sound, .. } if sound == wav)
+                            && audio.is_some_and(|entity| {
+                                app.world()
+                                    .get::<bevy::audio::AudioPlayer>(entity)
+                                    .is_some()
+                            })
+                    });
+            }
+            assert!(played, "expected playback of {wav}");
+        }
+    }
+
+    #[test]
     fn production_hit_feedback_uses_attacker_strategy_and_remote_reaction_override() {
         use crate::plugins::impact_fx_plugin::{CombatImpactEvent, CombatImpactKind};
         for (weapon, stock_context) in (1..=12).flat_map(|weapon| [(weapon, false), (weapon, true)])

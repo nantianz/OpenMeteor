@@ -269,9 +269,9 @@ pub(crate) fn first_simulation_substep(clock: Option<&FrameClock>) -> bool {
 }
 
 pub(crate) fn input_simulation_substep(clock: Option<&FrameClock>) -> bool {
-    clock
-        .and_then(|clock| clock.substep)
-        .is_none_or(|step| step.last)
+    clock.is_none_or(|clock| {
+        !clock.replay_steps.is_empty() || clock.substep.is_none_or(|step| step.last)
+    })
 }
 
 pub(crate) fn simulation_remaining_wall(clock: Option<&FrameClock>) -> f64 {
@@ -646,6 +646,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "original-assets")]
     #[test]
     fn stock_mrc_frame_timeline_recovers_the_recorder_rate() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../mrcs/tests");

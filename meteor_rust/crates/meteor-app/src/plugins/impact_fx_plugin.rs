@@ -668,6 +668,7 @@ fn update_impact_fx(
     net: Res<NetState>,
     real: Res<Time<Real>>,
     frame_clock: Option<Res<crate::plugins::FrameClock>>,
+    replay: Option<Res<crate::plugins::replay_plugin::MrcPlayback>>,
     mut state: ResMut<ImpactSimulationScale>,
     mut sparks: ResMut<SparkBurstRuntime>,
     mut impacts: MessageReader<CombatImpactEvent>,
@@ -705,7 +706,10 @@ fn update_impact_fx(
     if !settings.hit_shake {
         state.trauma = 0.0;
     }
-    let multiplayer_match = net.round_active;
+
+    let hit_stop = settings.hit_stop
+        && !net.round_active
+        && !replay.as_deref().is_some_and(|replay| replay.active);
     let local = local_fighter.iter().next();
     for impact in impacts.read() {
         state.ripple_impact = 1.0;
@@ -715,7 +719,7 @@ fn update_impact_fx(
         if settings.hit_shake && involves_local {
             state.trauma = state.trauma.max(trauma_for(impact.kind)).min(1.0);
         }
-        if !multiplayer_match && settings.hit_stop {
+        if hit_stop {
             begin_hitstop(&mut state, impact.kind, now);
         }
         if impact.kind == CombatImpactKind::Guard {
@@ -730,7 +734,7 @@ fn update_impact_fx(
             spawn_guard_sparks(&mut sparks, impact, state.wall_time, attacker, defender);
         }
     }
-    if multiplayer_match || !settings.hit_stop {
+    if !hit_stop {
         state.scale = 1.0;
         state.frozen = false;
         state.phase = HitStopPhase::Idle;
@@ -941,6 +945,21 @@ mod tests {
             contact: Vec3::Y * 2.2,
             direction: Vec3::X,
         });
+    }
+
+    #[test]
+    fn recorded_mrc_impact_does_not_trigger_hitstop() {
+        let (mut app, _, _) = impact_test_app();
+        app.insert_resource(crate::plugins::replay_plugin::MrcPlayback {
+            active: true,
+            ..default()
+        });
+        emit_test_impact(&mut app, CombatImpactKind::Hit);
+        impact_step(&mut app);
+        let state = app.world().resource::<ImpactSimulationScale>();
+        assert_eq!(state.phase, HitStopPhase::Idle);
+        assert_eq!(state.scale, 1.0);
+        assert!(!state.frozen);
     }
 
     #[test]

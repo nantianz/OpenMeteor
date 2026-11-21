@@ -5,7 +5,12 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Workspace build helpers"
+default-run = "xtask"
 
 [dependencies]
+flate2 = "1"
+meteor-network = { path = "../crates/meteor-network" }
+serde_json.workspace = true
+sha2 = "0.10"
 meteor-core = { path = "../crates/meteor-core" }
 meteor-asset = { path = "../crates/meteor-asset" }

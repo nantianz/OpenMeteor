@@ -163,6 +163,25 @@ fn run_fighters(world: &mut World) {
         .map(|clock| clock.replay_steps.clone())
         .filter(|steps| !steps.is_empty())
         .map(|steps| steps.into_iter());
+    let mut recorded_targets = replay_steps.as_ref().and_then(|steps| {
+        world
+            .get_resource::<super::replay_plugin::MrcPlayback>()
+            .filter(|playback| {
+                world.contains_resource::<super::replay_plugin::RecordedSubsteps>()
+                    && playback.active
+                    && !playback.paused
+            })
+            .and_then(|playback| {
+                let start = playback.frame_cursor.checked_sub(steps.len())?;
+                Some(
+                    playback
+                        .frame_times
+                        .get(start..playback.frame_cursor)?
+                        .to_vec()
+                        .into_iter(),
+                )
+            })
+    });
     while consumed < total {
         let remaining = total - consumed;
 
@@ -199,7 +218,18 @@ fn run_fighters(world: &mut World) {
                 remaining_wall_seconds: (now - step_now).max(0.0),
             });
         }
+        if let Some(recorded_time) = recorded_targets.as_mut().and_then(Iterator::next) {
+            world
+                .resource_mut::<super::replay_plugin::MrcPlayback>()
+                .frame_target = Some(recorded_time);
+            world.run_schedule(super::replay_plugin::MrcSubstep);
+        }
         run_controller_step(world);
+        if recorded_targets.is_some()
+            && world.resource::<super::replay_plugin::MrcPlayback>().paused
+        {
+            break;
+        }
         first = false;
     }
     let mut clock = world.resource_mut::<super::FrameClock>();

@@ -173,6 +173,13 @@ pub enum HitReactKind {
 }
 
 impl HitReact {
+    pub fn dead(pose_id: Option<u16>, motion_scale: f32) -> Self {
+        let mut reaction = Self::new(HitReactKind::Dead, pose_id);
+        reaction.lock_remaining = f32::INFINITY;
+        reaction.motion_scale = motion_scale;
+        reaction
+    }
+
     fn new(kind: HitReactKind, pose_id: Option<u16>) -> Self {
         Self {
             kind,
@@ -281,16 +288,11 @@ pub fn begin_environmental_hit(
 pub fn begin_death(fighter: &mut impl ReactionFighter, attack: Option<&AttackBlock>) -> HitReact {
     let pose_id = DEATH_POSES.iter().copied().find(|id| fighter.has_pose(*id));
     let move_val = attack.map(|a| a.target_move).unwrap_or(0.0);
-    let mut hr = HitReact::new(HitReactKind::Dead, pose_id);
-    hr.lock_remaining = f32::INFINITY;
-    hr.minimum_remaining = 0.0;
-    hr.authored_minimum = 0.0;
-    hr.motion_scale = move_val;
     fighter.set_in_guard(false);
     if let Some(id) = pose_id {
         fighter.play_pose(id, true);
     }
-    hr
+    HitReact::dead(pose_id, move_val)
 }
 
 pub fn begin_guard_hit(

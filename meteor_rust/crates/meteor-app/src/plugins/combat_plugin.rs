@@ -5154,15 +5154,125 @@ fn trace_obb(obb: &Obb) -> serde_json::Value {
     })
 }
 
+fn recorded_mrc_hit_matches_local_attack(
+    event_context: u32,
+    strategy_id: u8,
+    attacker_team: i32,
+    defender_team: i32,
+    attack_obbs: &[Obb],
+    hurt_obbs: &[Obb],
+    effect_hit: bool,
+) -> bool {
+    event_context == u32::from(strategy_id)
+        && teams_are_hostile(attacker_team, defender_team)
+        && (effect_hit
+            || attack_obbs
+                .iter()
+                .any(|attack| hurt_obbs.iter().any(|hurt| obbs_intersect(attack, hurt))))
+}
+
+#[cfg(test)]
+mod recorded_mrc_contact_tests {
+    use super::*;
+
+    fn test_mrc_contact_obb(x: f32) -> Obb {
+        Obb {
+            center: meteor_core::Vec3::new(x, 0.0, 0.0),
+            axes: [
+                meteor_core::Vec3::new(1.0, 0.0, 0.0),
+                meteor_core::Vec3::new(0.0, 1.0, 0.0),
+                meteor_core::Vec3::new(0.0, 0.0, 1.0),
+            ],
+            half_size: meteor_core::Vec3::new(0.5, 0.5, 0.5),
+        }
+    }
+
+    #[test]
+    fn recorded_mrc_hit_requires_matching_local_melee_contact() {
+        let attack = [test_mrc_contact_obb(0.0)];
+        let intersecting = [test_mrc_contact_obb(0.75)];
+        let separated = [test_mrc_contact_obb(2.0)];
+        assert!(recorded_mrc_hit_matches_local_attack(
+            1,
+            1,
+            1,
+            2,
+            &attack,
+            &intersecting,
+            false,
+        ));
+        assert!(!recorded_mrc_hit_matches_local_attack(
+            2,
+            1,
+            1,
+            2,
+            &attack,
+            &intersecting,
+            false,
+        ));
+        assert!(!recorded_mrc_hit_matches_local_attack(
+            1,
+            1,
+            1,
+            1,
+            &attack,
+            &intersecting,
+            false,
+        ));
+        assert!(!recorded_mrc_hit_matches_local_attack(
+            1, 1, 1, 2, &attack, &separated, false,
+        ));
+        assert!(recorded_mrc_hit_matches_local_attack(
+            1,
+            1,
+            1,
+            2,
+            &[],
+            &[],
+            true,
+        ));
+    }
+
+    fn settlement_test_app() -> App {
+        let mut app = App::new();
+        app.init_resource::<Time<bevy::time::Real>>()
+            .init_resource::<Time>()
+            .init_resource::<crate::plugins::FrameClock>()
+            .init_resource::<MatchEnd>()
+            .init_resource::<crate::app_state::LaunchRequest>()
+            .init_resource::<NextState<AppState>>()
+            .insert_resource(State::new(AppState::Playing))
+            .init_resource::<crate::plugins::stage_plugin::StageMissionRuntime>()
+            .init_resource::<crate::plugins::stage_plugin::StageScriptRuntime>()
+            .init_resource::<NetState>()
+            .add_systems(
+                PreUpdate,
+                advance_match_settlement.run_if(in_state(AppState::Playing)),
+            )
+            .add_systems(
+                Update,
+                evaluate_match_end.run_if(crate::plugins::simulation_frame),
+            );
+        app
+    }
+}
+
 fn attack_windows(
     mut commands: Commands,
-    (active_fighter, time, frame_clock, mut self_effect_commits, mut contact_frame, mrc_playback): (
+    (
+        active_fighter,
+        time,
+        frame_clock,
+        mut self_effect_commits,
+        mut contact_frame,
+        mut mrc_playback,
+    ): (
         Option<Res<super::fighter_frame::ActiveFighter>>,
         Res<Time>,
         Option<Res<crate::plugins::FrameClock>>,
         Local<std::collections::HashMap<Entity, u32>>,
         Option<ResMut<CharacterContactFrame>>,
-        Option<Res<crate::plugins::replay_plugin::MrcPlayback>>,
+        Option<ResMut<crate::plugins::replay_plugin::MrcPlayback>>,
     ),
     net: Res<NetState>,
     assets: Option<Res<CharacterAssetsSet>>,
@@ -5200,13 +5310,210 @@ fn attack_windows(
         return;
     };
 
-    if mrc_playback
-        .as_ref()
-        .is_some_and(|playback| playback.active)
-    {
+    if let Some(playback) = mrc_playback.as_mut().filter(|playback| playback.active) {
+        let active_is_non_local = active_fighter
+            .as_deref()
+            .and_then(|active| active.0)
+            .is_some_and(|entity| {
+                let attackers = queries.p0();
+                attackers
+                    .get(entity)
+                    .is_ok_and(|(_, _, _, _, _, _, _, _, _, _, _, local, _, _, _)| local.is_none())
+            });
+        if active_is_non_local {
+            return;
+        }
+        let mut pending = std::mem::take(&mut playback.pending_hit_locks);
+        if pending.is_empty() || !feedback.settings.auto_camera || lock.system.is_locked() {
+            return;
+        }
+        let mut local_attacks = Vec::new();
+        {
+            let mut attackers = queries.p0();
+            for (
+                attacker_entity,
+                fighter,
+                pose,
+                blend,
+                _motion,
+                _atk_pos,
+                sm_state,
+                health,
+                death,
+                reaction,
+                mission_npc,
+                local,
+                remote,
+                _ranged_gate,
+                (weapon_form, _ai_intent),
+            ) in &mut attackers
+            {
+                if local.is_none()
+                    || fighter.player_slot != 0
+                    || !super::fighter_frame::accepts(active_fighter.as_deref(), attacker_entity)
+                    || !attack_window_owner_active_for_scope(
+                        health.current,
+                        death.active,
+                        sm_state.current,
+                        reaction.current.is_some(),
+                        false,
+                    )
+                {
+                    continue;
+                }
+                let strategy_id = weapon_to_strategy(fighter.weapon);
+                let Some(character_assets) = assets.0.get(&format!("p{}", fighter.character_id))
+                else {
+                    continue;
+                };
+                let Some((_, window)) = sampled_attack_window(character_assets, pose, blend) else {
+                    continue;
+                };
+                let attack_obbs = geometry.attack_obbs(
+                    attacker_entity,
+                    fighter,
+                    weapon_form,
+                    pose.pose_id,
+                    character_assets,
+                    &window.bones,
+                );
+                let effect_obbs = if window
+                    .bones
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case("effect"))
+                {
+                    geometry.live_effect_obbs(
+                        attacker_entity,
+                        fighter,
+                        weapon_form,
+                        pose.pose_id,
+                        character_assets,
+                    )
+                } else {
+                    Vec::new()
+                };
+                let effect_origin = if effect_obbs.is_empty() {
+                    None
+                } else {
+                    fighter_whole_body_obb(attacker_entity, character_assets, &geometry)
+                };
+                local_attacks.push((
+                    strategy_id,
+                    fighter_combat_team(&net, true, remote, mission_npc),
+                    attack_obbs,
+                    effect_obbs,
+                    effect_origin,
+                ));
+            }
+        }
+        pending.retain(|&(_, _, time)| playback.elapsed - time <= 0.1);
+        if local_attacks.is_empty() {
+            // The recorded hit may arrive one animation sample before the local
+            // attack window opens. Keep it until the 0.1s tolerance expires.
+            playback.pending_hit_locks = pending;
+            return;
+        }
+        let mut retry = Vec::new();
+        let mut defenders = queries.p1();
+        for (target_entity, event_context, event_time) in pending.drain(..) {
+            let age = playback.elapsed - event_time;
+            if age > 0.1 {
+                continue;
+            }
+            if age < 0.0 {
+                retry.push((target_entity, event_context, event_time));
+                continue;
+            }
+            let Ok((
+                _,
+                health,
+                _,
+                _,
+                _,
+                _,
+                _,
+                _,
+                death,
+                _,
+                defender,
+                def_pos,
+                defender_remote,
+                defender_mission_npc,
+                (defender_local, _, defender_visibility, _, _, _, _),
+            )) = defenders.get_mut(target_entity)
+            else {
+                retry.push((target_entity, event_context, event_time));
+                continue;
+            };
+            if defender_local.is_some()
+                || defender_remote.is_none()
+                || health.current <= 0.0
+                || death.active
+                || defender_visibility.is_some_and(|visibility| *visibility == Visibility::Hidden)
+            {
+                continue;
+            }
+            let defender_team =
+                fighter_combat_team(&net, false, defender_remote, defender_mission_npc);
+            let Some(defender_assets) = assets.0.get(&format!("p{}", defender.character_id)) else {
+                retry.push((target_entity, event_context, event_time));
+                continue;
+            };
+            let hurt_obbs = geometry.hurt_obbs(target_entity, defender_assets);
+            let target_whole_body = local_attacks
+                .iter()
+                .any(|(_, _, _, effect_obbs, _)| !effect_obbs.is_empty())
+                .then(|| fighter_whole_body_obb(target_entity, defender_assets, &geometry))
+                .flatten();
+            let strategy_id = local_attacks.iter().find_map(
+                |(strategy_id, attacker_team, attack_obbs, effect_obbs, effect_origin)| {
+                    let effect_hit = target_whole_body.as_ref().is_some_and(|target_body| {
+                        effect_obbs
+                            .iter()
+                            .any(|attack| obbs_intersect(attack, target_body))
+                            && !effect_body_occluded(
+                                geometry.stage.as_deref(),
+                                effect_origin.as_ref(),
+                                target_body,
+                            )
+                    });
+                    recorded_mrc_hit_matches_local_attack(
+                        event_context,
+                        *strategy_id,
+                        *attacker_team,
+                        defender_team,
+                        attack_obbs,
+                        &hurt_obbs,
+                        effect_hit,
+                    )
+                    .then_some(*strategy_id)
+                },
+            );
+            let Some(strategy_id) = strategy_id else {
+                // The local animation has not sampled this attack window yet.
+                retry.push((target_entity, event_context, event_time));
+                continue;
+            };
+            let candidate = LockCandidate {
+                id: target_entity.to_bits(),
+                x: def_pos.translation.x,
+                y: def_pos.translation.y,
+                z: def_pos.translation.z,
+                team: defender_team,
+            };
+            if lock.system.acquire_hit_target(
+                feedback.settings.auto_camera,
+                strategy_id,
+                target_entity.to_bits(),
+                &[candidate],
+            ) {
+                lock.lock_entity = Some(target_entity);
+                return;
+            }
+        }
+        playback.pending_hit_locks = retry;
         return;
     }
-
     let now_seconds =
         crate::plugins::simulation_now(frame_clock.as_deref(), time.elapsed_secs_f64());
 
@@ -18562,7 +18869,6 @@ mod tests {
         assert!(delta < stale * 0.5, "466 dash direction: rust {rust:.2} vs recorded {recorded:.2} ({delta:.2} rad, stale {stale:.2})");
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn mrc_playback_does_not_resolve_a_second_melee_hit() {
         use bevy::ecs::system::RunSystemOnce;
@@ -22677,8 +22983,91 @@ mod tests {
         }
     }
 
+    fn spawn_local_stock_hit_harness_with_loadouts(
+        weapon: u8,
+        target_weapon: u8,
+        serial: bool,
+    ) -> (
+        GameplayHarness,
+        Entity,
+        impl Fn() -> Vec<(
+            Option<Entity>,
+            meteor_network::stock_protocol::StockHitRequest,
+        )>,
+    ) {
+        let (mut h, target) =
+            spawn_npc_combat_harness_with_order(weapon, [100.0, 0.0, 0.0], serial);
+        {
+            let mut fighter = h.app.world_mut().get_mut::<Fighter>(target).unwrap();
+            fighter.weapon = target_weapon;
+            fighter.weapon_slots = [target_weapon, 0];
+        }
+        h.app
+            .world_mut()
+            .entity_mut(h.fighter)
+            .remove::<NpcFighter>()
+            .insert(LocalFighter);
+        h.app
+            .world_mut()
+            .entity_mut(target)
+            .remove::<LocalFighter>();
+
+        let (tx, take_hits) = crate::plugins::network_plugin::stock_hit_test_channel();
+        h.app
+            .insert_resource(tx)
+            .init_resource::<CombatResourceData>()
+            .init_resource::<crate::plugins::audio_plugin::SfxCache>()
+            .init_resource::<Assets<AudioSource>>()
+            .init_resource::<crate::plugins::effect_plugin::EfCache>()
+            .init_resource::<crate::plugins::item_plugin::PropHitGate>()
+            .init_resource::<crate::plugins::stage_plugin::StageScriptRuntime>()
+            .init_resource::<PendingRangedHits>()
+            .add_message::<crate::plugins::impact_fx_plugin::CombatImpactEvent>()
+            .add_message::<crate::plugins::render_plugin::OfflineWeaponDeathDrop>();
+        h.app.world_mut().entity_mut(target).insert((
+            Qi::default(),
+            PoseRuntime::idle(),
+            EntryBlend::default(),
+            MotionState {
+                movement_mode: meteor_core::MovementMode::Idle,
+                velocity: Vec3::ZERO,
+                facing: std::f32::consts::PI,
+            },
+            SmState::default(),
+            CombatState::default(),
+            DeathRespawn::default(),
+            FighterAir::default(),
+            FighterDodge::default(),
+            FighterAttackMotion::default(),
+            crate::components::fighter::TargetHitClock {
+                last_hit_at: f64::NEG_INFINITY,
+                spawn_elapsed: 3.0,
+            },
+        ));
+        {
+            let mut net = h.app.world_mut().resource_mut::<NetState>();
+            net.status = NetStatus::InRoom;
+            net.address = "udp-host://0.0.0.0:5230".into();
+            net.player_id = "stock-1".into();
+            net.mode = "leader".into();
+            net.round_active = true;
+            net.stock_npc_actors.insert(target, 2);
+            net.stock_npc_ready.insert(target);
+        }
+        for entity in [h.fighter, target] {
+            crate::plugins::character_plugin::spawn_fighter_model_for_test(
+                h.app.world_mut(),
+                entity,
+            );
+        }
+        (h, target, take_hits)
+    }
+
     include!("combat_plugin/ninja_air_chain_tests.rs");
     include!("combat_plugin/sn11_bridge_tests.rs");
+    mod duel_lab {
+        include!("combat_tests/duel_lab.rs");
+    }
     include!("combat_tests/stock_impact_feedback.rs");
     include!("combat_tests/pst_key_door_guard.rs");
     include!("combat_tests/down_jump.rs");
