@@ -4,6 +4,7 @@ use std::{ffi::OsString, path::PathBuf};
 pub struct DesktopArgs {
     pub original_dir: Option<PathBuf>,
     pub check_resources: bool,
+    pub bake_map_previews: bool,
     pub help: bool,
 }
 
@@ -32,6 +33,9 @@ impl DesktopArgs {
                     return Err("--original-dir requires a directory path".into());
                 }
                 Some(value.into())
+            } else if arg == "--bake-map-previews" {
+                options.bake_map_previews = true;
+                None
             } else if arg == "--check-resources" {
                 options.check_resources = true;
                 None
@@ -62,6 +66,7 @@ mod tests {
         let expected = DesktopArgs {
             original_dir: Some(PathBuf::from("D:\\老流星\\Meteor Game")),
             check_resources: true,
+            bake_map_previews: false,
             help: false,
         };
         assert_eq!(

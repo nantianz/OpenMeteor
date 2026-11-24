@@ -6,6 +6,14 @@ mod desktop_console;
 mod original_ui;
 
 fn main() {
+    if std::env::args_os().any(|arg| arg == "--bake-map-previews") {
+        if let Err(error) = run() {
+            eprintln!("map previews: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     #[cfg(target_os = "windows")]
     let _console = desktop_console::initialize().unwrap_or_else(|error| {
         desktop_console::report_error(&error);
@@ -35,9 +43,10 @@ fn run() -> Result<(), String> {
         );
         return Ok(());
     }
-    if let Some(root) = args.resource_directory() {
+    let original_dir = args.resource_directory();
+    if let Some(root) = &original_dir {
         let source =
-            meteor_asset::original_directory::OriginalDirectory::open(&root, original_ui::ASSETS)?;
+            meteor_asset::original_directory::OriginalDirectory::open(root, original_ui::ASSETS)?;
         if source
             .read("fonts/ui.ttf")
             .map_err(|error| {
@@ -63,6 +72,11 @@ fn run() -> Result<(), String> {
         println!("MPK resources verified: {}", root.display());
         return Ok(());
     }
-    meteor_app::build_app().run();
+    if args.bake_map_previews {
+        return meteor_app::bake_stage_previews();
+    }
+    let mut app = meteor_app::build_app();
+    meteor_app::install_stage_preview_worker(&mut app, original_dir);
+    app.run();
     Ok(())
 }

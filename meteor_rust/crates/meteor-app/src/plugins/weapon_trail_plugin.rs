@@ -35,6 +35,8 @@ const RIPPLE_EDGE_OVERSHOOT: f32 = 0.60;
 const RIPPLE_BASE_OVERSHOOT: f32 = 0.05;
 mod ripple_wake;
 use ripple_wake::{build_wakes, record_ripple, RippleWake};
+mod enhanced;
+use enhanced::{EnhancedRibbons, EnhancedTrailMaterial, EnhancedTrailRibbon};
 
 const BLADE_RIPPLE_SHADER_HANDLE: Handle<Shader> =
     bevy::asset::uuid_handle!("5b11ad3e-71aa-4001-8c61-115e77aa0001");
@@ -128,6 +130,7 @@ struct WeaponTrailRuntime {
     now: f32,
     histories: HashMap<TrailKey, Vec<EdgeSample>>,
     wakes: Vec<RippleWake>,
+    enhanced: EnhancedRibbons,
 }
 
 #[derive(Default)]
@@ -155,11 +158,20 @@ impl PartEndpoints {
 
 impl Plugin for WeaponTrailPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(MaterialPlugin::<BladeRippleMaterial>::default());
+        app.add_plugins((
+            MaterialPlugin::<BladeRippleMaterial>::default(),
+            MaterialPlugin::<EnhancedTrailMaterial>::default(),
+        ));
         bevy::asset::load_internal_asset!(
             app,
             BLADE_RIPPLE_SHADER_HANDLE,
             "blade_ripple.wgsl",
+            Shader::from_wgsl
+        );
+        bevy::asset::load_internal_asset!(
+            app,
+            enhanced::ENHANCED_TRAIL_SHADER_HANDLE,
+            "weapon_trail_enhanced.wgsl",
             Shader::from_wgsl
         );
         app.init_resource::<WeaponTrailRuntime>()
@@ -334,6 +346,7 @@ fn cleanup_weapon_trail(
     if let Some(material) = runtime.ripple_material.take() {
         ripple_materials.remove(material.id());
     }
+    runtime.enhanced.despawn_all(&mut commands);
     runtime.now = 0.0;
     runtime.histories.clear();
     runtime.wakes.clear();
@@ -439,8 +452,11 @@ fn update_weapon_trail(
     fighters: Query<(Entity, &Fighter, &PoseRuntime, &WeaponForm)>,
     endpoints: Query<(&WeaponEndpoint, &GlobalTransform)>,
     collision: Query<(&WeaponCollisionGeometry, &GlobalTransform)>,
-    mut ribbons: Query<&mut Visibility, With<WeaponTrailRibbon>>,
+    mut ribbons: Query<&mut Visibility, Or<(With<WeaponTrailRibbon>, With<EnhancedTrailRibbon>)>>,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut commands: Commands,
+    enhancements: Option<Res<crate::plugins::graphics_pack::effects::EffectEnhancements>>,
+    mut trail_materials: ResMut<Assets<EnhancedTrailMaterial>>,
 ) {
     let dt = crate::plugins::simulation_dt(frame_clock.as_deref(), time.delta_secs());
     if dt <= 0.0 {
@@ -592,7 +608,66 @@ fn update_weapon_trail(
         }
     }
 
-    let (positions, colors, indices) = build_ribbons(&runtime.histories, &active, now);
+    let enhancements = enhancements.as_deref().filter(|e| e.enabled);
+    let mut stock = Vec::new();
+    let mut styled = Vec::new();
+    for (key, drag) in &active {
+        let weapon = fighter_state
+            .get(&key.fighter)
+            .map_or(0, |(fighter, _)| fighter.weapon);
+        match enhancements.and_then(|e| e.trail(weapon)) {
+            Some((style_key, resolved)) => styled.push((key, *drag, style_key, resolved)),
+            None => stock.push((key.clone(), *drag)),
+        }
+    }
+    let styled_buffers = enhanced::build_styled_ribbons(
+        &runtime.histories,
+        styled
+            .iter()
+            .map(|(key, drag, style_key, resolved)| (*key, *drag, *style_key, &resolved.style)),
+        now,
+    );
+    let mut shown_styles = Vec::new();
+    for (style_key, buffers) in &styled_buffers {
+        if buffers.is_empty() {
+            continue;
+        }
+        let texture = styled
+            .iter()
+            .find(|(_, _, key, _)| key == style_key)
+            .and_then(|(_, _, _, resolved)| resolved.texture.clone());
+        let scroll = styled
+            .iter()
+            .find(|(_, _, key, _)| key == style_key)
+            .map_or(0.0, |(_, _, _, resolved)| resolved.style.scroll);
+        let ribbon = runtime.enhanced.ensure(
+            &mut commands,
+            &mut meshes,
+            &mut trail_materials,
+            *style_key,
+            texture,
+        );
+        if let Some(mut mesh) = meshes.get_mut(&ribbon.mesh) {
+            buffers.write(&mut mesh);
+        }
+        if scroll != 0.0 {
+            if let Some(mut material) = trail_materials.get_mut(&ribbon.material) {
+                material.params.misc.x = (now * scroll).fract();
+                material.params.misc.z = now;
+            }
+        }
+        shown_styles.push(*style_key);
+    }
+    for (style_key, ribbon) in &runtime.enhanced.by_style {
+        if let Ok(mut visibility) = ribbons.get_mut(ribbon.entity) {
+            *visibility = if shown_styles.contains(style_key) {
+                Visibility::Visible
+            } else {
+                Visibility::Hidden
+            };
+        }
+    }
+    let (positions, colors, indices) = build_ribbons(&runtime.histories, &stock, now);
     let Some(mesh_handle) = runtime.mesh.as_ref() else {
         return;
     };
@@ -676,9 +751,16 @@ fn update_blade_ripples(
 
 fn hide_ribbon(
     runtime: &WeaponTrailRuntime,
-    ribbons: &mut Query<&mut Visibility, With<WeaponTrailRibbon>>,
+    ribbons: &mut Query<&mut Visibility, Or<(With<WeaponTrailRibbon>, With<EnhancedTrailRibbon>)>>,
 ) {
-    if let Some(entity) = runtime.entity {
+    let entities = runtime.entity.into_iter().chain(
+        runtime
+            .enhanced
+            .by_style
+            .values()
+            .map(|ribbon| ribbon.entity),
+    );
+    for entity in entities {
         if let Ok(mut visibility) = ribbons.get_mut(entity) {
             *visibility = Visibility::Hidden;
         }

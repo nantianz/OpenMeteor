@@ -1,3 +1,5 @@
+use super::character_plugin::preview::CharacterPreviewViewport;
+use super::room_map_preview::MapImage;
 use super::ui_theme as theme;
 use crate::app_state::{
     AppState, LaunchRequest, LauncherScreenMarker, LauncherStyledButton, MenuBackButton,
@@ -141,6 +143,8 @@ pub(crate) struct Mission {
     pub name: &'static str,
     pub position: Vec2,
     pub minutes: u32,
+    pub primary_item: i64,
+    pub secondary_item: i64,
     pub description: &'static str,
 }
 
@@ -150,6 +154,8 @@ pub(crate) const MISSIONS: &[Mission] = &[
         name: "炎硫岛",
         position: Vec2::new(0.15, 0.76),
         minutes: 10,
+        primary_item: 6,
+        secondary_item: 0,
         description: "孤岛临海，赤焰映空。\n江湖路远，从此踏上征途。",
     },
     Mission {
@@ -157,6 +163,8 @@ pub(crate) const MISSIONS: &[Mission] = &[
         name: "钟乳洞",
         position: Vec2::new(0.14, 0.43),
         minutes: 10,
+        primary_item: 5,
+        secondary_item: 1,
         description: "幽谷深处，洞壑纵横。\n循着暗处的声息，踏入江湖。",
     },
     Mission {
@@ -164,6 +172,8 @@ pub(crate) const MISSIONS: &[Mission] = &[
         name: "一线天",
         position: Vec2::new(0.17, 0.19),
         minutes: 15,
+        primary_item: 15,
+        secondary_item: 0,
         description: "两崖相峙，一线通天。\n夺取镖物，返回己方安全区。",
     },
     Mission {
@@ -171,6 +181,8 @@ pub(crate) const MISSIONS: &[Mission] = &[
         name: "金华城",
         position: Vec2::new(0.38, 0.42),
         minutes: 15,
+        primary_item: 24,
+        secondary_item: 14,
         description: "烟水绕城，长街入夜。\n刀光隐于街巷，步步皆需留心。",
     },
     Mission {
@@ -178,6 +190,8 @@ pub(crate) const MISSIONS: &[Mission] = &[
         name: "炽雪城",
         position: Vec2::new(0.39, 0.14),
         minutes: 20,
+        primary_item: 16,
+        secondary_item: 13,
         description: "雪落孤城，兵戈未息。\n城墙之内，危机四伏。",
     },
     Mission {
@@ -185,6 +199,8 @@ pub(crate) const MISSIONS: &[Mission] = &[
         name: "飞鹏堡",
         position: Vec2::new(0.39, 0.70),
         minutes: 25,
+        primary_item: 13,
+        secondary_item: 10,
         description: "危堡高悬，云断山门。\n越过重重险隘，踏入堡中。",
     },
     Mission {
@@ -192,6 +208,8 @@ pub(crate) const MISSIONS: &[Mission] = &[
         name: "皇天城",
         position: Vec2::new(0.65, 0.20),
         minutes: 30,
+        primary_item: 24,
+        secondary_item: 21,
         description: "重门深锁，楼阙森严。\n穿过繁华，直面暗藏的杀机。",
     },
     Mission {
@@ -199,6 +217,8 @@ pub(crate) const MISSIONS: &[Mission] = &[
         name: "决死阵",
         position: Vec2::new(0.61, 0.48),
         minutes: 5,
+        primary_item: 5,
+        secondary_item: 1,
         description: "绝壁断路，生死一线。\n方寸之间，须臾定胜负。",
     },
     Mission {
@@ -206,6 +226,8 @@ pub(crate) const MISSIONS: &[Mission] = &[
         name: "炼铁狱",
         position: Vec2::new(0.65, 0.77),
         minutes: 30,
+        primary_item: 31,
+        secondary_item: 33,
         description: "炉火不熄，铁壁如狱。\n深入险地，寻找破局之机。",
     },
 ];
@@ -214,13 +236,59 @@ pub(crate) fn mission(id: &str) -> Option<&'static Mission> {
     MISSIONS.iter().find(|m| m.id == id)
 }
 
+pub(crate) fn mission_weapons(id: &str) -> ((u8, u8), (u8, u8)) {
+    let m = mission(id).unwrap_or(&MISSIONS[0]);
+    let primary = super::character_plugin::weapon_slot_from_item(m.primary_item).unwrap_or((6, 0));
+    let secondary =
+        super::character_plugin::weapon_slot_from_item(m.secondary_item).unwrap_or((0, 0));
+    (primary, secondary)
+}
+
+fn weapon_class_name(weapon_id: u8) -> &'static str {
+    match weapon_id {
+        1 => "飞镖",
+        2 => "飞轮",
+        3 => "火铳",
+        4 => "双刺",
+        5 => "匕首",
+        6 => "长剑",
+        7 => "长枪",
+        8 => "大刀",
+        9 => "重锤",
+        10 => "乾坤刀",
+        11 => "指虎",
+        12 => "忍刀",
+        _ => "无",
+    }
+}
+
+fn mission_loadout_summary(m: &Mission) -> String {
+    let ((pw, _), (sw, _)) = mission_weapons(m.id);
+    let primary = weapon_class_name(pw);
+    let secondary = if sw == 0 {
+        "无"
+    } else {
+        weapon_class_name(sw)
+    };
+    format!("主兵器 · {primary}      副兵器 · {secondary}")
+}
+
 pub(crate) fn next_mission(id: &str) -> Option<&'static Mission> {
     let index = MISSIONS.iter().position(|mission| mission.id == id)?;
     MISSIONS.get(index + 1)
 }
 
+pub(super) fn mission_installed(id: &str) -> bool {
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    if let Some(installed) = meteor_asset::runtime_assets::original_mission_available(id) {
+        return installed;
+    }
+    let _ = id;
+    true
+}
+
 pub(crate) fn prepare_launch(request: &mut LaunchRequest, progress: &CampaignProgress) -> bool {
-    if !progress.is_unlocked(&request.stage_id) {
+    if !progress.is_unlocked(&request.stage_id) || !mission_installed(&request.stage_id) {
         return false;
     }
     let Some(mission) = mission(&request.stage_id) else {
@@ -236,12 +304,14 @@ pub(crate) fn prepare_launch(request: &mut LaunchRequest, progress: &CampaignPro
 
 #[derive(Component)]
 pub(crate) struct CampaignPin(pub &'static str);
+
+#[derive(Component, Clone, Copy)]
+pub(crate) struct CampaignStepArrow(pub i8);
+
 #[derive(Component)]
 struct MapViewport;
 #[derive(Component)]
-struct MapCanvas;
-#[derive(Component)]
-struct MapArt;
+struct HeroShowcaseColumn;
 #[derive(Component)]
 struct MissionTitle;
 #[derive(Component)]
@@ -252,6 +322,8 @@ struct MissionTime;
 struct MissionBest;
 #[derive(Component)]
 struct MissionOrdinal;
+#[derive(Component)]
+struct MissionWeaponText;
 #[derive(Component)]
 struct DetailPanel;
 #[derive(Component)]
@@ -300,6 +372,33 @@ fn action(
         });
 }
 
+fn step_button(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, text: &str, step: i8) {
+    parent
+        .spawn((
+            Button,
+            LauncherStyledButton,
+            CampaignStepArrow(step),
+            theme::ActionStyle::SECONDARY,
+            Node {
+                min_height: Val::Px(44.0),
+                height: Val::Px(44.0),
+                padding: UiRect::horizontal(Val::Px(14.0)),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                border: UiRect::all(Val::Px(1.0)),
+                flex_shrink: 0.0,
+                ..default()
+            },
+            BackgroundColor(theme::CARD),
+            BorderColor::all(theme::LINE),
+        ))
+        .with_children(|b| {
+            b.spawn(label(text, 14.0, theme::ACCENT_TEXT, font));
+        });
+}
+
+const CHAPTER_NUMERALS: [&str; 9] = ["壹", "贰", "叁", "肆", "伍", "陆", "柒", "捌", "玖"];
+
 pub(crate) fn spawn(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, active: bool) {
     parent
         .spawn((
@@ -315,7 +414,7 @@ pub(crate) fn spawn(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, acti
                 height: Val::Percent(100.0),
                 display: if active { Display::Flex } else { Display::None },
                 flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(8.0),
+                row_gap: Val::Px(10.0),
                 ..default()
             },
         ))
@@ -325,7 +424,7 @@ pub(crate) fn spawn(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, acti
                     width: Val::Percent(100.0),
                     min_height: Val::Px(44.0),
                     align_items: AlignItems::Center,
-                    column_gap: Val::Px(22.0),
+                    column_gap: Val::Px(20.0),
                     flex_shrink: 0.0,
                     ..default()
                 })
@@ -338,9 +437,10 @@ pub(crate) fn spawn(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, acti
                         .with_children(|b| {
                             action(b, font, "返回", MenuBackButton);
                         });
-                    header.spawn(label("江 湖 舆 图", 26.0, theme::TEXT, font));
-                    header.spawn(label("单人闯关 · 九处风云", 13.0, theme::METAL, font));
+                    header.spawn(label("单 人 闯 关", 26.0, theme::TEXT, font));
+                    header.spawn(label("孟星魂 · 江湖九章", 13.0, theme::METAL, font));
                 });
+
             screen
                 .spawn((
                     MapViewport,
@@ -348,117 +448,187 @@ pub(crate) fn spawn(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, acti
                         width: Val::Percent(100.0),
                         flex_grow: 1.0,
                         min_height: Val::Px(0.0),
+                        flex_direction: FlexDirection::Row,
+                        column_gap: Val::Px(16.0),
+                        row_gap: Val::Px(12.0),
                         overflow: Overflow::clip(),
                         ..default()
                     },
-                    BackgroundColor(Color::srgb(0.065, 0.059, 0.045)),
                 ))
                 .with_children(|viewport| {
                     viewport
                         .spawn((
-                            MapCanvas,
+                            HeroShowcaseColumn,
+                            theme::OrnateFrame,
                             Node {
-                                position_type: PositionType::Absolute,
-                                width: Val::Percent(100.0),
+                                width: Val::Percent(52.0),
                                 height: Val::Percent(100.0),
+                                min_width: Val::Px(0.0),
+                                min_height: Val::Px(180.0),
+                                flex_direction: FlexDirection::Column,
+                                justify_content: JustifyContent::SpaceBetween,
+                                padding: UiRect::all(Val::Px(22.0)),
+                                border: UiRect::all(Val::Px(1.0)),
+                                overflow: Overflow::clip(),
                                 ..default()
                             },
+                            BackgroundColor(Color::srgba(0.028, 0.026, 0.024, 0.72)),
+                            BorderColor::all(theme::LINE),
                         ))
-                        .with_children(|map| {
-                            map.spawn((
-                                MapArt,
+                        .with_children(|stage| {
+                            stage.spawn((
+                                CharacterPreviewViewport,
                                 Node {
                                     position_type: PositionType::Absolute,
+                                    left: Val::Px(0.0),
+                                    right: Val::Px(0.0),
+                                    top: Val::Px(0.0),
+                                    bottom: Val::Px(0.0),
                                     width: Val::Percent(100.0),
                                     height: Val::Percent(100.0),
                                     ..default()
                                 },
+                                ZIndex(0),
                             ));
-                            for m in MISSIONS {
-                                map.spawn((
-                                    Button,
-                                    LauncherStyledButton,
-                                    CampaignPin(m.id),
+
+                            stage
+                                .spawn((
                                     Node {
-                                        position_type: PositionType::Absolute,
-                                        left: Val::Percent(m.position.x * 100.0),
-                                        top: Val::Percent(m.position.y * 100.0),
-                                        margin: UiRect::new(
-                                            Val::Px(-42.0),
-                                            Val::ZERO,
-                                            Val::Px(-22.0),
-                                            Val::ZERO,
-                                        ),
-                                        width: Val::Px(84.0),
-                                        height: Val::Px(64.0),
                                         flex_direction: FlexDirection::Column,
-                                        align_items: AlignItems::Center,
-                                        justify_content: JustifyContent::Center,
+                                        row_gap: Val::Px(6.0),
+                                        padding: UiRect::left(Val::Px(12.0)),
+                                        border: UiRect::left(Val::Px(2.0)),
                                         ..default()
                                     },
-                                    BackgroundColor(Color::NONE),
+                                    BorderColor::all(theme::ACCENT_TEXT),
                                     ZIndex(2),
                                 ))
-                                .with_children(|pin| {
-                                    pin.spawn((
-                                        PinHalo(m.id),
-                                        Node {
-                                            position_type: PositionType::Absolute,
-                                            width: Val::Px(66.0),
-                                            height: Val::Px(66.0),
-                                            top: Val::Px(-15.0),
-                                            ..default()
-                                        },
+                                .with_children(|titles| {
+                                    titles.spawn((
+                                        MissionOrdinal,
+                                        label("单人任务   01 / 09", 12.0, theme::METAL, font),
                                     ));
-                                    pin.spawn((
-                                        Node {
-                                            width: Val::Px(18.0),
-                                            height: Val::Px(18.0),
-                                            border: UiRect::all(Val::Px(2.0)),
-                                            border_radius: BorderRadius::all(Val::Px(9.0)),
-                                            margin: UiRect::bottom(Val::Px(5.0)),
-                                            ..default()
-                                        },
-                                        BackgroundColor(theme::PRIMARY),
-                                        BorderColor::all(theme::METAL),
-                                    ));
-                                    pin.spawn((
-                                        PinLabel,
-                                        label(m.name, 16.0, theme::TEXT, font),
-                                        Node {
-                                            padding: UiRect::axes(Val::Px(6.0), Val::Px(2.0)),
-                                            ..default()
-                                        },
-                                        BackgroundColor(Color::srgba(0.04, 0.035, 0.025, 0.85)),
+                                    titles.spawn((
+                                        MissionTitle,
+                                        label("炎硫岛", 34.0, theme::TEXT, font),
                                     ));
                                 });
-                            }
+
+                            stage
+                                .spawn((
+                                    Node {
+                                        width: Val::Percent(100.0),
+                                        flex_direction: FlexDirection::Column,
+                                        row_gap: Val::Px(5.0),
+                                        padding: UiRect::axes(Val::Px(14.0), Val::Px(10.0)),
+                                        border: UiRect {
+                                            left: Val::Px(2.0),
+                                            bottom: Val::Px(1.0),
+                                            ..default()
+                                        },
+                                        ..default()
+                                    },
+                                    BackgroundColor(Color::srgba(0.032, 0.030, 0.028, 0.88)),
+                                    BorderColor::all(theme::METAL.with_alpha(0.65)),
+                                    ZIndex(2),
+                                ))
+                                .with_children(|pedestal| {
+                                    pedestal.spawn(label(
+                                        "出战人物 · 孟星魂（本关配发兵器预览）",
+                                        12.0,
+                                        theme::METAL,
+                                        font,
+                                    ));
+                                    pedestal.spawn((
+                                        MissionWeaponText,
+                                        label(
+                                            mission_loadout_summary(&MISSIONS[0]),
+                                            16.0,
+                                            theme::ACCENT_TEXT,
+                                            font,
+                                        ),
+                                    ));
+                                });
                         });
+
                     viewport
                         .spawn((
                             DetailPanel,
+                            theme::OrnateFrame,
                             Node {
-                                position_type: PositionType::Absolute,
-                                right: Val::Px(12.0),
-                                top: Val::Px(14.0),
-                                bottom: Val::Px(14.0),
-                                width: Val::Percent(26.0),
-                                padding: UiRect::all(Val::Px(22.0)),
+                                width: Val::Percent(48.0),
+                                height: Val::Percent(100.0),
+                                min_width: Val::Px(0.0),
+                                min_height: Val::Px(0.0),
+                                padding: UiRect::all(Val::Px(20.0)),
                                 flex_direction: FlexDirection::Column,
-                                row_gap: Val::Px(16.0),
+                                row_gap: Val::Px(12.0),
                                 border: UiRect::left(Val::Px(2.0)),
                                 overflow: Overflow::scroll_y(),
                                 ..default()
                             },
-                            BackgroundColor(Color::srgba(0.045, 0.043, 0.034, 0.94)),
+                            BackgroundColor(Color::srgba(0.038, 0.035, 0.030, 0.94)),
                             BorderColor::all(theme::METAL),
                         ))
                         .with_children(|panel| {
-                            panel.spawn((
-                                MissionOrdinal,
-                                label("单人任务", 12.0, theme::METAL, font),
-                            ));
-                            panel.spawn((MissionTitle, label("炎硫岛", 32.0, theme::TEXT, font)));
+                            panel
+                                .spawn((
+                                    Node {
+                                        width: Val::Percent(100.0),
+                                        height: Val::Px(168.0),
+                                        flex_shrink: 0.0,
+                                        overflow: Overflow::clip(),
+                                        border: UiRect::all(Val::Px(1.0)),
+                                        flex_direction: FlexDirection::Column,
+                                        justify_content: JustifyContent::FlexEnd,
+                                        ..default()
+                                    },
+                                    BackgroundColor(Color::srgb(0.05, 0.048, 0.044)),
+                                    BorderColor::all(theme::METAL.with_alpha(0.45)),
+                                ))
+                                .with_children(|banner| {
+                                    banner.spawn((
+                                        Node {
+                                            position_type: PositionType::Absolute,
+                                            left: Val::ZERO,
+                                            top: Val::ZERO,
+                                            width: Val::Percent(100.0),
+                                            height: Val::Percent(100.0),
+                                            ..default()
+                                        },
+                                        ImageNode {
+                                            color: Color::NONE,
+                                            ..default()
+                                        },
+                                        MapImage,
+                                    ));
+                                    banner
+                                        .spawn((
+                                            Node {
+                                                width: Val::Percent(100.0),
+                                                padding: UiRect::axes(Val::Px(12.0), Val::Px(6.0)),
+                                                justify_content: JustifyContent::SpaceBetween,
+                                                align_items: AlignItems::Center,
+                                                border: UiRect::top(Val::Px(1.0)),
+                                                ..default()
+                                            },
+                                            BackgroundColor(Color::srgba(0.03, 0.028, 0.025, 0.88)),
+                                            BorderColor::all(theme::LINE),
+                                        ))
+                                        .with_children(|meta| {
+                                            meta.spawn((
+                                                MissionTime,
+                                                label("", 12.0, theme::MUTED, font),
+                                            ));
+                                            meta.spawn((
+                                                MissionBest,
+                                                label("", 12.0, theme::METAL, font),
+                                            ));
+                                        });
+                                });
+
+                            panel.spawn((MissionDescription, label("", 14.0, theme::TEXT, font)));
+
                             panel.spawn((
                                 Node {
                                     width: Val::Percent(100.0),
@@ -468,19 +638,109 @@ pub(crate) fn spawn(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, acti
                                 },
                                 BackgroundColor(theme::LINE),
                             ));
-                            panel.spawn((MissionDescription, label("", 15.0, theme::TEXT, font)));
+
+                            panel.spawn(label("选择关卡章节", 12.0, theme::METAL, font));
+                            panel
+                                .spawn(Node {
+                                    width: Val::Percent(100.0),
+                                    flex_direction: FlexDirection::Row,
+                                    flex_wrap: FlexWrap::Wrap,
+                                    column_gap: Val::Percent(2.0),
+                                    row_gap: Val::Px(8.0),
+                                    ..default()
+                                })
+                                .with_children(|grid| {
+                                    for (idx, m) in MISSIONS.iter().enumerate() {
+                                        let numeral =
+                                            CHAPTER_NUMERALS.get(idx).copied().unwrap_or("章");
+                                        grid.spawn((
+                                            Button,
+                                            LauncherStyledButton,
+                                            CampaignPin(m.id),
+                                            Node {
+                                                width: Val::Percent(32.0),
+                                                min_height: Val::Px(42.0),
+                                                align_items: AlignItems::Center,
+                                                justify_content: JustifyContent::Center,
+                                                ..default()
+                                            },
+                                            BackgroundColor(Color::NONE),
+                                        ))
+                                        .with_children(
+                                            |pin| {
+                                                pin.spawn((
+                                                    PinHalo(m.id),
+                                                    Node {
+                                                        position_type: PositionType::Absolute,
+                                                        width: Val::Px(28.0),
+                                                        height: Val::Px(28.0),
+                                                        right: Val::Px(4.0),
+                                                        ..default()
+                                                    },
+                                                ));
+                                                pin.spawn((
+                                                    PinLabel,
+                                                    label(
+                                                        format!("{numeral} · {}", m.name),
+                                                        14.0,
+                                                        theme::TEXT,
+                                                        font,
+                                                    ),
+                                                    Node {
+                                                        width: Val::Percent(100.0),
+                                                        height: Val::Percent(100.0),
+                                                        padding: UiRect::axes(
+                                                            Val::Px(10.0),
+                                                            Val::Px(8.0),
+                                                        ),
+                                                        border: UiRect {
+                                                            left: Val::Px(2.0),
+                                                            bottom: Val::Px(1.0),
+                                                            ..default()
+                                                        },
+                                                        align_items: AlignItems::Center,
+                                                        ..default()
+                                                    },
+                                                    BorderColor::all(theme::LINE),
+                                                    BackgroundColor(Color::srgba(
+                                                        0.04, 0.035, 0.025, 0.85,
+                                                    )),
+                                                ));
+                                            },
+                                        );
+                                    }
+                                });
+
                             panel.spawn(Node {
                                 flex_grow: 1.0,
                                 ..default()
                             });
-                            panel.spawn(label("孟星魂", 16.0, theme::METAL, font));
-                            panel.spawn((MissionTime, label("", 13.0, theme::MUTED, font)));
-                            panel.spawn((MissionBest, label("", 13.0, theme::METAL, font)));
-                            action(panel, font, "出 发", StartGameButton);
+
+                            panel
+                                .spawn(Node {
+                                    width: Val::Percent(100.0),
+                                    flex_direction: FlexDirection::Row,
+                                    align_items: AlignItems::Center,
+                                    column_gap: Val::Px(8.0),
+                                    flex_shrink: 0.0,
+                                    ..default()
+                                })
+                                .with_children(|bar| {
+                                    step_button(bar, font, "← 上一关", -1);
+                                    step_button(bar, font, "下一关 →", 1);
+                                    bar.spawn(Node {
+                                        flex_grow: 1.0,
+                                        min_width: Val::Px(110.0),
+                                        ..default()
+                                    })
+                                    .with_children(|go| {
+                                        action(go, font, "出 发", StartGameButton);
+                                    });
+                                });
                         });
                 });
             screen.spawn(label(
-                "选择地点查看任务    ·    方向键切换    /    Enter 出发    /    Esc 返回",
+                "右下按钮或方向键切换关卡与所持兵器    ·    Enter 出发    ·    Esc 返回",
                 12.0,
                 theme::METAL,
                 font,
@@ -512,18 +772,17 @@ fn attach_art(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<theme::CalligraphyMaterial>>,
-    maps: Query<Entity, Added<MapArt>>,
     halos: Query<Entity, Added<PinHalo>>,
-    mut art: Local<Option<(Handle<Image>, Handle<theme::CalligraphyMaterial>)>>,
+    mut art: Local<Option<Handle<theme::CalligraphyMaterial>>>,
 ) {
-    if maps.is_empty() && halos.is_empty() {
+    if halos.is_empty() {
         return;
     }
-    let (map, halo) = art.get_or_insert_with(|| {
-        let mut decode = |bytes: &[u8]| {
-            images.add(
+    let halo = art
+        .get_or_insert_with(|| {
+            let image = images.add(
                 Image::from_buffer(
-                    bytes,
+                    &crate::resource_io::required("ui/campaign-halo.png"),
                     ImageType::Extension("png"),
                     CompressedImageFormats::NONE,
                     true,
@@ -531,18 +790,10 @@ fn attach_art(
                     RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
                 )
                 .expect("embedded campaign art"),
-            )
-        };
-        (
-            decode(&crate::resource_io::required("ui/campaign-map.png")),
-            materials.add(theme::CalligraphyMaterial {
-                image: decode(&crate::resource_io::required("ui/campaign-halo.png")),
-            }),
-        )
-    });
-    for entity in &maps {
-        commands.entity(entity).insert(ImageNode::new(map.clone()));
-    }
+            );
+            materials.add(theme::CalligraphyMaterial { image })
+        })
+        .clone();
     for entity in &halos {
         commands.entity(entity).insert(MaterialNode(halo.clone()));
     }
@@ -550,9 +801,13 @@ fn attach_art(
 
 fn fit_map(
     viewports: Query<&ComputedNode, With<MapViewport>>,
-    mut nodes: Query<
-        (&mut Node, Option<&MapCanvas>, Option<&DetailPanel>),
-        Or<(With<MapCanvas>, With<DetailPanel>)>,
+    mut layout_roots: Query<&mut Node, With<MapViewport>>,
+    mut columns: Query<
+        (&mut Node, Has<HeroShowcaseColumn>, Has<DetailPanel>),
+        (
+            Or<(With<HeroShowcaseColumn>, With<DetailPanel>)>,
+            Without<MapViewport>,
+        ),
     >,
 ) {
     let Ok(viewport) = viewports.single() else {
@@ -562,115 +817,167 @@ fn fit_map(
     if size.x <= 0.0 || size.y <= 0.0 {
         return;
     }
-    let portrait = size.x < 600.0 && size.y > size.x;
-    let map_height = if portrait { size.y * 0.53 } else { size.y };
-
-    let width = if portrait {
-        (size.x / 0.74).min(map_height * 16.0 / 9.0)
-    } else {
-        size.x.min(map_height * 16.0 / 9.0)
-    };
-    let height = width * 9.0 / 16.0;
-    for (mut node, canvas, panel) in &mut nodes {
-        if canvas.is_some() {
-            node.width = Val::Px(width);
-            node.height = Val::Px(height);
-            node.left = Val::Px(0.0);
-            node.top = Val::Px((map_height - height) * 0.5);
-        }
-        if panel.is_some() {
+    let portrait = size.x < 680.0 && size.y > size.x;
+    for mut root in &mut layout_roots {
+        root.flex_direction = if portrait {
+            FlexDirection::Column
+        } else {
+            FlexDirection::Row
+        };
+    }
+    for (mut node, is_hero, is_detail) in &mut columns {
+        if is_hero {
             node.width = if portrait {
                 Val::Percent(100.0)
             } else {
-                Val::Percent(26.0)
+                Val::Percent(52.0)
             };
-            node.top = if portrait {
-                Val::Percent(53.0)
+            node.height = if portrait {
+                Val::Percent(44.0)
             } else {
-                Val::Px(8.0)
+                Val::Percent(100.0)
             };
-            node.right = Val::Px(if portrait { 0.0 } else { 8.0 });
-            node.bottom = Val::Px(0.0);
-            node.padding = UiRect::all(Val::Px(if size.y < 400.0 { 10.0 } else { 22.0 }));
-            node.row_gap = Val::Px(if size.y < 400.0 { 7.0 } else { 16.0 });
+        } else if is_detail {
+            node.width = if portrait {
+                Val::Percent(100.0)
+            } else {
+                Val::Percent(48.0)
+            };
+            node.height = if portrait {
+                Val::Percent(56.0)
+            } else {
+                Val::Percent(100.0)
+            };
+            node.border = if portrait {
+                UiRect::top(Val::Px(2.0))
+            } else {
+                UiRect::left(Val::Px(2.0))
+            };
         }
+    }
+}
+
+fn select(request: &mut LaunchRequest, tab: &mut StageListTab, m: &Mission) {
+    if request.stage_id != m.id || request.stage_name != m.name || request.mode != "single" {
+        request.stage_id = m.id.into();
+        request.stage_name = m.name.into();
+        request.mode = "single".into();
+        request.character_id = 0;
+        request.spawn_room_npcs = false;
+    }
+    if *tab != StageListTab::Official {
+        *tab = StageListTab::Official;
     }
 }
 
 fn selection(
-    mut screen: ResMut<MenuScreen>,
-    state: Option<Res<State<AppState>>>,
-    keys: Option<Res<ButtonInput<KeyCode>>>,
-    pins: Query<(&CampaignPin, &Interaction), Changed<Interaction>>,
+    screen: Res<MenuScreen>,
     progress: Res<CampaignProgress>,
-    mut request: ResMut<LaunchRequest>,
     mut tab: ResMut<StageListTab>,
-    mut next: Option<ResMut<NextState<AppState>>>,
+    mut request: ResMut<LaunchRequest>,
+    pins: Query<(&Interaction, &CampaignPin), Changed<Interaction>>,
+    arrows: Query<(&Interaction, &CampaignStepArrow), Changed<Interaction>>,
+    keys: Option<Res<ButtonInput<KeyCode>>>,
+    mut next_state: Option<ResMut<NextState<AppState>>>,
 ) {
-    if *screen != MenuScreen::Stages || state.is_some_and(|s| *s.get() != AppState::Menu) {
+    if *screen != MenuScreen::Stages {
         return;
     }
-    *tab = StageListTab::Official;
-    if !progress.is_unlocked(&request.stage_id) {
-        request.stage_id = MISSIONS[0].id.into();
+    let unlocked: Vec<_> = MISSIONS
+        .iter()
+        .take(progress.unlocked_count())
+        .filter(|mission| mission_installed(mission.id))
+        .collect();
+    let count = unlocked.len();
+    if count == 0 {
+        return;
     }
-    for (pin, interaction) in &pins {
-        if *interaction == Interaction::Pressed && progress.is_unlocked(pin.0) {
-            request.stage_id = pin.0.into();
+    let mut index = unlocked
+        .iter()
+        .position(|m| m.id == request.stage_id)
+        .unwrap_or(0);
+    for (interaction, pin) in &pins {
+        if *interaction == Interaction::Pressed {
+            if let Some(i) = unlocked.iter().position(|m| m.id == pin.0) {
+                index = i;
+            }
+        }
+    }
+    for (interaction, arrow) in &arrows {
+        if *interaction == Interaction::Pressed {
+            index = (index as isize + arrow.0 as isize).rem_euclid(count as isize) as usize;
         }
     }
     if let Some(keys) = keys {
-        if keys.just_pressed(KeyCode::Escape) {
-            *screen = MenuScreen::Main;
-            return;
-        }
-        let direction =
-            if keys.just_pressed(KeyCode::ArrowRight) || keys.just_pressed(KeyCode::ArrowDown) {
+        let step =
+            if keys.any_just_pressed([KeyCode::ArrowRight, KeyCode::ArrowDown, KeyCode::KeyD]) {
                 1
-            } else if keys.just_pressed(KeyCode::ArrowLeft) || keys.just_pressed(KeyCode::ArrowUp) {
+            } else if keys.any_just_pressed([KeyCode::ArrowLeft, KeyCode::ArrowUp, KeyCode::KeyA]) {
                 -1
             } else {
                 0
             };
-        let index = MISSIONS
-            .iter()
-            .position(|m| m.id == request.stage_id)
-            .unwrap_or(0);
-        if direction != 0 {
-            request.stage_id = MISSIONS
-                [(index as i32 + direction).rem_euclid(progress.unlocked_count() as i32) as usize]
-                .id
-                .into();
+        if step != 0 {
+            index = (index as isize + step).rem_euclid(count as isize) as usize;
         }
-        if keys.just_pressed(KeyCode::Enter) && prepare_launch(&mut request, &progress) {
-            if let Some(next) = next.as_mut() {
-                next.set(AppState::Loading);
+        select(&mut request, &mut tab, unlocked[index]);
+        if keys.any_just_pressed([KeyCode::Enter, KeyCode::NumpadEnter])
+            && prepare_launch(&mut request, &progress)
+        {
+            if let Some(ref mut state) = next_state {
+                state.set(AppState::Loading);
             }
         }
+        return;
     }
-    request.stage_name = mission(&request.stage_id).unwrap().name.into();
+    select(&mut request, &mut tab, unlocked[index]);
 }
 
+#[allow(clippy::type_complexity)]
 fn feedback(
     request: Res<LaunchRequest>,
     progress: Res<CampaignProgress>,
     records: Option<Res<super::battle_result::timing::BestTimes>>,
-    mut texts: Query<(
+    mut pins: Query<(&CampaignPin, &Interaction, &Children, &mut Node)>,
+    mut start: Query<&mut Node, (With<StartGameButton>, Without<CampaignPin>)>,
+    mut labels: Query<(&mut TextColor, &mut BackgroundColor), With<PinLabel>>,
+    mut halos: Query<(&PinHalo, &mut Visibility)>,
+    mut copy: Query<(
         &mut Text,
         Option<&MissionTitle>,
         Option<&MissionDescription>,
         Option<&MissionTime>,
-        Option<&MissionOrdinal>,
         Option<&MissionBest>,
+        Option<&MissionOrdinal>,
+        Option<&MissionWeaponText>,
     )>,
-    mut pins: Query<(&CampaignPin, &Interaction, &Children, &mut Node)>,
-    mut labels: Query<(&mut TextColor, &mut BackgroundColor), With<PinLabel>>,
-    mut halos: Query<(&PinHalo, &mut Visibility)>,
 ) {
-    let Some(m) = mission(&request.stage_id) else {
-        return;
-    };
-    for (mut text, title, description, time, ordinal, best) in &mut texts {
+    let mut installed = MISSIONS
+        .iter()
+        .take(progress.unlocked_count())
+        .filter(|mission| mission_installed(mission.id));
+    let first = installed.clone().next();
+    let m = installed
+        .find(|mission| mission.id == request.stage_id)
+        .or(first);
+    for mut node in &mut start {
+        node.display = if m.is_some() {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
+    for (mut text, title, description, time, best, ordinal, weapon_text) in &mut copy {
+        let Some(m) = m else {
+            text.0 = if title.is_some() {
+                "缺少战役资源".into()
+            } else if description.is_some() {
+                "请安装已解锁章节的地图和任务脚本。".into()
+            } else {
+                String::new()
+            };
+            continue;
+        };
         if best.is_some() {
             let value = records.as_ref().and_then(|r| r.best(m.id));
             text.0 = format!(
@@ -696,14 +1003,17 @@ fn feedback(
                 MISSIONS.iter().position(|v| v.id == m.id).unwrap() + 1
             );
         }
+        if weapon_text.is_some() {
+            text.0 = mission_loadout_summary(m);
+        }
     }
     for (pin, interaction, children, mut node) in &mut pins {
-        node.display = if progress.is_unlocked(pin.0) {
+        node.display = if progress.is_unlocked(pin.0) && mission_installed(pin.0) {
             Display::Flex
         } else {
             Display::None
         };
-        let selected = pin.0 == m.id;
+        let selected = m.is_some_and(|mission| pin.0 == mission.id);
         for child in children.iter() {
             if let Ok((mut color, mut background)) = labels.get_mut(child) {
                 color.0 = if selected {
@@ -722,7 +1032,7 @@ fn feedback(
         }
     }
     for (halo, mut visibility) in &mut halos {
-        *visibility = if halo.0 == m.id {
+        *visibility = if m.is_some_and(|mission| halo.0 == mission.id) {
             Visibility::Inherited
         } else {
             Visibility::Hidden
@@ -784,6 +1094,13 @@ mod tests {
         app.world_mut()
             .resource_mut::<ButtonInput<KeyCode>>()
             .reset_all();
+        let next_btn = app
+            .world_mut()
+            .spawn((CampaignStepArrow(1), Interaction::Pressed))
+            .id();
+        app.update();
+        assert_eq!(app.world().resource::<LaunchRequest>().stage_id, "sn04");
+        *app.world_mut().get_mut::<Interaction>(next_btn).unwrap() = Interaction::None;
         app.world_mut().resource_mut::<LaunchRequest>().character_id = 19;
         app.world_mut()
             .resource_mut::<ButtonInput<KeyCode>>()
@@ -808,10 +1125,10 @@ mod tests {
             let text = String::from_utf8_lossy(&bytes);
             if text.contains("OnUpdate()") && text.contains("AddNPC(") {
                 authored.push(id.clone());
-                assert!(text.contains(&format!(
-                    "int RoundTime = {};",
-                    mission(&id).unwrap().minutes
-                )));
+                let m = mission(&id).unwrap();
+                assert!(text.contains(&format!("int RoundTime = {};", m.minutes)));
+                assert!(text.contains(&format!("int PlayerWeapon = {};", m.primary_item)));
+                assert!(text.contains(&format!("int PlayerWeapon2 = {};", m.secondary_item)));
             }
         }
         let mut listed = MISSIONS.iter().map(|m| m.id.to_owned()).collect::<Vec<_>>();

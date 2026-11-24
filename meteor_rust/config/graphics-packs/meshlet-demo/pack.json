@@ -1,6 +1,8 @@
 {
   "schema_version": 2,
   "id": "meshlet-demo",
+  "name": "Meshlet 模型替换（演示）",
+  "description": "仅桌面端：用 Meshlet 绘制替换场景物件的显示模型。",
   "materials": {
     "bronze": {
       "tint": [

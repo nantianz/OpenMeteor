@@ -254,6 +254,61 @@ Starter 包的金华城条目选中了 `Plane02 / sn13w01.jpg`。该表面须在
 
 太阳、云色和天空补光按关卡时钟变化。自动循环的更新频率受 `cloud_update_hz` 限制，云层分批改用新光照。验证跨午夜时可从 `23:30` 开始，用 `60` 倍速，约 30 秒经过午夜。
 
+## HDR 色调映射与泛光
+
+图形增强包的 `color_pipeline` 支持以下配置。
+
+```json
+"tonemapping": "none",
+"bloom": { "intensity": 0.22, "threshold": 1.15, "threshold_softness": 0.6, "low_frequency_boost": 0.5 }
+```
+
+`tonemapping` 取 `aces`（默认）、`none`、`reinhard` 或 `tony_mc_mapface`。`none` 只打开 HDR 缓冲，
+不改变原版的观感，适合只想要泛光的包。`bloom.intensity` 为 0 到 1，0 表示关闭；`threshold`
+是线性亮度门限，只有刀光、火花这类超过门限的发光内容才会泛光，普通场景贴图不受影响。
+
+## 刀光与特效增强
+
+`combat-fx` 示例包替换武器 Drag 刀光并在命中时播放新的火花、闪光和尘土。原版 `.ef`
+的时间轴、音效和 Pose 攻击判定形状不变，只替换显示层。设置里“战斗与场景特效”下的
+“刀光与特效增强”可在局内开关；命中特效同时受“武器击打特效”总开关控制。
+示例包附带由 `generate_textures.py` 生成的火花、闪光、扬尘和刀光贴图。
+
+包根的 `weapon_trails` 以 `"default"` 或武器 id（`1` 飞镖 … `6` 轻剑、`8` 大刀、`12` 忍刀）为键：
+
+| 字段 | 用途 |
+| --- | --- |
+| `texture` | 可选资源 id。横向为刀光年龄（新→旧），纵向为刀柄→刀尖 |
+| `gradient` | 三段线性 RGB：刀锋处、中段、尾端 |
+| `use_pose_color` | 是否乘上 POS `Drag` 里作者给的颜色，默认开 |
+| `intensity` | HDR 亮度倍数，默认 3；超过泛光门限的部分会发光 |
+| `tip_overshoot` | 刀尖向外延伸的比例（刀身长度），0 到 2 |
+| `length_scale` | 缩放作者的 Drag 时间窗口，0.2 到 3 |
+| `tail_power`、`edge_softness`、`core` | 尾部衰减曲线、刀柄/刀尖软边宽度、刀尖亮芯强度 |
+| `scroll` | 贴图沿刀光方向每秒滚动的 UV 单位 |
+
+包根的 `effects` 以 `.ef` 文件名（不含扩展名，忽略大小写）为键，支持 `*` 和 `?` 通配，
+例如 `"W??BL*"` 匹配全部武器命中特效。三个保留键在没有对应 `.ef` 时也会播放：
+`@hit` 普通命中、`@guard` 格挡、`@kill` 击杀（缺省回落到 `@hit`）。它们的根朝向这一击：
+局部 -Z 是攻击方向，+Z 指回攻击者，+Y 向上。
+
+| 字段 | 用途 |
+| --- | --- |
+| `replace` | 隐藏原版显示节点（音效保留），只播放 `emitters` |
+| `intensity` | 原版节点的亮度倍数（不替换时） |
+| `soft` | 原版节点与场景相交处做深度淡出。贴地的地波类特效不要开，会整体变淡 |
+| `emitters` | 新增发射器列表，最多 16 个 |
+
+发射器 `type` 有三种。`burst` 一次性喷出 `count` 个相机朝向的精灵：`direction`/`spread` 为
+根局部锥体，`speed`、`life`、`size` 为 `[最小, 最大]`，`stretch` 沿速度拉长，`gravity`、`drag`
+控制下落和阻尼，`color`→`end_color` 随寿命渐变，`blend` 取 `add` 或 `alpha`，`soft` 开启深度淡出。
+`flipbook` 在根位置播放 `texture` 的 `grid` 列×行序列帧，时长 = 帧数 ÷ `fps`，用 `size[0]`。
+`light` 是短暂点光：`intensity` 单位流明（15 万左右能照亮周围约两米），`radius` 为范围，`life[0]`
+为时长。原版场景材质只读方向光，因此点光通过帧 uniform 注入，最多同时 8 个。
+
+软粒子需要深度预渲染，只在桌面端启用；Android 和 Web 忽略 `soft`。发射器总数上限 96，
+点光 8 个，超出的直接丢弃。
+
 ## 人物布料
 
 发行包随 Starter 附带 P0 的绛红织锦护衣。启用增强包与「角色衣物摆动」后，选择 P0 即可看到。

@@ -9,7 +9,7 @@ pub struct DecodedImage {
 }
 
 pub fn decode_image(bytes: &[u8]) -> Result<DecodedImage, String> {
-    let rgba = if looks_like_tga(bytes) {
+    let mut rgba = if looks_like_tga(bytes) {
         decode_tga(bytes)?
     } else if looks_like_bmp(bytes) {
         decode_bmp(bytes)?
@@ -18,11 +18,11 @@ pub fn decode_image(bytes: &[u8]) -> Result<DecodedImage, String> {
         image.to_rgba8()
     };
     let (width, height) = rgba.dimensions();
-    let flipped = image::imageops::flip_vertical(&rgba);
+    image::imageops::flip_vertical_in_place(&mut rgba);
     Ok(DecodedImage {
         width,
         height,
-        rgba: flipped.into_raw(),
+        rgba: rgba.into_raw(),
     })
 }
 
@@ -117,20 +117,12 @@ fn decode_tga(bytes: &[u8]) -> Result<RgbaImage, String> {
         }
     }
 
+    let mut rgba =
+        ImageBuffer::from_raw(width, height, pixels).ok_or("TGA pixel buffer size mismatch")?;
     if !top_left {
-        let row_bytes = (width as usize) * 4;
-        let mut flipped = vec![0u8; pixels.len()];
-        for y in 0..height as usize {
-            let src_row = (height as usize - 1 - y) * row_bytes;
-            let dst_row = y * row_bytes;
-            flipped[dst_row..dst_row + row_bytes]
-                .copy_from_slice(&pixels[src_row..src_row + row_bytes]);
-        }
-        pixels = flipped;
+        image::imageops::flip_vertical_in_place(&mut rgba);
     }
-
-    ImageBuffer::from_raw(width, height, pixels)
-        .ok_or_else(|| "TGA pixel buffer size mismatch".into())
+    Ok(rgba)
 }
 
 fn decode_bmp(bytes: &[u8]) -> Result<RgbaImage, String> {

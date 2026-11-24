@@ -1,6 +1,8 @@
 {
   "schema_version": 1,
   "id": "sn06-color-pipeline-experiment",
+  "name": "四方阵 · HDR 色调（实验）",
+  "description": "四方阵使用 HDR 和统一色调映射，瀑布随昼夜变亮变暗。",
   "scenes": [
     {
       "stage": "sn06",

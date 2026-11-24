@@ -303,13 +303,14 @@ fn spawn_panel(
             max_width: Val::Px(if solo { 480.0 } else { 900.0 }),
             max_height: Val::Vh(76.0),
             flex_direction: FlexDirection::Column,
-            padding: UiRect::all(Val::Px(14.0)),
+            padding: UiRect::all(Val::Px(18.0)),
             border: UiRect::all(Val::Px(1.0)),
             row_gap: Val::Px(12.0),
-            border_radius: BorderRadius::all(Val::Px(6.0)),
+            border_radius: BorderRadius::ZERO,
             ..default()
         }),
-        BackgroundColor(Color::srgba(0.035, 0.041, 0.052, 0.96)),
+        theme::OrnateFrame,
+        BackgroundColor(Color::srgba(0.032, 0.031, 0.030, 0.96)),
         BorderColor::all(theme::LINE),
     ))
     .with_children(|panel| {

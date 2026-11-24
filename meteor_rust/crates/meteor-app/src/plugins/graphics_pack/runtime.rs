@@ -26,7 +26,13 @@ pub struct GraphicsFrame {
     pub water_wind_cross: Vec4,
 
     pub color_pipeline: Vec4,
+
+    pub fx_lights: [Vec4; 8],
+
+    pub fx_light_colors: [Vec4; 8],
 }
+
+const FX_LUMEN_SCALE: f32 = 1.0 / 100_000.0;
 
 impl GraphicsFrame {
     pub(crate) fn grass_light_direction(&self) -> Vec4 {
@@ -90,6 +96,7 @@ pub(super) fn update_frame(
             With<super::color_pipeline::UnifiedColorPipeline>,
         ),
     >,
+    fx_lights: Query<(&GlobalTransform, &PointLight, &Visibility), With<super::fx::FxLight>>,
     mut frame: Option<ResMut<FrameUniforms>>,
 ) {
     let Some(frame) = frame.as_deref_mut() else {
@@ -103,6 +110,27 @@ pub(super) fn update_frame(
         return;
     };
     frame.graphics.color_pipeline.x = f32::from(!color_pipeline.is_empty());
+
+    let mut flashes: Vec<(Vec3, f32, Vec3)> = fx_lights
+        .iter()
+        .filter(|(_, light, visibility)| {
+            light.intensity > 0.0 && **visibility != Visibility::Hidden
+        })
+        .map(|(transform, light, _)| {
+            let rgb = light.color.to_linear();
+            (
+                transform.translation(),
+                light.range,
+                Vec3::new(rgb.red, rgb.green, rgb.blue) * light.intensity * FX_LUMEN_SCALE,
+            )
+        })
+        .collect();
+    flashes.sort_by(|a, b| b.2.max_element().total_cmp(&a.2.max_element()));
+    for (i, (position, range, color)) in flashes.iter().take(8).enumerate() {
+        frame.graphics.fx_lights[i] = position.extend(*range);
+        frame.graphics.fx_light_colors[i] = color.extend(0.0);
+    }
+    frame.graphics.color_pipeline.y = flashes.len().min(8) as f32;
     if let Some((wind, response)) = packs
         .wind(&loaded.stage_id)
         .and_then(|wind| wind.response.map(|response| (wind, response.water)))

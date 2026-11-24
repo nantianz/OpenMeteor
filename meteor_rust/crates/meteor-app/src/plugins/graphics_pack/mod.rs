@@ -2,6 +2,8 @@ pub(crate) mod cloth_binding;
 pub(crate) mod cloth_obj;
 mod color_pipeline;
 pub(crate) mod config;
+pub(crate) mod effects;
+pub(crate) mod fx;
 pub(crate) mod grass;
 mod ground_cover;
 mod loader;
@@ -16,7 +18,7 @@ use crate::app_state::AppState;
 use bevy::prelude::*;
 #[cfg(test)]
 pub(crate) use loader::load_with_reader;
-pub(crate) use loader::GraphicsPacks;
+pub(crate) use loader::{CatalogEntry, GraphicsPackCatalog, GraphicsPacks};
 pub(crate) use runtime::GraphicsFrame;
 pub(crate) use surfaces::SceneGraphics;
 
@@ -25,6 +27,8 @@ pub fn install(app: &mut App) {
     grass::install(app);
     snow::install(app);
     color_pipeline::install(app);
+    effects::install(app);
+    fx::install(app);
     app.init_resource::<GraphicsPacks>()
         .add_systems(Startup, show_error)
         .add_systems(

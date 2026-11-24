@@ -189,11 +189,27 @@ fn plain() -> GmdlMaterial {
 #[test]
 fn disabled_never_reads_assets_and_invalid_schema_is_diagnostic() {
     let p = load_with_reader(
-        br#"{"schema_version":1,"enabled":false,"packs":["missing.json"]}"#,
-        |_| panic!("disabled must not load files"),
+        br#"{"schema_version":1,"enabled":false,"packs":["missing.json","ok.json"]}"#,
+        |name| match name {
+            "ok.json" => Ok(br#"{"schema_version":1,"id":"ok","name":"Ok","resources":{"a":"a.png"},"scenes":[{"stage":"sn03"}]}"#.to_vec()),
+            name if name.ends_with(".json") => Err("missing".into()),
+            _ => panic!("disabled must not load resources: {name}"),
+        },
     )
     .unwrap();
     assert!(p.packs.is_empty());
+    let listing = p.listing();
+    assert!(!listing.master_active);
+    assert_eq!(listing.entries.len(), 2);
+    assert!(listing.entries[0].error.is_some());
+    assert_eq!(
+        (
+            listing.entries[1].name.as_str(),
+            listing.entries[1].stages.clone()
+        ),
+        ("Ok", vec!["sn03".to_owned()])
+    );
+    assert!(!listing.entries[1].active);
     for v in [
         json!({"schema_version":2,"enabled":false,"packs":[]}),
         json!({"schema_version":1,"enabled":true,"packs":["../bad"]}),
@@ -932,4 +948,80 @@ fn cloth_config_accepts_xpbd_and_rejects_unstable_values_and_legacy_springs() {
         .unwrap();
     assert_eq!(config.iterations, 4);
     assert_eq!(config.density, 0.25);
+}
+
+#[test]
+fn settings_select_packs_at_startup_and_an_explicit_index_wins() {
+    use super::loader::{load_catalog_with_selection, PackSelection};
+    let index = br#"{"schema_version":1,"enabled":false,"packs":["a.json","b.json"]}"#;
+    let read = |name: &str| -> Result<Vec<u8>, String> {
+        let id = name.trim_end_matches(".json");
+        Ok(
+            format!(r#"{{"schema_version":1,"id":"{id}","scenes":[{{"stage":"*"}}]}}"#)
+                .into_bytes(),
+        )
+    };
+    let ids = |p: &GraphicsPacks| -> Vec<String> {
+        p.listing()
+            .entries
+            .iter()
+            .filter(|e| e.active)
+            .map(|e| e.id.clone())
+            .collect()
+    };
+
+    let p = load_catalog_with_selection(index, read, &PackSelection::default()).unwrap();
+    assert!(ids(&p).is_empty());
+
+    let mut selection = PackSelection {
+        master: Some(true),
+        ..default()
+    };
+    selection.choices.insert("b".into(), false);
+    let p = load_catalog_with_selection(index, read, &selection).unwrap();
+    assert_eq!(ids(&p), vec!["a".to_owned()]);
+    let mut settings = crate::app_state::Settings {
+        graphics_packs: Some(true),
+        ..default()
+    };
+    settings.graphics_pack_choices.insert("b".into(), false);
+    assert!(!p.listing().restart_pending(&settings));
+    settings.graphics_pack_choices.insert("b".into(), true);
+    assert!(p.listing().restart_pending(&settings));
+
+    let enabled = br#"{"schema_version":1,"enabled":true,"packs":["a.json","b.json"]}"#;
+    selection.master = Some(false);
+    selection.index_authoritative = true;
+    let p = load_catalog_with_selection(enabled, read, &selection).unwrap();
+    assert_eq!(ids(&p), vec!["a".to_owned(), "b".to_owned()]);
+    assert!(!p
+        .listing()
+        .restart_pending(&crate::app_state::Settings::default()));
+}
+
+#[test]
+fn pack_choices_round_trip_through_settings_text() {
+    let mut settings = crate::app_state::Settings {
+        graphics_packs: Some(false),
+        ..default()
+    };
+    settings
+        .graphics_pack_choices
+        .insert("combat-fx-sample".into(), false);
+    settings.graphics_pack_choices.insert("bad=id".into(), true);
+    let (parsed, _) = crate::app_state::parse_settings_for_test(
+        &crate::app_state::settings_text_for_test(&settings),
+    );
+    assert_eq!(parsed.graphics_packs, Some(false));
+    assert_eq!(
+        parsed.graphics_pack_choices.len(),
+        1,
+        "unsafe ids are not written"
+    );
+    assert_eq!(
+        parsed.graphics_pack_choices.get("combat-fx-sample"),
+        Some(&false)
+    );
+    let (fresh, _) = crate::app_state::parse_settings_for_test("");
+    assert_eq!(fresh.graphics_packs, None, "absent key follows the index");
 }

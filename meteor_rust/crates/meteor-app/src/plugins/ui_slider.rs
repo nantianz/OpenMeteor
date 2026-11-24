@@ -82,12 +82,11 @@ pub(crate) fn spawn_slider(
                 left: Val::Px(INSET),
                 right: Val::Px(INSET),
                 top: Val::Percent(50.0),
-                height: Val::Px(4.0),
-                margin: UiRect::top(Val::Px(-2.0)),
-                border_radius: BorderRadius::all(Val::Px(2.0)),
+                height: Val::Px(2.0),
+                margin: UiRect::top(Val::Px(-1.0)),
                 ..default()
             },
-            BackgroundColor(crate::plugins::ui_theme::CARD),
+            BackgroundColor(crate::plugins::ui_theme::LINE),
         ))
         .with_children(|track| {
             track.spawn((
@@ -95,10 +94,9 @@ pub(crate) fn spawn_slider(
                     position_type: PositionType::Absolute,
                     width: Val::Percent(slider.ratio() * 100.0),
                     height: Val::Percent(100.0),
-                    border_radius: BorderRadius::all(Val::Px(2.0)),
                     ..default()
                 },
-                BackgroundColor(crate::plugins::ui_theme::ACCENT),
+                BackgroundColor(crate::plugins::ui_theme::METAL),
                 SliderFill(entity),
             ));
             track.spawn((
@@ -106,13 +104,13 @@ pub(crate) fn spawn_slider(
                     position_type: PositionType::Absolute,
                     left: Val::Percent(slider.ratio() * 100.0),
                     top: Val::Percent(50.0),
-                    width: Val::Px(20.0),
-                    height: Val::Px(20.0),
-                    margin: UiRect::new(Val::Px(-10.0), Val::ZERO, Val::Px(-10.0), Val::ZERO),
-                    border_radius: BorderRadius::all(Val::Percent(50.0)),
+                    width: Val::Px(6.0),
+                    height: Val::Px(18.0),
+                    margin: UiRect::new(Val::Px(-3.0), Val::ZERO, Val::Px(-9.0), Val::ZERO),
+                    border_radius: BorderRadius::all(Val::Px(1.0)),
                     ..default()
                 },
-                BackgroundColor(crate::plugins::ui_theme::TEXT),
+                BackgroundColor(crate::plugins::settings_ui::GOLD_BRIGHT),
                 SliderThumb(entity),
             ));
         });

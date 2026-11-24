@@ -84,6 +84,7 @@ impl Page {
                     color: Vec4::ZERO,
                     has_texture: 0,
                     uv_offset: Vec2::ZERO,
+                    soft: 0.0,
                 }),
             }),
             free: (0..PARAMS_PER_PAGE).rev().collect(),
@@ -250,6 +251,7 @@ fn extract_params(
                         color: colors[i],
                         has_texture: material.params.has_texture,
                         uv_offset: Vec2::ZERO,
+                        soft: material.params.soft,
                     }),
                 },
             );
@@ -409,8 +411,7 @@ mod tests {
         let device = app.world().resource::<RenderDevice>();
         let queue = app.world().resource::<RenderQueue>();
         let buffers = app.world().resource::<ParamBuffers>();
-        let source = include_str!("../pon_ef_material.wgsl")
-            .replace("#import bevy_pbr::forward_io::VertexOutput", "struct VertexOutput { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>, };")
+        let source = super::test_support::raw_fragment_source(include_str!("../pon_ef_material.wgsl"))
             .replace("#{MATERIAL_BIND_GROUP}", "0")
             + "\n@vertex fn test_vertex(@builtin(vertex_index) i: u32) -> VertexOutput {\n\
                 let positions = array<vec2<f32>, 3>(vec2(-1.0,-1.0), vec2(3.0,-1.0), vec2(-1.0,3.0));\n\
@@ -684,6 +685,7 @@ mod tests {
                                     (i % 2) as f32 * 0.5,
                                     (burst % 2) as f32 * 0.5,
                                 ),
+                                soft: 0.0,
                             },
                         )
                     })
@@ -752,6 +754,7 @@ mod tests {
                     color: Vec4::ONE,
                     has_texture: 1,
                     uv_offset: Vec2::ZERO,
+                    soft: 0.0,
                 },
                 texture: Some(first.clone()),
                 blend: PonEfBlendMode::SrcAlphaOne,
@@ -862,6 +865,7 @@ mod tests {
                             color: Vec4::new(1.0, 0.0, 0.0, tick as f32 / 60.0),
                             has_texture: u32::from(tick > 30),
                             uv_offset: Vec2::ZERO,
+                            soft: 0.0,
                         },
                     ),
                     (
@@ -870,6 +874,7 @@ mod tests {
                             color: Vec4::Y,
                             has_texture: 0,
                             uv_offset: Vec2::ZERO,
+                            soft: 0.0,
                         },
                     ),
                 ];
@@ -913,8 +918,7 @@ mod tests {
         );
 
         use bevy::render::render_resource::*;
-        let source = include_str!("../pon_ef_material.wgsl")
-            .replace("#import bevy_pbr::forward_io::VertexOutput", "struct VertexOutput { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>, };")
+        let source = super::test_support::raw_fragment_source(include_str!("../pon_ef_material.wgsl"))
             .replace("#{MATERIAL_BIND_GROUP}", "3")
             + "\n@vertex fn test_vertex() -> VertexOutput { var o: VertexOutput; o.position=vec4<f32>(0.0,0.0,0.0,1.0); o.uv=vec2<f32>(0.0); return o; }";
         let shader = device.create_and_validate_shader_module(ShaderModuleDescriptor {

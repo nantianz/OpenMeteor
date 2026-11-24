@@ -135,9 +135,9 @@ impl UiSecondaryPageBundle {
                 display,
                 flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(10.0),
-                padding: UiRect::all(Val::Px(12.0)),
+                padding: UiRect::all(Val::Px(14.0)),
                 border: UiRect::all(Val::Px(1.0)),
-                border_radius: BorderRadius::all(Val::Px(3.0)),
+                border_radius: BorderRadius::ZERO,
                 ..default()
             },
             background: BackgroundColor(background),
@@ -238,7 +238,7 @@ pub struct UiPanelBundle {
 
 impl UiPanelBundle {
     pub fn new(mut node: Node, background: Color, border: Color) -> Self {
-        node.border_radius = BorderRadius::all(Val::Px(3.0));
+        node.border_radius = BorderRadius::ZERO;
         Self {
             node,
             background: BackgroundColor(background),
@@ -268,9 +268,9 @@ impl UiNoticePanelBundle {
                 flex_direction: FlexDirection::Column,
                 justify_content: JustifyContent::Center,
                 row_gap: Val::Px(2.0),
-                padding: UiRect::horizontal(Val::Px(14.0)),
+                padding: UiRect::horizontal(Val::Px(16.0)),
                 border: UiRect::all(Val::Px(1.0)),
-                border_radius: BorderRadius::all(Val::Px(3.0)),
+                border_radius: BorderRadius::ZERO,
                 ..default()
             },
             background: BackgroundColor(background),
@@ -341,10 +341,10 @@ impl UiDialogSurfaceBundle {
                 max_width: Val::Px(max_width),
                 max_height: Val::Percent(100.0),
                 flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(8.0),
-                padding: UiRect::all(Val::Px(12.0)),
+                row_gap: Val::Px(10.0),
+                padding: UiRect::all(Val::Px(16.0)),
                 border: UiRect::all(Val::Px(1.0)),
-                border_radius: BorderRadius::all(Val::Px(3.0)),
+                border_radius: BorderRadius::ZERO,
                 overflow: Overflow::scroll_y(),
                 ..default()
             },
@@ -503,7 +503,7 @@ impl UiSelectableButtonBundle {
         kind: UiSelectableKind,
         style: UiSelectableStyle,
     ) -> Self {
-        node.border_radius = BorderRadius::all(Val::Px(3.0));
+        node.border_radius = BorderRadius::ZERO;
         node.border = UiRect::all(Val::Px(1.0));
         node.column_gap = Val::Px(8.0);
         Self {

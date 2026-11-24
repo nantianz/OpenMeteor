@@ -14,6 +14,12 @@ pub struct Index {
 pub struct Pack {
     pub schema_version: u32,
     pub id: String,
+
+    #[serde(default)]
+    pub name: Option<String>,
+
+    #[serde(default)]
+    pub description: Option<String>,
     #[serde(default)]
     pub resources: BTreeMap<String, String>,
     #[serde(default)]
@@ -24,6 +30,154 @@ pub struct Pack {
     pub meshlet_models: BTreeMap<String, MeshletModel>,
     #[serde(default)]
     pub cloth_meshes: BTreeMap<String, String>,
+
+    #[serde(default)]
+    pub weapon_trails: BTreeMap<String, WeaponTrail>,
+
+    #[serde(default)]
+    pub effects: BTreeMap<String, EffectRule>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WeaponTrail {
+    pub texture: Option<String>,
+
+    pub gradient: [[f32; 3]; 3],
+
+    pub use_pose_color: bool,
+
+    pub intensity: f32,
+
+    pub tip_overshoot: f32,
+
+    pub length_scale: f32,
+
+    pub tail_power: f32,
+
+    pub edge_softness: f32,
+
+    pub core: f32,
+
+    pub scroll: f32,
+}
+impl Default for WeaponTrail {
+    fn default() -> Self {
+        Self {
+            texture: None,
+            gradient: [[1.0, 0.96, 0.85], [1.0, 0.7, 0.35], [0.6, 0.2, 0.1]],
+            use_pose_color: true,
+            intensity: 3.0,
+            tip_overshoot: 0.0,
+            length_scale: 1.0,
+            tail_power: 1.6,
+            edge_softness: 0.18,
+            core: 0.6,
+            scroll: 0.0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct EffectRule {
+    pub replace: bool,
+
+    pub intensity: f32,
+
+    pub soft: bool,
+    pub emitters: Vec<EffectEmitter>,
+}
+impl Default for EffectRule {
+    fn default() -> Self {
+        Self {
+            replace: false,
+            intensity: 1.0,
+            soft: false,
+            emitters: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EmitterKind {
+    Burst,
+
+    Flipbook,
+
+    Light,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EmitterBlend {
+    Add,
+    Alpha,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct EffectEmitter {
+    #[serde(rename = "type")]
+    pub kind: EmitterKind,
+    pub texture: Option<String>,
+
+    pub delay: f32,
+
+    pub offset: [f32; 3],
+
+    pub direction: [f32; 3],
+    pub spread: f32,
+    pub count: u32,
+
+    pub life: [f32; 2],
+    pub speed: [f32; 2],
+
+    pub size: [f32; 2],
+
+    pub stretch: f32,
+    pub gravity: f32,
+
+    pub drag: f32,
+    pub color: [f32; 3],
+    pub end_color: Option<[f32; 3]>,
+
+    pub intensity: f32,
+    pub blend: EmitterBlend,
+    pub soft: bool,
+
+    pub grid: [u32; 2],
+    pub fps: f32,
+
+    pub radius: f32,
+}
+impl Default for EffectEmitter {
+    fn default() -> Self {
+        Self {
+            kind: EmitterKind::Burst,
+            texture: None,
+            delay: 0.0,
+            offset: [0.0; 3],
+            direction: [0.0, 1.0, 0.0],
+            spread: 60.0,
+            count: 24,
+            life: [0.25, 0.6],
+            speed: [3.0, 8.0],
+            size: [0.04, 0.1],
+            stretch: 1.0,
+            gravity: -9.0,
+            drag: 2.0,
+            color: [1.0, 0.8, 0.5],
+            end_color: None,
+            intensity: 4.0,
+            blend: EmitterBlend::Add,
+            soft: true,
+            grid: [1, 1],
+            fps: 30.0,
+            radius: 5.0,
+        }
+    }
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -104,6 +258,43 @@ pub struct ColorPipeline {
 
     #[serde(default)]
     pub night_exposure_ev: f32,
+
+    #[serde(default)]
+    pub bloom: Option<Bloom>,
+
+    #[serde(default)]
+    pub tonemapping: ToneMapper,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToneMapper {
+    #[default]
+    Aces,
+    None,
+    Reinhard,
+    TonyMcMapface,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Bloom {
+    pub intensity: f32,
+
+    pub threshold: f32,
+
+    pub threshold_softness: f32,
+    pub low_frequency_boost: f32,
+}
+impl Default for Bloom {
+    fn default() -> Self {
+        Self {
+            intensity: 0.15,
+            threshold: 1.0,
+            threshold_softness: 0.5,
+            low_frequency_boost: 0.5,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1010,6 +1201,15 @@ impl Surface {
                 .is_none_or(|v| texture.is_some_and(|t| v.eq_ignore_ascii_case(t)))
     }
 }
+
+pub fn valid_pack_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 80
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+}
+
 pub fn relative_path(value: &str) -> bool {
     !value.is_empty()
         && !value.contains(['\\', ':', '\0'])
@@ -1049,8 +1249,19 @@ impl Pack {
         {
             return Err("invalid cloth_meshes budget or OBJ path".into());
         }
-        if !matches!(self.schema_version, 1 | 2) || self.id.is_empty() || self.id.len() > 80 {
+        if !matches!(self.schema_version, 1 | 2) || !valid_pack_id(&self.id) {
             return Err("invalid pack schema_version/id".into());
+        }
+        if self
+            .name
+            .as_ref()
+            .is_some_and(|name| name.is_empty() || name.chars().count() > 40)
+            || self
+                .description
+                .as_ref()
+                .is_some_and(|text| text.chars().count() > 160)
+        {
+            return Err("pack name must be 1..40 and description at most 160 characters".into());
         }
         if self.resources.len() > 128 || self.materials.len() > 128 || self.scenes.len() > 64 {
             return Err("pack exceeds entry budget".into());
@@ -1129,6 +1340,100 @@ impl Pack {
                 Err(format!("unknown resource: {id}"))
             }
         };
+        if self.weapon_trails.len() > 16 {
+            return Err("too many weapon trail styles".into());
+        }
+        for (key, trail) in &self.weapon_trails {
+            if key != "default" && !key.parse::<u8>().is_ok_and(|id| (1..=12).contains(&id)) {
+                return Err(format!(
+                    "weapon trail key must be \"default\" or a weapon id 1..12: {key}"
+                ));
+            }
+            if let Some(id) = &trail.texture {
+                resource(id)?;
+            }
+            for stop in trail.gradient {
+                color("weapon trail gradient", stop)?;
+            }
+            range("weapon trail intensity", trail.intensity, 0.0, 32.0)?;
+            range("weapon trail tip_overshoot", trail.tip_overshoot, 0.0, 2.0)?;
+            range("weapon trail length_scale", trail.length_scale, 0.2, 3.0)?;
+            range("weapon trail tail_power", trail.tail_power, 0.2, 6.0)?;
+            range("weapon trail edge_softness", trail.edge_softness, 0.0, 0.5)?;
+            range("weapon trail core", trail.core, 0.0, 1.0)?;
+            range("weapon trail scroll", trail.scroll, -16.0, 16.0)?;
+        }
+        if self.effects.len() > 512 {
+            return Err("too many effect rules".into());
+        }
+        for (key, rule) in &self.effects {
+            if key.is_empty() || key.len() > 64 || key.contains(['/', '\\', '.']) {
+                return Err(format!("invalid effect key: {key}"));
+            }
+            range(
+                &format!("effect {key} intensity"),
+                rule.intensity,
+                0.0,
+                32.0,
+            )?;
+            if rule.emitters.len() > 16 {
+                return Err(format!("effect {key}: too many emitters"));
+            }
+            if rule.replace && rule.emitters.is_empty() {
+                return Err(format!(
+                    "effect {key}: replace requires at least one emitter"
+                ));
+            }
+            for emitter in &rule.emitters {
+                if let Some(id) = &emitter.texture {
+                    resource(id)?;
+                }
+                range("emitter delay", emitter.delay, 0.0, 30.0)?;
+                for v in emitter.offset {
+                    range("emitter offset", v, -100.0, 100.0)?;
+                }
+                validate_sun_direction(emitter.direction)
+                    .map_err(|_| format!("effect {key}: invalid emitter direction"))?;
+                range("emitter spread", emitter.spread, 0.0, 180.0)?;
+                range("emitter life", emitter.life[0], 0.01, 30.0)?;
+                range("emitter life", emitter.life[1], emitter.life[0], 30.0)?;
+                range("emitter speed", emitter.speed[0], 0.0, 200.0)?;
+                range("emitter speed", emitter.speed[1], emitter.speed[0], 200.0)?;
+                range("emitter size", emitter.size[0], 0.001, 50.0)?;
+                range("emitter size", emitter.size[1], emitter.size[0], 50.0)?;
+                range("emitter stretch", emitter.stretch, 0.0, 16.0)?;
+                range("emitter gravity", emitter.gravity, -100.0, 100.0)?;
+                range("emitter drag", emitter.drag, 0.0, 32.0)?;
+                color("emitter color", emitter.color)?;
+                if let Some(end) = emitter.end_color {
+                    color("emitter end_color", end)?;
+                }
+                range("emitter fps", emitter.fps, 1.0, 240.0)?;
+                range("emitter radius", emitter.radius, 0.1, 100.0)?;
+                match emitter.kind {
+                    EmitterKind::Burst => {
+                        if !(1..=512).contains(&emitter.count) {
+                            return Err(format!("effect {key}: burst count must be 1..512"));
+                        }
+                        range("emitter intensity", emitter.intensity, 0.0, 32.0)?;
+                    }
+                    EmitterKind::Flipbook => {
+                        if emitter.texture.is_none()
+                            || !(1..=16).contains(&emitter.grid[0])
+                            || !(1..=16).contains(&emitter.grid[1])
+                        {
+                            return Err(format!(
+                                "effect {key}: flipbook requires a texture and a 1..16 grid"
+                            ));
+                        }
+                        range("emitter intensity", emitter.intensity, 0.0, 32.0)?;
+                    }
+                    EmitterKind::Light => {
+                        range("light intensity", emitter.intensity, 0.0, 1.0e7)?;
+                    }
+                }
+            }
+        }
         for p in self.materials.values() {
             for id in [&p.base_color, &p.normal, &p.orm].into_iter().flatten() {
                 resource(id)?;
@@ -1156,6 +1461,22 @@ impl Pack {
                     -6.0,
                     6.0,
                 )?;
+                if let Some(bloom) = &pipeline.bloom {
+                    range("bloom intensity", bloom.intensity, 0.0, 1.0)?;
+                    range("bloom threshold", bloom.threshold, 0.0, 16.0)?;
+                    range(
+                        "bloom threshold_softness",
+                        bloom.threshold_softness,
+                        0.0,
+                        1.0,
+                    )?;
+                    range(
+                        "bloom low_frequency_boost",
+                        bloom.low_frequency_boost,
+                        0.0,
+                        1.0,
+                    )?;
+                }
             }
             if s.weapons.len() > 128 {
                 return Err("too many weapon material rules".into());

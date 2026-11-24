@@ -147,6 +147,7 @@ fn uniform_only_particles_really_instance_and_keep_independent_colors() {
                         color: Vec4::ONE,
                         has_texture: 0,
                         uv_offset: Vec2::ZERO,
+                        soft: 0.0,
                     },
                     texture: None,
                     blend: PonEfBlendMode::SrcAlphaInvSrcAlpha,

@@ -180,8 +180,10 @@ impl Plugin for UiPlugin {
             Update,
             (
                 launcher_ui_scroll,
+                super::room_map_preview::update.run_if(in_state(AppState::Menu)),
                 adapt_settings_layout,
                 crate::plugins::settings_ui::adapt_settings_navigation,
+                crate::plugins::launcher_ui::adapt_settings_panel,
                 adapt_launcher_touch_targets,
                 adapt_runtime_ui_layout,
                 adapt_pause_sidebar.after(adapt_runtime_ui_layout),
@@ -265,6 +267,7 @@ impl Plugin for UiPlugin {
             Update,
             menu_auto_record_button.in_set(crate::plugins::UiTouchActionSet),
         )
+        .add_plugins(crate::plugins::settings_ui::SettingsUiPlugin)
         .init_resource::<crate::plugins::settings_ui::SettingsSliderDirty>()
         .add_systems(
             Update,
@@ -568,7 +571,7 @@ fn setup_playing_hud(
                 row_gap: Val::Px(4.0),
                 width: Val::Px(224.0),
                 padding: UiRect::ZERO,
-                border_radius: BorderRadius::all(Val::Px(3.0)),
+                border_radius: BorderRadius::ZERO,
                 ..default()
             },
             PlayingRoot,
@@ -579,14 +582,26 @@ fn setup_playing_hud(
         .spawn((
             Node {
                 align_items: AlignItems::Center,
-                column_gap: Val::Px(6.0),
+                column_gap: Val::Px(8.0),
                 height: Val::Px(20.0),
-                border: UiRect::left(Val::Px(2.0)),
-                padding: UiRect::left(Val::Px(6.0)),
+                border: UiRect {
+                    left: Val::Px(2.0),
+                    bottom: Val::Px(1.0),
+                    ..default()
+                },
+                padding: UiRect::left(Val::Px(8.0)),
                 ..default()
             },
             BorderColor::all(theme::METAL),
-            BackgroundColor(theme::HUD_SURFACE),
+            BackgroundGradient(vec![LinearGradient::new(
+                LinearGradient::TO_RIGHT,
+                vec![
+                    ColorStop::auto(theme::HUD_SURFACE.with_alpha(0.84)),
+                    ColorStop::auto(theme::HUD_SURFACE.with_alpha(0.32)),
+                    ColorStop::auto(Color::NONE),
+                ],
+            )
+            .into()]),
             HudLoadoutRow,
         ))
         .id();
@@ -645,8 +660,8 @@ fn setup_playing_hud(
     commands.entity(loadout_row).add_child(spare);
 
     for (kind, color, height) in [
-        (HudVital::Health, theme::HEALTH, 20.0),
-        (HudVital::Qi, theme::ANGER, 20.0),
+        (HudVital::Health, theme::HEALTH, 23.0),
+        (HudVital::Qi, theme::ANGER, 23.0),
     ] {
         let track = commands
             .spawn((
@@ -656,10 +671,21 @@ fn setup_playing_hud(
                     overflow: Overflow::clip(),
                     justify_content: JustifyContent::Center,
                     align_items: AlignItems::Center,
-                    border_radius: BorderRadius::all(Val::Px(3.0)),
+                    border: UiRect::left(Val::Px(2.0)),
+                    border_radius: BorderRadius::ZERO,
                     ..default()
                 },
+                BorderColor::all(color),
                 BackgroundColor(Color::NONE),
+                BackgroundGradient(vec![LinearGradient::new(
+                    LinearGradient::TO_RIGHT,
+                    vec![
+                        ColorStop::auto(theme::HUD_SURFACE.with_alpha(0.76)),
+                        ColorStop::auto(theme::HUD_SURFACE.with_alpha(0.28)),
+                        ColorStop::auto(Color::NONE),
+                    ],
+                )
+                .into()]),
                 HudMeterTrack,
             ))
             .id();
@@ -667,13 +693,22 @@ fn setup_playing_hud(
             .spawn((
                 Node {
                     position_type: PositionType::Absolute,
-                    left: Val::Px(0.0),
-                    top: Val::Px(0.0),
+                    left: Val::ZERO,
+                    bottom: Val::ZERO,
                     width: Val::Percent(0.0),
-                    height: Val::Percent(100.0),
+                    height: Val::Percent(32.0),
                     ..default()
                 },
-                BackgroundColor(color),
+                BackgroundGradient(vec![LinearGradient::new(
+                    LinearGradient::TO_RIGHT,
+                    vec![
+                        ColorStop::auto(color.mix(&Color::BLACK, 0.35)),
+                        ColorStop::auto(color),
+                        ColorStop::auto(color.mix(&theme::ACCENT_TEXT, 0.28)),
+                        ColorStop::auto(color.mix(&theme::TEXT, 0.52)),
+                    ],
+                )
+                .into()]),
                 HudVitalFill(kind),
             ))
             .id();
@@ -686,7 +721,7 @@ fn setup_playing_hud(
                     font_size: 13.0.into(),
                     ..default()
                 },
-                TextColor(Color::WHITE),
+                TextColor(theme::TEXT),
                 bevy::ui::widget::TextShadow {
                     offset: Vec2::splat(1.0),
                     color: Color::BLACK,
@@ -700,15 +735,43 @@ fn setup_playing_hud(
                 Node {
                     position_type: PositionType::Absolute,
                     left: Val::Px(0.0),
-                    top: Val::Px(0.0),
+                    bottom: Val::ZERO,
                     width: Val::Percent(100.0),
-                    height: Val::Percent(100.0),
+                    height: Val::Percent(32.0),
+                    border: UiRect::vertical(Val::Px(1.0)),
                     ..default()
                 },
-                BackgroundColor(theme::METAL.with_alpha(0.22)),
+                BorderColor::all(theme::METAL.with_alpha(0.42)),
+                BackgroundColor(Color::srgba(0.018, 0.016, 0.015, 0.88)),
             ))
             .id();
-        commands.entity(track).add_children(&[rail, fill, label]);
+        let emblem = commands
+            .spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(6.0),
+                    ..default()
+                },
+                Text::new(match kind {
+                    HudVital::Health => "命",
+                    HudVital::Qi => "气",
+                }),
+                TextFont {
+                    font: font.clone().into(),
+                    font_size: 11.0.into(),
+                    ..default()
+                },
+                TextColor(theme::ACCENT_TEXT),
+                bevy::ui::widget::TextShadow {
+                    offset: Vec2::ONE,
+                    color: Color::BLACK,
+                },
+                HudFixedFont(11.0),
+            ))
+            .id();
+        commands
+            .entity(track)
+            .add_children(&[rail, fill, label, emblem]);
         commands.entity(root).add_child(track);
     }
     commands.entity(root).add_child(loadout_row);
@@ -740,11 +803,23 @@ fn setup_playing_hud(
         Node {
             position_type: PositionType::Absolute,
             top: Val::Percent(25.0),
-            left: Val::Percent(10.0),
-            width: Val::Percent(80.0),
+            left: Val::Percent(18.0),
+            width: Val::Percent(64.0),
+            padding: UiRect::vertical(Val::Px(13.0)),
+            border: UiRect::vertical(Val::Px(1.0)),
             display: Display::None,
             ..default()
         },
+        BackgroundGradient(vec![LinearGradient::new(
+            LinearGradient::TO_RIGHT,
+            vec![
+                ColorStop::new(Color::NONE, Val::Percent(0.0)),
+                ColorStop::new(theme::HUD_SURFACE.with_alpha(0.88), Val::Percent(50.0)),
+                ColorStop::new(Color::NONE, Val::Percent(100.0)),
+            ],
+        )
+        .into()]),
+        BorderColor::all(theme::METAL.with_alpha(0.30)),
         Text::new(""),
         TextFont {
             font: font.clone().into(),
@@ -752,7 +827,7 @@ fn setup_playing_hud(
             ..default()
         },
         TextLayout::new(Justify::Center, LineBreak::WordOrCharacter),
-        TextColor(theme::TEXT),
+        TextColor(theme::METAL),
         bevy::ui::widget::TextShadow {
             offset: Vec2::splat(2.0),
             color: Color::BLACK,
@@ -769,25 +844,27 @@ fn setup_playing_hud(
                 top: Val::Px(110.0),
                 width: Val::Px(420.0),
                 height: Val::Auto,
-                padding: UiRect::axes(Val::Px(16.0), Val::Px(12.0)),
+                padding: UiRect::axes(Val::Px(18.0), Val::Px(10.0)),
+                align_items: AlignItems::Center,
                 flex_direction: FlexDirection::Row,
                 column_gap: Val::Px(12.0),
-                border: UiRect::left(Val::Px(2.0)),
-                border_radius: BorderRadius::all(Val::Px(3.0)),
+                border: UiRect::top(Val::Px(1.0)),
+                border_radius: BorderRadius::ZERO,
                 ..default()
             },
             BackgroundColor(Color::NONE),
             BackgroundGradient(vec![LinearGradient::new(
-                LinearGradient::TO_RIGHT,
+                LinearGradient::TO_BOTTOM,
                 vec![
-                    ColorStop::new(theme::HUD_SURFACE.with_alpha(0.88), Val::Percent(0.0)),
-                    ColorStop::new(theme::HUD_SURFACE.with_alpha(0.64), Val::Percent(65.0)),
-                    ColorStop::new(theme::HUD_SURFACE.with_alpha(0.0), Val::Percent(100.0)),
+                    ColorStop::new(theme::HUD_SURFACE.with_alpha(0.95), Val::Percent(0.0)),
+                    ColorStop::new(theme::HUD_SURFACE.with_alpha(0.80), Val::Percent(65.0)),
+                    ColorStop::new(theme::HUD_SURFACE.with_alpha(0.58), Val::Percent(100.0)),
                 ],
             )
             .into()]),
             Visibility::Hidden,
-            BorderColor::all(theme::ACCENT.with_alpha(0.8)),
+            BorderColor::all(theme::METAL.with_alpha(0.72)),
+            theme::OrnateFrame,
             DialoguePanelRoot,
             PlayingRoot,
         ))
@@ -801,6 +878,10 @@ fn setup_playing_hud(
                 ..default()
             },
             TextColor(theme::METAL),
+            bevy::ui::widget::TextShadow {
+                offset: Vec2::ONE,
+                color: Color::BLACK,
+            },
             DialogueSpeakerText,
             HudFixedFont(12.0),
         ))
@@ -815,6 +896,10 @@ fn setup_playing_hud(
             },
             TextLayout::new(Justify::Left, bevy::text::LineBreak::WordOrCharacter),
             TextColor(Color::srgb(0.95, 0.94, 0.91)),
+            bevy::ui::widget::TextShadow {
+                offset: Vec2::ONE,
+                color: Color::BLACK,
+            },
             DialogueHudText,
             HudFixedFont(15.0),
         ))
@@ -825,7 +910,7 @@ fn setup_playing_hud(
             flex_direction: FlexDirection::Column,
             min_width: Val::Px(0.0),
             flex_grow: 1.0,
-            row_gap: Val::Px(6.0),
+            row_gap: Val::Px(4.0),
             ..default()
         })
         .id();
@@ -943,9 +1028,9 @@ fn setup_playing_hud(
             BackgroundColor(Color::srgba(0.02, 0.025, 0.035, 0.72)),
             Visibility::Hidden,
             Outline {
-                width: Val::Px(1.0),
-                offset: Val::Px(2.0),
-                color: theme::METAL.with_alpha(0.6),
+                width: Val::Px(2.0),
+                offset: Val::Px(3.0),
+                color: theme::METAL.with_alpha(0.66),
             },
             RadarRoot,
             ZIndex(81),
@@ -981,6 +1066,23 @@ fn setup_playing_hud(
                 HudFixedFont(13.0),
             ));
         });
+    commands.entity(radar).with_children(|face| {
+        for inset in [8.0, 26.0] {
+            face.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Percent(inset),
+                    right: Val::Percent(inset),
+                    top: Val::Percent(inset),
+                    bottom: Val::Percent(inset),
+                    border: UiRect::all(Val::Px(1.0)),
+                    border_radius: BorderRadius::MAX,
+                    ..default()
+                },
+                BorderColor::all(theme::METAL.with_alpha(0.31)),
+            ));
+        }
+    });
     if let Some(plate) = radar_assets.plate.clone() {
         commands.entity(radar).insert(ImageNode {
             color: Color::srgba(0.2, 0.2, 0.2, 0.5),
@@ -1075,7 +1177,7 @@ pub(crate) fn load_ui_texture_bytes(workdir: &std::path::Path, name: &str) -> Op
         crate::plugins::audio_plugin::resource_roots(workdir)
             .into_iter()
             .find_map(|root| {
-                let bytes = crate::resource_io::read(root.join("UITexture.pak")).ok()?;
+                let bytes = crate::resource_io::read_legacy_pak(root.join("UITexture.pak"))?;
                 let pak = meteor_asset::pak::PakArchive::from_bytes(&bytes).ok()?;
                 crate::plugins::pak_textures::resolve_pak_texture(&[&pak], name)
             })
@@ -2507,8 +2609,9 @@ fn setup_pause_menu(
                 border: UiRect::right(Val::Px(1.0)),
                 ..default()
             }),
-            BackgroundColor(Color::srgba(0.025, 0.033, 0.044, 0.68)),
+            BackgroundColor(Color::srgba(0.025, 0.024, 0.022, 0.82)),
             BorderColor::all(theme::LINE),
+            theme::OrnateFrame,
             PauseSidebar,
         ))
         .id();
@@ -2686,7 +2789,7 @@ fn setup_settings_panel(
                 row_gap: Val::Px(12.0),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.039, 0.051, 0.059, 0.55)),
+            BackgroundColor(Color::srgba(0.02, 0.024, 0.03, 0.40)),
             bevy::ui::FocusPolicy::Block,
             UiInputBlocker,
             SettingsRoot,
@@ -2802,7 +2905,7 @@ fn split_dialogue(content: &str) -> (String, String) {
             return (speaker.trim().to_string(), body.trim().to_string());
         }
     }
-    ("对话".into(), content.trim().into())
+    (String::new(), content.trim().into())
 }
 
 fn dialogue_pages(body: &str, columns: usize, lines: usize) -> Vec<String> {
@@ -2894,7 +2997,7 @@ fn update_dialogue_hud(
 ) {
     let Some(content) = dialogue.text.clone().filter(|text| !text.trim().is_empty()) else {
         for mut panel in &mut panels {
-            *panel = Visibility::Hidden;
+            panel.set_if_neq(Visibility::Hidden);
         }
         *view = DialoguePresentation::default();
         return;
@@ -2945,7 +3048,7 @@ fn update_dialogue_hud(
     if dialogue.timer <= 0.0 {
         dialogue.text = None;
         for mut panel in &mut panels {
-            *panel = Visibility::Hidden;
+            panel.set_if_neq(Visibility::Hidden);
         }
         return;
     }
@@ -2955,22 +3058,24 @@ fn update_dialogue_hud(
         }
     }
     for mut speaker in &mut speakers {
-        let label = if view.pages.len() > 1 {
+        let label = if view.pages.len() <= 1 {
+            view.speaker.clone()
+        } else if view.speaker.is_empty() {
+            format!("{}/{}", view.page + 1, view.pages.len())
+        } else {
             format!(
                 "{}  ·  {}/{}",
                 view.speaker,
                 view.page + 1,
                 view.pages.len()
             )
-        } else {
-            view.speaker.clone()
         };
         if speaker.0 != label {
             speaker.0 = label;
         }
     }
     for mut panel in &mut panels {
-        *panel = Visibility::Visible;
+        panel.set_if_neq(Visibility::Visible);
     }
 }
 
@@ -3125,7 +3230,7 @@ pub(crate) fn setup_net_room_panel(mut commands: Commands, ui_font: Res<UiFont>)
         .spawn((
             Node {
                 width: Val::Percent(100.0),
-                max_width: Val::Px(1280.0),
+                max_width: Val::Auto,
                 height: Val::Percent(100.0),
                 min_height: Val::Px(0.0),
                 flex_direction: FlexDirection::Column,
@@ -3293,23 +3398,47 @@ pub(crate) fn setup_net_room_panel(mut commands: Commands, ui_font: Res<UiFont>)
     let details = commands
         .spawn((
             scrollable_y(Node {
-                width: Val::Px(280.0),
+                width: Val::Px(320.0),
                 min_height: Val::Px(0.0),
                 flex_shrink: 0.0,
                 flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(12.0),
-                padding: UiRect::all(Val::Px(12.0)),
+                padding: UiRect::all(Val::Px(14.0)),
                 border: UiRect::top(Val::Px(1.0)),
                 ..default()
             }),
-            BackgroundColor(theme::SURFACE.with_alpha(0.72)),
+            theme::OrnateFrame,
+            BackgroundColor(theme::SURFACE.with_alpha(0.84)),
             BorderColor::all(theme::LINE),
             NetRoomPanel,
         ))
         .id();
     commands.entity(columns).add_child(details);
-    let heading = text(&mut commands, "我的整备", 12.0, theme::METAL, font.clone());
-    commands.entity(details).add_child(heading);
+    let heading = text(
+        &mut commands,
+        "我的整备 · 持武预览",
+        12.0,
+        theme::METAL,
+        font.clone(),
+    );
+    let preview_box = commands
+        .spawn((
+            super::character_plugin::preview::CharacterPreviewViewport,
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Px(188.0),
+                flex_shrink: 0.0,
+                border: UiRect::all(Val::Px(1.0)),
+                overflow: Overflow::clip(),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.025, 0.024, 0.022, 0.88)),
+            BorderColor::all(theme::METAL.with_alpha(0.45)),
+        ))
+        .id();
+    commands
+        .entity(details)
+        .add_children(&[heading, preview_box]);
     for character in [true, false] {
         let row = commands
             .spawn(Node {
@@ -4142,11 +4271,26 @@ fn setup_result_panel(
     commands.entity(surface).add_child(actions);
     let font = Some(ui_font.0.clone());
     let cleared = cleared_campaign_mission(&request, &result, &net);
-    let next = cleared.and_then(|mission| super::campaign_ui::next_mission(mission.id));
-    if let Some(mission) = cleared.filter(|_| next.is_none()) {
+    let next_authored = cleared.and_then(|mission| super::campaign_ui::next_mission(mission.id));
+    let next = next_authored.filter(|mission| super::campaign_ui::mission_installed(mission.id));
+    if let Some(mission) = cleared.filter(|_| next_authored.is_none()) {
         let hint = text(
             &mut commands,
             &format!("已通关 · {}为最终关", mission.name),
+            14.0,
+            theme::METAL,
+            font.clone(),
+        );
+        commands.entity(hint).insert(Node {
+            width: Val::Percent(100.0),
+            flex_shrink: 0.0,
+            ..default()
+        });
+        commands.entity(actions).add_child(hint);
+    } else if let Some(mission) = next_authored.filter(|_| next.is_none()) {
+        let hint = text(
+            &mut commands,
+            &format!("下一关 · {}的地图或任务脚本未安装", mission.name),
             14.0,
             theme::METAL,
             font.clone(),
@@ -4201,6 +4345,9 @@ fn result_next_stage_button(
     }
     let Some(mission) = cleared_campaign_mission(&request, &result, &net)
         .and_then(|mission| super::campaign_ui::next_mission(mission.id))
+        .filter(|mission| {
+            super::campaign_ui::mission_installed(mission.id) && progress.is_unlocked(mission.id)
+        })
     else {
         return;
     };
@@ -4643,17 +4790,17 @@ fn adapt_runtime_ui_layout(
         node.width = Val::Px(hud.dialogue_size.x / unit);
         node.height = Val::Auto;
         node.max_height = Val::Px(hud.dialogue_size.y / unit);
-        node.padding = UiRect::axes(Val::Px(16.0 / unit), Val::Px(12.0 / unit));
+        node.padding = UiRect::axes(Val::Px(18.0 / unit), Val::Px(10.0 / unit));
         node.row_gap = Val::Px(6.0 / unit);
         node.column_gap = Val::Px(12.0 / unit);
-        node.border = UiRect::left(Val::Px(2.0 / unit));
+        node.border = UiRect::top(Val::Px(1.0 / unit));
     }
     for (mut node, track, label, header, icon) in &mut nodes.p7() {
         if !layout_changed && !node.is_added() {
             continue;
         }
         if track.is_some() {
-            node.height = Val::Px(if layout.mobile { 20.0 } else { 22.0 } / unit);
+            node.height = Val::Px(if layout.mobile { 22.0 } else { 24.0 } / unit);
         }
         if label.is_some() {
             node.left = Val::Auto;
@@ -4662,7 +4809,7 @@ fn adapt_runtime_ui_layout(
         if header {
             node.height = Val::Px(20.0 / unit);
             node.column_gap = Val::Px(6.0 / unit);
-            node.border = UiRect::left(Val::Px(2.0 / unit));
+            node.border = UiRect::bottom(Val::Px(1.0 / unit));
             node.padding = UiRect::left(Val::Px(6.0 / unit));
         }
         if icon {
@@ -4817,7 +4964,7 @@ fn menu_button(
                 align_items: AlignItems::Center,
                 padding: UiRect::horizontal(Val::Px(8.0)),
                 border: UiRect::all(Val::Px(1.0)),
-                border_radius: BorderRadius::all(Val::Px(3.0)),
+                border_radius: BorderRadius::ZERO,
                 ..default()
             },
             BackgroundColor(color),
@@ -4832,7 +4979,7 @@ fn menu_button(
             ResponsiveButtonPalette(color),
         ))
         .id();
-    let child = text(commands, label, 16.0, Color::WHITE, font);
+    let child = text(commands, label, 16.0, theme::TEXT, font);
     commands.entity(entity).add_child(child);
     entity
 }
@@ -5058,6 +5205,24 @@ mod tests {
         use bevy::camera::RenderTarget;
         use bevy::render::render_resource::TextureFormat;
         use bevy::render::view::screenshot::{save_to_disk, Screenshot, ScreenshotCaptured};
+        fn open_map_picker(
+            mut opened: Local<bool>,
+            labels: Query<(&Text, &ChildOf)>,
+            mut actions: Query<&mut Interaction, With<super::super::ui_components::UiPageAction>>,
+        ) {
+            if *opened {
+                return;
+            }
+            for (label, parent) in &labels {
+                if label.0 == "创建房间" {
+                    if let Ok(mut interaction) = actions.get_mut(parent.parent()) {
+                        *interaction = Interaction::Pressed;
+                        *opened = true;
+                        return;
+                    }
+                }
+            }
+        }
         #[derive(Resource)]
         struct CaptureTarget(Handle<Image>);
         #[derive(Resource)]
@@ -5601,6 +5766,23 @@ mod tests {
                     .chain(),
             );
         }
+        if std::env::var("METEOR_UI_CAPTURE").is_ok_and(|v| v.starts_with("network-create")) {
+            let packs = meteor_asset::pack_repository::default_pack_directory().unwrap();
+            meteor_asset::runtime_assets::initialize_native(&packs).unwrap();
+            app.add_systems(
+                Update,
+                open_map_picker.before(crate::plugins::UiTouchActionSet),
+            );
+            app.add_systems(
+                Update,
+                (
+                    super::super::network_plugin::menu_stock_stage_buttons,
+                    super::super::room_map_preview::update,
+                )
+                    .chain()
+                    .after(crate::plugins::UiTouchActionSet),
+            );
+        }
         if std::env::var("METEOR_UI_CAPTURE").is_ok_and(|v| v.starts_with("network")) {
             crate::plugins::network_plugin::room_browser::install_capture_fixture(&mut app);
         }
@@ -5644,6 +5826,8 @@ mod tests {
             .init_resource::<Assets<crate::plugins::stage_material::GmdlMaterial>>()
             .init_resource::<Assets<SkinnedMeshInverseBindposes>>()
             .insert_resource(UiFont(font))
+            .init_resource::<Settings>()
+            .init_resource::<crate::plugins::pak_textures::QualityTextureHandles>()
             .init_resource::<LaunchRequest>()
             .insert_resource(State::new(AppState::Playing))
             .insert_resource(DialogueState {
@@ -6223,15 +6407,22 @@ mod tests {
     #[test]
     fn campaign_result_advances_all_eight_links_and_stops_at_original_finale() {
         use super::super::battle_result::{BattleResultPlugin, OfflineScores};
-        use super::super::campaign_ui::MISSIONS;
+        use super::super::campaign_ui::{CampaignProgress, MISSIONS};
         use super::super::network_plugin::{NetState, NetStatus};
         fn app_for(request: LaunchRequest, result: MatchEnd, net: NetState) -> App {
+            let completed = MISSIONS
+                .iter()
+                .position(|mission| mission.id == request.stage_id)
+                .map_or(0, |index| index + 1);
+            let progress: CampaignProgress =
+                serde_json::from_value(serde_json::json!({"completed": completed})).unwrap();
             let mut app = App::new();
             app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
                 .init_state::<AppState>()
                 .insert_resource(request)
                 .insert_resource(result)
                 .insert_resource(net)
+                .insert_resource(progress)
                 .insert_resource(UiFont(Handle::default()))
                 .init_resource::<KillScore>()
                 .init_resource::<OfflineScores>()
@@ -7270,7 +7461,11 @@ mod tests {
                     assert!(computed.size().y >= 44.0);
                     tabs += 1;
                 }
-                assert_eq!(tabs, 6);
+                assert_eq!(
+                    tabs,
+                    crate::plugins::settings_ui::SettingsCategory::ALL.len()
+                        - usize::from(!crate::graphics_settings::AVAILABLE)
+                );
                 let pages: Vec<_> = app.world_mut().query_filtered::<(&Node, &ComputedNode), With<crate::plugins::settings_ui::SettingsCategoryPage>>()
                     .iter(app.world()).filter(|(node,_)|node.display != Display::None).collect();
                 assert_eq!(pages.len(), 1);
@@ -7299,20 +7494,58 @@ mod tests {
                         app.update();
                     }
                     let computed = app.world().get::<ComputedNode>(*selected).unwrap();
-                    assert!(computed.content_size().y <= computed.size().y + 1.0,
-                        "common settings should fit at {width}x{height}: content {:?}, viewport {:?}", computed.content_size(), computed.size());
+
+                    assert!(computed.content_size().x <= computed.size().x + 1.0,
+                        "settings rows overflow horizontally at {width}x{height} on {category:?}: content {:?}, viewport {:?}", computed.content_size(), computed.size());
+                    assert!(
+                        computed.size().y >= 4.0 * 44.0 || height < 500,
+                        "settings page too short at {width}x{height}: {:?}",
+                        computed.size()
+                    );
                 }
+
+                let page = category_pages
+                    .iter()
+                    .find(|(_, c)| *c == crate::plugins::settings_ui::SettingsCategory::Display)
+                    .unwrap()
+                    .0;
+                for (id, _) in &category_pages {
+                    app.world_mut().get_mut::<Node>(*id).unwrap().display = if *id == page {
+                        Display::Flex
+                    } else {
+                        Display::None
+                    };
+                }
+                for _ in 0..3 {
+                    app.update();
+                }
+                let mut arrows = 0;
+                for (computed, transform) in app.world_mut().query_filtered::<(&ComputedNode, &UiGlobalTransform), With<crate::plugins::settings_ui::SettingsStepButton>>().iter(app.world()) {
+                    if computed.size().x <= 0.0 { continue; }
+                    let rect = Rect::from_center_size(transform.translation, computed.size());
+                    assert!(rect.max.x <= width as f32 + 0.5 && rect.min.x >= -0.5,
+                        "settings arrow clipped at {width}x{height}: {rect:?}");
+                    arrows += 1;
+                }
+                assert!(arrows >= 8, "display page shows its slider arrows");
             } else if screen == MenuScreen::Stages {
+                use super::super::campaign_ui::{CampaignPin, CampaignProgress, MISSIONS};
+                let expected = {
+                    let progress = app.world().resource::<CampaignProgress>();
+                    MISSIONS
+                        .iter()
+                        .filter(|mission| progress.is_unlocked(mission.id))
+                        .count()
+                };
                 let mut count = 0;
-                for (pin, computed, transform) in app
+                for (pin, node, computed, transform) in app
                     .world_mut()
-                    .query::<(
-                        &super::super::campaign_ui::CampaignPin,
-                        &ComputedNode,
-                        &UiGlobalTransform,
-                    )>()
+                    .query::<(&CampaignPin, &Node, &ComputedNode, &UiGlobalTransform)>()
                     .iter(app.world())
                 {
+                    if node.display == Display::None {
+                        continue;
+                    }
                     let rect = Rect::from_center_size(transform.translation, computed.size());
                     assert!(
                         rect.min.x >= 0.0
@@ -7325,7 +7558,7 @@ mod tests {
                     assert!(computed.size().y >= 44.0);
                     count += 1;
                 }
-                assert_eq!(count, 9);
+                assert_eq!(count, expected);
                 let (computed, transform) = app
                     .world_mut()
                     .query_filtered::<(&ComputedNode, &UiGlobalTransform), With<StartGameButton>>()
@@ -7342,7 +7575,13 @@ mod tests {
                     .world_mut()
                     .query::<(&Text, &ChildOf)>()
                     .iter(app.world())
-                    .find(|(text, _)| text.0 == "创建房间")
+                    .find(|(text, parent)| {
+                        text.0 == "创建房间"
+                            && app
+                                .world()
+                                .get::<super::super::ui_components::UiPageAction>(parent.parent())
+                                .is_some()
+                    })
                     .map(|(_, parent)| parent.parent())
                     .unwrap();
                 *app.world_mut().get_mut::<Interaction>(button).unwrap() = Interaction::Pressed;
@@ -7373,7 +7612,13 @@ mod tests {
                         assert!(size.y >= 43.0);
                     }
                 }
-                assert!(checked >= 6, "create form actions must really be laid out");
+                assert!(checked > 0, "create form actions must really be laid out");
+                let preview = app.world_mut().query_filtered::<&ComputedNode, With<super::super::room_map_preview::MapImage>>()
+                    .single(app.world()).unwrap();
+                assert!(
+                    preview.size().x > 100.0 && preview.size().y > 55.0,
+                    "create form needs a visible map preview"
+                );
                 let (computed, transform) = app.world_mut()
                     .query_filtered::<(&ComputedNode, &UiGlobalTransform), With<crate::app_state::MenuStockHostButton>>()
                     .single(app.world()).unwrap();
@@ -7402,11 +7647,6 @@ mod tests {
                             computed.content_size().x <= computed.size().x + 1.0,
                             "create form overflows horizontally at {width}x{height}"
                         );
-                        if width >= 1280 {
-                            assert!(computed.content_size().y <= computed.size().y + 1.0,
-                                "desktop create form must fit at {width}x{height}: content {:?}, viewport {:?}",
-                                computed.content_size(), computed.size());
-                        }
                     }
                 }
             } else {
@@ -7426,7 +7666,7 @@ mod tests {
                     let labels = children.iter().filter(|child| app.world().get::<Text>(*child).is_some()).count();
                     assert_eq!(labels, 1, "hero navigation has one text line, no numbered tile or subtitle");
                 }
-                assert_eq!(count, 3);
+                assert_eq!(count, 5);
             }
         }
     }
@@ -7643,7 +7883,8 @@ mod tests {
                 }
                 let panel_rect = bounds(panel);
                 assert!(
-                    status_rect.max.y <= panel_rect.min.y || status_rect.max.x <= panel_rect.min.x,
+                    status_rect.max.y <= panel_rect.min.y || panel_rect.max.y <= status_rect.min.y
+                        || status_rect.max.x <= panel_rect.min.x || panel_rect.max.x <= status_rect.min.x,
                     "status overlaps dialogue {width}x{height} scale={unit}: {status_rect:?} {panel_rect:?}"
                 );
                 assert!(

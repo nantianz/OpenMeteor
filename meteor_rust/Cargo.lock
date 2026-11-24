@@ -4627,6 +4627,7 @@ dependencies = [
  "sha2",
  "tokio",
  "tokio-tungstenite",
+ "ttf-parser",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

@@ -658,6 +658,7 @@ struct GraphicsFrame {
     counts: vec4<f32>,
     water_wind: vec4<f32>, water_wind_cross: vec4<f32>,
     color_pipeline: vec4<f32>,
+    fx_lights: array<vec4<f32>,8>, fx_light_colors: array<vec4<f32>,8>,
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(17) var<uniform> graphics: GraphicsFrame;
 
@@ -724,6 +725,21 @@ fn pack_pbr(in: VertexOutput, n: vec3<f32>, texel: vec3<f32>, vertex: vec3<f32>,
     let x = radiance_sum * graphics.environment.z;
     let mapped = clamp((x*(2.51*x+0.03))/(x*(2.43*x+0.59)+0.14),vec3<f32>(0.0),vec3<f32>(1.0));
     return pack_linear_to_srgb(mapped);
+}
+
+fn pack_fx_lights(position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    var sum = vec3<f32>(0.0);
+    let count = min(u32(graphics.color_pipeline.y), 8u);
+    for (var i = 0u; i < count; i += 1u) {
+        let light = graphics.fx_lights[i];
+        let to_light = light.xyz - position;
+        let distance_sq = max(dot(to_light, to_light), 0.01);
+        let range = max(light.w, 0.01);
+        let window = clamp(1.0 - distance_sq / (range * range), 0.0, 1.0);
+        let n_dot_l = max(dot(normal, to_light * inverseSqrt(distance_sq)), 0.0);
+        sum += graphics.fx_light_colors[i].rgb * (window * window * n_dot_l / (1.0 + distance_sq));
+    }
+    return sum;
 }
 fn pack_contacts(position: vec3<f32>, normal: vec3<f32>) -> f32 {
     if (graphics.counts.y <= 0.0) { return 1.0; }
@@ -934,6 +950,11 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         let sheen = emission * (vec3<f32>(0.16) + texel.rgb * 0.20) * (0.30 + 1.20 * flow);
         let shell = emission * (0.18 + 3.4 * rim * rim * (0.45 + 1.6 * rays) + 1.1 * rim * flow);
         color = vec4<f32>(color.rgb + sheen + shell, color.a);
+    }
+    if (graphics.color_pipeline.y > 0.0 && (params.mode == 0u || params.mode == 1u)) {
+        let flash = pack_fx_lights(in.world_position.xyz, normalize(in.world_normal));
+        let lit = texel.rgb * select(pack_linear_to_srgb(flash), flash, unified_hdr());
+        color = vec4<f32>(color.rgb + lit, color.a);
     }
     if (params.mode == 0u || params.mode == 1u) {
         color = vec4<f32>(pack_fog(in.world_position.xyz, color.rgb), color.a);

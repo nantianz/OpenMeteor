@@ -8,8 +8,8 @@ use crate::combat_authority::{
 use crate::escort::{character_capsule_intersects_flag, escort_stage};
 use crate::host_authority::{clamp_frame_dt, InputAuthority, InputReject, InputStamp};
 use crate::modes::{
-    can_respawn, is_escort_stage, is_siege_stage, is_team_mode, mode_rule_id,
-    original_stage_supports_mode, round_time_limit_seconds, RESPAWN_DELAY_SECONDS,
+    can_respawn, is_escort_stage, is_team_mode, mode_rule_id, round_time_limit_seconds,
+    RESPAWN_DELAY_SECONDS,
 };
 use crate::protocol::{
     CombatReactionWire, ItemEffectWire, ItemWeaponSlotWire, Message, RoomMemberWire, RoomRulesWire,
@@ -1858,14 +1858,14 @@ impl RoomServer {
                     return dispatch;
                 }
                 let configured = !mode.is_empty() && !stage.is_empty();
-                if configured
-                    && (!is_web_mode(&mode)
-                        || !is_web_stage(&stage)
-                        || !original_stage_supports_mode(&stage, &mode))
-                {
+                if let Err(text) = if configured {
+                    validate_web_stage_rule(self.origin_res.as_deref(), &stage, &mode)
+                } else {
+                    Ok(())
+                } {
                     dispatch.to_sender.push(Message::Error {
                         code: "bad_room_settings".into(),
-                        text: "mode or stage is not supported".into(),
+                        text,
                     });
                     return dispatch;
                 }
@@ -1996,13 +1996,12 @@ impl RoomServer {
                         None => {
                             let mode = mode.unwrap_or_else(|| "deathmatch".to_string());
                             let stage = stage.unwrap_or_else(|| "sn01".to_string());
-                            if !is_web_mode(&mode)
-                                || !is_web_stage(&stage)
-                                || !original_stage_supports_mode(&stage, &mode)
+                            if let Err(text) =
+                                validate_web_stage_rule(self.origin_res.as_deref(), &stage, &mode)
                             {
                                 dispatch.to_sender.push(Message::Error {
                                     code: "bad_room_settings".into(),
-                                    text: "mode or stage is not supported".into(),
+                                    text,
                                 });
                                 return dispatch;
                             }
@@ -2376,13 +2375,12 @@ impl RoomServer {
                     });
                     return dispatch;
                 }
-                if !is_web_mode(&mode)
-                    || !is_web_stage(&stage_id)
-                    || !original_stage_supports_mode(&stage_id, &mode)
+                if let Err(text) =
+                    validate_web_stage_rule(self.origin_res.as_deref(), &stage_id, &mode)
                 {
                     dispatch.to_sender.push(Message::Error {
                         code: "bad_room_settings".into(),
-                        text: "mode or stage is not supported".into(),
+                        text,
                     });
                     return dispatch;
                 }
@@ -2456,18 +2454,17 @@ impl RoomServer {
                     });
                     return dispatch;
                 }
-                if room.mode == "escort" && !is_escort_stage(&room.stage) {
+                if let Err(text) =
+                    validate_web_stage_rule(self.origin_res.as_deref(), &room.stage, &room.mode)
+                {
                     dispatch.to_sender.push(Message::Error {
-                        code: "ESCORT_STAGE_UNSUPPORTED".into(),
-                        text: "escort requires an authored objective and common/team safe zones"
-                            .into(),
-                    });
-                    return dispatch;
-                }
-                if room.mode == "siege" && !is_siege_stage(&room.stage) {
-                    dispatch.to_sender.push(Message::Error {
-                        code: "SIEGE_STAGE_UNSUPPORTED".into(),
-                        text: "siege requires an authored GoalBlue/GoalRed stage".into(),
+                        code: match room.mode.as_str() {
+                            "escort" => "ESCORT_STAGE_UNSUPPORTED",
+                            "siege" => "SIEGE_STAGE_UNSUPPORTED",
+                            _ => "ASSET_LOAD_FAILED",
+                        }
+                        .into(),
+                        text,
                     });
                     return dispatch;
                 }
@@ -2682,7 +2679,6 @@ impl RoomServer {
                     room.started
                         && room.order.first() == Some(&player_id)
                         && room.mode == "siege"
-                        && is_siege_stage(&room.stage)
                         && matches!(winner_team, 1 | 2)
                 });
                 if !accepted {
@@ -5655,18 +5651,53 @@ fn web_weapon_id(weapon: &str) -> Option<u8> {
     })
 }
 
-fn is_web_mode(mode: &str) -> bool {
-    matches!(
-        mode,
-        "leader" | "escort" | "siege" | "assassin" | "deathmatch"
-    )
+fn validate_web_stage_rule(root: Option<&Path>, stage: &str, mode: &str) -> Result<(), String> {
+    use crate::modes::{
+        runtime_stage_rule_mask, stage_rule_masks, stage_supports_room_rule, validate_siege_assets,
+    };
+    let rule = mode_rule_id(mode)
+        .filter(|_| crate::modes::is_stage_id(stage))
+        .ok_or_else(|| format!("无效的地图或规则 {stage} / {mode}"))?;
+    let mask = root.and_then(|root| {
+        if root.as_os_str().is_empty() {
+            return runtime_stage_rule_mask(stage);
+        }
+        let index: usize = stage[2..].parse().ok()?;
+        let bytes = environment::read_resource(root, "Meteor.res").ok()?;
+        stage_rule_masks(&bytes).ok()?[index]
+    });
+    if !stage_supports_room_rule(stage, rule, mask) {
+        return Err(format!("地图 {stage} 未开放 Rule {rule}"));
+    }
+    let official = meteor_scene::stage_registry::is_official_stage_id(stage);
+    let Some(root) = root else {
+        return if official {
+            Ok(())
+        } else {
+            Err(format!("地图 {stage} 未安装"))
+        };
+    };
+    let read = |path: &str| {
+        environment::read_resource(root, path)
+            .ok()
+            .filter(|bytes| !bytes.is_empty())
+    };
+    if !official {
+        for ext in meteor_asset::runtime_assets::ROOM_STAGE_EXTENSIONS {
+            let path = format!("{stage}/{stage}.{ext}");
+            read(&path).ok_or_else(|| format!("地图缺少 {path}"))?;
+        }
+    }
+    match rule {
+        2 if !is_escort_stage(stage) => environment::load_escort(root, stage).map(|_| ()),
+        3 => validate_siege_assets(stage, read),
+        _ => Ok(()),
+    }
 }
 
-fn is_web_stage(stage_id: &str) -> bool {
-    stage_id
-        .strip_prefix("sn")
-        .and_then(|number| number.parse::<u8>().ok())
-        .is_some_and(|number| (1..=22).contains(&number))
+#[cfg(test)]
+fn web_stage_supports_mode(root: Option<&Path>, stage: &str, mode: &str) -> bool {
+    validate_web_stage_rule(root, stage, mode).is_ok()
 }
 
 #[cfg(feature = "original-assets")]
@@ -5677,6 +5708,107 @@ mod tests {
     use crate::protocol::FighterSnapshot;
     use crate::role_state::{encode_request1_state, role_state_from_runtime, RoleStateRuntime};
     use crate::wire_v4::{CombatJudge, Input as V4Input, InputVisual, PackedObb};
+
+    #[test]
+    fn custom_room_stage_admission_uses_resources_and_rules() {
+        let root = std::env::temp_dir().join(format!("meteor-custom-stage-{}", std::process::id()));
+        let dir = root.join("sn96");
+        std::fs::create_dir_all(&dir).unwrap();
+        for ext in meteor_asset::runtime_assets::ROOM_STAGE_EXTENSIONS {
+            std::fs::write(dir.join(format!("sn96.{ext}")), b"fixture").unwrap();
+        }
+        assert!(web_stage_supports_mode(Some(&root), "sn96", "deathmatch"));
+        assert!(web_stage_supports_mode(Some(&root), "sn96", "leader"));
+        assert!(!web_stage_supports_mode(Some(&root), "sn96", "escort"));
+        assert!(!web_stage_supports_mode(Some(&root), "sn26", "leader"));
+        assert!(!web_stage_supports_mode(Some(&root), "../sn96", "leader"));
+        assert!(!web_stage_supports_mode(None, "sn96", "leader"));
+        std::fs::remove_file(dir.join("sn96.pst")).unwrap();
+        assert!(!web_stage_supports_mode(Some(&root), "sn96", "leader"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn authored_custom_rules_start_escort_and_settle_siege() {
+        use std::fs;
+        let original = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        let root = std::env::temp_dir().join(format!("meteor-custom-rules-{}", std::process::id()));
+        let mut registry = fs::read(original.join("Meteor.res")).unwrap();
+        let record_start =
+            0x30 + 12 * usize::from(u16::from_le_bytes([registry[0x2e], registry[0x2f]]));
+        let records: Vec<_> = [(96u32, 2u32), (97, 4)]
+            .into_iter()
+            .flat_map(|(stage, mask)| {
+                [5, stage, 0, 0, 0, 1, 11, mask, 0, 0]
+                    .into_iter()
+                    .flat_map(u32::to_le_bytes)
+            })
+            .collect();
+        registry.splice(record_start..record_start, records);
+        fs::create_dir_all(root.join("cmodel")).unwrap();
+        fs::create_dir_all(root.join("PScriptLib")).unwrap();
+        fs::write(root.join("Meteor.res"), registry).unwrap();
+        for file in [
+            "cmodel/IPItem02.gmb",
+            "PScriptLib/Def.h",
+            "PScriptLib/box.pst",
+            "PScriptLib/desk.pst",
+            "PScriptLib/chair.pst",
+            "PScriptLib/jug.pst",
+        ] {
+            fs::copy(original.join(file), root.join(file)).unwrap();
+        }
+        for (stage, template, mode) in [("sn96", "sn03", "escort"), ("sn97", "sn04", "siege")] {
+            fs::create_dir_all(root.join(stage)).unwrap();
+            for ext in meteor_asset::runtime_assets::ROOM_STAGE_EXTENSIONS {
+                fs::copy(
+                    original.join(format!("{template}/{template}.{ext}")),
+                    root.join(format!("{stage}/{stage}.{ext}")),
+                )
+                .unwrap();
+            }
+            assert!(!web_stage_supports_mode(Some(&root), stage, "deathmatch"));
+            let mut server = RoomServer::new();
+            server.origin_res = Some(root.clone());
+            server.connect(1);
+            server.handle(1, hello());
+            let created = server.handle(1, create_room(mode, stage));
+            assert!(
+                !created
+                    .to_sender
+                    .iter()
+                    .any(|m| matches!(m, Message::Error { .. })),
+                "{created:?}"
+            );
+            let started = server.handle(1, Message::RoomStart);
+            assert!(
+                !started
+                    .to_sender
+                    .iter()
+                    .any(|m| matches!(m, Message::Error { .. })),
+                "{started:?}"
+            );
+            if mode == "escort" {
+                assert_eq!(
+                    server.rooms["room1"]
+                        .escort_definition
+                        .as_ref()
+                        .unwrap()
+                        .item_id,
+                    2
+                );
+            } else {
+                let result = server.handle(1, Message::ObjectiveEnd { winner_team: 2 });
+                assert!(result.to_room.iter().any(|message| matches!(message,
+                    Message::RoundEnd { winner_team: Some(2), reason, .. } if reason == "siege-objective"
+                )));
+            }
+        }
+        fs::remove_file(root.join("PScriptLib/Def.h")).unwrap();
+        let error = validate_web_stage_rule(Some(&root), "sn97", "siege").unwrap_err();
+        assert!(error.contains("PScriptLib/Def.h"), "{error}");
+        fs::remove_dir_all(root).unwrap();
+    }
 
     fn running_late_join(mode: &str) -> RoomServer {
         let mut server = RoomServer::new();

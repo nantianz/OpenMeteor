@@ -837,6 +837,7 @@ mod radar_map;
 pub mod ranged_plugin;
 pub mod render_plugin;
 pub mod replay_plugin;
+pub(crate) mod room_map_preview;
 pub mod settings_ui;
 pub mod stage_collider;
 pub mod stage_material;

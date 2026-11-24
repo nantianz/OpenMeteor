@@ -1,6 +1,8 @@
 {
   "schema_version": 1,
   "id": "longsword-pbr-preview",
+  "name": "轻剑金属材质（预览）",
+  "description": "轻剑刀身使用金属 PBR 材质。",
   "resources": { "longsword-orm": "orm.png" },
   "materials": {
     "longsword": {

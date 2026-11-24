@@ -1,3 +1,4 @@
+use crate::runtime_assets::ROOM_STAGE_EXTENSIONS;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -7,7 +8,8 @@ use std::{
     sync::Mutex,
 };
 
-const CACHE_BYTES: usize = 64 * 1024 * 1024;
+const CACHE_BYTES: usize = 128 * 1024 * 1024;
+const MAX_CACHED_ENTRY_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone)]
 enum Entry {
@@ -95,6 +97,60 @@ impl OriginalDirectory {
         &self.root
     }
 
+    pub fn stage_ids(&self) -> Vec<String> {
+        self.entries.keys()
+            .filter_map(|name| {
+                let (id, file) = name.split_once('/')?;
+                (is_stage(id) && id != "sn00" && file == format!("{id}.gmb"))
+                    .then_some(id)
+            })
+            .filter(|id| ROOM_STAGE_EXTENSIONS.iter().all(|ext| {
+                matches!(self.entries.get(&format!("{id}/{id}.{ext}")), Some(Entry::File(path)) if path.is_file())
+            }))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    pub fn has_mission(&self, stage: &str) -> bool {
+        is_stage(stage)
+            && self.entries.contains_key(&format!("level/{stage}_.pst"))
+            && ROOM_STAGE_EXTENSIONS
+                .iter()
+                .all(|ext| self.entries.contains_key(&format!("{stage}/{stage}.{ext}")))
+    }
+
+    pub fn stage_preview_revision(&self, stage: &str) -> String {
+        let mut hash = Sha256::new();
+        hash.update(self.root.as_os_str().as_encoded_bytes());
+        let stage_path = format!("{stage}/");
+        for (name, entry) in &self.entries {
+            if !(name.starts_with(&stage_path)
+                || name.starts_with("cmodel/")
+                || name == &format!("{stage}.pak")
+                || name == &format!("level/{stage}.wp")
+                || matches!(
+                    name.as_str(),
+                    "meteor.res" | "ctexture.pak" | "texturepatch.pak"
+                ))
+            {
+                continue;
+            }
+            if let Entry::File(path) = entry {
+                hash.update(name.as_bytes());
+                if let Ok(metadata) = path.metadata() {
+                    hash.update(metadata.len().to_le_bytes());
+                    if let Ok(modified) = metadata.modified().and_then(|t| {
+                        t.duration_since(std::time::UNIX_EPOCH)
+                            .map_err(std::io::Error::other)
+                    }) {
+                        hash.update(modified.as_nanos().to_le_bytes());
+                    }
+                }
+            }
+        }
+        format!("{:x}", hash.finalize())
+    }
+
     fn index_archive(&mut self, name: &str, path: &Path) -> Result<(), String> {
         let scope = match name {
             "texturepatch.pak" => "patch",
@@ -118,7 +174,7 @@ impl OriginalDirectory {
             .map_err(|e| format!("Original PAK {}: {e}", path.display()))?;
         for index in 0..archive.len() {
             let file = archive
-                .by_index(index)
+                .by_index_raw(index)
                 .map_err(|e| format!("{name}: {e}"))?;
             if file.is_dir() {
                 continue;
@@ -170,11 +226,6 @@ impl OriginalDirectory {
                 names.push(format!("pmodel/p{hero}.{ext}"));
             }
         }
-        for stage in 1..=22 {
-            for ext in ["gmb", "des", "pst"] {
-                names.push(format!("sn{stage:02}/sn{stage:02}.{ext}"));
-            }
-        }
         let missing: Vec<_> = names
             .into_iter()
             .filter(|name| !self.entries.contains_key(name))
@@ -198,16 +249,9 @@ impl OriginalDirectory {
             heroes.push(serde_json::json!({"hero":hero,"entry":entry,"checksum":checksum(&bytes),"sourceHash":hash,"packedHash":hash}));
         }
         let mut stages = Vec::new();
-        for name in self
-            .entries
-            .keys()
-            .filter(|name| name.starts_with("stage/") && name.ends_with(".pst"))
-        {
-            let id = name.trim_start_matches("stage/").trim_end_matches(".pst");
-            if !is_stage(id) {
-                continue;
-            }
-            let bytes = self.read(name)?;
+        for id in self.stage_ids() {
+            let name = format!("stage/{id}.pst");
+            let bytes = self.read(&format!("{id}/{id}.pst"))?;
             stages.push(serde_json::json!({"stage":id,"entry":name,"length":bytes.len(),"checksum":checksum(&bytes),"packedHash":format!("{:x}", Sha256::digest(&bytes))}));
         }
         serde_json::to_vec(&serde_json::json!({"version":1,"profile":"source-bytes","heroes":heroes,"stages":stages})).map_err(|e| e.to_string())
@@ -247,11 +291,7 @@ impl OriginalDirectory {
                 if !stems.contains(stem) {
                     continue;
                 }
-                let bytes = self.read(name)?;
-                if bytes.len() > 30
-                    && bytes.starts_with(b"BM")
-                    && u16::from_le_bytes([bytes[28], bytes[29]]) == 8
-                {
+                if self.is_palette_mask(name)? {
                     masks.entry(scope.clone()).or_default().insert(stem.into());
                 }
             }
@@ -279,16 +319,20 @@ impl OriginalDirectory {
     }
 
     pub fn read(&self, name: &str) -> Result<Vec<u8>, String> {
+        self.read_if_present(name)?
+            .ok_or_else(|| format!("Original resource missing: {name}"))
+    }
+
+    pub(crate) fn read_if_present(&self, name: &str) -> Result<Option<Vec<u8>>, String> {
         let name = normalize(name)?;
         let name = match name.as_str() {
             "character.amb" | "character.act" => format!("common/{name}"),
             _ => name,
         };
-        let entry = self
-            .entries
-            .get(&name)
-            .ok_or_else(|| format!("Original resource missing: {name}"))?;
-        match entry {
+        let Some(entry) = self.entries.get(&name) else {
+            return Ok(None);
+        };
+        let bytes = match entry {
             Entry::File(path) => {
                 fs::read(path).map_err(|e| format!("Original resource {}: {e}", path.display()))
             }
@@ -301,46 +345,126 @@ impl OriginalDirectory {
                     .map_err(|_| "Original resource cache poisoned")?;
                 if let Some(index) = cache.iter().position(|(key, _)| key == &name) {
                     let hit = cache.remove(index).unwrap();
-                    let bytes = hit.1.clone();
+                    let bytes = copy_entry(&hit.1);
                     cache.push_back(hit);
-                    return Ok(bytes);
+                    return bytes
+                        .map(Some)
+                        .map_err(|error| format!("Original PAK {archive} / {name}: {error}"));
                 }
-                let mut archives = self
-                    .archives
-                    .lock()
-                    .map_err(|_| "Original archive lock poisoned")?;
-                let mut file = archives
-                    .get_mut(archive)
-                    .ok_or("Original archive missing")?
-                    .by_index(*index)
-                    .map_err(|e| format!("{name}: {e}"))?;
-                let mut bytes = Vec::new();
-                file.read_to_end(&mut bytes)
-                    .map_err(|e| format!("{name}: {e}"))?;
-                if bytes.len() <= CACHE_BYTES {
+                let bytes = self.with_zip_entry(archive, *index, &name, read_zip_entry)?;
+                if bytes.len() <= MAX_CACHED_ENTRY_BYTES {
                     while cache.iter().map(|(_, b)| b.len()).sum::<usize>() + bytes.len()
                         > CACHE_BYTES
                     {
                         cache.pop_front();
                     }
-                    cache.push_back((name, bytes.clone()));
+                    if let Ok(cached) = copy_entry(&bytes) {
+                        cache.push_back((name, cached));
+                    }
                 }
                 Ok(bytes)
             }
+        }?;
+        Ok(Some(bytes))
+    }
+
+    fn with_zip_entry<T>(
+        &self,
+        archive: &str,
+        index: usize,
+        name: &str,
+        read: impl FnOnce(&mut zip::read::ZipFile<'_>) -> std::io::Result<T>,
+    ) -> Result<T, String> {
+        let mut archives = self
+            .archives
+            .lock()
+            .map_err(|_| "Original archive lock poisoned")?;
+        let zip = archives
+            .get_mut(archive)
+            .ok_or("Original archive missing")?;
+        let mut file = zip
+            .by_index(index)
+            .map_err(|error| format!("Original PAK {archive} / {name}: {error}"))?;
+        read(&mut file).map_err(|error| format!("Original PAK {archive} / {name}: {error}"))
+    }
+
+    fn is_palette_mask(&self, name: &str) -> Result<bool, String> {
+        if let Some(Entry::Zip { archive, index }) = self.entries.get(name) {
+            return self.with_zip_entry(archive, *index, name, |file| {
+                if file.size() <= 30 {
+                    return Ok(false);
+                }
+                let mut header = [0u8; 30];
+                file.read_exact(&mut header)?;
+                Ok(is_mask_header(&header))
+            });
         }
+        self.read(name)
+            .map(|bytes| bytes.len() > 30 && is_mask_header(&bytes))
     }
 
     pub fn verify_all(&self) -> Result<(), String> {
-        for name in self.entries.keys() {
+        for (name, entry) in &self.entries {
             if name.ends_with(".pak") {
                 continue;
             }
-            if self.read(name)?.is_empty() && (name.ends_with(".pos") || name.ends_with(".gmb")) {
+            let size = if let Entry::Zip { archive, index } = entry {
+                self.with_zip_entry(archive, *index, name, |file| {
+                    let expected = file.size();
+                    let size = std::io::copy(
+                        &mut file.take(expected.saturating_add(1)),
+                        &mut std::io::sink(),
+                    )?;
+                    if size != expected {
+                        return Err(std::io::Error::other(
+                            "uncompressed length differs from ZIP directory",
+                        ));
+                    }
+                    Ok(size)
+                })?
+            } else {
+                self.read(name)?.len() as u64
+            };
+            if size == 0 && (name.ends_with(".pos") || name.ends_with(".gmb")) {
                 return Err(format!("Empty original resource: {name}"));
             }
         }
         Ok(())
     }
+}
+
+fn copy_entry(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
+    let mut copy = Vec::new();
+    copy.try_reserve_exact(bytes.len())
+        .map_err(std::io::Error::other)?;
+    copy.extend_from_slice(bytes);
+    Ok(copy)
+}
+
+fn read_zip_entry(file: &mut zip::read::ZipFile<'_>) -> std::io::Result<Vec<u8>> {
+    let size = usize::try_from(file.size())
+        .map_err(|_| std::io::Error::other("entry exceeds the process address space"))?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(size)
+        .map_err(|error| std::io::Error::other(format!("cannot allocate {size} bytes: {error}")))?;
+    let mut chunk = [0; 64 * 1024];
+    loop {
+        let count = file.read(&mut chunk)?;
+        if count == 0 && bytes.len() == size {
+            return Ok(bytes);
+        }
+        if count == 0 || count > size - bytes.len() {
+            return Err(std::io::Error::other(
+                "uncompressed length differs from ZIP directory",
+            ));
+        }
+        bytes.extend_from_slice(&chunk[..count]);
+    }
+}
+
+fn is_mask_header(header: &[u8]) -> bool {
+    header.starts_with(b"BM") && u16::from_le_bytes([header[28], header[29]]) == 8
 }
 
 fn is_stage(name: &str) -> bool {

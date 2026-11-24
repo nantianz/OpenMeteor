@@ -1,6 +1,81 @@
 use super::*;
 
 #[test]
+fn mission_npc_uses_script_model_above_stock_range_and_reports_missing_assets() {
+    use crate::plugins::character_plugin::CharacterAssetsSet;
+    let Some(root) = std::env::var_os("METEOR_TEST_ORIGINAL_DIR") else {
+        return;
+    };
+    let root = Path::new(&root).join("pmodel");
+    let mut blob = Vec::new();
+    let entries: Vec<_> = [
+        ("p0.skc", "p20.skc"), ("p0_300.skc", "p20_300.skc"),
+        ("P0.bnc", "p20.bnc"), ("P0.POS", "p20.pos"), ("p0.amb", "p20.amb"),
+    ].into_iter().map(|(source, target)| {
+        let bytes = std::fs::read(root.join(source)).unwrap();
+        let entry = serde_json::json!({"name": format!("pmodel/{target}"), "off": blob.len(), "len": bytes.len()});
+        blob.extend(bytes);
+        entry
+    }).collect();
+    let manifest = serde_json::to_vec(&serde_json::json!({
+        "formatVersion": 1, "kind": "test", "packId": "test/mission-p20", "entries": entries,
+    }))
+    .unwrap();
+    let mut pack = b"MPK1".to_vec();
+    pack.extend((manifest.len() as u32).to_le_bytes());
+    pack.extend(manifest);
+    pack.extend(blob);
+    meteor_asset::runtime_assets::register_mpk1(&pack).unwrap();
+
+    for model in [20, 254] {
+        let mut runtime = MissionScriptRuntime::new(r#"OnStart(){ AddNPC("custom"); }"#, default());
+        runtime
+            .register_npc_script(
+                "custom",
+                &format!("int Model = 0; OnInit(){{ Model = {model}; }}"),
+            )
+            .unwrap();
+        runtime.start().unwrap();
+        let mut app = App::new();
+        app.insert_resource(StageMissionRuntime::from_script(runtime))
+            .insert_resource(LaunchRequest {
+                stage_id: "sn24".into(),
+                ..default()
+            })
+            .init_resource::<PlayerPerformance>()
+            .init_resource::<PendingMissionNpcCommands>()
+            .init_resource::<CharacterAssetsSet>()
+            .init_resource::<LoadedStageInfo>()
+            .init_resource::<NextState<AppState>>()
+            .add_systems(Update, consume_mission_npc_requests);
+        app.update();
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<&Fighter, With<MissionNpc>>();
+        if model == 20 {
+            assert_eq!(query.single(world).unwrap().character_id, 20);
+            assert!(world.resource::<CharacterAssetsSet>().0.contains_key("p20"));
+        } else {
+            assert_eq!(query.iter(world).count(), 0);
+            let error = world
+                .resource::<LoadedStageInfo>()
+                .error
+                .as_deref()
+                .unwrap();
+            assert!(
+                error.contains("sn24")
+                    && error.contains("custom")
+                    && error.contains("pmodel/p254.skc"),
+                "{error}"
+            );
+            assert!(matches!(
+                world.resource::<NextState<AppState>>(),
+                NextState::Pending(AppState::Error)
+            ));
+        }
+    }
+}
+
+#[test]
 fn hard_behavior_clears_old_perform_and_preserves_new_commands_while_spawn_is_pending() {
     let source = r#"OnStart(){ AddNPC("a"); Perform(1,"say","old");
         ChangeBehavior(1,"wait"); Perform(1,"say","new"); }"#;

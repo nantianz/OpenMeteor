@@ -27,11 +27,9 @@ use crate::plugins::network_plugin::stock_connection_dialog::{
     StockConnectionAction, StockConnectionDialog, StockConnectionDialogRoot, StockConnectionText,
 };
 use crate::plugins::ui_components::{
-    spawn_selection_indicator, UiActionBarBundle, UiFormFieldBundle, UiPageAction,
-    UiSecondaryHeaderBundle, UiSecondaryPageBundle, UiSelectId, UiSelectOption, UiSelectToggle,
-    UiSelectableButtonBundle, UiSelectableKind, UiSelectableStyle,
+    spawn_selection_indicator, UiActionBarBundle, UiPageAction, UiSecondaryHeaderBundle,
+    UiSecondaryPageBundle, UiSelectableButtonBundle, UiSelectableKind, UiSelectableStyle,
 };
-#[cfg(not(target_arch = "wasm32"))]
 use crate::plugins::ui_components::{
     UiDialogSurfaceBundle, UiModalAction, UiModalId, UiModalOverlayBundle, UiModalRoot,
 };
@@ -168,6 +166,8 @@ pub(crate) enum LauncherCreateLayout {
     Maps,
     Settings,
     MapChoice,
+    MapPreview,
+    MapList,
     Brand,
 }
 
@@ -188,6 +188,9 @@ pub(crate) struct LauncherMobileStartBar;
 
 #[derive(Component)]
 pub(crate) struct LauncherStageAsideStartButton;
+
+#[derive(Component)]
+pub(crate) struct RoomMapPickerPage;
 
 #[derive(Component)]
 pub(crate) struct LauncherMobileStartButton;
@@ -262,15 +265,19 @@ const NAV_HOVER: Color = theme::SELECTED;
 const STAGE_CARD: Color = LAUNCHER_CARD;
 const STAGE_CARD_ACTIVE: Color = LAUNCHER_CARD_ACTIVE;
 const ACTION_RED: Color = theme::PRIMARY;
+const INK_WASH_TEXT: Color = Color::srgb(0.16, 0.14, 0.12);
+const INK_WASH_MUTED: Color = Color::srgb(0.38, 0.34, 0.29);
+const INK_WASH_RED: Color = Color::srgb(0.58, 0.19, 0.14);
 
 const NETWORK_PAGE_STACK: UiPageStack = UiPageStack(1);
 const NETWORK_BROWSER_PAGE: UiPageId = UiPageId(0);
 const NETWORK_CREATE_PAGE: UiPageId = UiPageId(1);
 #[cfg(not(target_arch = "wasm32"))]
 const STOCK_DIRECT_MODAL: UiModalId = UiModalId(1);
-const STOCK_GAME_NUM_SELECT: UiSelectId = UiSelectId(1);
-const STOCK_GAME_TIME_SELECT: UiSelectId = UiSelectId(2);
-const STOCK_LIFE_ADJUST_SELECT: UiSelectId = UiSelectId(3);
+const ROOM_ADVANCED_MODAL: UiModalId = UiModalId(4);
+
+#[derive(Component)]
+struct RoomAdvancedDialog;
 
 #[derive(Resource, Clone)]
 pub struct UiFont(pub Handle<Font>);
@@ -344,7 +351,7 @@ pub fn setup_launcher(
         spawn_stock_connection_dialog(overlay, &font);
     });
     commands.entity(root).with_children(|overlay| {
-        spawn_stock_select_dialogs(overlay, &font, &request);
+        spawn_room_advanced_dialog(overlay, &font, &request);
     });
 }
 
@@ -518,11 +525,11 @@ fn spawn_main_screen(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, act
                         ..default()
                     })
                     .with_children(|brand| {
-                        brand.spawn(theme::title_node(true));
+                        brand.spawn(launcher_text("流星再世", 30.0, INK_WASH_TEXT, font));
                         brand.spawn(launcher_text(
                             "METEOR 2003 RESTORATION",
                             9.0,
-                            theme::MUTED,
+                            INK_WASH_MUTED,
                             font,
                         ));
                     });
@@ -538,11 +545,11 @@ fn spawn_main_screen(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, act
                     LauncherMainCopy,
                 ))
                 .with_children(|copy| {
-                    copy.spawn(theme::title_node(false));
+                    copy.spawn(launcher_text("流星再世", 52.0, INK_WASH_TEXT, font));
                     copy.spawn(launcher_text(
                         "人 在 江 湖    ·    身 不 由 己",
                         13.0,
-                        theme::MUTED,
+                        INK_WASH_MUTED,
                         font,
                     ));
                 });
@@ -646,6 +653,15 @@ pub(crate) struct LoadoutArrow {
     direction: i8,
 }
 
+#[derive(Component, Clone, Copy)]
+pub(crate) struct CreateRoomLoadoutArrow {
+    field: LoadoutField,
+    direction: i8,
+}
+
+#[derive(Component, Clone, Copy)]
+pub(crate) struct RoomStageStepArrow(pub i8);
+
 const LOADOUT_WEAPONS: [u8; 12] = [6, 5, 8, 7, 9, 4, 1, 2, 3, 10, 11, 12];
 
 fn loadout_label(field: LoadoutField, request: &LaunchRequest) -> String {
@@ -663,9 +679,18 @@ fn spawn_player_loadout(
     font: &Handle<Font>,
     request: &LaunchRequest,
 ) {
+    spawn_loadout_selector_rows(parent, font, request, false);
+}
+
+fn spawn_loadout_selector_rows(
+    parent: &mut ChildSpawnerCommands,
+    font: &Handle<Font>,
+    request: &LaunchRequest,
+    in_create_page: bool,
+) {
     for (field, title) in [
-        (LoadoutField::Character, "人物"),
-        (LoadoutField::Weapon, "武器"),
+        (LoadoutField::Character, "出战人物"),
+        (LoadoutField::Weapon, "主手兵器"),
     ] {
         parent
             .spawn((Node {
@@ -675,7 +700,7 @@ fn spawn_player_loadout(
                 ..default()
             },))
             .with_children(|group| {
-                group.spawn(launcher_text(title, 12.0, CYAN, font));
+                group.spawn(launcher_text(title, 12.0, theme::METAL, font));
                 group
                     .spawn(Node {
                         width: Val::Percent(100.0),
@@ -684,7 +709,11 @@ fn spawn_player_loadout(
                         ..default()
                     })
                     .with_children(|row| {
-                        spawn_loadout_arrow(row, field, -1);
+                        if in_create_page {
+                            spawn_create_room_loadout_arrow(row, field, -1);
+                        } else {
+                            spawn_loadout_arrow(row, field, -1);
+                        }
                         row.spawn((
                             Node {
                                 flex_grow: 1.0,
@@ -695,56 +724,123 @@ fn spawn_player_loadout(
                                 align_items: AlignItems::Center,
                                 padding: UiRect::horizontal(Val::Px(6.0)),
                                 border: UiRect::all(Val::Px(1.0)),
-                                border_radius: BorderRadius::all(Val::Px(3.0)),
+                                border_radius: BorderRadius::ZERO,
                                 overflow: Overflow::clip(),
                                 ..default()
                             },
                             BackgroundColor(STAGE_CARD_ACTIVE),
-                            BorderColor::all(LAUNCHER_LINE),
+                            BorderColor::all(theme::ACCENT.with_alpha(0.55)),
                         ))
                         .with_children(|value| {
                             value.spawn((
-                                launcher_text(&loadout_label(field, request), 14.0, PAPER, font),
+                                launcher_text(&loadout_label(field, request), 15.0, PAPER, font),
                                 field,
                             ));
                         });
-                        spawn_loadout_arrow(row, field, 1);
+                        if in_create_page {
+                            spawn_create_room_loadout_arrow(row, field, 1);
+                        } else {
+                            spawn_loadout_arrow(row, field, 1);
+                        }
                     });
             });
     }
 }
 
+fn spawn_create_room_loadout_arrow(
+    parent: &mut ChildSpawnerCommands,
+    field: LoadoutField,
+    direction: i8,
+) {
+    parent
+        .spawn((
+            Button,
+            Node {
+                width: Val::Px(44.0),
+                min_width: Val::Px(44.0),
+                height: Val::Px(44.0),
+                flex_shrink: 0.0,
+                border: UiRect::all(Val::Px(1.0)),
+                border_radius: BorderRadius::ZERO,
+                ..default()
+            },
+            BackgroundColor(STAGE_CARD),
+            BorderColor::all(LAUNCHER_LINE),
+            LauncherStyledButton,
+            theme::ActionStyle::SECONDARY,
+            CreateRoomLoadoutArrow { field, direction },
+        ))
+        .with_children(|button| {
+            crate::plugins::ui_components::spawn_loadout_arrow_icon(button, direction);
+        });
+}
+
+fn apply_loadout_step(request: &mut LaunchRequest, field: LoadoutField, direction: i8) {
+    match field {
+        LoadoutField::Character => {
+            request.character_id = (i32::from(request.character_id) + i32::from(direction))
+                .rem_euclid(CHARACTER_NAMES.len() as i32) as u8;
+        }
+        LoadoutField::Weapon => {
+            let current = LOADOUT_WEAPONS.iter().position(|id| *id == request.weapon);
+            let next = current.map_or(
+                if direction < 0 {
+                    LOADOUT_WEAPONS.len() - 1
+                } else {
+                    0
+                },
+                |index| {
+                    (index as i32 + i32::from(direction)).rem_euclid(LOADOUT_WEAPONS.len() as i32)
+                        as usize
+                },
+            );
+            request.weapon = LOADOUT_WEAPONS[next];
+        }
+    }
+}
+
 pub(crate) fn player_loadout_controls(
     buttons: Query<(&Interaction, &LoadoutArrow), (Changed<Interaction>, With<Button>)>,
+    create_buttons: Query<
+        (&Interaction, &CreateRoomLoadoutArrow),
+        (Changed<Interaction>, With<Button>),
+    >,
+    stage_arrows: Query<(&Interaction, &RoomStageStepArrow), (Changed<Interaction>, With<Button>)>,
+    stage_choices: Query<&MenuStockStageButton>,
     mut request: ResMut<LaunchRequest>,
     mut labels: Query<(&LoadoutField, &mut Text)>,
 ) {
     for (interaction, arrow) in &buttons {
+        if *interaction == Interaction::Pressed {
+            apply_loadout_step(&mut request, arrow.field, arrow.direction);
+        }
+    }
+    for (interaction, arrow) in &create_buttons {
+        if *interaction == Interaction::Pressed {
+            apply_loadout_step(&mut request, arrow.field, arrow.direction);
+        }
+    }
+    for (interaction, step) in &stage_arrows {
         if *interaction != Interaction::Pressed {
             continue;
         }
-        match arrow.field {
-            LoadoutField::Character => {
-                request.character_id =
-                    (i32::from(request.character_id) + i32::from(arrow.direction))
-                        .rem_euclid(CHARACTER_NAMES.len() as i32) as u8;
-            }
-            LoadoutField::Weapon => {
-                let current = LOADOUT_WEAPONS.iter().position(|id| *id == request.weapon);
-                let next = current.map_or(
-                    if arrow.direction < 0 {
-                        LOADOUT_WEAPONS.len() - 1
-                    } else {
-                        0
-                    },
-                    |index| {
-                        (index as i32 + i32::from(arrow.direction))
-                            .rem_euclid(LOADOUT_WEAPONS.len() as i32)
-                            as usize
-                    },
-                );
-                request.weapon = LOADOUT_WEAPONS[next];
-            }
+        let mut allowed: Vec<(&str, &str)> = stage_choices
+            .iter()
+            .filter(|s| {
+                super::network_plugin::stock_stage_allowed_for_rule(request.stock_rule, &s.id)
+            })
+            .map(|s| (s.id.as_str(), s.name.as_str()))
+            .collect();
+        allowed.sort_by_key(|(id, _)| *id);
+        if !allowed.is_empty() {
+            let current = allowed
+                .iter()
+                .position(|(id, _)| *id == request.stage_id)
+                .unwrap_or(0);
+            let next =
+                (current as isize + step.0 as isize).rem_euclid(allowed.len() as isize) as usize;
+            request.stage_id = allowed[next].0.to_owned();
+            request.stage_name = allowed[next].1.to_owned();
         }
     }
     for (field, mut text) in &mut labels {
@@ -1023,37 +1119,19 @@ fn spawn_network_screen(
                             Display::None,
                         ),
                         LauncherCreateLayout::Page,
+                        RoomMapPickerPage,
                     ))
                     .with_children(|create_page| {
                         create_page
                             .spawn(UiSecondaryHeaderBundle::default())
                             .with_children(|heading| {
-                                spawn_stock_page_back_button(
+                                spawn_stock_page_button(
                                     heading,
                                     font,
+                                    "← 返回",
                                     UiPageAction::show(NETWORK_PAGE_STACK, NETWORK_BROWSER_PAGE),
                                 );
-                                heading
-                                    .spawn(Node {
-                                        flex_grow: 1.0,
-                                        flex_direction: FlexDirection::Column,
-                                        row_gap: Val::Px(2.0),
-                                        ..default()
-                                    })
-                                    .with_children(|titles| {
-                                        titles.spawn(launcher_text(
-                                            "创建房间",
-                                            18.0,
-                                            PAPER,
-                                            font,
-                                        ));
-                                        titles.spawn(launcher_text(
-                                            "选择模式、地图与战局参数",
-                                            11.0,
-                                            theme::MUTED,
-                                            font,
-                                        ));
-                                    });
+                                heading.spawn(launcher_text("创建房间", 20.0, PAPER, font));
                             });
 
                         create_page
@@ -1075,43 +1153,8 @@ fn spawn_network_screen(
                                     LauncherCreateLayout::Maps,
                                 ))
                                 .with_children(|section| {
-                                    spawn_native_text_field(
-                                        section,
-                                        font,
-                                        TextField::RoomName,
-                                        &request.room_name,
-                                    );
-                                    section.spawn(launcher_text("战斗地图", 13.0, CYAN, font));
-                                    section.spawn((
-                                        launcher_text(
-                                            &format!(
-                                                "当前：{} · {}",
-                                                request.stage_id.to_uppercase(),
-                                                request.stage_name
-                                            ),
-                                            12.0,
-                                            PAPER,
-                                            font,
-                                        ),
-                                        MenuStockStageText,
-                                    ));
-                                    section.spawn(UiActionBarBundle::wrapped()).with_children(
-                                        |stages| {
-                                            for stage in official_stages()
-                                                .into_iter()
-                                                .chain(custom.stages.iter().cloned())
-                                            {
-                                                spawn_stock_stage_choice(
-                                                    stages,
-                                                    font,
-                                                    &stage.id,
-                                                    &stage.name,
-                                                    request.stock_rule,
-                                                    request.stage_id == stage.id,
-                                                );
-                                            }
-                                        },
-                                    );
+                                    section.spawn(launcher_text("对战地图", 15.0, PAPER, font));
+                                    spawn_room_map_picker(section, font, request, custom);
                                 });
 
                                 body.spawn((
@@ -1125,21 +1168,16 @@ fn spawn_network_screen(
                                     LauncherCreateLayout::Settings,
                                 ))
                                 .with_children(|settings| {
-                                    #[cfg(not(target_arch = "wasm32"))]
-                                    if !super::network_plugin::default_web_address().is_empty() {
-                                        settings.spawn(stock_form_section_bundle()).with_children(|section| {
-                                            spawn_stock_selectable_button(
-                                                section, font, "开启公网对战", request.public_battle,
-                                                UiSelectableKind::Checkbox, MenuPublicBattleButton,
-                                            );
-                                            section.spawn(launcher_text(
-                                                "开启：与桌面版、浏览器版联机\n关闭：创建原版兼容的局域网房间",
-                                                11.0, theme::MUTED, font,
-                                            ));
-                                        });
-                                    }
                                     settings.spawn(stock_form_section_bundle()).with_children(
                                         |section| {
+                                            spawn_native_text_field(section, font, TextField::RoomName, &request.room_name);
+                                            #[cfg(not(target_arch = "wasm32"))]
+                                            if !super::network_plugin::default_web_address().is_empty() {
+                                                spawn_stock_selectable_button(
+                                                    section, font, "公网对战", request.public_battle,
+                                                    UiSelectableKind::Checkbox, MenuPublicBattleButton,
+                                                );
+                                            }
                                             section.spawn(launcher_text(
                                                 "对战模式",
                                                 13.0,
@@ -1188,95 +1226,35 @@ fn spawn_network_screen(
                                                 });
                                         },
                                     );
-
-                                    settings.spawn(stock_form_section_bundle()).with_children(
-                                        |section| {
-                                            section.spawn(launcher_text(
-                                                "战局参数",
+                                    settings
+                                        .spawn((
+                                            stock_form_section_bundle(),
+                                            theme::OrnateFrame,
+                                        ))
+                                        .with_children(|hero| {
+                                            hero.spawn(launcher_text(
+                                                "出战配置",
                                                 13.0,
-                                                CYAN,
+                                                theme::METAL,
                                                 font,
                                             ));
-                                            section
-                                                .spawn(UiActionBarBundle::wrapped())
-                                                .with_children(|fields| {
-                                                    spawn_stock_select(
-                                                        fields,
-                                                        font,
-                                                        "局数",
-                                                        StockConfigField::GameNum,
-                                                        STOCK_GAME_NUM_SELECT,
-                                                        request.stock_game_num,
-                                                    );
-                                                    spawn_stock_select(
-                                                        fields,
-                                                        font,
-                                                        "单场时限",
-                                                        StockConfigField::GameTime,
-                                                        STOCK_GAME_TIME_SELECT,
-                                                        request.stock_game_time_minutes,
-                                                    );
-                                                    spawn_stock_select(
-                                                        fields,
-                                                        font,
-                                                        "生命调整",
-                                                        StockConfigField::LifeAdjust,
-                                                        STOCK_LIFE_ADJUST_SELECT,
-                                                        request.stock_life_adjust_percent,
-                                                    );
-                                                });
-                                        },
-                                    );
-
-                                    settings.spawn(stock_form_section_bundle()).with_children(|section| {
-                                        spawn_stock_selectable_button(section, font, "再平衡", request.balance_rules, UiSelectableKind::Checkbox, crate::app_state::MenuBalanceRulesButton);
-                                        section.spawn(launcher_text("按房主配置调整磨血、指定 Pose 的伤害、速度与硬直", 12.0, theme::MUTED, font));
-                                    });
-                                    settings.spawn(stock_form_section_bundle()).with_children(
-                                        |section| {
-                                            section.spawn(launcher_text(
-                                                "场景道具",
-                                                13.0,
-                                                CYAN,
-                                                font,
+                                            hero.spawn((
+                                                super::character_plugin::preview::CharacterPreviewViewport,
+                                                Node {
+                                                    width: Val::Percent(100.0),
+                                                    height: Val::Px(144.0),
+                                                    flex_shrink: 0.0,
+                                                    border: UiRect::all(Val::Px(1.0)),
+                                                    overflow: Overflow::clip(),
+                                                    ..default()
+                                                },
+                                                BackgroundColor(Color::srgba(
+                                                    0.025, 0.024, 0.022, 0.85,
+                                                )),
+                                                BorderColor::all(theme::METAL.with_alpha(0.45)),
                                             ));
-                                            section
-                                                .spawn(UiActionBarBundle::wrapped())
-                                                .with_children(|items| {
-                                                    for (rule, label, enabled) in [
-                                                        (
-                                                            StockItemRule::Hide,
-                                                            "隐藏密宝",
-                                                            request.stock_hide_item,
-                                                        ),
-                                                        (
-                                                            StockItemRule::Health,
-                                                            "恢复道具",
-                                                            request.stock_health_item,
-                                                        ),
-                                                        (
-                                                            StockItemRule::Update,
-                                                            "提升道具",
-                                                            request.stock_update_item,
-                                                        ),
-                                                        (
-                                                            StockItemRule::Special,
-                                                            "特殊道具",
-                                                            request.stock_special_item,
-                                                        ),
-                                                    ] {
-                                                        spawn_stock_selectable_button(
-                                                            items,
-                                                            font,
-                                                            label,
-                                                            enabled,
-                                                            UiSelectableKind::Checkbox,
-                                                            MenuStockItemRuleButton(rule),
-                                                        );
-                                                    }
-                                                });
-                                        },
-                                    );
+                                            spawn_loadout_selector_rows(hero, font, request, true);
+                                        });
                                 });
                             });
                         create_page
@@ -1305,6 +1283,9 @@ fn spawn_network_screen(
                                     },
                                     MenuNetStatusText,
                                 ));
+                                spawn_stock_page_button(
+                                    actions, font, "高级设置", UiModalAction::show(ROOM_ADVANCED_MODAL),
+                                );
                                 spawn_action_button(
                                     actions,
                                     font,
@@ -1317,9 +1298,10 @@ fn spawn_network_screen(
         });
 }
 
-fn spawn_stock_page_back_button<M: Bundle>(
+fn spawn_stock_page_button<M: Bundle>(
     parent: &mut ChildSpawnerCommands,
     font: &Handle<Font>,
+    label: &str,
     marker: M,
 ) {
     parent
@@ -1332,7 +1314,7 @@ fn spawn_stock_page_back_button<M: Bundle>(
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
                 border: UiRect::all(Val::Px(1.0)),
-                border_radius: BorderRadius::all(Val::Px(3.0)),
+                border_radius: BorderRadius::ZERO,
                 ..default()
             },
             BackgroundColor(theme::CARD),
@@ -1344,7 +1326,7 @@ fn spawn_stock_page_back_button<M: Bundle>(
             marker,
         ))
         .with_children(|button| {
-            button.spawn(launcher_text("← 返回", 13.0, PAPER, font));
+            button.spawn(launcher_text(label, 13.0, PAPER, font));
         });
 }
 
@@ -1422,6 +1404,143 @@ fn spawn_stock_selectable_with_node<M: Bundle>(
         });
 }
 
+fn spawn_room_map_picker(
+    parent: &mut ChildSpawnerCommands,
+    font: &Handle<Font>,
+    request: &LaunchRequest,
+    custom: &crate::plugins::stage_plugin::CustomStages,
+) {
+    use super::room_map_preview::{MapImage, MapPreviewHint};
+
+    parent
+        .spawn((
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Px(228.0),
+                flex_shrink: 0.0,
+                overflow: Overflow::clip(),
+                border: UiRect::all(Val::Px(1.0)),
+                flex_direction: FlexDirection::Column,
+                justify_content: JustifyContent::FlexEnd,
+                ..default()
+            },
+            theme::OrnateFrame,
+            BackgroundColor(Color::srgb(0.045, 0.043, 0.039)),
+            BorderColor::all(theme::METAL.with_alpha(0.50)),
+            LauncherCreateLayout::MapPreview,
+        ))
+        .with_children(|frame| {
+            frame.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
+                    top: Val::ZERO,
+                    left: Val::ZERO,
+                    ..default()
+                },
+                ImageNode {
+                    color: Color::NONE,
+                    ..default()
+                },
+                MapImage,
+            ));
+            frame
+                .spawn((
+                    Node {
+                        width: Val::Percent(100.0),
+                        padding: UiRect::axes(Val::Px(14.0), Val::Px(8.0)),
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::SpaceBetween,
+                        column_gap: Val::Px(10.0),
+                        border: UiRect::top(Val::Px(1.0)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.028, 0.026, 0.024, 0.92)),
+                    BorderColor::all(theme::LINE),
+                ))
+                .with_children(|caption| {
+                    caption
+                        .spawn(Node {
+                            flex_direction: FlexDirection::Column,
+                            row_gap: Val::Px(2.0),
+                            min_width: Val::Px(0.0),
+                            flex_grow: 1.0,
+                            ..default()
+                        })
+                        .with_children(|titles| {
+                            titles.spawn((
+                                launcher_text("", 18.0, theme::TEXT, font),
+                                MenuStockStageText,
+                            ));
+                            titles.spawn((
+                                launcher_text("", 11.0, theme::METAL, font),
+                                MapPreviewHint,
+                            ));
+                        });
+                    caption
+                        .spawn(Node {
+                            flex_direction: FlexDirection::Row,
+                            align_items: AlignItems::Center,
+                            column_gap: Val::Px(6.0),
+                            flex_shrink: 0.0,
+                            ..default()
+                        })
+                        .with_children(|nav| {
+                            for (step, label) in [(-1, "← 上一图"), (1, "下一图 →")] {
+                                nav.spawn((
+                                    Button,
+                                    LauncherStyledButton,
+                                    RoomStageStepArrow(step),
+                                    theme::ActionStyle::SECONDARY,
+                                    Node {
+                                        height: Val::Px(34.0),
+                                        min_height: Val::Px(34.0),
+                                        padding: UiRect::horizontal(Val::Px(10.0)),
+                                        align_items: AlignItems::Center,
+                                        justify_content: JustifyContent::Center,
+                                        border: UiRect::all(Val::Px(1.0)),
+                                        ..default()
+                                    },
+                                    BackgroundColor(theme::CARD),
+                                    BorderColor::all(theme::LINE),
+                                ))
+                                .with_children(|b| {
+                                    b.spawn(launcher_text(label, 12.0, theme::ACCENT_TEXT, font));
+                                });
+                            }
+                        });
+                });
+        });
+    parent
+        .spawn((
+            scrollable_y(Node {
+                width: Val::Percent(100.0),
+                max_height: Val::Px(320.0),
+                flex_direction: FlexDirection::Row,
+                flex_wrap: FlexWrap::Wrap,
+                align_content: AlignContent::FlexStart,
+                column_gap: Val::Percent(2.0),
+                row_gap: Val::Px(8.0),
+                flex_shrink: 0.0,
+                ..default()
+            }),
+            LauncherCreateLayout::MapList,
+        ))
+        .with_children(|stages| {
+            for stage in available_room_stages(custom) {
+                spawn_stock_stage_choice(
+                    stages,
+                    font,
+                    &stage.id,
+                    &stage.name,
+                    request.stock_rule,
+                    request.stage_id == stage.id,
+                );
+            }
+        });
+}
+
 fn spawn_stock_stage_choice(
     parent: &mut ChildSpawnerCommands,
     font: &Handle<Font>,
@@ -1430,211 +1549,250 @@ fn spawn_stock_stage_choice(
     rule: i32,
     selected: bool,
 ) {
-    let visible = stock_stage_visible_for_rule(rule, stage_id);
-    spawn_stock_selectable_with_node(
-        parent,
-        font,
-        &format!("{} · {stage_name}", stage_id.to_uppercase()),
-        selected && visible,
-        UiSelectableKind::Radio,
-        Node {
-            width: Val::Px(180.0),
-            min_width: Val::Px(148.0),
-            max_width: Val::Px(220.0),
-            min_height: Val::Px(46.0),
-            display: if visible {
-                Display::Flex
-            } else {
-                Display::None
-            },
-            flex_grow: 0.0,
-            justify_content: JustifyContent::FlexStart,
-            align_items: AlignItems::Center,
-            column_gap: Val::Px(7.0),
-            padding: UiRect::horizontal(Val::Px(10.0)),
-            border: UiRect::all(Val::Px(2.0)),
-            ..default()
-        },
-        (
+    use super::room_map_preview::StageThumbnail;
+    let visible = super::network_plugin::stock_stage_allowed_for_rule(rule, stage_id);
+    let badge = stage_id
+        .strip_prefix("sn")
+        .or_else(|| stage_id.strip_prefix("SN"))
+        .map_or_else(|| stage_id.to_uppercase(), |num| format!("卷 {num}"));
+    let card_style = UiSelectableStyle::new(
+        Color::srgba(0.055, 0.052, 0.048, 0.92),
+        Color::srgba(0.32, 0.12, 0.10, 0.96),
+        theme::LINE,
+        theme::ACCENT_TEXT,
+    );
+    parent
+        .spawn((
+            UiSelectableButtonBundle::new(
+                Node {
+                    width: Val::Percent(32.0),
+                    min_width: Val::Px(132.0),
+                    height: Val::Px(68.0),
+                    min_height: Val::Px(68.0),
+                    display: if visible {
+                        Display::Flex
+                    } else {
+                        Display::None
+                    },
+                    flex_direction: FlexDirection::Column,
+                    justify_content: JustifyContent::FlexEnd,
+                    overflow: Overflow::clip(),
+                    border: UiRect::all(Val::Px(1.5)),
+                    ..default()
+                },
+                selected && visible,
+                UiSelectableKind::Radio,
+                card_style,
+            ),
+            LauncherStyledButton,
             MenuStockStageButton {
                 id: stage_id.to_string(),
                 name: stage_name.to_string(),
             },
             LauncherCreateLayout::MapChoice,
-        ),
-    );
-}
+        ))
+        .with_children(|card| {
+            card.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::ZERO,
+                    top: Val::ZERO,
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
+                    ..default()
+                },
+                ImageNode {
+                    color: Color::NONE,
+                    ..default()
+                },
+                StageThumbnail(stage_id.to_string()),
+            ));
 
-fn stock_stage_visible_for_rule(rule: i32, stage_id: &str) -> bool {
-    if meteor_scene::stage_registry::is_official_stage_id(stage_id)
-        && !meteor_network::modes::original_stage_supports_rule(stage_id, rule)
-    {
-        return false;
-    }
-    match rule {
-        2 => {
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                super::escort_assets::load_escort(stage_id).is_ok()
-            }
+            card.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(6.0),
+                    top: Val::Px(5.0),
+                    padding: UiRect::axes(Val::Px(5.0), Val::Px(1.5)),
+                    border: UiRect::left(Val::Px(2.0)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.025, 0.022, 0.020, 0.84)),
+                BorderColor::all(theme::ACCENT),
+            ))
+            .with_children(|tag| {
+                tag.spawn(launcher_text(&badge, 10.0, theme::METAL, font));
+            });
 
-            #[cfg(target_arch = "wasm32")]
-            {
-                meteor_network::modes::is_escort_stage(stage_id)
-            }
-        }
-        3 => matches!(
-            stage_id.to_ascii_lowercase().as_str(),
-            "sn04" | "sn11" | "sn12"
-        ),
-        _ => true,
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn spawn_stock_select(
-    parent: &mut ChildSpawnerCommands,
-    font: &Handle<Font>,
-    label: &str,
-    field: StockConfigField,
-    select_id: UiSelectId,
-    selected_value: u32,
-) {
-    parent
-        .spawn(UiFormFieldBundle::responsive(100.0))
-        .with_children(|select| {
-            select.spawn(launcher_text(label, 11.0, CYAN, font));
-            select
-                .spawn((
-                    Button,
-                    Node {
-                        width: Val::Percent(100.0),
-                        min_height: Val::Px(44.0),
-                        justify_content: JustifyContent::SpaceBetween,
-                        align_items: AlignItems::Center,
-                        padding: UiRect::horizontal(Val::Px(12.0)),
-                        border: UiRect::all(Val::Px(1.0)),
-                        border_radius: BorderRadius::all(Val::Px(3.0)),
-                        ..default()
-                    },
-                    BackgroundColor(STAGE_CARD),
-                    BorderColor::all(LAUNCHER_LINE),
-                    Interaction::default(),
-                    LauncherStyledButton,
-                    UiSelectToggle(select_id),
-                ))
-                .with_children(|button| {
-                    button.spawn((
-                        launcher_text(
-                            stock_select_value_label(field, selected_value),
-                            13.0,
-                            PAPER,
-                            font,
-                        ),
-                        MenuStockSelectText(field),
-                    ));
-                    button.spawn(launcher_text("▼", 11.0, CYAN, font));
-                });
+            card.spawn((
+                Node {
+                    width: Val::Percent(100.0),
+                    padding: UiRect::axes(Val::Px(8.0), Val::Px(5.0)),
+                    align_items: AlignItems::Center,
+                    justify_content: JustifyContent::SpaceBetween,
+                    border: UiRect::top(Val::Px(1.0)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.022, 0.020, 0.018, 0.88)),
+                BorderColor::all(theme::LINE),
+            ))
+            .with_children(|footer| {
+                footer.spawn(launcher_text(stage_name, 14.0, PAPER, font));
+            });
         });
 }
 
-fn spawn_stock_select_dialogs(
+pub(crate) fn available_room_stages(
+    custom: &crate::plugins::stage_plugin::CustomStages,
+) -> Vec<meteor_scene::stage_registry::StageInfo> {
+    let candidates = official_stages()
+        .into_iter()
+        .chain(custom.stages.iter().cloned());
+    let manifest = meteor_asset::runtime_assets::manifest().or_else(|| {
+        #[cfg(target_os = "android")]
+        {
+            crate::android_assets::authoring_manifest()
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            None
+        }
+    });
+    if let Some(manifest) = manifest {
+        let Ok(index) = meteor_asset::pack_manifest::parse_pack_index(&manifest) else {
+            return Vec::new();
+        };
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&manifest) else {
+            return Vec::new();
+        };
+        return candidates
+            .filter(|stage| {
+                let Some(pack) = index.get(&format!("stage/{}", stage.id)) else {
+                    return false;
+                };
+                if !stage_has_required_entries(&json, &stage.id) {
+                    return false;
+                }
+                #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+                {
+                    return meteor_asset::pack_repository::default_pack_directory()
+                        .ok()
+                        .is_some_and(|dir| dir.join(&pack.file_name).is_file());
+                }
+                #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+                {
+                    let _ = pack;
+                    true
+                }
+            })
+            .collect();
+    }
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    if let Some(ids) = meteor_asset::runtime_assets::original_stage_ids() {
+        return ids
+            .iter()
+            .map(|id| meteor_scene::stage_registry::get_stage(id, &custom.stages))
+            .collect();
+    }
+    #[cfg(test)]
+    {
+        candidates.collect()
+    }
+    #[cfg(not(test))]
+    {
+        Vec::new()
+    }
+}
+
+fn stage_has_required_entries(manifest: &serde_json::Value, id: &str) -> bool {
+    let pack_id = format!("stage/{id}");
+    manifest["packs"].as_array().is_some_and(|packs| {
+        packs.iter().any(|item| {
+            item["packId"].as_str() == Some(pack_id.as_str())
+                && item["entries"].as_array().is_some_and(|entries| {
+                    meteor_asset::runtime_assets::ROOM_STAGE_EXTENSIONS
+                        .iter()
+                        .all(|ext| {
+                            let expected = format!("stage/{id}.{ext}");
+                            entries
+                                .iter()
+                                .any(|entry| entry.as_str() == Some(expected.as_str()))
+                        })
+                })
+        })
+    })
+}
+
+fn spawn_room_advanced_dialog(
     parent: &mut ChildSpawnerCommands,
     font: &Handle<Font>,
     request: &LaunchRequest,
 ) {
-    for (id, field, title, current, options) in [
-        (
-            STOCK_GAME_NUM_SELECT,
-            StockConfigField::GameNum,
-            "局数",
-            request.stock_game_num,
-            &[
-                (1, "1 局"),
-                (3, "3 局"),
-                (5, "5 局"),
-                (10, "10 局"),
-                (999, "999 局"),
-                (9_999, "无限局"),
-            ][..],
+    parent.spawn((
+        UiModalOverlayBundle::new(
+            UiModalRoot::new(ROOM_ADVANCED_MODAL, Display::Flex),
+            Display::None, theme::SCRIM, 305,
         ),
-        (
-            STOCK_GAME_TIME_SELECT,
-            StockConfigField::GameTime,
-            "单场时限",
-            request.stock_game_time_minutes,
-            &[
-                (5, "5 分钟"),
-                (10, "10 分钟"),
-                (15, "15 分钟"),
-                (30, "30 分钟"),
-                (60, "60 分钟"),
-                (999, "不限时"),
-            ][..],
-        ),
-        (
-            STOCK_LIFE_ADJUST_SELECT,
-            StockConfigField::LifeAdjust,
-            "生命调整",
-            request.stock_life_adjust_percent,
-            &[
-                (50, "50%"),
-                (100, "100%"),
-                (150, "150%"),
-                (200, "200%"),
-                (300, "300%"),
-                (500, "500%"),
-            ][..],
-        ),
-    ] {
-        crate::plugins::ui_components::spawn_select_dialog(parent, font, id, title, |menu| {
-            for &(value, label) in options {
-                spawn_stock_selectable_with_node(
-                    menu,
-                    font,
-                    label,
-                    value == current,
-                    UiSelectableKind::Radio,
-                    Node {
-                        width: Val::Percent(100.0),
-                        min_height: Val::Px(44.0),
-                        flex_shrink: 0.0,
-                        align_items: AlignItems::Center,
-                        column_gap: Val::Px(8.0),
-                        padding: UiRect::horizontal(Val::Px(12.0)),
-                        border: UiRect::all(Val::Px(1.0)),
-                        ..default()
-                    },
-                    (UiSelectOption(id), MenuStockSelectOption { field, value }),
-                );
-            }
-        });
-    }
-}
-
-fn stock_select_value_label(field: StockConfigField, value: u32) -> &'static str {
-    match (field, value) {
-        (StockConfigField::GameNum, 1) => "1 局",
-        (StockConfigField::GameNum, 3) => "3 局",
-        (StockConfigField::GameNum, 5) => "5 局",
-        (StockConfigField::GameNum, 10) => "10 局",
-        (StockConfigField::GameNum, 9_999) => "无限局",
-        (StockConfigField::GameTime, 5) => "5 分钟",
-        (StockConfigField::GameTime, 10) => "10 分钟",
-        (StockConfigField::GameTime, 15) => "15 分钟",
-        (StockConfigField::GameTime, 30) => "30 分钟",
-        (StockConfigField::GameTime, 60) => "60 分钟",
-        (StockConfigField::GameTime, 999) => "不限时",
-        (StockConfigField::LifeAdjust, 50) => "50%",
-        (StockConfigField::LifeAdjust, 100) => "100%",
-        (StockConfigField::LifeAdjust, 150) => "150%",
-        (StockConfigField::LifeAdjust, 200) => "200%",
-        (StockConfigField::LifeAdjust, 300) => "300%",
-        (StockConfigField::LifeAdjust, 500) => "500%",
-        (StockConfigField::GameNum, _) => "999 局",
-        (StockConfigField::GameTime, _) => "999 分钟",
-        (StockConfigField::LifeAdjust, _) => "200%",
-    }
+        RoomAdvancedDialog,
+    )).with_children(|overlay| {
+        overlay.spawn(UiDialogSurfaceBundle::new(752.0, PANEL, theme::ACCENT))
+            .with_children(|dialog| {
+                dialog.spawn(UiSecondaryHeaderBundle::default()).with_children(|header| {
+                    header.spawn((launcher_text("高级设置", 19.0, PAPER, font),
+                        Node { flex_grow: 1.0, ..default() }));
+                    spawn_stock_page_button(header, font, "完成", UiModalAction::hide(ROOM_ADVANCED_MODAL));
+                });
+                dialog.spawn(scrollable_y(Node {
+                    width: Val::Percent(100.0),
+                    min_height: Val::Px(0.0),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(10.0),
+                    ..default()
+                })).with_children(|settings| {
+                    settings.spawn(stock_form_section_bundle()).with_children(|timing| {
+                        for (field, label, options) in [
+                            (StockConfigField::GameNum, "局数", &[(1, "1 局"), (3, "3 局"), (5, "5 局"), (10, "10 局"), (999, "999 局"), (9_999, "无限局")][..]),
+                            (StockConfigField::GameTime, "单场时限", &[(5, "5 分钟"), (10, "10 分钟"), (15, "15 分钟"), (30, "30 分钟"), (60, "60 分钟"), (999, "不限时")][..]),
+                            (StockConfigField::LifeAdjust, "生命调整", &[(50, "50%"), (100, "100%"), (150, "150%"), (200, "200%"), (300, "300%"), (500, "500%")][..]),
+                        ] {
+                            let current = match field {
+                                StockConfigField::GameNum => request.stock_game_num,
+                                StockConfigField::GameTime => request.stock_game_time_minutes,
+                                StockConfigField::LifeAdjust => request.stock_life_adjust_percent,
+                            };
+                            timing.spawn(UiActionBarBundle::wrapped()).with_children(|title| {
+                                title.spawn(launcher_text(label, 13.0, PAPER, font));
+                                title.spawn((launcher_text(
+                                    &super::network_plugin::stock_config_value_label(field, request), 12.0, theme::MUTED, font,
+                                ), MenuStockSelectText(field)));
+                            });
+                            timing.spawn(UiActionBarBundle::wrapped()).with_children(|choices| {
+                                for &(value, label) in options {
+                                    spawn_stock_selectable_button(choices, font, label,
+                                        value == current, UiSelectableKind::Radio, MenuStockSelectOption { field, value });
+                                }
+                            });
+                        }
+                    });
+                    settings.spawn(stock_form_section_bundle()).with_children(|section| {
+                        section.spawn(launcher_text("场景道具", 13.0, PAPER, font));
+                        section.spawn(UiActionBarBundle::wrapped()).with_children(|choices| {
+                            for (rule, label, enabled) in [
+                                (StockItemRule::Hide, "隐藏密宝", request.stock_hide_item),
+                                (StockItemRule::Health, "恢复道具", request.stock_health_item),
+                                (StockItemRule::Update, "提升道具", request.stock_update_item),
+                                (StockItemRule::Special, "特殊道具", request.stock_special_item),
+                            ] {
+                                spawn_stock_selectable_button(choices, font, label, enabled,
+                                    UiSelectableKind::Checkbox, MenuStockItemRuleButton(rule));
+                            }
+                        });
+                        spawn_stock_selectable_button(section, font, "再平衡", request.balance_rules,
+                            UiSelectableKind::Checkbox, crate::app_state::MenuBalanceRulesButton);
+                    });
+                });
+            });
+    });
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1656,79 +1814,174 @@ fn spawn_stock_loadout_dialog(
         .with_children(|overlay| {
             overlay
                 .spawn((
-                    UiDialogSurfaceBundle::new(560.0, PANEL, theme::ACCENT),
+                    UiDialogSurfaceBundle::new(880.0, PANEL, theme::ACCENT),
                     ScrollPosition::default(),
                     LauncherScrollArea,
                     Interaction::default(),
                 ))
                 .with_children(|dialog| {
-                    dialog.spawn(launcher_text("出战准备", 18.0, PAPER, font));
                     dialog
-                        .spawn((
-                            Button,
-                            Node {
-                                width: Val::Percent(100.0),
-                                min_height: Val::Px(40.0),
-                                padding: UiRect::all(Val::Px(8.0)),
-                                ..default()
-                            },
-                            BackgroundColor(theme::SURFACE),
-                            NativeTextEdit {
-                                field: TextField::StockPassword,
-                                value: String::new(),
-                            },
-                            crate::plugins::network_plugin::StockPasswordSection,
-                        ))
-                        .with_children(|field| {
-                            field.spawn((
-                                launcher_text(
-                                    "房间密码（无密码留空）：点击输入",
-                                    14.0,
-                                    PAPER,
-                                    font,
-                                ),
-                                NativeTextLabel(TextField::StockPassword),
+                        .spawn(Node {
+                            width: Val::Percent(100.0),
+                            justify_content: JustifyContent::SpaceBetween,
+                            align_items: AlignItems::Center,
+                            padding: UiRect::bottom(Val::Px(6.0)),
+                            border: UiRect::bottom(Val::Px(1.0)),
+                            ..default()
+                        })
+                        .insert(BorderColor::all(theme::LINE))
+                        .with_children(|header| {
+                            header.spawn(launcher_text("出 战 整 备", 22.0, PAPER, font));
+                            header.spawn((
+                                launcher_text("正在读取房间模式…", 13.0, theme::METAL, font),
+                                crate::plugins::network_plugin::StockLoadoutModeText,
                             ));
                         });
-                    spawn_player_loadout(dialog, font, request);
-                    dialog.spawn((
-                        launcher_text("正在读取房间模式…", 13.0, CYAN, font),
-                        crate::plugins::network_plugin::StockLoadoutModeText,
-                    ));
+
                     dialog
-                        .spawn((
-                            UiActionBarBundle::wrapped(),
-                            crate::plugins::network_plugin::StockLoadoutCampSection,
-                        ))
-                        .with_children(|camps| {
-                            for (camp, label) in [(1, "流星队"), (2, "蝴蝶队")] {
-                                spawn_stock_selectable_button(
-                                    camps,
-                                    font,
-                                    label,
-                                    request.stock_camp == camp,
-                                    UiSelectableKind::Radio,
-                                    crate::plugins::network_plugin::StockLoadoutCamp(camp),
-                                );
-                            }
-                        });
-                    dialog
-                        .spawn(UiActionBarBundle::single_row())
-                        .with_children(|actions| {
-                            spawn_compact_network_button(
-                                actions,
-                                font,
-                                "取消",
-                                false,
-                                MenuStockLoadoutCancel,
-                            );
-                            spawn_compact_network_button(
-                                actions,
-                                font,
-                                "开始",
-                                false,
-                                MenuStockLoadoutConfirm,
-                            );
+                        .spawn(Node {
+                            width: Val::Percent(100.0),
+                            flex_direction: FlexDirection::Row,
+                            flex_wrap: FlexWrap::Wrap,
+                            column_gap: Val::Px(18.0),
+                            row_gap: Val::Px(14.0),
+                            align_items: AlignItems::Stretch,
+                            ..default()
+                        })
+                        .with_children(|columns| {
+
+                            columns
+                                .spawn((
+                                    theme::OrnateFrame,
+                                    Node {
+                                        width: Val::Px(340.0),
+                                        max_width: Val::Percent(100.0),
+                                        min_height: Val::Px(300.0),
+                                        flex_grow: 1.0,
+                                        flex_direction: FlexDirection::Column,
+                                        justify_content: JustifyContent::FlexEnd,
+                                        padding: UiRect::all(Val::Px(12.0)),
+                                        border: UiRect::all(Val::Px(1.0)),
+                                        overflow: Overflow::clip(),
+                                        ..default()
+                                    },
+                                    BackgroundColor(Color::srgba(0.025, 0.024, 0.022, 0.88)),
+                                    BorderColor::all(theme::METAL.with_alpha(0.55)),
+                                ))
+                                .with_children(|stage| {
+                                    stage.spawn((
+                                        super::character_plugin::preview::CharacterPreviewViewport,
+                                        Node {
+                                            position_type: PositionType::Absolute,
+                                            left: Val::ZERO,
+                                            right: Val::ZERO,
+                                            top: Val::ZERO,
+                                            bottom: Val::ZERO,
+                                            width: Val::Percent(100.0),
+                                            height: Val::Percent(100.0),
+                                            ..default()
+                                        },
+                                        ZIndex(0),
+                                    ));
+                                    stage.spawn((
+                                        launcher_text(
+                                            "实时持武姿态预览",
+                                            11.0,
+                                            theme::METAL,
+                                            font,
+                                        ),
+                                        ZIndex(2),
+                                    ));
+                                });
+
+                            columns
+                                .spawn(Node {
+                                    width: Val::Px(460.0),
+                                    max_width: Val::Percent(100.0),
+                                    flex_grow: 1.0,
+                                    flex_direction: FlexDirection::Column,
+                                    justify_content: JustifyContent::SpaceBetween,
+                                    row_gap: Val::Px(12.0),
+                                    ..default()
+                                })
+                                .with_children(|controls| {
+                                    controls
+                                        .spawn((
+                                            Button,
+                                            Node {
+                                                width: Val::Percent(100.0),
+                                                min_height: Val::Px(42.0),
+                                                padding: UiRect::axes(
+                                                    Val::Px(12.0),
+                                                    Val::Px(8.0),
+                                                ),
+                                                border: UiRect::all(Val::Px(1.0)),
+                                                align_items: AlignItems::Center,
+                                                ..default()
+                                            },
+                                            BackgroundColor(theme::SURFACE),
+                                            BorderColor::all(theme::LINE),
+                                            NativeTextEdit {
+                                                field: TextField::StockPassword,
+                                                value: String::new(),
+                                            },
+                                            crate::plugins::network_plugin::StockPasswordSection,
+                                        ))
+                                        .with_children(|field| {
+                                            field.spawn((
+                                                launcher_text(
+                                                    "房间密码（无密码留空）：点击输入",
+                                                    13.0,
+                                                    PAPER,
+                                                    font,
+                                                ),
+                                                NativeTextLabel(TextField::StockPassword),
+                                            ));
+                                        });
+
+                                    spawn_player_loadout(controls, font, request);
+
+                                    controls
+                                        .spawn((
+                                            UiActionBarBundle::wrapped(),
+                                            crate::plugins::network_plugin::StockLoadoutCampSection,
+                                        ))
+                                        .with_children(|camps| {
+                                            for (camp, label) in
+                                                [(1, "流星队"), (2, "蝴蝶队")]
+                                            {
+                                                spawn_stock_selectable_button(
+                                                    camps,
+                                                    font,
+                                                    label,
+                                                    request.stock_camp == camp,
+                                                    UiSelectableKind::Radio,
+                                                    crate::plugins::network_plugin::StockLoadoutCamp(
+                                                        camp,
+                                                    ),
+                                                );
+                                            }
+                                        });
+
+                                    controls
+                                        .spawn(UiActionBarBundle::single_row())
+                                        .with_children(|actions| {
+                                            spawn_compact_network_button(
+                                                actions,
+                                                font,
+                                                "取消",
+                                                false,
+                                                MenuStockLoadoutCancel,
+                                            );
+                                            spawn_compact_network_button(
+                                                actions,
+                                                font,
+                                                "开始",
+                                                true,
+                                                MenuStockLoadoutConfirm,
+                                            );
+                                        });
+                                });
                         });
                 });
         });
@@ -1784,7 +2037,7 @@ fn spawn_stock_connection_dialog(parent: &mut ChildSpawnerCommands, font: &Handl
                                         align_items: AlignItems::Center,
                                         padding: UiRect::horizontal(Val::Px(10.0)),
                                         border: UiRect::all(Val::Px(1.0)),
-                                        border_radius: BorderRadius::all(Val::Px(3.0)),
+                                        border_radius: BorderRadius::ZERO,
                                         ..default()
                                     },
                                     BackgroundColor(STAGE_CARD),
@@ -1878,7 +2131,7 @@ fn spawn_compact_network_button<M: Bundle>(
                 align_items: AlignItems::Center,
                 padding: UiRect::horizontal(Val::Px(10.0)),
                 border: UiRect::all(Val::Px(1.0)),
-                border_radius: BorderRadius::all(Val::Px(3.0)),
+                border_radius: BorderRadius::ZERO,
                 ..default()
             },
             BackgroundColor(STAGE_CARD),
@@ -1918,26 +2171,27 @@ pub(crate) fn spawn_network_room_button(
             BorderColor::all(theme::LINE),
             Interaction::default(),
             LauncherStyledButton,
+            theme::ActionStyle::SECONDARY,
             LauncherNetworkRoomButton,
             target,
         ))
         .with_children(|row| {
             row.spawn((
                 Node {
-                    width: Val::Px(52.0),
+                    width: Val::Px(56.0),
                     flex_shrink: 0.0,
-                    min_height: Val::Px(26.0),
+                    min_height: Val::Px(28.0),
                     align_items: AlignItems::Center,
                     justify_content: JustifyContent::Center,
                     border: UiRect::all(Val::Px(1.0)),
-                    border_radius: BorderRadius::all(Val::Px(3.0)),
+                    border_radius: BorderRadius::ZERO,
                     ..default()
                 },
-                BorderColor::all(theme::METAL.with_alpha(0.35)),
-                BackgroundColor(theme::SURFACE.with_alpha(0.65)),
+                BorderColor::all(theme::METAL.with_alpha(0.45)),
+                BackgroundColor(theme::SURFACE.with_alpha(0.78)),
             ))
             .with_children(|badge| {
-                badge.spawn(launcher_text(source, 11.0, theme::METAL, font));
+                badge.spawn(launcher_text(source, 11.0, theme::ACCENT_TEXT, font));
             });
             row.spawn(Node {
                 flex_direction: FlexDirection::Column,
@@ -1948,17 +2202,21 @@ pub(crate) fn spawn_network_room_button(
                 ..default()
             })
             .with_children(|labels| {
-                labels.spawn(launcher_text(&title, 15.0, theme::TEXT, font));
+                labels.spawn(launcher_text(&title, 16.0, theme::TEXT, font));
                 labels.spawn(launcher_text(&detail, 11.0, theme::MUTED, font));
             });
-            row.spawn((
-                launcher_text(&count, 13.0, theme::TEXT, font),
-                Node {
-                    min_width: Val::Px(48.0),
-                    flex_shrink: 0.0,
-                    ..default()
-                },
-            ));
+            row.spawn(Node {
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::FlexEnd,
+                row_gap: Val::Px(3.0),
+                min_width: Val::Px(64.0),
+                flex_shrink: 0.0,
+                ..default()
+            })
+            .with_children(|right| {
+                right.spawn(launcher_text(&count, 13.0, theme::TEXT, font));
+                right.spawn(launcher_text("加入 →", 11.0, theme::METAL, font));
+            });
         });
 }
 
@@ -1969,78 +2227,95 @@ pub(crate) fn spawn_full_settings_page(
     keymap: &Keymap,
     in_game: bool,
 ) {
+    use crate::plugins::settings_ui as page;
+
     parent
         .spawn((
             Node {
-                height: Val::Px(72.0),
-                flex_direction: FlexDirection::Row,
-                align_items: AlignItems::Center,
-                column_gap: Val::Px(24.0),
+                width: Val::Percent(100.0),
+                flex_grow: 1.0,
+                min_height: Val::Px(0.0),
+                flex_direction: FlexDirection::Column,
+                padding: UiRect::new(Val::Px(28.0), Val::Px(28.0), Val::Px(14.0), Val::Px(10.0)),
+                border: UiRect::vertical(Val::Px(1.0)),
                 ..default()
             },
-            LauncherPageHeading,
+            BackgroundGradient(vec![LinearGradient::new(
+                LinearGradient::TO_RIGHT,
+                vec![
+                    ColorStop::new(Color::srgba(0.025, 0.028, 0.034, 0.94), Val::Percent(0.0)),
+                    ColorStop::new(Color::srgba(0.035, 0.038, 0.046, 0.86), Val::Percent(55.0)),
+                    ColorStop::new(Color::srgba(0.03, 0.033, 0.04, 0.78), Val::Percent(100.0)),
+                ],
+            )
+            .into()]),
+            BorderColor::all(page::DIVIDER),
+            LauncherSettingsPanel,
         ))
-        .with_children(|heading| {
-            if in_game {
-                spawn_settings_header_back(heading, font);
-            } else {
-                spawn_back_button(heading, font);
-            }
-            heading
+        .with_children(|panel| {
+            panel
+                .spawn((page::settings_header_bundle(), LauncherPageHeading))
+                .with_children(|heading| {
+                    if in_game {
+                        spawn_settings_header_back(heading, font);
+                    } else {
+                        spawn_back_button(heading, font);
+                    }
+                    page::spawn_settings_title(heading, font);
+                    heading.spawn(Node {
+                        flex_grow: 1.0,
+                        ..default()
+                    });
+                    if in_game {
+                        spawn_settings_header_close(heading, font);
+                    } else {
+                        spawn_settings_close_button(heading, font);
+                    }
+                });
+            page::spawn_settings_rule(panel);
+            panel
                 .spawn(Node {
-                    flex_direction: FlexDirection::Column,
+                    width: Val::Percent(100.0),
+                    flex_grow: 1.0,
+                    min_height: Val::Px(0.0),
+                    flex_basis: Val::Px(0.0),
+                    justify_content: JustifyContent::Center,
+                    overflow: Overflow::clip(),
                     ..default()
                 })
-                .with_children(|titles| {
-                    titles.spawn(launcher_text("系统设置", 9.0, RED_BRIGHT, font));
-                    titles.spawn(launcher_text("偏好设置", 26.0, PAPER, font));
+                .with_children(|form| {
+                    page::spawn_web_settings_form(form, font, settings, keymap, in_game);
                 });
-            heading.spawn(Node {
-                flex_grow: 1.0,
-                ..default()
+            page::spawn_settings_footer(panel, font, |actions| {
+                spawn_settings_secondary_button(actions, font, "恢复默认设置");
+                if in_game {
+                    spawn_settings_back_button(actions, font, "确认");
+                } else {
+                    spawn_settings_confirm_button(actions, font);
+                }
             });
-            if in_game {
-                spawn_settings_header_close(heading, font);
-            } else {
-                spawn_settings_close_button(heading, font);
-            }
         });
+}
 
-    parent
-        .spawn(Node {
-            width: Val::Percent(100.0),
-            flex_grow: 1.0,
-            min_height: Val::Px(0.0),
-            flex_basis: Val::Px(0.0),
-            overflow: Overflow::clip(),
-            ..default()
-        })
-        .with_children(|form| {
-            crate::plugins::settings_ui::spawn_web_settings_form(
-                form, font, settings, keymap, in_game,
-            );
-        });
+#[derive(Component)]
+pub(crate) struct LauncherSettingsPanel;
 
-    parent
-        .spawn((Node {
-            width: Val::Percent(100.0),
-            flex_direction: FlexDirection::Row,
-            justify_content: JustifyContent::FlexEnd,
-            column_gap: Val::Px(10.0),
-            padding: UiRect {
-                top: Val::Px(8.0),
-                ..default()
-            },
-            ..default()
-        },))
-        .with_children(|actions| {
-            spawn_settings_secondary_button(actions, font, "恢复默认设置");
-            if in_game {
-                spawn_settings_back_button(actions, font, "确认");
-            } else {
-                spawn_settings_confirm_button(actions, font);
-            }
-        });
+pub(crate) fn adapt_settings_panel(
+    windows: Query<&Window>,
+    mut panels: Query<&mut Node, With<LauncherSettingsPanel>>,
+) {
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let layout = responsive_ui_layout(window.width(), window.height(), cfg!(target_os = "android"));
+    let (h, top) = if layout.mobile {
+        (10.0, 6.0)
+    } else {
+        (28.0, 14.0)
+    };
+    for mut node in &mut panels {
+        node.padding = UiRect::new(Val::Px(h), Val::Px(h), Val::Px(top), Val::Px(top.min(10.0)));
+    }
 }
 
 fn spawn_settings_header_back(parent: &mut ChildSpawnerCommands, font: &Handle<Font>) {
@@ -2057,7 +2332,7 @@ fn spawn_settings_header_back(parent: &mut ChildSpawnerCommands, font: &Handle<F
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
                 border: UiRect::all(Val::Px(1.0)),
-                border_radius: BorderRadius::all(Val::Px(3.0)),
+                border_radius: BorderRadius::ZERO,
                 ..default()
             },
             BackgroundColor(theme::SURFACE),
@@ -2084,7 +2359,7 @@ fn spawn_settings_header_close(parent: &mut ChildSpawnerCommands, font: &Handle<
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
                 border: UiRect::all(Val::Px(1.0)),
-                border_radius: BorderRadius::all(Val::Px(3.0)),
+                border_radius: BorderRadius::ZERO,
                 ..default()
             },
             BackgroundColor(theme::SURFACE),
@@ -2151,7 +2426,7 @@ fn spawn_settings_close_button(parent: &mut ChildSpawnerCommands, font: &Handle<
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
                 border: UiRect::all(Val::Px(1.0)),
-                border_radius: BorderRadius::all(Val::Px(3.0)),
+                border_radius: BorderRadius::ZERO,
                 ..default()
             },
             BackgroundColor(theme::SURFACE),
@@ -2181,7 +2456,7 @@ pub(crate) fn spawn_settings_secondary_button(
                 align_items: AlignItems::Center,
                 padding: UiRect::horizontal(Val::Px(16.0)),
                 border: UiRect::all(Val::Px(1.0)),
-                border_radius: BorderRadius::all(Val::Px(3.0)),
+                border_radius: BorderRadius::ZERO,
                 ..default()
             },
             BackgroundColor(theme::SURFACE),
@@ -2211,7 +2486,7 @@ pub(crate) fn spawn_settings_back_button(
                 align_items: AlignItems::Center,
                 padding: UiRect::horizontal(Val::Px(16.0)),
                 border: UiRect::all(Val::Px(1.0)),
-                border_radius: BorderRadius::all(Val::Px(3.0)),
+                border_radius: BorderRadius::ZERO,
                 ..default()
             },
             BackgroundColor(theme::PRIMARY),
@@ -2237,7 +2512,7 @@ fn spawn_settings_confirm_button(parent: &mut ChildSpawnerCommands, font: &Handl
                 align_items: AlignItems::Center,
                 padding: UiRect::horizontal(Val::Px(16.0)),
                 border: UiRect::all(Val::Px(1.0)),
-                border_radius: BorderRadius::all(Val::Px(3.0)),
+                border_radius: BorderRadius::ZERO,
                 ..default()
             },
             BackgroundColor(ACTION_RED),
@@ -2339,7 +2614,7 @@ fn spawn_hero_nav_button<M: Bundle>(
                 align_items: AlignItems::Center,
                 padding: UiRect::horizontal(Val::Px(22.0)),
                 border: UiRect::bottom(Val::Px(1.0)),
-                border_radius: BorderRadius::all(Val::Px(2.0)),
+                border_radius: BorderRadius::ZERO,
                 flex_shrink: 0.0,
                 ..default()
             },
@@ -2351,7 +2626,7 @@ fn spawn_hero_nav_button<M: Bundle>(
             marker,
         ))
         .with_children(|button| {
-            button.spawn(launcher_text(label, 20.0, theme::TEXT, font));
+            button.spawn(launcher_text(label, 20.0, INK_WASH_TEXT, font));
             button.spawn((
                 Node {
                     position_type: PositionType::Absolute,
@@ -2379,7 +2654,7 @@ fn spawn_hero_nav_button<M: Bundle>(
                         ..default()
                     },
                     UiTransform::from_rotation(Rot2::radians(angle)),
-                    BackgroundColor(theme::TEXT),
+                    BackgroundColor(INK_WASH_TEXT),
                 ));
             }
         });
@@ -2413,22 +2688,36 @@ pub(crate) fn hero_nav_feedback(
     }
     for (_button, state, children, mut gradient, mut border, mut node) in &mut buttons {
         let selected = *state != Interaction::None;
-        *gradient = theme::hero_gradient(selected, *state == Interaction::Pressed);
-        border.set_all(if selected {
-            theme::ACCENT.with_alpha(0.65)
+        *gradient = if selected {
+            BackgroundGradient(vec![LinearGradient::new(
+                LinearGradient::TO_RIGHT,
+                vec![
+                    ColorStop::new(
+                        INK_WASH_RED.with_alpha(if *state == Interaction::Pressed {
+                            0.42
+                        } else {
+                            0.28
+                        }),
+                        Val::Percent(0.0),
+                    ),
+                    ColorStop::new(Color::NONE, Val::Percent(100.0)),
+                ],
+            )
+            .into()])
         } else {
-            theme::LINE
+            BackgroundGradient::default()
+        };
+        border.set_all(if selected {
+            INK_WASH_RED.with_alpha(0.65)
+        } else {
+            INK_WASH_MUTED.with_alpha(0.25)
         });
         node.height = Val::Px(if mobile { 48.0 / unit } else { 48.0 });
         node.min_height = node.height;
         node.max_height = node.height;
         for child in children.iter() {
             if let Ok(mut accent) = accents.get_mut(child) {
-                accent.0 = if selected {
-                    theme::ACCENT_TEXT
-                } else {
-                    Color::NONE
-                };
+                accent.0 = if selected { INK_WASH_RED } else { Color::NONE };
             }
         }
     }
@@ -2460,7 +2749,7 @@ fn spawn_back_button(parent: &mut ChildSpawnerCommands, font: &Handle<Font>) {
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
                 border: UiRect::all(Val::Px(1.0)),
-                border_radius: BorderRadius::all(Val::Px(3.0)),
+                border_radius: BorderRadius::ZERO,
                 ..default()
             },
             BackgroundColor(theme::SURFACE),
@@ -2485,14 +2774,13 @@ fn spawn_action_button<M: Bundle>(
         .spawn((
             Button,
             Node {
-                width: Val::Px(180.0),
+                width: Val::Px(140.0),
                 max_width: Val::Percent(100.0),
-                min_height: Val::Px(40.0),
+                min_height: Val::Px(44.0),
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
-                margin: UiRect::top(Val::Px(12.0)),
                 border: UiRect::all(Val::Px(1.0)),
-                border_radius: BorderRadius::all(Val::Px(3.0)),
+                border_radius: BorderRadius::ZERO,
                 ..default()
             },
             BackgroundColor(ACTION_RED),
@@ -2518,7 +2806,7 @@ fn spawn_loadout_arrow(parent: &mut ChildSpawnerCommands, field: LoadoutField, d
                 height: Val::Px(44.0),
                 flex_shrink: 0.0,
                 border: UiRect::all(Val::Px(1.0)),
-                border_radius: BorderRadius::all(Val::Px(3.0)),
+                border_radius: BorderRadius::ZERO,
                 ..default()
             },
             BackgroundColor(STAGE_CARD),
@@ -2911,16 +3199,22 @@ pub(crate) fn reset_menu_screen(
 
 pub(crate) fn launcher_ui_scroll(
     mut mouse_wheel_events: MessageReader<MouseWheel>,
+    windows: Query<&Window>,
     select: Option<Res<crate::plugins::ui_components::UiSelectState>>,
     #[cfg(not(target_arch = "wasm32"))] connection: Option<Res<StockConnectionDialog>>,
-    mut viewport: Query<&mut ScrollPosition, With<LauncherScreensViewport>>,
-    mut inner: Query<
+    mut areas: Query<
         (
-            &Interaction,
+            Entity,
+            &Node,
+            &ComputedNode,
+            &UiGlobalTransform,
+            Option<&InheritedVisibility>,
+            Option<&CalculatedClip>,
+            Option<&ComputedStackIndex>,
             &mut ScrollPosition,
             Option<&crate::plugins::ui_components::UiSelectScrollArea>,
         ),
-        (With<LauncherScrollArea>, Without<LauncherScreensViewport>),
+        With<LauncherScrollArea>,
     >,
 ) {
     let select_open = select.is_some_and(|select| select.open || select.blocked_this_frame);
@@ -2937,19 +3231,40 @@ pub(crate) fn launcher_ui_scroll(
         if dy.abs() < f32::EPSILON {
             continue;
         }
-        let mut handled = false;
-        for (interaction, mut scroll, select_area) in &mut inner {
+        let Some(position) = windows.single().ok().and_then(|window| {
+            window
+                .cursor_position()
+                .map(|pos| pos * window.scale_factor())
+        }) else {
+            continue;
+        };
+        let mut best: Option<(Entity, u32, f32, f32)> = None;
+        for (entity, node, computed, transform, inherited, clip, stack, scroll, select_area) in
+            &mut areas
+        {
             if select_open && select_area.is_none() {
                 continue;
             }
-            if matches!(*interaction, Interaction::Hovered | Interaction::Pressed) {
-                scroll.0.y = (scroll.0.y - dy).max(0.0);
-                handled = true;
+            let extent =
+                (computed.content_size().y - computed.size().y) * computed.inverse_scale_factor;
+            let next = (scroll.y - dy).clamp(0.0, extent.max(0.0));
+            if (next - scroll.y).abs() < 0.01 {
+                continue;
+            }
+            if ui_node_contains(node, computed, transform, inherited, clip, position) {
+                let size = computed.size();
+                let area = size.x * size.y;
+                let stack = stack.map_or(0, |s| s.0);
+                if best.is_none_or(|(_, old_stack, old_area, _)| {
+                    stack > old_stack || (stack == old_stack && area < old_area)
+                }) {
+                    best = Some((entity, stack, area, next));
+                }
             }
         }
-        if !handled && !select_open {
-            if let Ok(mut scroll) = viewport.single_mut() {
-                scroll.0.y = (scroll.0.y - dy).max(0.0);
+        if let Some((entity, _, _, next)) = best {
+            if let Ok((_, _, _, _, _, _, _, mut scroll, _)) = areas.get_mut(entity) {
+                scroll.y = next;
             }
         }
     }
@@ -3256,15 +3571,22 @@ pub(crate) fn adapt_launcher_layout(
     );
 
     let unit = ui_scale.as_ref().map_or(1.0, |scale| scale.0.max(0.05));
-    let content_width =
-        (window.width() / unit).min(1360.0) - layout.left_gutter - layout.right_gutter;
+    let viewport_w = window.width() / unit;
+    let viewport_h = window.height() / unit;
+    let full_bleed_screen = matches!(*screen, MenuScreen::Stages | MenuScreen::Network);
+    let shell_w = if full_bleed_screen {
+        viewport_w
+    } else {
+        viewport_w.min(1360.0)
+    };
+    let content_width = (shell_w - layout.left_gutter - layout.right_gutter).max(320.0);
     let stacked_create = content_width < 1000.0;
+    let settings_width = (content_width * 0.34).clamp(400.0, 560.0);
     let map_width = if stacked_create {
         content_width
     } else {
-        content_width - 412.0
+        (content_width - settings_width - 14.0).max(400.0)
     };
-    let columns = ((map_width - 26.0 + 8.0) / 156.0).floor().max(1.0);
     for (mut node, part) in &mut sets.p7() {
         match part {
             LauncherCreateLayout::Page => {
@@ -3293,16 +3615,30 @@ pub(crate) fn adapt_launcher_layout(
                 node.width = if stacked_create {
                     Val::Percent(100.0)
                 } else {
-                    Val::Px(400.0)
+                    Val::Px(settings_width)
                 };
             }
+            LauncherCreateLayout::MapPreview => {
+                let budget = (viewport_h - 240.0).max(244.0);
+                node.height = Val::Px((budget * 0.44).clamp(140.0, 300.0));
+            }
+            LauncherCreateLayout::MapList => {
+                let budget = (viewport_h - 240.0).max(244.0);
+                node.max_height = Val::Px((budget * 0.52).clamp(160.0, 440.0));
+            }
             LauncherCreateLayout::MapChoice => {
-                node.width =
-                    Val::Px(((map_width - 26.0 - (columns - 1.0) * 8.0) / columns).floor());
-                node.min_width = Val::Px(0.0);
+                node.width = if layout.mobile {
+                    Val::Percent(48.5)
+                } else if map_width >= 1040.0 {
+                    Val::Percent(23.5)
+                } else {
+                    Val::Percent(32.0)
+                };
+                node.min_width = Val::Px(120.0);
                 node.max_width = Val::Auto;
-                node.min_height = Val::Px(if layout.mobile { 44.0 / unit } else { 38.0 });
-                node.border = UiRect::all(Val::Px(1.0));
+                node.height = Val::Px(if layout.mobile { 58.0 / unit } else { 72.0 });
+                node.min_height = node.height;
+                node.border = UiRect::all(Val::Px(1.5));
             }
             LauncherCreateLayout::Brand => {
                 node.width = Val::Px(if *screen == MenuScreen::Network {
@@ -3391,11 +3727,13 @@ pub(crate) fn adapt_launcher_layout(
             };
         }
         if shell.is_some() {
-            node.max_width = Val::Px(if *screen == MenuScreen::Main {
-                1240.0
+            node.max_width = if full_bleed_screen {
+                Val::Auto
+            } else if *screen == MenuScreen::Main {
+                Val::Px(1240.0)
             } else {
-                1360.0
-            });
+                Val::Px(1360.0)
+            };
             node.padding = UiRect::new(
                 Val::Px(layout.left_gutter),
                 Val::Px(layout.right_gutter),
@@ -3694,6 +4032,17 @@ mod font_tests {
     use bevy::window::WindowResolution;
 
     #[test]
+    fn room_catalog_requires_stage_entries_and_accepts_future_ids() {
+        let manifest = serde_json::json!({"packs": [
+            {"packId": "stage/sn23", "entries": ["stage/sn23.gmb", "stage/sn23.des", "stage/sn23.cob", "stage/sn23.pst"]},
+            {"packId": "stage/sn24", "entries": ["stage/sn24.gmb", "stage/sn24.des"]}
+        ]});
+        assert!(stage_has_required_entries(&manifest, "sn23"));
+        assert!(!stage_has_required_entries(&manifest, "sn24"));
+        assert!(!stage_has_required_entries(&manifest, "sn01"));
+    }
+
+    #[test]
     fn main_and_secondary_navigation_only_highlight_the_pointer_target() {
         let mut app = App::new();
         app.add_systems(Startup, |mut commands: Commands| {
@@ -3737,11 +4086,7 @@ mod font_tests {
                         if app.world().get::<HeroNavAccent>(child).is_some() {
                             assert_eq!(
                                 app.world().get::<BackgroundColor>(child).unwrap().0,
-                                if active {
-                                    theme::ACCENT_TEXT
-                                } else {
-                                    Color::NONE
-                                }
+                                if active { INK_WASH_RED } else { Color::NONE }
                             );
                         }
                     }
@@ -3841,6 +4186,28 @@ mod font_tests {
             world.query::<&MenuStockSelectOption>().iter(world).count(),
             18
         );
+        let advanced = world
+            .query_filtered::<(Entity, &Node), With<RoomAdvancedDialog>>()
+            .single(world)
+            .unwrap();
+        assert_eq!(advanced.1.display, Display::None);
+        let advanced = advanced.0;
+        let settings: Vec<_> = world
+            .query_filtered::<Entity, Or<(
+                With<MenuStockSelectOption>,
+                With<MenuStockItemRuleButton>,
+                With<crate::app_state::MenuBalanceRulesButton>,
+            )>>()
+            .iter(world)
+            .collect();
+        for mut entity in settings {
+            while entity != advanced {
+                entity = world
+                    .get::<ChildOf>(entity)
+                    .expect("advanced setting belongs to the modal")
+                    .parent();
+            }
+        }
         let pages: Vec<_> = world.query::<(&UiPageRoot, &Node)>().iter(world).collect();
         assert!(pages.iter().any(|(_, node)| node.display == Display::None));
     }
@@ -3945,7 +4312,7 @@ mod font_tests {
         app.update();
 
         let mut dialogs = app.world_mut().query::<(&UiModalRoot, &Node, &ChildOf)>();
-        assert_eq!(dialogs.iter(app.world()).count(), 3);
+        assert_eq!(dialogs.iter(app.world()).count(), 4);
         let mut selects = app
             .world_mut()
             .query_filtered::<(&Node, &ChildOf), With<crate::plugins::ui_components::UiSelectMenu>>(

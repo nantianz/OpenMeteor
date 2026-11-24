@@ -8,6 +8,7 @@
     "graphics-packs/sn06-moss-valley/pack.json",
     "graphics-packs/sn06-nextgen-sample/pack.json",
     "graphics-packs/longsword/pack.json",
-    "graphics-packs/sn06-color-pipeline/pack.json"
+    "graphics-packs/sn06-color-pipeline/pack.json",
+    "graphics-packs/combat-fx/pack.json"
   ]
 }

@@ -1,7 +1,7 @@
 #![cfg(target_arch = "wasm32")]
 
 use crate::app_state::{AppState, LaunchRequest};
-use crate::pack_manifest::{match_pack_roots, parse_pack_index, resolve_pack_order};
+use crate::pack_manifest::{installed_match_pack_roots, parse_pack_index, resolve_pack_order};
 use bevy::prelude::*;
 use js_sys::Uint8Array;
 use std::collections::HashSet;
@@ -122,7 +122,8 @@ async fn load_root_packs(
 
     let mut loaded = already_loaded.clone();
     for id in ordered {
-        if loaded.contains(&id) && meteor_asset::runtime_assets::contains_pack(&id) {
+        if meteor_asset::runtime_assets::contains_pack(&id) {
+            loaded.insert(id);
             continue;
         }
         let descriptor = descriptors
@@ -167,6 +168,7 @@ pub fn prepare_match_assets(
     mut next_state: ResMut<NextState<AppState>>,
 ) {
     let key = match_key(&request);
+    let roots = installed_match_pack_roots(&request);
     let mut shared = match loader.0.lock() {
         Ok(shared) => shared,
         Err(_) => {
@@ -180,7 +182,7 @@ pub fn prepare_match_assets(
         LoadPhase::Ready(active)
             if active == &key
                 && crate::pack_manifest::match_packs_resident(
-                    &request.stage_id,
+                    &roots,
                     meteor_asset::runtime_assets::contains_pack,
                 ) =>
         {
@@ -201,7 +203,6 @@ pub fn prepare_match_assets(
 
     let target = loader.0.clone();
     spawn_local(async move {
-        let roots = match_pack_roots(&stage_id);
         let result = load_root_packs(roots, &loaded, Some((target.clone(), generation))).await;
         if let Ok(mut shared) = target.lock() {
             if shared.generation != generation {
@@ -272,13 +273,14 @@ pub fn menu_music_ready(loader: Res<WasmAssetLoader>) -> bool {
 
 pub fn match_assets_ready(request: Res<LaunchRequest>, loader: Res<WasmAssetLoader>) -> bool {
     let key = match_key(&request);
+    let roots = installed_match_pack_roots(&request);
     loader
         .0
         .lock()
         .map(|shared| {
             matches!(&shared.phase, LoadPhase::Ready(active) if active == &key)
                 && crate::pack_manifest::match_packs_resident(
-                    &request.stage_id,
+                    &roots,
                     meteor_asset::runtime_assets::contains_pack,
                 )
         })
@@ -311,9 +313,13 @@ pub(crate) async fn load_network_models(
 }
 
 pub async fn bootstrap() -> Result<(), String> {
-    load_root_packs(vec!["startup".into()], &HashSet::new(), None)
-        .await
-        .map(|_| ())
+    load_root_packs(
+        vec!["startup".into(), "common".into()],
+        &HashSet::new(),
+        None,
+    )
+    .await
+    .map(|_| ())
 }
 
 pub fn cancel_pending_assets(loader: Res<WasmAssetLoader>) {

@@ -45,10 +45,23 @@ pub fn registered_pack_count() -> usize {
     packs().read().map(|packs| packs.len()).unwrap_or_default()
 }
 
+pub const ROOM_STAGE_EXTENSIONS: [&str; 4] = ["gmb", "des", "cob", "pst"];
+
 pub fn read_entry(name: &str) -> Option<Vec<u8>> {
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     if let Some(source) = ORIGINAL_DIRECTORY.get() {
-        return source.read(name).ok();
+        return match source.read_if_present(name) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                if let Ok(mut pending) = ORIGINAL_READ_ERROR.lock() {
+                    if pending.is_none() {
+                        log::error!("{error}");
+                        *pending = Some(error);
+                    }
+                }
+                None
+            }
+        };
     }
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(repository) = NATIVE_REPOSITORY.get() {
@@ -126,6 +139,14 @@ pub fn entry_name_for_legacy_path(path: &str) -> Option<String> {
 }
 
 pub fn read_legacy_path(path: &str) -> Option<Vec<u8>> {
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    if let Some(source) = ORIGINAL_DIRECTORY.get() {
+        let entry = entry_name_for_legacy_path(path)?;
+        if entry.starts_with("stage/") {
+            return source.read(path).ok();
+        }
+        return source.read(path).or_else(|_| source.read(&entry)).ok();
+    }
     read_entry(&entry_name_for_legacy_path(path)?)
 }
 
@@ -200,6 +221,14 @@ mod tests {
 static ORIGINAL_DIRECTORY: OnceLock<crate::original_directory::OriginalDirectory> = OnceLock::new();
 
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+static ORIGINAL_READ_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+pub fn take_original_read_error() -> Option<String> {
+    ORIGINAL_READ_ERROR.lock().ok()?.take()
+}
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 pub fn initialize_original(
     source: crate::original_directory::OriginalDirectory,
 ) -> Result<(), String> {
@@ -214,6 +243,25 @@ pub fn initialize_original(
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 pub fn original_directory_active() -> bool {
     ORIGINAL_DIRECTORY.get().is_some()
+}
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+pub fn original_stage_ids() -> Option<Vec<String>> {
+    ORIGINAL_DIRECTORY.get().map(|source| source.stage_ids())
+}
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+pub fn original_mission_available(stage: &str) -> Option<bool> {
+    ORIGINAL_DIRECTORY
+        .get()
+        .map(|source| source.has_mission(stage))
+}
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+pub fn original_stage_preview_revision(stage: &str) -> Option<String> {
+    ORIGINAL_DIRECTORY
+        .get()
+        .map(|source| source.stage_preview_revision(stage))
 }
 
 pub fn runtime_texture_source_active() -> bool {
@@ -337,8 +385,14 @@ pub fn stock_stage_checksums() -> Result<std::collections::BTreeMap<String, u32>
     }
     let stages = json["stages"]
         .as_array()
-        .filter(|s| !s.is_empty())
         .ok_or("missing stage checksum metadata; rebuild MPK packs")?;
+    if stages.is_empty() {
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        if original_directory_active() {
+            return Ok(std::collections::BTreeMap::new());
+        }
+        return Err("missing stage checksum metadata; rebuild MPK packs".into());
+    }
     let mut sums = std::collections::BTreeMap::new();
     for stage in stages {
         let id = stage["stage"].as_str().ok_or("invalid stage id")?;

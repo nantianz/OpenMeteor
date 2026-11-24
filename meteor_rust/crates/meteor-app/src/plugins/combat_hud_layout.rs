@@ -21,18 +21,30 @@ impl CombatHudLayout {
         } else {
             152.0
         };
-        let map_origin = Vec2::new(width - safe.right - 10.0 - map_diameter, safe.top + 10.0);
+        let map_origin = if mobile {
+            Vec2::new(width - safe.right - 10.0 - map_diameter, safe.top + 10.0)
+        } else {
+            Vec2::new(
+                width - safe.right - 24.0 - map_diameter,
+                height - safe.bottom - 24.0 - map_diameter,
+            )
+        };
         let button_size = Vec2::new(64.0, 28.0);
         let center = safe.left + (width - safe.left - safe.right) * 0.5;
         let mut pause_center = Vec2::new(
             center + (button_size.x + 8.0) * 0.5,
             safe.top + 10.0 + button_size.y * 0.5,
         );
-        let status_width = if mobile { 180.0 } else { 224.0 };
-        let stats_origin = Vec2::new(safe.left + 10.0, safe.top + 14.0);
+        let status_width = if mobile { 180.0 } else { 264.0 };
+        let stats_origin = if mobile {
+            Vec2::new(safe.left + 10.0, safe.top + 14.0)
+        } else {
+            Vec2::new(safe.left + 24.0, height - safe.bottom - 114.0)
+        };
 
-        if center - button_size.x - 4.0 < stats_origin.x + status_width + 12.0
-            || center + button_size.x + 4.0 > map_origin.x - 12.0
+        if mobile
+            && (center - button_size.x - 4.0 < stats_origin.x + status_width + 12.0
+                || center + button_size.x + 4.0 > map_origin.x - 12.0)
         {
             pause_center.y = (stats_origin.y + 132.0).max(map_origin.y + map_diameter + 12.0)
                 + button_size.y * 0.5;
@@ -43,7 +55,7 @@ impl CombatHudLayout {
             pause_center - Vec2::X * (button_size.x + 8.0)
         };
         let dialogue_size = Vec2::new(
-            (width - safe.left - safe.right - 32.0).min(if mobile { 360.0 } else { 420.0 }),
+            (width - safe.left - safe.right - 32.0).clamp(1.0, if mobile { 360.0 } else { 570.0 }),
             120.0,
         );
         let center_x = safe.left + (width - safe.left - safe.right - dialogue_size.x) * 0.5;
@@ -60,7 +72,16 @@ impl CombatHudLayout {
         {
             top = top.max(map_origin.y + map_diameter + 12.0);
         }
-        let dialogue_origin = Vec2::new(center_x, top);
+        let dialogue_origin = if mobile {
+            Vec2::new(center_x, top)
+        } else {
+            let clearance = if center_x + dialogue_size.x + 16.0 > map_origin.x {
+                map_origin.y - 10.0
+            } else {
+                height - safe.bottom - 76.0
+            };
+            Vec2::new(center_x, clearance - dialogue_size.y)
+        };
         Self {
             map_origin,
             map_diameter,

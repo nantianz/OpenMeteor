@@ -93,12 +93,52 @@ pub struct PonEfMaterialKey {
 
 #[path = "effect_plugin/dynamic_uniforms.rs"]
 mod dynamic_uniforms;
+#[path = "effect_plugin/enhance.rs"]
+pub(crate) mod enhance;
+
+#[cfg(test)]
+pub(crate) mod test_support {
+
+    pub(crate) fn raw_fragment_source(source: &str) -> String {
+        let mut out = String::new();
+        let mut skipping = false;
+        for line in source.lines() {
+            if line.starts_with("#ifdef DEPTH_PREPASS") {
+                skipping = true;
+                continue;
+            }
+            if line.starts_with("#endif") {
+                skipping = false;
+                continue;
+            }
+            if skipping {
+                continue;
+            }
+            if line.starts_with("#import bevy_pbr::forward_io::VertexOutput") {
+                out.push_str("struct VertexOutput { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>, };\n");
+                continue;
+            }
+            if line.starts_with("#import bevy_pbr::view_transformations::depth_ndc_to_view_z") {
+                out.push_str(
+                    "fn depth_ndc_to_view_z(d: f32) -> f32 { return -1.0 / max(d, 1e-6); }\n",
+                );
+                continue;
+            }
+            out.push_str(line);
+            out.push('\n');
+        }
+        out
+    }
+}
 
 #[derive(ShaderType, Clone, PartialEq)]
 struct PonEfMaterialParams {
     color: Vec4,
-    has_texture: u32,
     uv_offset: Vec2,
+
+    has_texture: u32,
+
+    soft: f32,
 }
 
 #[derive(Asset, TypePath, Clone)]
@@ -111,6 +151,25 @@ pub struct PonEfMaterial {
     uniform_id: u64,
 
     particle_colors: Option<Box<[Vec4; dynamic_uniforms::PARAMS_PER_PAGE]>>,
+}
+
+#[cfg(test)]
+impl PonEfMaterial {
+    pub(crate) fn test_untextured() -> Self {
+        Self {
+            params: PonEfMaterialParams {
+                color: Vec4::ONE,
+                uv_offset: Vec2::ZERO,
+                has_texture: 0,
+                soft: 0.0,
+            },
+            texture: None,
+            blend: PonEfBlendMode::SrcAlphaOne,
+            two_sided: true,
+            uniform_id: dynamic_uniforms::new_uniform_id(),
+            particle_colors: None,
+        }
+    }
 }
 
 impl From<&PonEfMaterial> for PonEfMaterialKey {
@@ -752,7 +811,7 @@ impl EfTextureCache {
                     .into_iter()
                     .filter_map(|name| {
                         roots.iter().find_map(|root| {
-                            let bytes = crate::resource_io::read(root.join(name)).ok()?;
+                            let bytes = crate::resource_io::read_legacy_pak(root.join(name))?;
                             meteor_asset::pak::PakArchive::from_bytes(&bytes).ok()
                         })
                     })
@@ -864,16 +923,22 @@ impl EfTextureCache {
         if let Some(handle) = &image {
             self.images.push(handle.clone());
         }
+        let blend = PonEfBlendMode::from_state(state);
+        let reads_alpha = matches!(
+            blend,
+            PonEfBlendMode::SrcAlphaInvSrcAlpha | PonEfBlendMode::SrcAlphaOne
+        );
         let handle = materials.add(PonEfMaterial {
             uniform_id: dynamic_uniforms::new_uniform_id(),
             particle_colors: None,
             params: PonEfMaterialParams {
                 color: Vec4::ONE,
-                has_texture: u32::from(image.is_some()),
+                has_texture: u32::from(image.is_some()) | (u32::from(reads_alpha) << 1),
                 uv_offset: Vec2::ZERO,
+                soft: 0.0,
             },
             texture: image,
-            blend: PonEfBlendMode::from_state(state),
+            blend,
             two_sided: state.two_sided,
         });
         self.materials.insert(key, handle.clone());
@@ -1003,6 +1068,7 @@ pub(crate) fn install_effect_playback_systems(app: &mut App) {
             scene_script_effects,
             combat_hit_effects,
             clear_interrupted_pose_effects,
+            enhance::apply_effect_rules,
             tick_pon_ef_players,
             tick_pon_ef_drags,
             tick_pon_ef_particles,
@@ -1551,6 +1617,7 @@ pub fn spawn_pon_ef(
                 audio_playing,
                 audio_triggered,
             },
+            enhance::PonEfEffectName(crate::plugins::graphics_pack::effects::effect_stem(name)),
             Transform::from_translation(world_position),
         ))
         .id();
@@ -1762,6 +1829,7 @@ type PonEfPlayerQuery<'w, 's> = Query<
         Option<&'static SceneEffectAnchor>,
         Option<&'static PonEfStartTime>,
         Option<&'static mut PonEfClockAdvanced>,
+        Option<&'static enhance::PonEfEnhance>,
     ),
     Without<PonEfNodeEntity>,
 >;
@@ -1775,6 +1843,7 @@ type PonEfParticlePlayerQuery<'w, 's> = Query<
         Option<&'static ChildOf>,
         Option<&'static WornVisual>,
         Option<&'static SceneEffectAnchor>,
+        Option<&'static enhance::PonEfEnhance>,
     ),
 >;
 
@@ -1937,6 +2006,7 @@ pub(crate) fn tick_pon_ef_players(
         scene_anchor,
         start_time,
         clock_advanced,
+        enhance,
     ) in &mut players
     {
         let root_global = node_access
@@ -2161,7 +2231,7 @@ pub(crate) fn tick_pon_ef_players(
                 dynamic_uniforms::set_color(
                     &mut materials,
                     &material_handle.0,
-                    Vec4::new(color[0], color[1], color[2], opacity),
+                    enhance::boost(Vec4::new(color[0], color[1], color[2], opacity), enhance),
                 );
                 dynamic_uniforms::advance_uv(
                     &mut materials,
@@ -2275,11 +2345,11 @@ fn tick_ifl_animations(
         anim.index = (anim.index + 1) % anim.frames.len();
         let next = &anim.frames[anim.index];
         if materials.get(&anim.material).is_some_and(|material| {
-            material.texture.as_ref() != Some(next) || material.params.has_texture != 1
+            material.texture.as_ref() != Some(next) || material.params.has_texture & 1 == 0
         }) {
             if let Some(mut material) = materials.get_mut(&anim.material) {
                 material.texture = Some(next.clone());
-                material.params.has_texture = 1;
+                material.params.has_texture |= 1;
             }
         }
     }
@@ -2405,7 +2475,8 @@ pub(crate) fn tick_pon_ef_particles(
         );
     }
     for (group_entity, node_entity, owner, mut group) in &mut groups {
-        let Ok((instance, root_global, parent, worn_visual, scene_anchor)) = players.get(owner.0)
+        let Ok((instance, root_global, parent, worn_visual, scene_anchor, enhance)) =
+            players.get(owner.0)
         else {
             continue;
         };
@@ -2614,11 +2685,14 @@ pub(crate) fn tick_pon_ef_particles(
             dynamic_uniforms::set_particle_color(
                 &mut materials,
                 &p,
-                Vec4::new(
-                    style_color[0],
-                    style_color[1],
-                    style_color[2],
-                    style_opacity * fade,
+                enhance::boost(
+                    Vec4::new(
+                        style_color[0],
+                        style_color[1],
+                        style_color[2],
+                        style_opacity * fade,
+                    ),
+                    enhance,
                 ),
             );
         }
@@ -4978,6 +5052,7 @@ mod tests {
                 color: Vec4::ONE,
                 has_texture: 0,
                 uv_offset: Vec2::ZERO,
+                soft: 0.0,
             },
             texture: None,
             blend: PonEfBlendMode::Opaque,
@@ -6137,7 +6212,7 @@ mod texture_tests {
         );
         let shader = include_str!("pon_ef_material.wgsl");
         assert!(shader.contains("#{MATERIAL_BIND_GROUP}"));
-        assert!(shader.contains("return texel * params.color"));
+        assert!(shader.contains("return texel * params.color * fade"));
     }
 
     #[test]

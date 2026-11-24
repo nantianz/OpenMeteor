@@ -2660,6 +2660,43 @@ fn spawn_stage_sky(
     ));
 }
 
+fn is_preview_sky_object(
+    object: &meteor_asset::gmdl::GmdlObject,
+    authored: Option<&meteor_asset::des::StageObject>,
+    center: [f32; 3],
+) -> bool {
+    let lower = object.name.to_ascii_lowercase();
+    if lower.contains("sky")
+        || authored
+            .and_then(|o| o.object_type.as_deref())
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("skybox"))
+    {
+        return true;
+    }
+    if !authored.is_some_and(|entry| !entry.block_player) {
+        return false;
+    }
+    if lower.starts_with("gsctk") || lower == "fog" {
+        return true;
+    }
+
+    if !lower.starts_with("sphere") || object.num_faces > 256 {
+        return false;
+    }
+    let (min, max) = object.positions.chunks_exact(3).fold(
+        (Vec2::splat(f32::INFINITY), Vec2::splat(f32::NEG_INFINITY)),
+        |(min, max), v| {
+            let p = Vec2::new(v[0], v[1]);
+            (min.min(p), max.max(p))
+        },
+    );
+    let center = Vec2::new(center[0], center[1]);
+    (max - min).min_element() >= 1200.0 && min.cmplt(center).all() && max.cmpgt(center).all()
+}
+
+#[derive(Resource)]
+pub(super) struct MapPreviewScene;
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn setup_stage_scene(
     mut commands: Commands,
@@ -2677,11 +2714,12 @@ pub(super) fn setup_stage_scene(
     mut hazards: ResMut<super::hazard_plugin::StageHazardRuntime>,
     graphics: Option<Res<super::graphics_pack::GraphicsPacks>>,
     render_adapter: Option<Res<bevy::render::renderer::RenderAdapterInfo>>,
-    (mut cloud_materials, mut cloud_noise, mut grass_materials, mut snow_materials): (
+    (mut cloud_materials, mut cloud_noise, mut grass_materials, mut snow_materials, preview): (
         Option<ResMut<Assets<super::graphics_pack::sky::CloudSkyMaterial>>>,
         Option<ResMut<super::graphics_pack::sky::CloudNoise>>,
         Option<ResMut<Assets<super::graphics_pack::grass::GrassMaterial>>>,
         Option<ResMut<Assets<super::graphics_pack::snow::SnowMaterial>>>,
+        Option<Res<MapPreviewScene>>,
     ),
 ) {
     hazards.0 = Default::default();
@@ -2883,7 +2921,7 @@ pub(super) fn setup_stage_scene(
             Err(error) => warn!("{} sky enhancement skipped: {error}", loaded.stage_id),
         }
     }
-    if !enhanced_sky {
+    if !enhanced_sky && preview.is_none() {
         spawn_stage_sky(
             &mut commands,
             &mut meshes,
@@ -2930,6 +2968,9 @@ pub(super) fn setup_stage_scene(
         let scene_obj = stage_desc
             .as_ref()
             .and_then(|d| d.scene_objects.iter().find(|obj| obj.name == object.name));
+        if preview.is_some() && is_preview_sky_object(object, scene_obj, loaded.center) {
+            continue;
+        }
         let replacement = (!sky_replacements.iter().any(|&(index, _)| index == obj_idx))
             .then(|| {
                 meshlets.replace(
@@ -2981,6 +3022,13 @@ pub(super) fn setup_stage_scene(
             drawn_objects += 1;
             drawn_faces += indices.len() / 3;
             let mat = &gmdl.materials[mat_idx as usize];
+            if preview.is_some()
+                && gmdl
+                    .resolve_texture_name(mat)
+                    .is_some_and(|name| name.to_ascii_lowercase().contains("sky"))
+            {
+                continue;
+            }
             let (mode, opacity, alpha_cutoff) = classify_gmdl_material(mat);
 
             let color_key = mat.blend == "COLORKEY";

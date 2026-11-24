@@ -184,9 +184,21 @@ pub(super) fn spawn_panel(commands: &mut Commands, panel: UiPanel, font: &UiFont
                 position_type: PositionType::Absolute,
                 width: Val::Percent(100.0),
                 height: Val::Percent(100.0),
-                padding: UiRect::all(Val::Px(16.0)),
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
+                padding: if modal {
+                    UiRect::all(Val::Px(16.0))
+                } else {
+                    UiRect::new(Val::Px(20.0), Val::Px(24.0), Val::Px(72.0), Val::Px(20.0))
+                },
+                justify_content: if modal {
+                    JustifyContent::Center
+                } else {
+                    JustifyContent::FlexEnd
+                },
+                align_items: if modal {
+                    AlignItems::Center
+                } else {
+                    AlignItems::FlexStart
+                },
                 ..default()
             },
             GlobalZIndex(260),
@@ -201,7 +213,15 @@ pub(super) fn spawn_panel(commands: &mut Commands, panel: UiPanel, font: &UiFont
         ));
     }
     let surface = commands
-        .spawn(UiDialogSurfaceBundle::new(460.0, theme::CARD, theme::LINE))
+        .spawn(UiDialogSurfaceBundle::new(
+            if modal { 460.0 } else { 312.0 },
+            if modal {
+                theme::CARD
+            } else {
+                theme::HUD_SURFACE.with_alpha(0.82)
+            },
+            theme::METAL.with_alpha(0.55),
+        ))
         .id();
     if modal {
         commands.entity(surface).insert((
@@ -210,12 +230,47 @@ pub(super) fn spawn_panel(commands: &mut Commands, panel: UiPanel, font: &UiFont
             Interaction::default(),
         ));
     }
+    if !modal {
+        commands
+            .entity(surface)
+            .entry::<Node>()
+            .and_modify(|mut node| {
+                node.padding = UiRect::axes(Val::Px(16.0), Val::Px(12.0));
+                node.row_gap = Val::Px(5.0);
+                node.border = UiRect::vertical(Val::Px(1.0));
+                node.border_radius = BorderRadius::ZERO;
+            });
+        commands
+            .entity(surface)
+            .insert(BackgroundGradient(vec![LinearGradient::new(
+                LinearGradient::TO_RIGHT,
+                vec![
+                    ColorStop::auto(Color::NONE),
+                    ColorStop::auto(theme::HUD_SURFACE.with_alpha(0.68)),
+                ],
+            )
+            .into()]));
+    }
     commands.entity(root).add_child(surface);
     let font = Some(font.0.clone());
-    let heading = text(commands, &panel.title, 25.0, theme::TEXT, font.clone());
-    commands.entity(surface).add_child(heading);
+    if !panel.title.trim().is_empty() {
+        let heading = text(
+            commands,
+            &panel.title,
+            if modal { 25.0 } else { 18.0 },
+            theme::METAL,
+            font.clone(),
+        );
+        commands.entity(surface).add_child(heading);
+    }
     for line in &panel.text {
-        let label = text(commands, line, 16.0, theme::TEXT, font.clone());
+        let label = text(
+            commands,
+            line,
+            if modal { 16.0 } else { 14.0 },
+            theme::TEXT,
+            font.clone(),
+        );
         commands.entity(surface).add_child(label);
     }
     if modal {

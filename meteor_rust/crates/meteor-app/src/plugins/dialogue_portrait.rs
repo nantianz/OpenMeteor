@@ -177,10 +177,12 @@ pub(crate) fn window_node() -> impl Bundle {
             height: Val::Px(72.0),
             flex_shrink: 0.0,
             overflow: Overflow::clip(),
-            border_radius: BorderRadius::all(Val::Px(8.0)),
+            border_radius: BorderRadius::MAX,
+            border: UiRect::all(Val::Px(1.0)),
             ..default()
         },
-        BackgroundColor(theme::BACKGROUND.with_alpha(0.35)),
+        BorderColor::all(theme::METAL.with_alpha(0.58)),
+        BackgroundColor(theme::BACKGROUND.with_alpha(0.62)),
         PortraitWindow,
     )
 }

@@ -22,8 +22,8 @@ use meteor_core::MovementMode;
 use meteor_scene::mission_runtime::{MissionScriptRuntime, NpcRequest};
 use meteor_scene::pst_music::PstMusicRequests;
 use meteor_scene::scene_script_runtime::{
-    PstValue, SceneItemCatalog, SceneItemInstance, SceneNetOp, SceneScriptRuntime,
-    SceneTransferRequest,
+    expand_scene_pst_includes, PstValue, SceneItemCatalog, SceneItemInstance, SceneNetOp,
+    SceneScriptRuntime, SceneTransferRequest,
 };
 use meteor_scene::stage_loader::{
     get_stage_center, load_stage_assets, StageAssetSource, WaypointGraph,
@@ -579,6 +579,7 @@ impl Plugin for StagePlugin {
                     .chain()
                     .after(start_stage_script)
                     .after(spawn_local_fighter)
+                    .after(super::character_plugin::load_character_assets)
                     .run_if(|script: Res<StageMissionRuntime>| script.0.is_some())
                     .run_if(|request: Res<LaunchRequest>| should_load_mission_script(&request))
                     .run_if(crate::plugins::starts_fresh_playing_session),
@@ -1040,89 +1041,6 @@ fn capture_loaded_stage_assets(source: &StageSource, stage_id: &str) -> LoadedSt
         from_pack: matches!(source, StageSource::Mpk { .. }),
         ticket_mask: None,
     }
-}
-
-fn expand_scene_pst_includes(
-    root_path: &str,
-    root_text: &str,
-    read: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
-) -> (String, Vec<String>, Vec<String>) {
-    fn include_path(parent: &str, include: &str) -> Option<String> {
-        let mut parts = parent
-            .rsplit_once('/')
-            .map(|(dir, _)| dir.split('/').map(str::to_owned).collect::<Vec<_>>())
-            .unwrap_or_default();
-        let normalized = include.replace('\\', "/");
-        for segment in normalized.split('/') {
-            match segment {
-                "" | "." => {}
-                ".." => {
-                    parts.pop()?;
-                }
-                value => parts.push(value.to_owned()),
-            }
-        }
-        (!parts.is_empty()).then(|| parts.join("/"))
-    }
-
-    fn expand(
-        path: &str,
-        source: &str,
-        read: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
-        seen: &mut std::collections::HashSet<String>,
-        loaded: &mut Vec<String>,
-        missing: &mut Vec<String>,
-    ) -> String {
-        if !seen.insert(path.to_ascii_lowercase()) {
-            return String::new();
-        }
-        loaded.push(path.to_owned());
-        let mut merged = String::new();
-        for line in source.lines() {
-            let directive = line.trim().strip_prefix("#include").map(str::trim);
-            if let Some(include) = directive
-                .and_then(|value| value.strip_prefix('"'))
-                .and_then(|value| value.split_once('"').map(|(name, _)| name))
-            {
-                if let Some(path) = include_path(path, include) {
-                    if seen.contains(&path.to_ascii_lowercase()) {
-                        continue;
-                    }
-                    if let Some(bytes) = read(&path) {
-                        merged.push_str(&expand(
-                            &path,
-                            &crate::text_codec::decode_text(&bytes),
-                            read,
-                            seen,
-                            loaded,
-                            missing,
-                        ));
-                    } else {
-                        missing.push(path);
-                    }
-                } else {
-                    missing.push(include.to_owned());
-                }
-            } else {
-                merged.push_str(line);
-                merged.push('\n');
-            }
-        }
-        merged
-    }
-
-    let mut seen = std::collections::HashSet::new();
-    let mut loaded = Vec::new();
-    let mut missing = Vec::new();
-    let merged = expand(
-        root_path,
-        root_text,
-        read,
-        &mut seen,
-        &mut loaded,
-        &mut missing,
-    );
-    (merged, loaded, missing)
 }
 
 #[cfg(test)]
@@ -3840,6 +3758,9 @@ pub(super) fn consume_mission_npc_requests(
     mut pending: ResMut<PendingMissionNpcCommands>,
     mut player_performance: ResMut<PlayerPerformance>,
     waypoints: Option<Res<WaypointGraph>>,
+    mut characters: Option<ResMut<super::character_plugin::CharacterAssetsSet>>,
+    mut loaded: Option<ResMut<LoadedStageInfo>>,
+    mut next_state: Option<ResMut<NextState<AppState>>>,
     mut npcs: Query<(
         Entity,
         &mut MissionNpc,
@@ -3878,16 +3799,28 @@ pub(super) fn consume_mission_npc_requests(
                 break;
             }
         }
-        spawn_mission_npc(
+        if let Err(error) = spawn_mission_npc(
             &mut commands,
             &mut script,
             scene
                 .as_deref_mut()
                 .and_then(StageScriptRuntime::script_mut),
             waypoints.as_deref(),
+            characters.as_deref_mut(),
             &npc_script,
             id,
-        );
+        ) {
+            let error = format!("{} 任务 NPC {npc_script}：{error}", request.stage_id);
+            error!("{error}");
+            if let Some(loaded) = loaded.as_deref_mut() {
+                loaded.ready = false;
+                loaded.error = Some(error);
+            }
+            if let Some(next_state) = next_state.as_deref_mut() {
+                next_state.set(AppState::Error);
+            }
+            return;
+        }
     }
     let stops = script
         .script_mut()
@@ -4179,9 +4112,10 @@ fn spawn_mission_npc(
     script: &mut ResMut<StageMissionRuntime>,
     scene: Option<&mut SceneScriptRuntime>,
     waypoints: Option<&WaypointGraph>,
+    characters: Option<&mut super::character_plugin::CharacterAssetsSet>,
     npc_script: &str,
     id: i64,
-) {
+) -> Result<(), String> {
     let definition = match script
         .script()
         .and_then(|runtime| runtime.initialized_npc_definition(id, npc_script))
@@ -4196,15 +4130,12 @@ fn spawn_mission_npc(
                         .iter()
                         .find_map(|root| crate::resource_io::read(root.join(&legacy_path)).ok())
                 });
-            let Some(bytes) = bytes else {
-                warn!("mission AddNPC(\"{npc_script}\") — {npc_script}.pst missing");
-                return;
-            };
+            let bytes = bytes.ok_or_else(|| format!("无法读取脚本 {legacy_path}"))?;
             let text = crate::text_codec::decode_text(&bytes);
             if let Some(runtime) = script.script_mut() {
-                if let Err(error) = runtime.activate_npc_script_linked(id, &text, scene) {
-                    warn!("mission NPC {npc_script} initialization failed: {error}");
-                }
+                runtime
+                    .activate_npc_script_linked(id, &text, scene)
+                    .map_err(|error| format!("脚本 {legacy_path} 初始化失败：{error}"))?;
             }
             script
                 .script()
@@ -4214,6 +4145,20 @@ fn spawn_mission_npc(
                 })
         }
     };
+    let character_id = u8::try_from(definition.model)
+        .map_err(|_| format!("Model = {} 超出人物编号范围 0–255", definition.model))?;
+    if let Some(characters) = characters {
+        let key = format!("p{character_id}");
+        if let std::collections::hash_map::Entry::Vacant(entry) = characters.0.entry(key) {
+            let root = std::env::current_dir().unwrap_or_default();
+            let assets = super::character_plugin::try_load_character_asset(
+                &resource_roots(&root),
+                entry.key(),
+            )
+            .map_err(|error| format!("Model = {character_id}：{error}"))?;
+            entry.insert(assets);
+        }
+    }
 
     let initial_forced_behavior = None;
     let initial_behavior_args = Vec::new();
@@ -4221,7 +4166,6 @@ fn spawn_mission_npc(
     let initial_attack_target_remaining = 0;
     let mut initial_patrol = crate::plugins::ai_plugin::NpcPatrol::default();
     initial_patrol.schedule_initial_think(definition.think as f32, id);
-    let character_id = definition.model.clamp(0, 19) as u8;
     let primary = crate::plugins::character_plugin::weapon_slot_from_item(definition.weapon)
         .unwrap_or((0, 0));
     let secondary = crate::plugins::character_plugin::weapon_slot_from_item(definition.weapon2)
@@ -4317,6 +4261,7 @@ fn spawn_mission_npc(
         host.sync_actor_position(id, position.to_array());
         host.sync_fighter(id, definition.hp as f64, definition.hp as f64, team as f64);
     }
+    Ok(())
 }
 
 fn sync_mission_spatial(

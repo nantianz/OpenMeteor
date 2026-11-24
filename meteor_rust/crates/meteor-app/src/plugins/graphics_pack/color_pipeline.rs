@@ -6,6 +6,7 @@ use crate::{
 use bevy::{
     camera::Hdr,
     core_pipeline::tonemapping::Tonemapping,
+    post_process::bloom::{Bloom, BloomCompositeMode, BloomPrefilter},
     prelude::*,
     render::{renderer::RenderAdapterInfo, settings::Backends, view::ColorGrading},
 };
@@ -26,6 +27,28 @@ pub(super) fn test_marker() -> UnifiedColorPipeline {
     }
 }
 
+fn bloom_component(profile: &super::config::Bloom) -> Option<Bloom> {
+    (profile.intensity > 0.0).then(|| Bloom {
+        intensity: profile.intensity,
+        low_frequency_boost: profile.low_frequency_boost,
+        low_frequency_boost_curvature: 0.95,
+        high_pass_frequency: 1.0,
+        prefilter: BloomPrefilter {
+            threshold: profile.threshold,
+            threshold_softness: profile.threshold_softness,
+        },
+        composite_mode: BloomCompositeMode::Additive,
+        ..Bloom::default()
+    })
+}
+
+fn same_bloom(a: &Bloom, b: &Bloom) -> bool {
+    a.intensity == b.intensity
+        && a.low_frequency_boost == b.low_frequency_boost
+        && a.prefilter.threshold == b.prefilter.threshold
+        && a.prefilter.threshold_softness == b.prefilter.threshold_softness
+}
+
 pub(super) fn install(app: &mut App) {
     app.add_systems(Update, sync.after(super::sky::update_cycle));
 }
@@ -43,6 +66,7 @@ fn sync(
             Option<&Hdr>,
             Option<&Tonemapping>,
             Option<&ColorGrading>,
+            Option<&Bloom>,
             Option<&UnifiedColorPipeline>,
         ),
         With<GameplayCamera>,
@@ -75,13 +99,23 @@ fn sync(
                 .find_map(|sky| sky.0)
                 .map_or(0.0, |light| light.night_factor);
             pipeline.filter(|profile| profile.enabled).map(|profile| {
-                profile.exposure_ev + profile.night_exposure_ev * night + exposure.log2()
+                (
+                    profile.exposure_ev + profile.night_exposure_ev * night + exposure.log2(),
+                    profile.bloom.as_ref().and_then(bloom_component),
+                    match profile.tonemapping {
+                        super::config::ToneMapper::Aces => Tonemapping::AcesFitted,
+                        super::config::ToneMapper::None => Tonemapping::None,
+                        super::config::ToneMapper::Reinhard => Tonemapping::Reinhard,
+                        super::config::ToneMapper::TonyMcMapface => Tonemapping::TonyMcMapface,
+                    },
+                )
             })
         })
         .filter(|_| active && supported);
-    for (entity, hdr, tone, grading, managed) in &cameras {
+    for (entity, hdr, tone, grading, bloom, managed) in &cameras {
         let mut entity = commands.entity(entity);
-        if let Some(exposure) = selection {
+        if let Some((exposure, wanted_bloom, wanted_tone)) = &selection {
+            let exposure = *exposure;
             if managed.is_none() {
                 entity.insert(UnifiedColorPipeline {
                     previous_hdr: hdr.is_some(),
@@ -92,8 +126,20 @@ fn sync(
             if hdr.is_none() {
                 entity.insert(Hdr);
             }
-            if tone != Some(&Tonemapping::AcesFitted) {
-                entity.insert(Tonemapping::AcesFitted);
+
+            match (wanted_bloom, bloom) {
+                (Some(wanted), current)
+                    if current.is_none_or(|current| !same_bloom(current, wanted)) =>
+                {
+                    entity.insert(wanted.clone());
+                }
+                (None, Some(_)) => {
+                    entity.remove::<Bloom>();
+                }
+                _ => {}
+            }
+            if tone != Some(wanted_tone) {
+                entity.insert(*wanted_tone);
             }
             if managed.is_none() || grading.is_none_or(|value| value.global.exposure != exposure) {
                 let mut value = ColorGrading::default();
@@ -101,6 +147,9 @@ fn sync(
                 entity.insert(value);
             }
         } else if let Some(managed) = managed {
+            if bloom.is_some() {
+                entity.remove::<Bloom>();
+            }
             if !managed.previous_hdr {
                 entity.remove::<Hdr>();
             }
@@ -230,6 +279,47 @@ mod tests {
         assert!(
             app.world().get::<Hdr>(camera).is_none(),
             "unsupported backend must fall back"
+        );
+    }
+
+    #[test]
+    fn bloom_and_tone_mapper_follow_the_pack_and_are_removed_on_exit() {
+        let packs = super::super::load_with_reader(
+            br#"{"schema_version":1,"enabled":true,"packs":["p.json"]}"#,
+            |_| Ok(br#"{"schema_version":1,"id":"fx","scenes":[{"stage":"*","color_pipeline":{"enabled":true,"tonemapping":"none","bloom":{"intensity":0.3,"threshold":1.2,"threshold_softness":0.5}}}]}"#.to_vec()),
+        ).unwrap();
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, StatesPlugin))
+            .insert_state(AppState::Playing)
+            .insert_resource(packs)
+            .insert_resource(LoadedStageInfo {
+                stage_id: "sn03".into(),
+                ..default()
+            })
+            .insert_resource(adapter(wgpu::Backend::Metal))
+            .add_systems(Update, sync);
+        let camera = app
+            .world_mut()
+            .spawn((GameplayCamera, Tonemapping::AcesFitted))
+            .id();
+        app.update();
+        let bloom = app.world().get::<Bloom>(camera).expect("bloom inserted");
+        assert_eq!(bloom.intensity, 0.3);
+        assert_eq!(bloom.prefilter.threshold, 1.2);
+        assert_eq!(bloom.composite_mode, BloomCompositeMode::Additive);
+        assert_eq!(
+            app.world().get::<Tonemapping>(camera),
+            Some(&Tonemapping::None)
+        );
+        app.insert_state(AppState::Result);
+        app.update();
+        assert!(
+            app.world().get::<Bloom>(camera).is_none(),
+            "bloom leaves with the pipeline"
+        );
+        assert_eq!(
+            app.world().get::<Tonemapping>(camera),
+            Some(&Tonemapping::AcesFitted)
         );
     }
 }

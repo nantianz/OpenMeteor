@@ -3,7 +3,7 @@
 use meteor_asset::original_directory::OriginalDirectory;
 use std::{
     fs,
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicUsize, Ordering},
 };
@@ -52,7 +52,7 @@ impl Fixture {
             }
         }
         for stage in 1..=22 {
-            for ext in ["GMB", "DES", "PST"] {
+            for ext in ["GMB", "DES", "COB", "PST"] {
                 fixture.write(
                     &format!("SN{stage:02}/SN{stage:02}.{ext}"),
                     b"stage\r\n\x80",
@@ -148,6 +148,24 @@ fn direct_source_preserves_bytes_aliases_masks_and_patch_overrides_without_packs
         meteor_asset::runtime_assets::stock_stage_checksums().unwrap()["sn01"],
         679
     );
+
+    assert!(meteor_asset::runtime_assets::read_entry("texture/ptexture/absent.tga").is_none());
+    assert!(meteor_asset::runtime_assets::take_original_read_error().is_none());
+    let pak = fixture.0.join("PTexture.PAK");
+    let mut bytes = fs::read(&pak).unwrap();
+    let offset = {
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+        let entry = archive.by_index_raw(0).unwrap();
+        (entry.data_start() + entry.compressed_size() / 2) as usize
+    };
+    bytes[offset] ^= 1;
+    fs::write(pak, bytes).unwrap();
+    assert!(meteor_asset::runtime_assets::read_entry("texture/ptexture/other.tga").is_none());
+    let error = meteor_asset::runtime_assets::take_original_read_error().unwrap();
+    assert!(
+        error.contains("ptexture.pak") && error.contains("texture/ptexture/other.tga"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -182,6 +200,37 @@ fn missing_and_corrupt_resources_report_the_source_path() {
 }
 
 #[test]
+fn incomplete_original_installation_discovers_only_complete_maps_and_allows_zero_maps() {
+    let fixture = Fixture::complete();
+    for id in 2..=22 {
+        fs::remove_dir_all(fixture.0.join(format!("SN{id:02}"))).unwrap();
+    }
+    fs::remove_file(fixture.0.join("SN01/SN01.PST")).unwrap();
+    for ext in ["gmb", "des", "cob", "pst"] {
+        fixture.write(&format!("SN24/SN24.{ext}"), b"custom stage");
+    }
+    fixture.write("LEVEL/SN24_.PST", b"OnStart(){}");
+    let source = OriginalDirectory::open(&fixture.0, &[]).unwrap();
+    source.verify_all().unwrap();
+    assert_eq!(source.stage_ids(), ["sn24"]);
+    assert!(source.has_mission("sn24"));
+    assert!(!source.has_mission("sn01"));
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&source.read("compatibility/stock.json").unwrap()).unwrap();
+    assert_eq!(metadata["stages"][0]["stage"], "sn24");
+    assert_eq!(metadata["stages"].as_array().unwrap().len(), 1);
+
+    fs::remove_file(fixture.0.join("SN24/SN24.cob")).unwrap();
+    let source = OriginalDirectory::open(&fixture.0, &[]).unwrap();
+    source.verify_all().unwrap();
+    assert!(source.stage_ids().is_empty());
+    assert!(!source.has_mission("sn24"));
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&source.read("compatibility/stock.json").unwrap()).unwrap();
+    assert_eq!(metadata["stages"], serde_json::json!([]));
+}
+
+#[test]
 fn reopening_recomputes_metadata_from_the_selected_installation() {
     let fixture = Fixture::complete();
     let first = OriginalDirectory::open(&fixture.0, &[])
@@ -198,6 +247,46 @@ fn reopening_recomputes_metadata_from_the_selected_installation() {
         fs::read(fixture.0.join("PMODEL/P0.POS")).unwrap(),
         b"different\n"
     );
+}
+
+#[test]
+fn extended_original_stage_reads_a_pak_larger_than_the_entry_cache() {
+    let fixture = Fixture::complete();
+    for ext in ["gmb", "des", "cob", "pst"] {
+        fixture.write(&format!("SN24/SN24.{ext}"), b"custom stage");
+    }
+    let path = fixture.0.join("SN24.PAK");
+    let mut zip = zip::ZipWriter::new(fs::File::create(&path).unwrap());
+    zip.start_file(
+        "large.bin",
+        zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .large_file(true),
+    )
+    .unwrap();
+    let size = 129 * 1024 * 1024;
+    std::io::copy(
+        &mut std::io::Read::take(std::io::repeat(0x5a), size),
+        &mut zip,
+    )
+    .unwrap();
+    zip.start_file(
+        "unused.bin",
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored),
+    )
+    .unwrap();
+    std::io::copy(&mut std::io::repeat(0x2a).take(384 * 1024 * 1024), &mut zip).unwrap();
+    zip.finish().unwrap();
+    assert!(fs::metadata(path).unwrap().len() > 512 * 1024 * 1024);
+
+    let source = OriginalDirectory::open(&fixture.0, &[]).unwrap();
+    assert!(source.stage_ids().contains(&"sn24".into()));
+    let data = source.read("texture/sn24/large.bin").unwrap();
+    assert_eq!(data.len() as u64, size);
+    assert_eq!(data.first(), Some(&0x5a));
+    assert_eq!(data.last(), Some(&0x5a));
+    drop(data);
+    source.verify_all().unwrap();
 }
 
 #[test]

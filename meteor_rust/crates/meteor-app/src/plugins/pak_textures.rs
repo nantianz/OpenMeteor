@@ -148,7 +148,7 @@ pub fn pak_chain(root: &std::path::Path, scope: &str) -> Vec<PakArchive> {
     ]);
     names
         .into_iter()
-        .filter_map(|name| crate::resource_io::read(root.join(&name)).ok())
+        .filter_map(|name| crate::resource_io::read_legacy_pak(root.join(name)))
         .filter_map(|bytes| PakArchive::from_bytes(&bytes).ok())
         .collect()
 }

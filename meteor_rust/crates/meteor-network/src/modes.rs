@@ -30,6 +30,112 @@ pub fn original_stage_supports_mode(stage_id: &str, mode: &str) -> bool {
     mode_rule_id(mode).is_some_and(|rule| original_stage_supports_rule(stage_id, rule))
 }
 
+pub fn is_stage_id(stage: &str) -> bool {
+    let bytes = stage.as_bytes();
+    bytes.len() == 4
+        && bytes.starts_with(b"sn")
+        && bytes[2..].iter().all(u8::is_ascii_digit)
+        && &bytes[2..] != b"00"
+}
+
+pub fn custom_stage_supports_rule(stage: &str, rule: i32) -> bool {
+    is_stage_id(stage)
+        && !meteor_scene::stage_registry::is_official_stage_id(stage)
+        && matches!(rule, 1 | 4 | 5)
+}
+
+pub(crate) fn stage_rule_masks(
+    bytes: &[u8],
+) -> Result<[Option<u32>; 100], meteor_asset::res::MeteorResError> {
+    let mut masks = [None; 100];
+    for record in meteor_asset::res::parse_meteor_res(bytes)?.records {
+        if record.category == 5 {
+            if let (Some(slot), Some(mask)) = (
+                masks.get_mut(record.id as usize),
+                record.prop_seed_value(11),
+            ) {
+                *slot = Some(mask as u32);
+            }
+        }
+    }
+    Ok(masks)
+}
+
+pub fn runtime_stage_rule_mask(stage: &str) -> Option<u32> {
+    static MASKS: std::sync::OnceLock<[Option<u32>; 100]> = std::sync::OnceLock::new();
+    let index: usize = stage.strip_prefix("sn")?.parse().ok()?;
+    if let Some(masks) = MASKS.get() {
+        return *masks.get(index)?;
+    }
+    let bytes = meteor_asset::runtime_assets::read_entry("common/meteor.res")?;
+    let masks = stage_rule_masks(&bytes).ok()?;
+    *MASKS.get_or_init(|| masks).get(index)?
+}
+
+pub fn stage_supports_room_rule(stage: &str, rule: i32, mask: Option<u32>) -> bool {
+    is_stage_id(stage)
+        && (1..=5).contains(&rule)
+        && mask.map_or_else(
+            || original_stage_supports_rule(stage, rule) || custom_stage_supports_rule(stage, rule),
+            |mask| mask & (1 << (rule - 1)) != 0,
+        )
+}
+
+pub fn validate_siege_assets(
+    stage: &str,
+    mut read: impl FnMut(&str) -> Option<Vec<u8>>,
+) -> Result<(), String> {
+    use meteor_scene::pst_runtime::{parse_program, tokenize, Token};
+    let decode = |bytes: Vec<u8>| {
+        String::from_utf8(bytes)
+            .unwrap_or_else(|error| encoding_rs::GB18030.decode(error.as_bytes()).0.into_owned())
+    };
+    let des_path = format!("{stage}/{stage}.des");
+    let des = read(&des_path).ok_or_else(|| format!("护城地图缺少 {des_path}"))?;
+    let desc = meteor_asset::des::parse_stage_description(&decode(des));
+    for goal in ["GoalBlue", "GoalRed"] {
+        if !desc
+            .scene_objects
+            .iter()
+            .chain(&desc.dummies)
+            .any(|object| {
+                object.admits_ticket(1 << 3)
+                    && object
+                        .effect
+                        .as_deref()
+                        .is_some_and(|effect| effect.eq_ignore_ascii_case(goal))
+            })
+        {
+            return Err(format!("护城地图 {des_path} 缺少可用机关 {goal}"));
+        }
+    }
+    let pst_path = format!("{stage}/{stage}.pst");
+    let pst = read(&pst_path).ok_or_else(|| format!("护城地图缺少 {pst_path}"))?;
+    let (script, _, missing) = meteor_scene::scene_script_runtime::expand_scene_pst_includes(
+        &pst_path,
+        &decode(pst),
+        &mut read,
+    );
+    if !missing.is_empty() {
+        return Err(format!(
+            "护城脚本 {pst_path} 缺少引用文件 {}",
+            missing.join(", ")
+        ));
+    }
+    parse_program(&script).map_err(|error| format!("护城脚本 {pst_path} 无法解析：{error}"))?;
+    if !tokenize(&script).windows(3).any(|tokens| {
+        matches!(tokens,
+            [Token::Ident(name), Token::Op(open), Token::String(command)]
+                if name == "GameCallBack" && open == "(" && command == "end"
+        )
+    }) {
+        return Err(format!(
+            "护城脚本 {pst_path} 缺少 GameCallBack(\"end\", team)"
+        ));
+    }
+    Ok(())
+}
+
 pub const SIEGE_STAGE_IDS: &[&str] = &["sn04", "sn11", "sn12"];
 
 pub fn mode_label(mode: &str) -> &'static str {

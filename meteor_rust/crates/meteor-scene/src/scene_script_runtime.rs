@@ -756,6 +756,91 @@ impl PstHost for SceneHost {
     }
 }
 
+pub fn expand_scene_pst_includes(
+    root_path: &str,
+    root_text: &str,
+    read: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
+) -> (String, Vec<String>, Vec<String>) {
+    fn include_path(parent: &str, include: &str) -> Option<String> {
+        let mut parts = parent
+            .rsplit_once('/')
+            .map(|(dir, _)| dir.split('/').map(str::to_owned).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let normalized = include.replace('\\', "/");
+        for segment in normalized.split('/') {
+            match segment {
+                "" | "." => {}
+                ".." => {
+                    parts.pop()?;
+                }
+                value => parts.push(value.to_owned()),
+            }
+        }
+        (!parts.is_empty()).then(|| parts.join("/"))
+    }
+
+    fn expand(
+        path: &str,
+        source: &str,
+        read: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
+        seen: &mut std::collections::HashSet<String>,
+        loaded: &mut Vec<String>,
+        missing: &mut Vec<String>,
+    ) -> String {
+        if !seen.insert(path.to_ascii_lowercase()) {
+            return String::new();
+        }
+        loaded.push(path.to_owned());
+        let mut merged = String::new();
+        for line in source.lines() {
+            let directive = line.trim().strip_prefix("#include").map(str::trim);
+            if let Some(include) = directive
+                .and_then(|value| value.strip_prefix('"'))
+                .and_then(|value| value.split_once('"').map(|(name, _)| name))
+            {
+                if let Some(path) = include_path(path, include) {
+                    if seen.contains(&path.to_ascii_lowercase()) {
+                        continue;
+                    }
+                    if let Some(bytes) = read(&path) {
+                        merged.push_str(&expand(
+                            &path,
+                            &std::str::from_utf8(&bytes)
+                                .map(std::borrow::Cow::Borrowed)
+                                .unwrap_or_else(|_| encoding_rs::GB18030.decode(&bytes).0),
+                            read,
+                            seen,
+                            loaded,
+                            missing,
+                        ));
+                    } else {
+                        missing.push(path);
+                    }
+                } else {
+                    missing.push(include.to_owned());
+                }
+            } else {
+                merged.push_str(line);
+                merged.push('\n');
+            }
+        }
+        merged
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    let mut loaded = Vec::new();
+    let mut missing = Vec::new();
+    let merged = expand(
+        root_path,
+        root_text,
+        read,
+        &mut seen,
+        &mut loaded,
+        &mut missing,
+    );
+    (merged, loaded, missing)
+}
+
 pub struct SceneScriptRuntime {
     runtime: Runtime<SceneHost>,
     update_accumulator: f64,

@@ -4,6 +4,7 @@ mod concealment;
 pub(crate) use collision_sample::refresh_collision_fixture;
 pub(crate) use collision_sample::{capture_collision_transforms, SampledCollisionTransform};
 mod hit_sway;
+pub(crate) mod preview;
 mod remake;
 
 use crate::components::fighter::{EntryBlend, PoseRuntime};
@@ -570,6 +571,7 @@ impl Plugin for CharacterPlugin {
     fn build(&self, app: &mut App) {
         hit_sway::install(app);
         remake::install(app);
+        preview::install(app);
         let actor_schedule = super::fighter_frame::schedule(app);
         let serial = super::fighter_frame::installed(app);
         configure_placement_model_sync(app);
@@ -1126,31 +1128,38 @@ pub(crate) fn load_character_asset(
     roots: &[PathBuf],
     character_id: &str,
 ) -> Option<CharacterAssets> {
-    let skin_text = read_first(roots, &format!("pmodel/{character_id}.skc"))
-        .map(|b| crate::text_codec::decode_text(&b))?;
-    let bnc_text = read_first(
-        roots,
-        &format!("pmodel/P{}.bnc", character_id[1..].to_uppercase()),
-    )
-    .map(|b| crate::text_codec::decode_text(&b))?;
-    let pos_text = read_first(
-        roots,
-        &format!("pmodel/P{}.POS", character_id[1..].to_uppercase()),
-    )
-    .map(|b| crate::text_codec::decode_text(&b))?;
-    let amb_bytes = read_first(roots, &format!("pmodel/{character_id}.amb"))?;
+    try_load_character_asset(roots, character_id)
+        .inspect_err(|error| warn!("{error}"))
+        .ok()
+}
+
+pub(super) fn try_load_character_asset(
+    roots: &[PathBuf],
+    character_id: &str,
+) -> Result<CharacterAssets, String> {
+    let required = |suffix: &str| {
+        let path = format!("pmodel/{character_id}{suffix}");
+        read_first(roots, &path).ok_or_else(|| format!("无法读取人物资源 {path}"))
+    };
+    let skin_text = crate::text_codec::decode_text(&required(".skc")?);
+    let bnc_text = crate::text_codec::decode_text(&required(".bnc")?);
+    let pos_text = crate::text_codec::decode_text(&required(".POS")?);
+    let amb_bytes = required(".amb")?;
 
     let act = read_first(roots, "Common/character.act")
         .map(|bytes| crate::text_codec::decode_text(&bytes))
         .map(|text| meteor_asset::act::parse_character_act(&text))
         .unwrap_or_default();
 
-    let ptexture =
-        read_first(roots, "ptexture.pak").and_then(|bytes| PakArchive::from_bytes(&bytes).ok());
-    let ctexture =
-        read_first(roots, "ctexture.pak").and_then(|bytes| PakArchive::from_bytes(&bytes).ok());
-    let texture_patch =
-        read_first(roots, "TexturePatch.pak").and_then(|bytes| PakArchive::from_bytes(&bytes).ok());
+    let legacy_pak = |name| {
+        roots
+            .iter()
+            .find_map(|root| crate::resource_io::read_legacy_pak(root.join(name)))
+            .and_then(|bytes| PakArchive::from_bytes(&bytes).ok())
+    };
+    let ptexture = legacy_pak("ptexture.pak");
+    let ctexture = legacy_pak("ctexture.pak");
+    let texture_patch = legacy_pak("TexturePatch.pak");
     match &ptexture {
         Some(pak) => info!("ptexture.pak loaded: {} entries", pak.len()),
         None if meteor_asset::runtime_assets::runtime_texture_source_active() => {
@@ -1160,8 +1169,7 @@ pub(crate) fn load_character_asset(
     }
     let skin = parse_skin(&skin_text);
 
-    let collision_skin = read_first(roots, &format!("pmodel/{character_id}_300.skc"))
-        .map(|bytes| parse_skin(&crate::text_codec::decode_text(&bytes)))?;
+    let collision_skin = parse_skin(&crate::text_codec::decode_text(&required("_300.skc")?));
     let bone_data = parse_bones(&bnc_text);
     let skeleton = Skeleton::from_bone_data(&bone_data);
 
@@ -1171,13 +1179,8 @@ pub(crate) fn load_character_asset(
         .enumerate()
         .map(|(i, d)| (d.name.clone(), i))
         .collect();
-    let amb = match parse_amb(&amb_bytes) {
-        Ok(amb) => amb,
-        Err(error) => {
-            warn!("unable to decode {character_id}.amb: {error}");
-            return None;
-        }
-    };
+    let amb = parse_amb(&amb_bytes)
+        .map_err(|error| format!("无法解码人物资源 pmodel/{character_id}.amb: {error}"))?;
     let pose_frames: std::collections::BTreeMap<u16, (u32, u32)> = parse_poses(&pos_text)
         .into_iter()
         .map(|p| (p.id, (p.start, p.end)))
@@ -1215,7 +1218,7 @@ pub(crate) fn load_character_asset(
         meteor_combat::hitbox::build_bone_local_bounds(&positions, &influences)
     };
     let visual = remake::load(roots, character_id, &skeleton);
-    Some(CharacterAssets {
+    Ok(CharacterAssets {
         visual,
         amb,
         skin,

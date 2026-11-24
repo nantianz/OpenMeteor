@@ -1,6 +1,8 @@
 {
   "schema_version": 1,
   "id": "openmeteor-starter",
+  "name": "基础增强",
+  "description": "全关卡环境光、风场、角色衣物和接地阴影，四方阵与一线天的草地。",
   "cloth_meshes": {
     "red_cape": "models/red-cape.obj",
     "p0_split_coat_sim": "models/p0-split-coat-sim.obj",

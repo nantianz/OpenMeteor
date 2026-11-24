@@ -463,6 +463,8 @@ fn update(
         With<Fighter>,
     >,
     mut candidates: Local<Vec<(f32, Entity, usize, bool)>>,
+    mut chosen: Local<Vec<bool>>,
+    mut order: Local<Vec<usize>>,
     mut upload: ResMut<BendUpload>,
     mut combat: ResMut<GrassCombat>,
     collider: Option<Res<crate::plugins::stage_collider::StageCollider>>,
@@ -531,15 +533,25 @@ fn update(
         drawn_tiles * 3 / 4
     };
     let coverage_slots = drawn_tiles - foreground;
-    let coverage_candidates = candidates.len() - foreground;
-    let selected = |i: usize| {
-        if i < foreground {
-            return true;
+
+    chosen.clear();
+    chosen.resize(candidates.len(), false);
+    chosen[..foreground].fill(true);
+    if coverage_slots > 0 {
+        order.clear();
+        order.extend(foreground..candidates.len());
+        let key = |i: usize| {
+            let h = (candidates[i].1.to_bits()).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            (h ^ (h >> 29)).wrapping_mul(0xBF58_476D_1CE4_E5B9)
+        };
+        if coverage_slots < order.len() {
+            order.select_nth_unstable_by_key(coverage_slots, |&i| key(i));
         }
-        let rank = i - foreground;
-        rank * coverage_slots / coverage_candidates
-            != (rank + 1) * coverage_slots / coverage_candidates
-    };
+        for &i in &order[..coverage_slots.min(order.len())] {
+            chosen[i] = true;
+        }
+    }
+    let selected = |i: usize| chosen[i];
     budget -= candidates
         .iter()
         .enumerate()

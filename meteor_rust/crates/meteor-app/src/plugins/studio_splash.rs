@@ -306,6 +306,9 @@ fn animate(
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))] water: Option<
         Res<super::stage_material::water::startup::WaterStartup>,
     >,
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))] previews: Option<
+        Res<super::room_map_preview::StartupProgress>,
+    >,
     graphics: Option<Res<super::graphics_pack::GraphicsPacks>>,
     mut next: ResMut<NextState<AppState>>,
     mut logos: Query<
@@ -374,6 +377,11 @@ fn animate(
         color.0 = Color::srgba(0.85, 0.80, 0.69, alpha);
     }
     if t >= MENU_START && *state.get() == AppState::StudioSplash {
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        if previews.is_some_and(|progress| !progress.complete()) {
+            next.set(AppState::MapPreviewLoading);
+            return;
+        }
         next.set(AppState::Menu);
     }
     for (entity, mut color) in &mut roots {

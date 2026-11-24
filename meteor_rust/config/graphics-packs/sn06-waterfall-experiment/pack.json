@@ -1,6 +1,8 @@
 {
   "schema_version": 1,
   "id": "sn06-waterfall-experiment",
+  "name": "四方阵 · 瀑布光照（实验）",
+  "description": "瀑布叠加层随太阳与月光变化。",
   "resources": {
     "waterfall-flow": "textures/waterfall-flow-v1.png"
   },

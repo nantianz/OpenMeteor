@@ -1,6 +1,8 @@
 {
   "schema_version": 2,
   "id": "sn06-moss-valley",
+  "name": "四方阵 · 青苔庭院",
+  "description": "四方阵的天空、风场、雾气、地表材质、草地与替换模型。",
   "resources": {
     "cliff-base": "textures/cliff-base.png",
     "cliff-normal": "textures/cliff-normal.png",

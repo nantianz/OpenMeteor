@@ -1,6 +1,8 @@
 {
   "schema_version": 1,
   "id": "sn04-interactive-snow",
+  "name": "炽雪城 · 互动雪地",
+  "description": "炽雪城地面积雪，脚印与打斗痕迹会慢慢恢复。",
   "scenes": [
     {
       "stage": "sn04",

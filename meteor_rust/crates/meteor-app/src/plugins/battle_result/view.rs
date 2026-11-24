@@ -268,8 +268,9 @@ pub(super) fn spawn_surface(
         },
     );
     commands.entity(ledger).insert((
-        BackgroundColor(theme::BACKGROUND.with_alpha(0.86)),
-        BorderColor::all(theme::METAL.with_alpha(0.45)),
+        theme::OrnateFrame,
+        BackgroundColor(theme::BACKGROUND.with_alpha(0.88)),
+        BorderColor::all(theme::METAL.with_alpha(0.55)),
     ));
     let header = node(
         commands,

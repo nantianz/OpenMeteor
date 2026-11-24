@@ -2,7 +2,7 @@
 
 use crate::app_state::LaunchRequest;
 use crate::pack_manifest::{
-    match_pack_roots, parse_pack_index, resolve_pack_order, PackDescriptor,
+    installed_match_pack_roots, parse_pack_index, resolve_pack_order, PackDescriptor,
 };
 use bevy::prelude::*;
 use sha2::{Digest, Sha256};
@@ -155,16 +155,17 @@ pub(crate) fn load_match_assets(
     mut loader: ResMut<AndroidAssetLoader>,
 ) {
     let key = match_key(&request);
+    let roots = installed_match_pack_roots(&request);
     if loader.active_key.as_deref() == Some(key.as_str())
         && loader.error.is_none()
         && crate::pack_manifest::match_packs_resident(
-            &request.stage_id,
+            &roots,
             meteor_asset::runtime_assets::contains_pack,
         )
     {
         return;
     }
-    let result = load_root_packs(&match_pack_roots(&request.stage_id), &mut loader);
+    let result = load_root_packs(&roots, &mut loader);
     if result.is_ok() {
         loader
             .loaded

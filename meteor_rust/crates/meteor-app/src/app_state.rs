@@ -3,6 +3,8 @@ use bevy::prelude::*;
 #[derive(States, Debug, Clone, Copy, Default, Eq, PartialEq, Hash)]
 pub enum AppState {
     StudioSplash,
+
+    MapPreviewLoading,
     #[default]
     Menu,
     Loading,
@@ -124,6 +126,9 @@ impl Default for RoomState {
 pub const MAX_ROOM_NPC: usize = 3;
 
 #[derive(Resource, Debug, Clone)]
+pub struct StartupSettings(pub Settings);
+
+#[derive(Resource, Debug, Clone)]
 pub struct Settings {
     pub window_resolution: u8,
     pub fullscreen: bool,
@@ -146,6 +151,12 @@ pub struct Settings {
     pub volumetric_fog: bool,
     pub sky_enhance: bool,
     pub grass_enhance: bool,
+
+    pub effect_enhance: bool,
+
+    pub graphics_packs: Option<bool>,
+
+    pub graphics_pack_choices: std::collections::BTreeMap<String, bool>,
     pub target_fps: u32,
     pub brightness: f32,
     pub contrast: f32,
@@ -207,6 +218,9 @@ impl Default for Settings {
             volumetric_fog: true,
             sky_enhance: true,
             grass_enhance: true,
+            effect_enhance: true,
+            graphics_packs: None,
+            graphics_pack_choices: Default::default(),
             target_fps: 0,
             brightness: 94.0,
             contrast: 94.0,
@@ -797,6 +811,7 @@ new_character_models={}
 volumetric_fog={}
 sky_enhance={}
 grass_enhance={}
+effect_enhance={}
 target_fps={}
 brightness={}
 contrast={}
@@ -834,6 +849,7 @@ touch_controls={}
         u8::from(settings.volumetric_fog),
         u8::from(settings.sky_enhance),
         u8::from(settings.grass_enhance),
+        u8::from(settings.effect_enhance),
         settings.target_fps,
         settings.brightness,
         settings.contrast,
@@ -860,6 +876,14 @@ touch_controls={}
         settings.ui_scale,
         settings.touch_controls,
     );
+    if let Some(enabled) = settings.graphics_packs {
+        text.push_str(&format!("graphics_packs={}\n", u8::from(enabled)));
+    }
+    for (id, enabled) in &settings.graphics_pack_choices {
+        if crate::plugins::graphics_pack::config::valid_pack_id(id) {
+            text.push_str(&format!("graphics_pack.{id}={}\n", u8::from(*enabled)));
+        }
+    }
     text.push_str(&format!(
         "graphics_adapter={}\ngraphics_backend={}\n",
         settings.graphics_adapter.replace(['\r', '\n'], ""),
@@ -979,6 +1003,8 @@ fn parse_settings(text: &str) -> (Settings, Keymap) {
             "volumetric_fog" => settings.volumetric_fog = parse_bool(value),
             "sky_enhance" => settings.sky_enhance = parse_bool(value),
             "grass_enhance" => settings.grass_enhance = parse_bool(value),
+            "effect_enhance" => settings.effect_enhance = parse_bool(value),
+            "graphics_packs" => settings.graphics_packs = Some(parse_bool(value)),
             "target_fps" => settings.target_fps = value.parse().unwrap_or(settings.target_fps),
             "brightness" => settings.brightness = value.parse().unwrap_or(settings.brightness),
             "contrast" => settings.contrast = value.parse().unwrap_or(settings.contrast),
@@ -1062,6 +1088,14 @@ fn parse_settings(text: &str) -> (Settings, Keymap) {
             "radar" => apply_binding_value(&mut keymap, KeyField::Radar, value),
             "debug_panel" => apply_binding_value(&mut keymap, KeyField::DebugPanel, value),
             "dodge" => apply_binding_value(&mut keymap, KeyField::Dodge, value),
+            other if other.starts_with("graphics_pack.") => {
+                let id = &other["graphics_pack.".len()..];
+                if crate::plugins::graphics_pack::config::valid_pack_id(id) {
+                    settings
+                        .graphics_pack_choices
+                        .insert(id.to_owned(), parse_bool(value));
+                }
+            }
             other => {
                 if let Some(index) = KeyField::STOCK_CHAT_ACTIONS
                     .iter()
@@ -1085,6 +1119,16 @@ fn parse_settings(text: &str) -> (Settings, Keymap) {
         }
     }
     (settings, keymap)
+}
+
+#[cfg(test)]
+pub(crate) fn parse_settings_for_test(text: &str) -> (Settings, Keymap) {
+    parse_settings(text)
+}
+
+#[cfg(test)]
+pub(crate) fn settings_text_for_test(settings: &Settings) -> String {
+    settings_text(settings, &Keymap::default())
 }
 
 pub fn reset_settings_defaults(settings: &mut Settings, keymap: &mut Keymap) {
@@ -1129,6 +1173,7 @@ pub enum SettingsBoolField {
     VolumetricFog,
     SkyEnhance,
     GrassEnhance,
+    EffectEnhance,
     DynamicShadows,
     SceneNormalMaps,
     HdScene,

@@ -12,6 +12,14 @@ pub(crate) fn read_to_string(path: impl AsRef<std::path::Path>) -> std::io::Resu
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
+pub(crate) fn read_legacy_pak(path: impl AsRef<std::path::Path>) -> Option<Vec<u8>> {
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    if meteor_asset::runtime_assets::original_directory_active() {
+        return None;
+    }
+    read(path).ok()
+}
+
 pub(crate) fn required(name: &str) -> Vec<u8> {
     if let Ok(bytes) = read(name) {
         return bytes;

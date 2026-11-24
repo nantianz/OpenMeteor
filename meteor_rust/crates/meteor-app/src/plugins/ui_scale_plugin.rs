@@ -10,15 +10,25 @@ pub const UI_REFERENCE_HEIGHT: f32 = 720.0;
 
 pub const UI_SCALE_MIN: f32 = 0.55;
 
+pub const UI_GROW_WIDTH: f32 = 1920.0;
+pub const UI_GROW_HEIGHT: f32 = 1080.0;
+
+pub const UI_SCALE_MAX: f32 = 2.0;
+
 pub fn adaptive_ui_scale(width: f32, height: f32, manual: f32, native_mobile: bool) -> f32 {
     if manual > 0.0 {
         manual.clamp(0.5, 1.5)
     } else if native_mobile {
         1.0
     } else {
-        (width / UI_REFERENCE_WIDTH)
-            .min(height / UI_REFERENCE_HEIGHT)
-            .clamp(UI_SCALE_MIN, 1.0)
+        let fit = (width / UI_REFERENCE_WIDTH).min(height / UI_REFERENCE_HEIGHT);
+        if fit < 1.0 {
+            fit.max(UI_SCALE_MIN)
+        } else {
+            (width / UI_GROW_WIDTH)
+                .min(height / UI_GROW_HEIGHT)
+                .clamp(1.0, UI_SCALE_MAX)
+        }
     }
 }
 
@@ -139,10 +149,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn auto_scale_shrinks_but_never_grows() {
+    fn auto_scale_shrinks_small_windows_and_grows_past_1080p() {
         assert_eq!(adaptive_ui_scale(1280.0, 720.0, 0.0, false), 1.0);
 
-        assert_eq!(adaptive_ui_scale(2560.0, 1440.0, 0.0, false), 1.0);
+        assert_eq!(adaptive_ui_scale(1600.0, 900.0, 0.0, false), 1.0);
+        assert_eq!(adaptive_ui_scale(1920.0, 1080.0, 0.0, false), 1.0);
+
+        assert!((adaptive_ui_scale(2560.0, 1440.0, 0.0, false) - 1440.0 / 1080.0).abs() < 1e-6);
+        assert_eq!(adaptive_ui_scale(3840.0, 2160.0, 0.0, false), 2.0);
+        assert!((adaptive_ui_scale(3440.0, 1440.0, 0.0, false) - 1440.0 / 1080.0).abs() < 1e-6);
+        assert_eq!(adaptive_ui_scale(7680.0, 4320.0, 0.0, false), UI_SCALE_MAX);
 
         assert!((adaptive_ui_scale(800.0, 360.0, 0.0, false) - 0.55).abs() < 1e-6);
 

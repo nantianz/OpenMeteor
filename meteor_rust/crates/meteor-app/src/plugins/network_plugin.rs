@@ -2677,6 +2677,16 @@ fn apply_stock_discovered_room(request: &mut LaunchRequest, room: &StockDiscover
 }
 
 fn validate_stock_selection(request: &LaunchRequest) -> Result<(), String> {
+    let custom = super::stage_plugin::CustomStages {
+        stages: super::escort_assets::custom_stage_entries(),
+        ..default()
+    };
+    if !super::launcher_ui::available_room_stages(&custom)
+        .iter()
+        .any(|stage| stage.id == request.stage_id)
+    {
+        return Err("所选地图资源不可用，请重新选择地图".into());
+    }
     if !(1..=5).contains(&request.stock_rule) {
         return Err("原版规则必须是 Rule 1..5".into());
     }
@@ -2695,26 +2705,7 @@ fn validate_stock_selection(request: &LaunchRequest) -> Result<(), String> {
     if request.stock_rule != 1 && !(1..=2).contains(&request.stock_camp) {
         return Err("劫镖/护城/暗杀/死斗必须选择流星队或蝴蝶队".into());
     }
-    if meteor_scene::stage_registry::is_official_stage_id(&request.stage_id)
-        && !meteor_network::modes::original_stage_supports_rule(
-            &request.stage_id,
-            request.stock_rule,
-        )
-    {
-        return Err("原版资源不支持此规则与地图组合".into());
-    }
-    if request.stock_rule == 2 {
-        #[cfg(not(target_arch = "wasm32"))]
-        super::escort_assets::load_escort(&request.stage_id)?;
-        #[cfg(target_arch = "wasm32")]
-        if !meteor_network::modes::is_escort_stage(&request.stage_id) {
-            return Err("公网劫镖支持 sn02、sn03".into());
-        }
-    }
-    if request.stock_rule == 3 && !matches!(request.stage_id.as_str(), "sn04" | "sn11" | "sn12") {
-        return Err("原版护城只支持 sn04、sn11、sn12".into());
-    }
-    Ok(())
+    validate_stock_stage_rule(request.stock_rule, &request.stage_id)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2870,13 +2861,31 @@ fn menu_stock_item_rule_buttons(
     }
 }
 
-fn menu_stock_stage_buttons(
+pub(super) fn menu_stock_stage_buttons(
     pressed: Query<(&Interaction, &MenuStockStageButton), Changed<Interaction>>,
-    mut buttons: Query<(&MenuStockStageButton, &mut Node, &mut UiSelectionState)>,
+    mut buttons: Query<
+        (&MenuStockStageButton, &mut Node, &mut UiSelectionState),
+        Without<super::launcher_ui::RoomMapPickerPage>,
+    >,
     mut labels: Query<&mut Text, With<MenuStockStageText>>,
     mut request: ResMut<LaunchRequest>,
+    screen: Option<Res<crate::app_state::MenuScreen>>,
+    picker: Query<&Node, With<super::launcher_ui::RoomMapPickerPage>>,
+    mut was_open: Local<bool>,
 ) {
-    if !request.is_changed()
+    let open = screen.as_ref().is_none_or(|screen| {
+        **screen == crate::app_state::MenuScreen::Network
+            && picker
+                .single()
+                .is_ok_and(|node| node.display != Display::None)
+    });
+    let opened = open && !*was_open;
+    *was_open = open;
+    if !open {
+        return;
+    }
+    if !opened
+        && !request.is_changed()
         && !pressed
             .iter()
             .any(|(interaction, _)| *interaction == Interaction::Pressed)
@@ -2891,6 +2900,23 @@ fn menu_stock_stage_buttons(
             request.stage_name.clone_from(&stage.name);
         }
     }
+    let active_choice = buttons.iter().any(|(stage, _, _)| {
+        stage.id == request.stage_id && stock_stage_allowed_for_rule(request.stock_rule, &stage.id)
+    });
+    let fallback = (!active_choice)
+        .then(|| {
+            buttons
+                .iter()
+                .filter(|(stage, _, _)| stock_stage_allowed_for_rule(request.stock_rule, &stage.id))
+                .min_by_key(|(stage, _, _)| stage.id.as_str())
+                .map(|(stage, _, _)| (stage.id.clone(), stage.name.clone()))
+        })
+        .flatten();
+    if let Some((id, name)) = fallback {
+        request.stage_id = id;
+        request.stage_name = name;
+    }
+    let mut selection_available = false;
     for (stage, mut node, mut selection) in &mut buttons {
         let allowed = stock_stage_allowed_for_rule(request.stock_rule, &stage.id);
         node.display = if allowed {
@@ -2899,17 +2925,29 @@ fn menu_stock_stage_buttons(
             Display::None
         };
         selection.selected = allowed && request.stage_id == stage.id;
+        selection_available |= selection.selected;
     }
+    let caption = if selection_available {
+        if request.stage_name.eq_ignore_ascii_case(&request.stage_id) {
+            request.stage_id.to_uppercase()
+        } else {
+            format!(
+                "{}   {}",
+                request.stage_id.to_uppercase(),
+                request.stage_name
+            )
+        }
+    } else {
+        "暂无地图".into()
+    };
     for mut label in &mut labels {
-        label.0 = format!(
-            "当前：{} · {}",
-            request.stage_id.to_uppercase(),
-            request.stage_name
-        );
+        if label.0 != caption {
+            label.0.clone_from(&caption);
+        }
     }
 }
 
-fn stock_config_value_label(field: StockConfigField, request: &LaunchRequest) -> String {
+pub(super) fn stock_config_value_label(field: StockConfigField, request: &LaunchRequest) -> String {
     match field {
         StockConfigField::GameNum if request.stock_game_num == 9_999 => "无限局".into(),
         StockConfigField::GameNum => format!("{} 局", request.stock_game_num),
@@ -2919,33 +2957,41 @@ fn stock_config_value_label(field: StockConfigField, request: &LaunchRequest) ->
     }
 }
 
-fn stock_stage_allowed_for_rule(rule: i32, stage_id: &str) -> bool {
-    if meteor_scene::stage_registry::is_official_stage_id(stage_id)
-        && !meteor_network::modes::original_stage_supports_rule(stage_id, rule)
-    {
-        return false;
+pub(crate) fn stock_stage_allowed_for_rule(rule: i32, stage_id: &str) -> bool {
+    validate_stock_stage_rule(rule, stage_id).is_ok()
+}
+
+fn validate_stock_stage_rule(rule: i32, stage_id: &str) -> Result<(), String> {
+    use meteor_network::modes::{
+        runtime_stage_rule_mask, stage_supports_room_rule, validate_siege_assets,
+    };
+    if !stage_supports_room_rule(stage_id, rule, runtime_stage_rule_mask(stage_id)) {
+        return Err(format!("地图 {stage_id} 未开放 Rule {rule}"));
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    if !meteor_asset::runtime_assets::contains_pack(&format!("stage/{stage_id}")) {
+        return Ok(());
     }
     match rule {
-        2 => {
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                super::escort_assets::load_escort(stage_id).is_ok()
-            }
-            #[cfg(target_arch = "wasm32")]
-            {
-                meteor_network::modes::is_escort_stage(stage_id)
-            }
+        2 => super::escort_assets::load_escort(stage_id).map(|_| ()),
+        3 => {
+            let reader = super::escort_assets::StageAssetReader::for_authoring(stage_id);
+            validate_siege_assets(stage_id, |path| reader.read(path))
         }
-        3 => matches!(
-            stage_id.to_ascii_lowercase().as_str(),
-            "sn04" | "sn11" | "sn12"
-        ),
-        _ => meteor_scene::stage_registry::is_official_stage_id(stage_id),
+        _ => Ok(()),
     }
 }
 
 fn normalize_stock_stage_for_rule(request: &mut LaunchRequest) {
-    if stock_stage_allowed_for_rule(request.stock_rule, &request.stage_id) {
+    let custom = super::stage_plugin::CustomStages {
+        stages: super::escort_assets::custom_stage_entries(),
+        ..default()
+    };
+    let installed = super::launcher_ui::available_room_stages(&custom);
+    if installed.iter().any(|stage| stage.id == request.stage_id)
+        && stock_stage_allowed_for_rule(request.stock_rule, &request.stage_id)
+    {
         return;
     }
     let fallback = match request.stock_rule {
@@ -2953,9 +2999,10 @@ fn normalize_stock_stage_for_rule(request: &mut LaunchRequest) {
         3 => "sn04",
         _ => "sn01",
     };
-    if let Some(stage) = meteor_scene::stage_registry::official_stages()
+    if let Some(stage) = installed
         .into_iter()
-        .find(|stage| stage.id == fallback)
+        .filter(|stage| stock_stage_allowed_for_rule(request.stock_rule, &stage.id))
+        .min_by_key(|stage| (stage.id != fallback, stage.number))
     {
         request.stage_id = stage.id;
         request.stage_name = stage.name;
@@ -3360,7 +3407,7 @@ pub(crate) fn stock_scene_objects(
     stage_id: &str,
     flags: u32,
 ) -> Option<stock_scene::StockSceneObjectMap> {
-    if !meteor_scene::stage_registry::is_official_stage_id(stage_id) {
+    if !meteor_network::modes::is_stage_id(stage_id) {
         return None;
     }
     let descriptor = stock_read_legacy_file(&format!("{stage_id}/{stage_id}.des"))?;
@@ -4886,21 +4933,19 @@ fn handle_stock_game_event(
         }
         StockGameEvent::StageConfig(config) => {
             let stage_id = config.stage_id.to_ascii_lowercase();
-            if meteor_scene::stage_registry::is_official_stage_id(&stage_id) {
+            if meteor_network::modes::is_stage_id(&stage_id) {
                 net.stock_scene_frame = Some(stock_scene_frame(&stage_id));
             }
             info!(
                 "net: stock stage config stage={stage_id} fields={}/{}/{} local={}",
                 config.field_a, config.field_b, config.field_c, request.stage_id
             );
-            if meteor_scene::stage_registry::is_official_stage_id(&stage_id)
-                && request.stage_id != stage_id
-            {
-                request.stage_name = meteor_scene::stage_registry::official_stages()
-                    .into_iter()
-                    .find(|stage| stage.id == stage_id)
-                    .map(|stage| stage.name)
-                    .unwrap_or_else(|| stage_id.to_uppercase());
+            if meteor_network::modes::is_stage_id(&stage_id) && request.stage_id != stage_id {
+                request.stage_name = meteor_scene::stage_registry::get_stage(
+                    &stage_id,
+                    &super::escort_assets::custom_stage_entries(),
+                )
+                .name;
                 request.stage_id.clone_from(&stage_id);
                 net.stage = stage_id;
                 if request.stock_rule == 2 {

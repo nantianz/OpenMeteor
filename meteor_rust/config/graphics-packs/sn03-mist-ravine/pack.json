@@ -1,6 +1,8 @@
 {
   "schema_version": 2,
   "id": "sn03-mist-ravine",
+  "name": "一线天 · 雾谷",
+  "description": "一线天的天空、雾气、地表材质、草地与替换模型。",
   "resources": {
     "a-base": "textures/a-base.png",
     "a-normal": "textures/a-normal.png",

@@ -214,7 +214,9 @@ fn load_sfx_bytes(roots: &[std::path::PathBuf], name: &str) -> Option<Vec<u8>> {
     if let Some(bytes) = read_first(roots, &format!("Patch/{name}")) {
         return Some(bytes);
     }
-    let pak_bytes = read_first(roots, "waves.pak")?;
+    let pak_bytes = roots
+        .iter()
+        .find_map(|root| crate::resource_io::read_legacy_pak(root.join("waves.pak")))?;
     let pak = meteor_asset::pak::PakArchive::from_bytes(&pak_bytes).ok()?;
     let bytes = pak
         .entries()

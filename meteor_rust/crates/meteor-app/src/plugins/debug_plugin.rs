@@ -557,7 +557,7 @@ fn adapt_debug_stats_layout(
             if layout.mobile {
                 top.max(window.height() * 0.48)
             } else {
-                top
+                safe.top + 48.0
             } / unit,
         );
     }

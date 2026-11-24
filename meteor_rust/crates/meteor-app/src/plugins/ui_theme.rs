@@ -1,36 +1,50 @@
-use crate::app_state::{MenuRoot, NetRoomRoot, RoomRoot, SettingsRoot};
+use crate::app_state::{MenuRoot, MenuScreen, NetRoomRoot, RoomRoot, SettingsRoot};
+use crate::plugins::ui_components::{UiDialogSurface, UiNoticePanel, UiPanel};
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{CompressedImageFormats, ImageSampler, ImageType};
 use bevy::prelude::*;
-use bevy::render::render_resource::AsBindGroup;
+use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::{Shader, ShaderRef};
+use bevy::text::{FontSize, LetterSpacing};
+use bevy::ui::{widget::TextShadow, FocusPolicy};
 
-pub const BACKGROUND: Color = Color::srgb(0.055, 0.063, 0.078);
-pub const SURFACE: Color = Color::srgba(0.082, 0.094, 0.114, 0.94);
-pub const CARD: Color = Color::srgba(0.105, 0.118, 0.137, 0.88);
-pub const HOVER: Color = Color::srgb(0.18, 0.19, 0.21);
-pub const SELECTED: Color = Color::srgba(0.31, 0.10, 0.11, 0.94);
-pub const ACCENT: Color = Color::srgb(0.70, 0.20, 0.19);
-pub const ACCENT_TEXT: Color = Color::srgb(0.91, 0.49, 0.43);
-pub const PRIMARY: Color = Color::srgb(0.48, 0.105, 0.11);
-pub const PRIMARY_HOVER: Color = Color::srgb(0.62, 0.15, 0.15);
-pub const PRIMARY_PRESSED: Color = Color::srgb(0.37, 0.065, 0.075);
-pub const TEXT: Color = Color::srgb(0.94, 0.93, 0.90);
-pub const MUTED: Color = Color::srgb(0.65, 0.68, 0.71);
-pub const METAL: Color = Color::srgb(0.80, 0.74, 0.60);
-pub const LINE: Color = Color::srgba(0.62, 0.65, 0.68, 0.28);
-pub const SCRIM: Color = Color::srgba(0.02, 0.025, 0.035, 0.80);
-pub const HUD_SURFACE: Color = Color::srgba(0.055, 0.063, 0.078, 0.84);
-pub const HEALTH: Color = Color::srgb(0.73, 0.20, 0.21);
-pub const ANGER: Color = Color::srgb(0.72, 0.58, 0.30);
+pub const BACKGROUND: Color = Color::srgb(0.032, 0.033, 0.039);
+pub const SURFACE: Color = Color::srgba(0.045, 0.042, 0.038, 0.94);
+pub const CARD: Color = Color::srgba(0.078, 0.071, 0.064, 0.90);
+pub const HOVER: Color = Color::srgb(0.17, 0.14, 0.11);
+pub const SELECTED: Color = Color::srgba(0.26, 0.14, 0.11, 0.94);
+pub const ACCENT: Color = Color::srgb(0.72, 0.57, 0.35);
+pub const ACCENT_TEXT: Color = Color::srgb(0.93, 0.84, 0.65);
+pub const PRIMARY: Color = Color::srgb(0.46, 0.13, 0.11);
+pub const PRIMARY_HOVER: Color = Color::srgb(0.62, 0.17, 0.14);
+pub const PRIMARY_PRESSED: Color = Color::srgb(0.31, 0.08, 0.07);
+pub const CRIMSON: Color = Color::srgb(0.68, 0.15, 0.13);
+pub const CRIMSON_BRIGHT: Color = Color::srgb(0.88, 0.24, 0.19);
+pub const TEXT: Color = Color::srgb(0.95, 0.93, 0.88);
+pub const MUTED: Color = Color::srgb(0.64, 0.62, 0.58);
+pub const METAL: Color = Color::srgb(0.82, 0.72, 0.53);
+pub const LINE: Color = Color::srgba(0.76, 0.66, 0.48, 0.26);
+pub const SCRIM: Color = Color::srgba(0.015, 0.016, 0.022, 0.84);
+pub const HUD_SURFACE: Color = Color::srgba(0.035, 0.033, 0.032, 0.86);
+pub const HEALTH: Color = Color::srgb(0.78, 0.16, 0.15);
+pub const ANGER: Color = Color::srgb(0.82, 0.64, 0.28);
 
 #[derive(Component)]
 pub(crate) struct CinematicBackdrop;
+
+#[derive(Component)]
+pub(crate) struct OrnateFrame;
 
 #[derive(Resource)]
 pub struct CinematicArt {
     pub image: Handle<Image>,
     pub size: Vec2,
+}
+
+#[derive(Resource)]
+struct InkWashArt {
+    image: Handle<Image>,
+    size: Vec2,
 }
 
 #[derive(Component, Clone, Copy)]
@@ -48,6 +62,12 @@ pub struct CompactAction;
 
 const TITLE_SHADER: Handle<Shader> =
     bevy::asset::uuid_handle!("f4aa72cc-64d8-49a8-8c7e-ec01958cfbb8");
+const INK_STROKE_SHADER: Handle<Shader> =
+    bevy::asset::uuid_handle!("92c1e6e1-7840-4d9d-9f4e-77d8102a5b11");
+const ATMOSPHERE_SHADER: Handle<Shader> =
+    bevy::asset::uuid_handle!("c381a847-2a19-46bf-850c-63f1e5a10a22");
+const FRAME_SHADER: Handle<Shader> =
+    bevy::asset::uuid_handle!("5d47e129-9b34-4412-b89f-19e7c2d08f33");
 
 #[derive(Asset, AsBindGroup, TypePath, Clone)]
 pub struct CalligraphyMaterial {
@@ -60,10 +80,88 @@ impl UiMaterial for CalligraphyMaterial {
         ShaderRef::Handle(TITLE_SHADER)
     }
 }
+
+#[derive(ShaderType, Clone, Copy, Debug)]
+pub struct InkStrokeUniform {
+    pub color: Vec4,
+    pub params: Vec4,
+}
+
+#[derive(Asset, AsBindGroup, TypePath, Clone)]
+pub struct InkStrokeMaterial {
+    #[uniform(0)]
+    pub stroke: InkStrokeUniform,
+}
+impl UiMaterial for InkStrokeMaterial {
+    fn fragment_shader() -> ShaderRef {
+        ShaderRef::Handle(INK_STROKE_SHADER)
+    }
+}
+
+#[derive(ShaderType, Clone, Copy, Debug)]
+pub struct AtmosphereUniform {
+    pub ember: Vec4,
+    pub params: Vec4,
+}
+
+#[derive(Asset, AsBindGroup, TypePath, Clone)]
+pub struct AtmosphereMaterial {
+    #[uniform(0)]
+    pub atmo: AtmosphereUniform,
+}
+impl UiMaterial for AtmosphereMaterial {
+    fn fragment_shader() -> ShaderRef {
+        ShaderRef::Handle(ATMOSPHERE_SHADER)
+    }
+}
+
+#[derive(ShaderType, Clone, Copy, Debug)]
+pub struct FrameUniform {
+    pub color: Vec4,
+    pub params: Vec4,
+}
+
+#[derive(Asset, AsBindGroup, TypePath, Clone)]
+pub struct FrameMaterial {
+    #[uniform(0)]
+    pub frame: FrameUniform,
+}
+impl UiMaterial for FrameMaterial {
+    fn fragment_shader() -> ShaderRef {
+        ShaderRef::Handle(FRAME_SHADER)
+    }
+}
+
 #[derive(Resource)]
 struct CalligraphyArt(Handle<CalligraphyMaterial>);
+
+#[derive(Resource)]
+struct SharedDecorMaterials {
+    atmosphere: Handle<AtmosphereMaterial>,
+    panel_frame: Handle<FrameMaterial>,
+    dialog_frame: Handle<FrameMaterial>,
+}
+
 #[derive(Component)]
 pub(crate) struct CalligraphyTitle;
+
+#[derive(Component)]
+struct HasInkStroke;
+
+#[derive(Component)]
+struct InkStrokeUnderlay {
+    button: Entity,
+    material: Handle<InkStrokeMaterial>,
+    primary: bool,
+    seed: f32,
+    progress: f32,
+}
+
+#[derive(Component)]
+struct HasOrnateFrame;
+
+#[derive(Component)]
+struct HasAtmosphere;
 
 pub(crate) fn title_node(compact: bool) -> impl Bundle {
     (
@@ -98,6 +196,36 @@ fn load_title(
     commands.insert_resource(CalligraphyArt(material));
 }
 
+fn init_decor_materials(
+    mut commands: Commands,
+    mut atmospheres: ResMut<Assets<AtmosphereMaterial>>,
+    mut frames: ResMut<Assets<FrameMaterial>>,
+) {
+    let atmosphere = atmospheres.add(AtmosphereMaterial {
+        atmo: AtmosphereUniform {
+            ember: Vec4::new(0.92, 0.36, 0.16, 0.78),
+            params: Vec4::new(0.0, 0.85, 1.0, 0.0),
+        },
+    });
+    let panel_frame = frames.add(FrameMaterial {
+        frame: FrameUniform {
+            color: Vec4::new(0.82, 0.72, 0.53, 0.72),
+            params: Vec4::new(18.0, 0.85, 0.0, 0.0),
+        },
+    });
+    let dialog_frame = frames.add(FrameMaterial {
+        frame: FrameUniform {
+            color: Vec4::new(0.88, 0.77, 0.56, 0.88),
+            params: Vec4::new(24.0, 1.0, 1.0, 0.0),
+        },
+    });
+    commands.insert_resource(SharedDecorMaterials {
+        atmosphere,
+        panel_frame,
+        dialog_frame,
+    });
+}
+
 fn attach_title(
     mut commands: Commands,
     art: Res<CalligraphyArt>,
@@ -120,19 +248,43 @@ impl Plugin for CinematicThemePlugin {
         if !app.world().contains_resource::<Assets<Shader>>() {
             app.init_asset::<Shader>();
         }
-        app.add_plugins(UiMaterialPlugin::<CalligraphyMaterial>::default());
+        app.add_plugins((
+            UiMaterialPlugin::<CalligraphyMaterial>::default(),
+            UiMaterialPlugin::<InkStrokeMaterial>::default(),
+            UiMaterialPlugin::<AtmosphereMaterial>::default(),
+            UiMaterialPlugin::<FrameMaterial>::default(),
+        ));
         bevy::asset::load_internal_asset!(
             app,
             TITLE_SHADER,
             "ui_calligraphy.wgsl",
             Shader::from_wgsl
         );
-        app.add_systems(PreStartup, (load_art, load_title))
+        bevy::asset::load_internal_asset!(
+            app,
+            INK_STROKE_SHADER,
+            "ui_ink_stroke.wgsl",
+            Shader::from_wgsl
+        );
+        bevy::asset::load_internal_asset!(
+            app,
+            ATMOSPHERE_SHADER,
+            "ui_atmosphere.wgsl",
+            Shader::from_wgsl
+        );
+        bevy::asset::load_internal_asset!(app, FRAME_SHADER, "ui_frame.wgsl", Shader::from_wgsl);
+        app.add_systems(PreStartup, (load_art, load_title, init_decor_materials))
             .add_systems(
                 Update,
                 (
                     background_art,
+                    attach_atmosphere,
+                    animate_atmosphere,
                     attach_title,
+                    attach_panel_frames,
+                    attach_ink_strokes,
+                    animate_ink_strokes,
+                    polish_typography,
                     action_feedback,
                     compact_actions,
                     super::launcher_ui::hero_nav_feedback,
@@ -145,6 +297,19 @@ impl Plugin for CinematicThemePlugin {
 }
 
 fn load_art(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+    let ink = Image::from_buffer(
+        include_bytes!("../../assets/ui/ink-wash-background.png"),
+        ImageType::Extension("png"),
+        CompressedImageFormats::NONE,
+        true,
+        ImageSampler::linear(),
+        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+    )
+    .expect("embedded ink wash background must decode");
+    commands.insert_resource(InkWashArt {
+        size: ink.size().as_vec2(),
+        image: images.add(ink),
+    });
     match Image::from_buffer(
         &crate::resource_io::required("ui/cinematic-fortress.png"),
         ImageType::Extension("png"),
@@ -172,9 +337,11 @@ pub(crate) fn cover_rect(image: Vec2, viewport: Vec2) -> Rect {
 fn background_art(
     mut commands: Commands,
     art: Option<Res<CinematicArt>>,
+    ink: Option<Res<InkWashArt>>,
+    screen: Option<Res<MenuScreen>>,
     windows: Query<&Window>,
     mut roots: Query<
-        (Entity, Option<&mut ImageNode>),
+        (Entity, Option<&mut ImageNode>, Has<MenuRoot>),
         Or<(
             With<MenuRoot>,
             With<NetRoomRoot>,
@@ -190,18 +357,281 @@ fn background_art(
     let size = windows.single().map_or(Vec2::new(1280.0, 720.0), |w| {
         Vec2::new(w.width(), w.height())
     });
-    let rect = Some(cover_rect(art.size, size));
-    for (entity, image) in &mut roots {
+    for (entity, image, menu_root) in &mut roots {
+        let ink = ink
+            .as_ref()
+            .filter(|_| menu_root && screen.as_deref().is_some_and(|s| *s == MenuScreen::Main));
+        let (handle, art_size) = ink.map_or((&art.image, art.size), |ink| (&ink.image, ink.size));
+        let rect = Some(cover_rect(art_size, size));
         if let Some(mut image) = image {
+            if image.image != *handle {
+                image.image = handle.clone();
+            }
             if image.rect != rect {
                 image.rect = rect;
             }
         } else {
             commands.entity(entity).insert(ImageNode {
-                image: art.image.clone(),
+                image: handle.clone(),
                 rect,
                 ..default()
             });
+        }
+    }
+}
+
+fn attach_atmosphere(
+    mut commands: Commands,
+    decor: Option<Res<SharedDecorMaterials>>,
+    roots: Query<
+        Entity,
+        (
+            Or<(
+                With<MenuRoot>,
+                With<NetRoomRoot>,
+                With<RoomRoot>,
+                With<SettingsRoot>,
+                With<CinematicBackdrop>,
+            )>,
+            Without<HasAtmosphere>,
+        ),
+    >,
+) {
+    let Some(decor) = decor else {
+        return;
+    };
+    for root in &roots {
+        let overlay = commands
+            .spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(0.0),
+                    right: Val::Px(0.0),
+                    top: Val::Px(0.0),
+                    bottom: Val::Px(0.0),
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
+                    ..default()
+                },
+                MaterialNode(decor.atmosphere.clone()),
+                FocusPolicy::Pass,
+                ZIndex(-1),
+            ))
+            .id();
+        commands
+            .entity(root)
+            .insert(HasAtmosphere)
+            .add_child(overlay);
+    }
+}
+
+fn animate_atmosphere(
+    time: Option<Res<Time>>,
+    decor: Option<Res<SharedDecorMaterials>>,
+    materials: Option<ResMut<Assets<AtmosphereMaterial>>>,
+) {
+    let (Some(time), Some(decor), Some(mut materials)) = (time, decor, materials) else {
+        return;
+    };
+    if let Some(mut mat) = materials.get_mut(&decor.atmosphere) {
+        mat.atmo.params.x = time.elapsed_secs();
+    };
+}
+
+fn attach_panel_frames(
+    mut commands: Commands,
+    decor: Option<Res<SharedDecorMaterials>>,
+    panels: Query<
+        (Entity, Option<&UiDialogSurface>, Option<&OrnateFrame>),
+        (
+            Or<(
+                With<UiPanel>,
+                With<UiDialogSurface>,
+                With<UiNoticePanel>,
+                With<OrnateFrame>,
+            )>,
+            Without<HasOrnateFrame>,
+        ),
+    >,
+) {
+    let Some(decor) = decor else {
+        return;
+    };
+    for (entity, is_dialog, is_ornate) in &panels {
+        let handle = if is_dialog.is_some() || is_ornate.is_some() {
+            decor.dialog_frame.clone()
+        } else {
+            decor.panel_frame.clone()
+        };
+        let frame = commands
+            .spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(0.0),
+                    right: Val::Px(0.0),
+                    top: Val::Px(0.0),
+                    bottom: Val::Px(0.0),
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
+                    ..default()
+                },
+                MaterialNode(handle),
+                FocusPolicy::Pass,
+                ZIndex(-1),
+            ))
+            .id();
+        commands
+            .entity(entity)
+            .insert(HasOrnateFrame)
+            .add_child(frame);
+    }
+}
+
+fn attach_ink_strokes(
+    mut commands: Commands,
+    mut materials: Option<ResMut<Assets<InkStrokeMaterial>>>,
+    buttons: Query<
+        (
+            Entity,
+            Option<&ActionStyle>,
+            Option<&super::launcher_ui::HeroNavButton>,
+        ),
+        (
+            Or<(
+                With<ActionStyle>,
+                With<super::launcher_ui::HeroNavButton>,
+                With<super::ui_plugin::ResponsiveMenuButton>,
+            )>,
+            Without<HasInkStroke>,
+        ),
+    >,
+) {
+    let Some(ref mut materials) = materials else {
+        return;
+    };
+    for (entity, action_style, hero_nav) in &buttons {
+        let primary = hero_nav.is_some() || action_style.is_some_and(|s| s.primary);
+        let seed = (entity.index().index() as f32 * 1.618_034) % 37.0;
+        let base_color = if primary {
+            Vec4::new(0.68, 0.14, 0.12, 0.90)
+        } else {
+            Vec4::new(0.44, 0.34, 0.21, 0.72)
+        };
+        let material = materials.add(InkStrokeMaterial {
+            stroke: InkStrokeUniform {
+                color: base_color,
+                params: Vec4::new(0.0, seed, 0.0, 0.0),
+            },
+        });
+        let underlay = commands
+            .spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(0.0),
+                    right: Val::Px(0.0),
+                    top: Val::Px(2.0),
+                    bottom: Val::Px(2.0),
+                    ..default()
+                },
+                MaterialNode(material.clone()),
+                FocusPolicy::Pass,
+                ZIndex(-1),
+                InkStrokeUnderlay {
+                    button: entity,
+                    material,
+                    primary,
+                    seed,
+                    progress: 0.0,
+                },
+            ))
+            .id();
+        commands
+            .entity(entity)
+            .insert(HasInkStroke)
+            .add_child(underlay);
+    }
+}
+
+fn animate_ink_strokes(
+    time: Option<Res<Time>>,
+    mut materials: Option<ResMut<Assets<InkStrokeMaterial>>>,
+    buttons: Query<&Interaction>,
+    mut underlays: Query<&mut InkStrokeUnderlay>,
+) {
+    let Some(ref mut materials) = materials else {
+        return;
+    };
+    let (dt, elapsed) = time.map_or((0.033, 0.0), |t| {
+        (t.delta_secs().clamp(0.001, 0.1), t.elapsed_secs())
+    });
+    for mut underlay in &mut underlays {
+        let interaction = buttons
+            .get(underlay.button)
+            .copied()
+            .unwrap_or(Interaction::None);
+        let target = if interaction != Interaction::None {
+            1.0
+        } else {
+            0.0
+        };
+        let speed = if target > underlay.progress { 8.5 } else { 5.5 };
+        underlay.progress += (target - underlay.progress).clamp(-dt * speed, dt * speed);
+        if (underlay.progress - target).abs() < 0.01 {
+            underlay.progress = target;
+        }
+        if let Some(mut mat) = materials.get_mut(&underlay.material) {
+            mat.stroke.params = Vec4::new(underlay.progress, underlay.seed, elapsed, 0.0);
+            mat.stroke.color = match (underlay.primary, interaction) {
+                (true, Interaction::Pressed) => Vec4::new(0.84, 0.20, 0.16, 0.96),
+                (true, _) => Vec4::new(0.68, 0.14, 0.12, 0.88),
+                (false, Interaction::Pressed) => Vec4::new(0.62, 0.48, 0.28, 0.85),
+                (false, _) => Vec4::new(0.44, 0.34, 0.21, 0.72),
+            };
+        }
+    }
+}
+
+fn polish_typography(
+    mut commands: Commands,
+    mut texts: Query<
+        (
+            Entity,
+            &TextFont,
+            Option<&mut LetterSpacing>,
+            Option<&TextShadow>,
+        ),
+        Added<TextFont>,
+    >,
+) {
+    for (entity, font, spacing, shadow) in &mut texts {
+        let px = match font.font_size {
+            FontSize::Px(px) => px,
+            _ => continue,
+        };
+        if px >= 22.0 {
+            if let Some(mut spacing) = spacing {
+                if matches!(*spacing, LetterSpacing::Px(v) if v == 0.0) {
+                    *spacing = LetterSpacing::Px(2.0);
+                }
+            }
+            if shadow.is_none() {
+                commands.entity(entity).insert(TextShadow {
+                    offset: Vec2::new(1.5, 2.0),
+                    color: Color::srgba(0.0, 0.0, 0.0, 0.85),
+                });
+            }
+        } else if px >= 16.0 {
+            if let Some(mut spacing) = spacing {
+                if matches!(*spacing, LetterSpacing::Px(v) if v == 0.0) {
+                    *spacing = LetterSpacing::Px(0.8);
+                }
+            }
+            if shadow.is_none() {
+                commands.entity(entity).insert(TextShadow {
+                    offset: Vec2::new(1.0, 1.5),
+                    color: Color::srgba(0.0, 0.0, 0.0, 0.78),
+                });
+            }
         }
     }
 }
@@ -211,24 +641,25 @@ pub(crate) fn hero_gradient(selected: bool, pressed: bool) -> BackgroundGradient
         return BackgroundGradient::default();
     }
     let start = if pressed {
-        PRIMARY_PRESSED
+        PRIMARY_PRESSED.with_alpha(0.94)
     } else if selected {
-        PRIMARY_HOVER.with_alpha(0.85)
+        PRIMARY_HOVER.with_alpha(0.86)
     } else {
-        Color::srgba(0.045, 0.055, 0.07, 0.4)
+        Color::srgba(0.045, 0.042, 0.038, 0.4)
+    };
+    let mid = if pressed {
+        PRIMARY.with_alpha(0.68)
+    } else if selected {
+        PRIMARY.with_alpha(0.50)
+    } else {
+        Color::srgba(0.04, 0.038, 0.035, 0.2)
     };
     BackgroundGradient(vec![LinearGradient::new(
         LinearGradient::TO_RIGHT,
         vec![
             ColorStop::new(start, Val::Percent(0.0)),
-            ColorStop::new(
-                if selected {
-                    PRIMARY.with_alpha(0.45)
-                } else {
-                    Color::srgba(0.04, 0.05, 0.065, 0.2)
-                },
-                Val::Percent(55.0),
-            ),
+            ColorStop::new(mid, Val::Percent(52.0)),
+            ColorStop::new(ACCENT.with_alpha(0.18), Val::Percent(82.0)),
             ColorStop::new(Color::NONE, Val::Percent(100.0)),
         ],
     )
@@ -237,14 +668,14 @@ pub(crate) fn hero_gradient(selected: bool, pressed: bool) -> BackgroundGradient
 
 pub(crate) fn action_gradient(color: Color, primary: bool) -> BackgroundGradient {
     let top = if primary {
-        color.mix(&ACCENT_TEXT, 0.08)
+        color.mix(&CRIMSON_BRIGHT, 0.16)
     } else {
-        Color::srgba(0.16, 0.18, 0.20, 0.55)
+        Color::srgba(0.13, 0.12, 0.10, 0.65)
     };
     let bottom = if primary {
-        color.mix(&BACKGROUND, 0.18)
+        color.mix(&BACKGROUND, 0.28)
     } else {
-        Color::srgba(0.04, 0.05, 0.065, 0.8)
+        Color::srgba(0.04, 0.038, 0.035, 0.86)
     };
     BackgroundGradient(vec![LinearGradient::new(
         LinearGradient::TO_BOTTOM,
@@ -271,13 +702,13 @@ fn action_feedback(
         node.border.left = Val::Px(2.0);
         node.border_radius = BorderRadius::ZERO;
         *border = BorderColor::all(if style.primary {
-            METAL.with_alpha(0.4)
+            METAL.with_alpha(0.45)
         } else {
             LINE
         });
         border.left = if active { ACCENT_TEXT } else { Color::NONE };
         if active {
-            border.bottom = ACCENT.with_alpha(0.65);
+            border.bottom = ACCENT.with_alpha(0.75);
         }
     }
 }
@@ -379,5 +810,59 @@ mod tests {
             assert!(rect.min.cmpge(Vec2::splat(-0.01)).all());
             assert!(rect.max.cmple(art.size + Vec2::splat(0.01)).all());
         }
+    }
+
+    #[test]
+    fn ink_strokes_frames_and_atmosphere_attach_and_animate_cleanly() {
+        let mut app = App::new();
+        app.init_resource::<Assets<InkStrokeMaterial>>()
+            .init_resource::<Assets<AtmosphereMaterial>>()
+            .init_resource::<Assets<FrameMaterial>>()
+            .add_systems(Startup, init_decor_materials)
+            .add_systems(
+                Update,
+                (
+                    attach_atmosphere,
+                    attach_panel_frames,
+                    attach_ink_strokes,
+                    animate_ink_strokes,
+                    polish_typography,
+                )
+                    .chain(),
+            );
+        let root = app.world_mut().spawn((Node::default(), MenuRoot)).id();
+        let panel = app.world_mut().spawn((Node::default(), OrnateFrame)).id();
+        let button = app
+            .world_mut()
+            .spawn((Button, ActionStyle::PRIMARY, Interaction::None))
+            .id();
+        let heading = app
+            .world_mut()
+            .spawn((
+                Text::new("江湖舆图"),
+                TextFont {
+                    font_size: 26.0.into(),
+                    ..default()
+                },
+            ))
+            .id();
+
+        app.update();
+        assert!(app.world().get::<HasAtmosphere>(root).is_some());
+        assert!(app.world().get::<HasOrnateFrame>(panel).is_some());
+        assert!(app.world().get::<HasInkStroke>(button).is_some());
+        assert!(app.world().get::<TextShadow>(heading).is_some());
+
+        *app.world_mut().get_mut::<Interaction>(button).unwrap() = Interaction::Hovered;
+        for _ in 0..8 {
+            app.update();
+        }
+        let underlay = app.world().get::<Children>(button).unwrap()[0];
+        let progress = app
+            .world()
+            .get::<InkStrokeUnderlay>(underlay)
+            .unwrap()
+            .progress;
+        assert!(progress > 0.5, "hovered button must sweep ink stroke in");
     }
 }

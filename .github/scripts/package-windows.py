@@ -14,6 +14,7 @@ UI_IMAGES = (
     "studio-logo.png",
     "cinematic-title-reborn-matte.png",
     "cinematic-fortress.png",
+    "ink-wash-background.png",
     "campaign-map.png",
     "campaign-halo.png",
 )
@@ -77,6 +78,7 @@ def graphics_files():
         "graphics-packs/sn06-nextgen-sample/pack.json",
         "graphics-packs/longsword/pack.json",
         "graphics-packs/sn06-color-pipeline/pack.json",
+        "graphics-packs/combat-fx/pack.json",
     }
     if index.get("enabled") is not True or not required.issubset(index.get("packs", [])):
         raise ValueError("default graphics enhancements are disabled or incomplete")

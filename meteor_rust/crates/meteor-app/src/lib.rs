@@ -139,6 +139,20 @@ impl Plugin for MeteorPlugin {
     }
 }
 
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+pub fn install_stage_preview_worker(app: &mut App, original_dir: Option<std::path::PathBuf>) {
+    plugins::room_map_preview::install(app, original_dir);
+}
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+pub fn bake_stage_previews() -> Result<(), String> {
+    if !meteor_asset::runtime_assets::original_directory_active() {
+        let root = meteor_asset::pack_repository::default_pack_directory()?;
+        meteor_asset::runtime_assets::initialize_native(&root)?;
+    }
+    plugins::room_map_preview::bake()
+}
+
 pub fn build_app() -> App {
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     if !meteor_asset::runtime_assets::original_directory_active() {
@@ -162,8 +176,12 @@ pub fn build_app() -> App {
     ))]
     let graphics_settings =
         neural_rendering::install(&mut app, graphics_settings, settings.dlss5_neural_rendering);
+    let graphics_packs = plugins::graphics_pack::GraphicsPacks::load(&settings);
+    app.insert_resource(graphics_packs.listing().clone());
+
+    app.insert_resource(app_state::StartupSettings(settings.clone()));
     app.insert_resource(settings).insert_resource(keymap);
-    app.insert_resource(plugins::graphics_pack::GraphicsPacks::load());
+    app.insert_resource(graphics_packs);
     app.insert_resource(plugins::battle_result::timing::BestTimes::load());
     let default_plugins = DefaultPlugins
         .set(bevy::asset::AssetPlugin {
@@ -224,7 +242,23 @@ pub fn build_app() -> App {
     plugins::frame_work::install(&mut app);
     #[cfg(not(target_arch = "wasm32"))]
     app.add_plugins(plugins::perf_plugin::PerfPlugin);
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    if meteor_asset::runtime_assets::original_directory_active() {
+        app.add_systems(Last, show_original_read_error);
+    }
     app
+}
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+fn show_original_read_error(
+    mut loaded: ResMut<LoadedStageInfo>,
+    mut next: ResMut<NextState<AppState>>,
+) {
+    if let Some(error) = meteor_asset::runtime_assets::take_original_read_error() {
+        loaded.ready = false;
+        loaded.error = Some(format!("读取原版资源失败\n{error}"));
+        next.set(AppState::Error);
+    }
 }
 
 #[cfg(target_arch = "wasm32")]

@@ -1,6 +1,8 @@
 {
   "schema_version": 1,
   "id": "sn06-nextgen-sample",
+  "name": "四方阵 · 次世代草地（实验）",
+  "description": "更密的草地、体积云和雾气参数。",
   "scenes": [
     {
       "stage": "sn06",

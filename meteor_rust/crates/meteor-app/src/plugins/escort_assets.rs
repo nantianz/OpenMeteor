@@ -25,7 +25,7 @@ impl StageAssetReader {
         }
     }
 
-    fn for_authoring(stage_id: &str) -> Self {
+    pub(super) fn for_authoring(stage_id: &str) -> Self {
         Self {
             authoring_fallback: true,
             ..Self::new(stage_id)

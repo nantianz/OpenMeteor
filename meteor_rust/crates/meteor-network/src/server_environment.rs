@@ -5,8 +5,8 @@ pub(super) fn load_escort(
     root: &Path,
     stage: &str,
 ) -> Result<crate::escort_definition::EscortDefinition, String> {
-    if !meteor_scene::stage_registry::is_official_stage_id(stage) {
-        return Err("escort requires an installed official stage".into());
+    if !crate::modes::is_stage_id(stage) {
+        return Err(format!("无效的劫镖地图编号 {stage}"));
     }
     let read = |path: &str| read_resource(root, path).map_err(|e| format!("{path}: {e}"));
     let des = read(&format!("{stage}/{stage}.des"))?;
@@ -35,7 +35,7 @@ pub(super) fn load_hazards(root: Option<&Path>, stage: &str, mode: &str) -> Stag
     let mut hazards = StageHazards::new();
     let Some(root) = root else { return hazards };
 
-    if !meteor_scene::stage_registry::is_official_stage_id(stage) {
+    if !crate::modes::is_stage_id(stage) {
         return hazards;
     }
     let paths = meteor_scene::stage_loader::stage_asset_paths(stage);
