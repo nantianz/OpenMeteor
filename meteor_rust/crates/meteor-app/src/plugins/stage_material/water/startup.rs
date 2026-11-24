@@ -1,4 +1,5 @@
 use super::bake_cache::{Prepared, PREPARED};
+use crate::plugins::ui_theme as theme;
 use bevy::prelude::*;
 use std::sync::{mpsc, Arc, Mutex};
 
@@ -54,6 +55,7 @@ fn begin(
     commands
         .spawn((
             BakeRoot,
+            theme::CinematicBackdrop,
             GlobalZIndex(3000),
             Node {
                 position_type: PositionType::Absolute,
@@ -66,7 +68,7 @@ fn begin(
                 padding: UiRect::all(px(32)),
                 ..default()
             },
-            BackgroundColor(Color::srgb(0.035, 0.045, 0.05)),
+            BackgroundColor(theme::BACKGROUND),
         ))
         .with_children(|root| {
             root.spawn((
@@ -77,7 +79,7 @@ fn begin(
                     font_size: 18.0.into(),
                     ..default()
                 },
-                TextColor(Color::srgb(0.88, 0.86, 0.79)),
+                TextColor(theme::TEXT),
             ));
             root.spawn((
                 Node {
@@ -86,7 +88,7 @@ fn begin(
                     height: px(6),
                     ..default()
                 },
-                BackgroundColor(Color::srgb(0.14, 0.17, 0.18)),
+                BackgroundColor(theme::LINE),
             ))
             .with_children(|track| {
                 track.spawn((
@@ -96,7 +98,7 @@ fn begin(
                         height: percent(100),
                         ..default()
                     },
-                    BackgroundColor(Color::srgb(0.65, 0.77, 0.69)),
+                    BackgroundColor(theme::METAL),
                 ));
             });
             root.spawn((
@@ -106,7 +108,7 @@ fn begin(
                     font_size: 13.0.into(),
                     ..default()
                 },
-                TextColor(Color::srgb(0.55, 0.59, 0.58)),
+                TextColor(theme::MUTED),
             ));
         });
 }

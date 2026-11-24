@@ -68,13 +68,19 @@ pub(super) fn install(app: &mut App) {
     );
 }
 
-pub(crate) fn weapon_holding_pose(weapon_id: u8, assets: &CharacterAssets) -> u16 {
-    let strategy = weapon_id.saturating_sub(1);
-    let candidate = if strategy == meteor_physics::locomotion::FIREARM_STRATEGY {
-        meteor_physics::locomotion::guard_pose_for_weapon(strategy).unwrap_or(12)
-    } else {
-        meteor_physics::locomotion::locked_idle_pose_for_weapon(strategy, 0).unwrap_or(0)
+fn weapon_holding_pose(weapon_id: u8, weapon_form: u8) -> u16 {
+    use meteor_physics::locomotion::{
+        guard_pose_for_weapon, locked_idle_pose_for_weapon, FIREARM_STRATEGY,
     };
+    let strategy = meteor_combat::weapon_strategy::weapon_to_strategy(weapon_id);
+    if strategy == FIREARM_STRATEGY {
+        guard_pose_for_weapon(strategy).unwrap_or(0)
+    } else {
+        locked_idle_pose_for_weapon(strategy, weapon_form).unwrap_or(0)
+    }
+}
+fn resolve_preview_pose(weapon_id: u8, weapon_form: u8, assets: &CharacterAssets) -> u16 {
+    let candidate = weapon_holding_pose(weapon_id, weapon_form);
     if assets.pose_frames.contains_key(&candidate) {
         candidate
     } else if assets.pose_frames.contains_key(&0) {
@@ -326,7 +332,8 @@ fn sync_preview_actor(
     let Some(character_assets) = assets_set.0.get(&character_key) else {
         return;
     };
-    let pose_id = weapon_holding_pose(signature.primary_weapon, character_assets);
+    let weapon_form = 0;
+    let pose_id = resolve_preview_pose(signature.primary_weapon, weapon_form, character_assets);
     let (start, end) = character_assets
         .pose_frames
         .get(&pose_id)
@@ -366,7 +373,7 @@ fn sync_preview_actor(
         &mut commands,
         actor_entity,
         &fighter_meta,
-        0,
+        weapon_form,
         &character_key,
         character_assets,
         0.24,
@@ -381,6 +388,24 @@ fn sync_preview_actor(
     );
     if cached_assets.is_none() {
         commands.insert_resource(owned_set);
+    }
+}
+#[cfg(all(test, feature = "original-assets"))]
+mod tests {
+    use super::*;
+    #[test]
+    fn preview_matches_all_original_weapon_strategies_and_staff_blade_forms() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        let assets = super::super::load_character_asset_for_test(&[root], "p0").unwrap();
+        for (weapon, expected) in (1..=12).zip([1, 3, 12, 4, 5, 6, 7, 8, 7, 401, 400, 404]) {
+            assert_eq!(
+                resolve_preview_pose(weapon, 0, &assets),
+                expected,
+                "weapon {weapon}"
+            );
+        }
+        assert_eq!(resolve_preview_pose(10, 1, &assets), 402);
+        assert_eq!(resolve_preview_pose(10, 2, &assets), 403);
     }
 }
 

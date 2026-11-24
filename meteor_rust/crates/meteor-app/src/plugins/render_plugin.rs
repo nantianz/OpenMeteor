@@ -2734,9 +2734,13 @@ pub(super) fn setup_stage_scene(
         loaded_assets.cob.as_deref(),
         &mut collision,
     );
-    let disk_gmb = candidates
-        .iter()
-        .find_map(|path| crate::resource_io::read(path).ok());
+    let disk_gmb = if loaded_assets.gmb.is_none() {
+        candidates
+            .iter()
+            .find_map(|path| crate::resource_io::read(path).ok())
+    } else {
+        None
+    };
     let Some(bytes) = loaded_assets.gmb.as_deref().or(disk_gmb.as_deref()) else {
         warn!(
             "stage mesh missing for {} candidates={:?}",

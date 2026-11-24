@@ -17,20 +17,24 @@ use bevy::{
     ecs::system::RunSystemOnce,
     prelude::*,
     render::{
-        gpu_readback::{Readback, ReadbackComplete},
-        render_resource::{Extent3d, PollType, TextureDimension, TextureFormat, TextureUsages},
-        renderer::RenderDevice,
-        RenderPlugin,
+        render_asset::RenderAssets,
+        render_resource::{
+            BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Extent3d, MapMode, PollType,
+            TexelCopyBufferInfo, TexelCopyBufferLayout, TextureDimension, TextureFormat,
+            TextureUsages,
+        },
+        renderer::{RenderDevice, RenderQueue},
+        texture::GpuImage,
+        RenderApp, RenderPlugin,
     },
 };
-use std::{
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 const WIDTH: u32 = 768;
 const HEIGHT: u32 = 336;
 
+const SHOT_COUNT: usize = 3;
+const SHOT_BYTES: usize = (WIDTH * HEIGHT * 4) as usize;
 pub(crate) fn bake() -> Result<(), String> {
     let mut stages = super::desktop::library().0;
     if let Ok(wanted) = std::env::var("METEOR_STAGE_PREVIEW_STAGE") {
@@ -95,13 +99,6 @@ pub(crate) fn bake() -> Result<(), String> {
             Transform::default(),
         ))
         .id();
-    let readback = Arc::new(Mutex::new(Vec::new()));
-    let buffer = readback.clone();
-    app.world_mut()
-        .spawn(Readback::texture(target))
-        .observe(move |event: On<ReadbackComplete>| {
-            *buffer.lock().unwrap() = event.data.clone();
-        });
     let deadline = Instant::now() + Duration::from_secs(45);
     while app.plugins_state() != PluginsState::Ready {
         assert!(
@@ -114,6 +111,14 @@ pub(crate) fn bake() -> Result<(), String> {
     app.finish();
     app.cleanup();
 
+    let device = app.world().resource::<RenderDevice>().clone();
+    let queue = app.world().resource::<RenderQueue>().clone();
+    let readback = device.create_buffer(&BufferDescriptor {
+        label: Some("Map Preview Readback"),
+        size: (SHOT_COUNT * SHOT_BYTES) as u64,
+        usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
     let mut failed = Vec::new();
     for (stage, output) in stages {
         let read = |ext| crate::resource_io::read(format!("{stage}/{stage}.{ext}")).ok();
@@ -162,26 +167,69 @@ pub(crate) fn bake() -> Result<(), String> {
             .as_ref()
             .map(|mesh| camera_candidates(mesh, &anchors))
             .unwrap_or_default();
+        let shots = &shots[..shots.len().min(SHOT_COUNT)];
         let mut best = None;
-        for shot in shots.into_iter().take(3) {
-            *app.world_mut().get_mut::<Transform>(camera).unwrap() = shot;
+        if !shots.is_empty() {
+            let mut submission = None;
+            for (index, &shot) in shots.iter().enumerate() {
+                *app.world_mut().get_mut::<Transform>(camera).unwrap() = shot;
 
-            for _ in 0..10 {
+                if index == 0 {
+                    app.update();
+                }
                 app.update();
-                app.world()
-                    .resource::<RenderDevice>()
-                    .poll(PollType::Poll)
-                    .map_err(|e| e.to_string())?;
-                std::thread::sleep(Duration::from_millis(4));
+                let gpu_images = app
+                    .sub_app(RenderApp)
+                    .world()
+                    .resource::<RenderAssets<GpuImage>>();
+                let image = gpu_images
+                    .get(&target)
+                    .ok_or("map preview target unavailable")?;
+                let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+                    label: Some("Map Preview Copy"),
+                });
+                encoder.copy_texture_to_buffer(
+                    image.texture.as_image_copy(),
+                    TexelCopyBufferInfo {
+                        buffer: &readback,
+                        layout: TexelCopyBufferLayout {
+                            offset: (index * SHOT_BYTES) as u64,
+                            bytes_per_row: Some(WIDTH * 4),
+                            rows_per_image: None,
+                        },
+                    },
+                    Extent3d {
+                        width: WIDTH,
+                        height: HEIGHT,
+                        depth_or_array_layers: 1,
+                    },
+                );
+                submission = Some(queue.submit([encoder.finish()]));
             }
-            let pixels = readback.lock().unwrap().clone();
-            if pixels.len() != (WIDTH * HEIGHT * 4) as usize {
-                continue;
-            }
-            let score = composition_score(&pixels);
-            if best.as_ref().is_none_or(|(previous, _)| score > *previous) {
-                best = Some((score, pixels));
-            }
+            let slice = readback.slice(..(shots.len() * SHOT_BYTES) as u64);
+            let (tx, rx) = std::sync::mpsc::channel();
+            slice.map_async(MapMode::Read, move |result| {
+                let _ = tx.send(result);
+            });
+            device
+                .poll(PollType::Wait {
+                    submission_index: submission,
+                    timeout: Some(Duration::from_secs(20)),
+                })
+                .map_err(|error| error.to_string())?;
+            rx.try_recv()
+                .map_err(|error| error.to_string())?
+                .map_err(|error| error.to_string())?;
+            best = {
+                let bytes = slice.get_mapped_range();
+                bytes
+                    .chunks_exact(SHOT_BYTES)
+                    .map(|pixels| (composition_score(pixels), pixels))
+                    .rev()
+                    .max_by_key(|(score, _)| *score)
+                    .map(|(score, pixels)| (score, pixels.to_vec()))
+            };
+            readback.unmap();
         }
         if let Some((_, pixels)) = best.filter(|(score, _)| *score > 0) {
             let temp = output.with_extension(format!("{}.tmp.jpg", std::process::id()));

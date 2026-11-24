@@ -609,24 +609,19 @@ pub(crate) fn spawn_select_dialog(
     title: &str,
     options: impl FnOnce(&mut ChildSpawnerCommands),
 ) {
-    use crate::plugins::launcher_ui::{
-        launcher_text, LauncherScrollArea, LAUNCHER_RED_BRIGHT, PANEL,
-    };
+    use super::ui_theme as theme;
+    use crate::plugins::launcher_ui::{launcher_text, LauncherScrollArea};
     parent
-        .spawn(UiSelectMenuBundle::new(
-            id,
-            Color::srgba(0.01, 0.02, 0.03, 0.88),
-            Color::NONE,
-        ))
+        .spawn(UiSelectMenuBundle::new(id, theme::SCRIM, Color::NONE))
         .with_children(|overlay| {
             overlay
                 .spawn(UiDialogSurfaceBundle::new(
                     440.0,
-                    PANEL,
-                    LAUNCHER_RED_BRIGHT,
+                    theme::SURFACE,
+                    theme::ACCENT,
                 ))
                 .with_children(|surface| {
-                    surface.spawn(launcher_text(title, 18.0, Color::WHITE, font));
+                    surface.spawn(launcher_text(title, 18.0, theme::TEXT, font));
                     surface
                         .spawn((
                             Node {
@@ -656,10 +651,10 @@ pub(crate) fn spawn_select_dialog(
                             },
                             crate::app_state::LauncherStyledButton,
                             UiSelectDismiss,
-                            BackgroundColor(Color::srgba(0.2, 0.23, 0.24, 0.8)),
+                            BackgroundColor(theme::CARD),
                         ))
                         .with_children(|button| {
-                            button.spawn(launcher_text("取消", 14.0, Color::WHITE, font));
+                            button.spawn(launcher_text("取消", 14.0, theme::TEXT, font));
                         });
                 });
         });

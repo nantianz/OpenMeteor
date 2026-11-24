@@ -1,3 +1,4 @@
+use super::ui_theme as theme;
 use crate::app_state::AppState;
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{CompressedImageFormats, ImageSampler, ImageType};
@@ -205,6 +206,8 @@ fn setup(
     commands
         .spawn((
             SplashRoot,
+            theme::CinematicBackdrop,
+            theme::BackdropOpacity(1.0),
             GlobalZIndex(2000),
             bevy::ui::FocusPolicy::Block,
             Node {
@@ -216,7 +219,7 @@ fn setup(
                 justify_content: JustifyContent::Center,
                 ..default()
             },
-            BackgroundColor(Color::BLACK),
+            BackgroundColor(theme::BACKGROUND),
         ))
         .with_children(|root| {
             root.spawn((
@@ -227,7 +230,7 @@ fn setup(
                     font_size: FontSize::Px(14.0),
                     ..default()
                 },
-                TextColor(Color::srgb(0.65, 0.68, 0.70)),
+                TextColor(theme::MUTED),
                 TextLayout::justify(Justify::Center),
                 Node {
                     position_type: PositionType::Absolute,
@@ -293,7 +296,7 @@ fn setup(
                         height: px(2),
                         ..default()
                     },
-                    BackgroundColor(Color::WHITE),
+                    BackgroundColor(theme::METAL),
                 ));
             });
         });
@@ -318,7 +321,7 @@ fn animate(
     mut pieces: Query<(&SplashPiece, &mut ImageNode, &mut UiTransform)>,
     mut materials: ResMut<Assets<LogoMaterial>>,
     mut glints: Query<(&mut Node, &mut BackgroundColor), (With<SplashGlint>, Without<SplashRoot>)>,
-    mut roots: Query<(Entity, &mut BackgroundColor), With<SplashRoot>>,
+    mut roots: Query<(Entity, &mut BackgroundColor, &mut theme::BackdropOpacity), With<SplashRoot>>,
     mut texts: Query<&mut TextColor, With<SplashNotice>>,
 ) {
     if graphics.is_some_and(|p| p.error.is_some()) {
@@ -374,7 +377,7 @@ fn animate(
     }
     for (mut node, mut color) in &mut glints {
         node.left = px(-32.0 + (t / 1.4).fract() * 184.0);
-        color.0 = Color::srgba(0.85, 0.80, 0.69, alpha);
+        color.0 = theme::METAL.with_alpha(alpha);
     }
     if t >= MENU_START && *state.get() == AppState::StudioSplash {
         #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
@@ -384,11 +387,11 @@ fn animate(
         }
         next.set(AppState::Menu);
     }
-    for (entity, mut color) in &mut roots {
+    for (entity, mut color, mut backdrop) in &mut roots {
         let reveal = ((t - REVEAL_START) / (DURATION - REVEAL_START)).clamp(0.0, 1.0);
-        color
-            .0
-            .set_alpha(1.0 - reveal * reveal * (3.0 - 2.0 * reveal));
+        let opacity = 1.0 - reveal * reveal * (3.0 - 2.0 * reveal);
+        color.0.set_alpha(opacity);
+        backdrop.0 = opacity;
         if t >= DURATION || !matches!(state.get(), AppState::StudioSplash | AppState::Menu) {
             commands.entity(entity).despawn();
             commands.remove_resource::<IntroClock>();

@@ -146,6 +146,7 @@ impl Plugin for UiPlugin {
         .add_systems(OnEnter(AppState::Loading), reset_radar)
         .add_systems(OnEnter(AppState::Loading), reset_dialogue)
         .add_systems(OnEnter(AppState::Error), setup_error)
+        .add_systems(OnExit(AppState::Error), despawn_root::<LoadingRoot>)
         .add_systems(
             Update,
             (
@@ -742,7 +743,7 @@ fn setup_playing_hud(
                     ..default()
                 },
                 BorderColor::all(theme::METAL.with_alpha(0.42)),
-                BackgroundColor(Color::srgba(0.018, 0.016, 0.015, 0.88)),
+                BackgroundColor(theme::HUD_SURFACE.with_alpha(0.88)),
             ))
             .id();
         let emblem = commands
@@ -895,7 +896,7 @@ fn setup_playing_hud(
                 ..default()
             },
             TextLayout::new(Justify::Left, bevy::text::LineBreak::WordOrCharacter),
-            TextColor(Color::srgb(0.95, 0.94, 0.91)),
+            TextColor(theme::TEXT),
             bevy::ui::widget::TextShadow {
                 offset: Vec2::ONE,
                 color: Color::BLACK,
@@ -1025,7 +1026,7 @@ fn setup_playing_hud(
                 overflow: Overflow::clip(),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.02, 0.025, 0.035, 0.72)),
+            BackgroundColor(theme::HUD_SURFACE.with_alpha(0.72)),
             Visibility::Hidden,
             Outline {
                 width: Val::Px(2.0),
@@ -1100,7 +1101,7 @@ fn setup_playing_hud(
                     font_size: 16.0.into(),
                     ..default()
                 },
-                TextColor(Color::srgb(0.6, 0.9, 0.6)),
+                TextColor(theme::ACCENT_TEXT),
                 ReplayHudText,
             ))
             .id();
@@ -1115,18 +1116,12 @@ fn setup_playing_hud(
                     align_items: AlignItems::Center,
                     ..default()
                 },
-                BackgroundColor(Color::srgb(0.2, 0.3, 0.25)),
+                BackgroundColor(theme::CARD),
                 Interaction::default(),
                 ReplayPauseButton,
             ))
             .id();
-        let label = text(
-            &mut commands,
-            "暂停",
-            14.0,
-            Color::WHITE,
-            Some(font.clone()),
-        );
+        let label = text(&mut commands, "暂停", 14.0, theme::TEXT, Some(font.clone()));
         commands.entity(pause).add_child(label);
         commands.entity(root).add_child(pause);
         if mrc.active {
@@ -1140,8 +1135,8 @@ fn setup_playing_hud(
                         overflow: Overflow::clip(),
                         ..default()
                     },
-                    BorderColor::all(Color::srgba(0.75, 0.82, 0.82, 0.45)),
-                    BackgroundColor(Color::srgba(0.04, 0.06, 0.08, 0.88)),
+                    BorderColor::all(theme::METAL.with_alpha(0.45)),
+                    BackgroundColor(theme::HUD_SURFACE.with_alpha(0.88)),
                     Interaction::default(),
                     bevy::ui::RelativeCursorPosition::default(),
                     ReplayTimelineTrack,
@@ -1154,7 +1149,7 @@ fn setup_playing_hud(
                         height: Val::Percent(100.0),
                         ..default()
                     },
-                    BackgroundColor(Color::srgba(0.72, 0.22, 0.16, 0.92)),
+                    BackgroundColor(theme::PRIMARY_HOVER.with_alpha(0.92)),
                     ReplayTimelineFill,
                 ))
                 .id();
@@ -1164,7 +1159,7 @@ fn setup_playing_hud(
                 &mut commands,
                 "拖动时间轴跳转 · 空格暂停/继续",
                 12.0,
-                Color::srgb(0.7, 0.75, 0.76),
+                theme::MUTED,
                 Some(font),
             );
             commands.entity(root).add_child(hint);
@@ -1911,7 +1906,7 @@ fn spawn_fighter_vital_bars(commands: &mut Commands, root: Entity, fighter: Enti
                     Val::Percent(-50.0),
                     Val::Px(if qi { 8.0 / unit } else { 2.0 / unit }),
                 )),
-                BackgroundColor(Color::srgba(0.015, 0.02, 0.03, 0.85)),
+                BackgroundColor(theme::HUD_SURFACE.with_alpha(0.85)),
                 Visibility::Inherited,
                 FighterVitalBar {
                     fighter,
@@ -2588,7 +2583,7 @@ fn setup_pause_menu(
                 height: Val::Percent(100.0),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.02, 0.025, 0.035, 0.32)),
+            BackgroundColor(theme::SCRIM.with_alpha(0.32)),
             bevy::ui::FocusPolicy::Block,
             UiInputBlocker,
             PauseRoot,
@@ -2609,8 +2604,9 @@ fn setup_pause_menu(
                 border: UiRect::right(Val::Px(1.0)),
                 ..default()
             }),
-            BackgroundColor(Color::srgba(0.025, 0.024, 0.022, 0.82)),
+            BackgroundColor(theme::SURFACE),
             BorderColor::all(theme::LINE),
+            theme::CinematicBackdrop,
             theme::OrnateFrame,
             PauseSidebar,
         ))
@@ -2789,7 +2785,7 @@ fn setup_settings_panel(
                 row_gap: Val::Px(12.0),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.02, 0.024, 0.03, 0.40)),
+            BackgroundColor(theme::BACKGROUND),
             bevy::ui::FocusPolicy::Block,
             UiInputBlocker,
             SettingsRoot,
@@ -3110,7 +3106,7 @@ fn setup_room_panel(mut commands: Commands, ui_font: Res<UiFont>, room: Res<Room
         &mut commands,
         &room_members_text(&room),
         18.0,
-        Color::WHITE,
+        theme::TEXT,
         font.clone(),
     );
     commands.entity(members).insert(RoomMembersText);
@@ -3119,7 +3115,7 @@ fn setup_room_panel(mut commands: Commands, ui_font: Res<UiFont>, room: Res<Room
         &mut commands,
         "添加对手 (NPC)",
         220.0,
-        Color::srgb(0.25, 0.35, 0.45),
+        theme::CARD,
         font.clone(),
     );
     commands.entity(add).insert(RoomAddNpcButton);
@@ -3432,7 +3428,7 @@ pub(crate) fn setup_net_room_panel(mut commands: Commands, ui_font: Res<UiFont>)
                 overflow: Overflow::clip(),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.025, 0.024, 0.022, 0.88)),
+            BackgroundColor(theme::SURFACE.with_alpha(0.88)),
             BorderColor::all(theme::METAL.with_alpha(0.45)),
         ))
         .id();
@@ -3968,11 +3964,7 @@ fn update_replay_hud(
         );
     }
     for (_, mut background) in &mut buttons {
-        background.0 = if paused {
-            Color::srgb(0.4, 0.3, 0.2)
-        } else {
-            Color::srgb(0.2, 0.3, 0.25)
-        };
+        background.0 = if paused { theme::SELECTED } else { theme::CARD };
     }
     for child_entities in &children {
         for child in child_entities {
@@ -4403,15 +4395,19 @@ fn setup_error(
         .spawn((
             Node {
                 position_type: PositionType::Absolute,
-                top: Val::Px(20.0),
-                left: Val::Px(20.0),
-                flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(10.0),
+                width: percent(100),
+                height: percent(100),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                padding: UiRect::all(px(20)),
                 ..default()
             },
+            BackgroundColor(theme::BACKGROUND),
+            theme::CinematicBackdrop,
             LoadingRoot,
         ))
         .id();
+    let surface = overlay_surface(&mut commands);
     let error = commands
         .spawn((
             Text::new(loaded.error.clone().unwrap_or_else(|| "加载失败".into())),
@@ -4420,7 +4416,7 @@ fn setup_error(
                 font_size: 24.0.into(),
                 ..default()
             },
-            TextColor(Color::srgb(1.0, 0.3, 0.3)),
+            TextColor(theme::CRIMSON_BRIGHT),
         ))
         .id();
     let hint = commands
@@ -4431,10 +4427,11 @@ fn setup_error(
                 font_size: 16.0.into(),
                 ..default()
             },
-            TextColor(Color::WHITE),
+            TextColor(theme::MUTED),
         ))
         .id();
-    commands.entity(root).add_child(error).add_child(hint);
+    commands.entity(root).add_child(surface);
+    commands.entity(surface).add_children(&[error, hint]);
 }
 
 type ModeButtonQuery<'w, 's> = Query<
@@ -7613,12 +7610,17 @@ mod tests {
                     }
                 }
                 assert!(checked > 0, "create form actions must really be laid out");
-                let preview = app.world_mut().query_filtered::<&ComputedNode, With<super::super::room_map_preview::MapImage>>()
-                    .single(app.world()).unwrap();
-                assert!(
-                    preview.size().x > 100.0 && preview.size().y > 55.0,
-                    "create form needs a visible map preview"
-                );
+                let mut map_images = app.world_mut().query_filtered::<&ComputedNode,
+                    With<super::super::room_map_preview::MapImage>>();
+                let mut visible_previews = map_images
+                    .iter(app.world())
+                    .map(ComputedNode::size)
+                    .filter(|size| size.x > 0.0 && size.y > 0.0);
+                let preview = visible_previews
+                    .next()
+                    .expect("create form needs a visible map preview");
+                assert!(preview.x > 100.0 && preview.y > 55.0);
+                assert!(visible_previews.next().is_none());
                 let (computed, transform) = app.world_mut()
                     .query_filtered::<(&ComputedNode, &UiGlobalTransform), With<crate::app_state::MenuStockHostButton>>()
                     .single(app.world()).unwrap();

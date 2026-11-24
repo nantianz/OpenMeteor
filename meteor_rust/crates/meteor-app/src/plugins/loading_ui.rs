@@ -10,6 +10,8 @@ const FOG_SHADER: Handle<Shader> =
 pub(crate) struct FogMaterial {
     #[uniform(0)]
     params: Vec4,
+    #[uniform(0)]
+    light: LinearRgba,
 }
 impl UiMaterial for FogMaterial {
     fn fragment_shader() -> ShaderRef {
@@ -86,9 +88,8 @@ pub(crate) fn setup(
                 justify_content: JustifyContent::Center,
                 ..default()
             },
-            MaterialNode(materials.add(FogMaterial {
-                params: Vec4::new(0.0, 1.0, 1.7778, 0.0),
-            })),
+            theme::CinematicBackdrop,
+            theme::BackdropOpacity(1.0),
             LoadingRoot,
             LoadingCurtain,
             GlobalZIndex(1000),
@@ -96,6 +97,19 @@ pub(crate) fn setup(
             bevy::ui::FocusPolicy::Block,
         ))
         .with_children(|root| {
+            root.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    width: percent(100),
+                    height: percent(100),
+                    ..default()
+                },
+                MaterialNode(materials.add(FogMaterial {
+                    params: Vec4::new(0.0, 1.0, 1.7778, 0.0),
+                    light: theme::METAL.to_linear(),
+                })),
+                bevy::ui::FocusPolicy::Pass,
+            ));
             root.spawn((
                 Node {
                     flex_direction: FlexDirection::Column,
@@ -148,7 +162,7 @@ fn animate(
     mut captions: Query<&mut Text, With<LoadingCaption>>,
     mut copies: Query<&mut Visibility, With<LoadingCopy>>,
     mut commands: Commands,
-    roots: Query<Entity, With<LoadingCurtain>>,
+    mut roots: Query<(Entity, &mut theme::BackdropOpacity), With<LoadingCurtain>>,
     collider: Option<Res<super::stage_collider::StageCollider>>,
     mut next: ResMut<NextState<AppState>>,
     info: Option<ResMut<crate::app_state::LoadedStageInfo>>,
@@ -209,19 +223,18 @@ fn animate(
     let aspect = windows
         .single()
         .map_or(1.7778, |w| w.width() / w.height().max(1.0));
+    let opacity = (1.0 - state.reveal).clamp(0.0, 1.0);
     for (_, material) in materials.iter_mut() {
-        material.params = Vec4::new(
-            state.age,
-            (1.0 - state.reveal).clamp(0.0, 1.0),
-            aspect,
-            state.reveal,
-        );
+        material.params = Vec4::new(state.age, opacity, aspect, state.reveal);
     }
-    if state.reveal >= 1.0 {
-        state.active = false;
-        for root in &roots {
+    for (root, mut backdrop) in &mut roots {
+        backdrop.0 = opacity;
+        if opacity == 0.0 {
             commands.entity(root).despawn();
         }
+    }
+    if opacity == 0.0 {
+        state.active = false;
     }
 }
 fn cleanup(
@@ -259,7 +272,6 @@ mod tests {
         .expect("fog shader validates with the Bevy UI inputs");
     }
 
-    #[cfg(feature = "original-assets")]
     #[test]
     fn curtain_waits_for_loading_then_reveals_and_cleans_up_on_error() {
         let mut app = App::new();
@@ -269,6 +281,7 @@ mod tests {
             bevy::state::app::StatesPlugin,
         ))
         .init_state::<AppState>()
+        .init_asset::<Shader>()
         .init_asset::<Image>()
         .init_asset::<Font>()
         .insert_resource(UiFont(Handle::default()))
@@ -276,7 +289,9 @@ mod tests {
         .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
             std::time::Duration::from_millis(100),
         ))
-        .add_plugins((theme::CinematicThemePlugin, LoadingUiPlugin));
+        .add_systems(PreStartup, theme::load_art)
+        .add_systems(Update, theme::background_art)
+        .add_plugins(LoadingUiPlugin);
         app.world_mut().resource_mut::<Time<Virtual>>().pause();
         app.update();
         app.world_mut()
@@ -284,6 +299,12 @@ mod tests {
             .set(AppState::Loading);
         app.update();
         assert!(!app.world().resource::<LoadingPresentation>().can_enter());
+        let world = app.world_mut();
+        let curtain = world
+            .query_filtered::<&ImageNode, With<LoadingCurtain>>()
+            .single(world)
+            .unwrap();
+        assert_eq!(curtain.image, world.resource::<theme::CinematicArt>().image);
         for _ in 0..10 {
             app.update();
         }

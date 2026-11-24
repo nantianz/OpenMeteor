@@ -1,5 +1,9 @@
 #import bevy_ui::ui_vertex_output::UiVertexOutput
-@group(1) @binding(0) var<uniform> params: vec4<f32>;
+struct FogUniform {
+    params: vec4<f32>,
+    light: vec4<f32>,
+}
+@group(1) @binding(0) var<uniform> fog: FogUniform;
 
 fn hash(p: vec2<f32>) -> f32 {
     var h = fract(vec3<f32>(p.x, p.y, p.x) * 0.1031);
@@ -33,6 +37,7 @@ fn billow(p0: vec2<f32>) -> f32 {
 fn fragment(in: UiVertexOutput) -> @location(0) vec4<f32> {
     let uv = in.uv;
 
+    let params = fog.params;
     let t = params.x * 3.0;
 
     let p = (uv-0.5) * vec2<f32>(params.z,1.0) * 2.4;
@@ -50,14 +55,15 @@ fn fragment(in: UiVertexOutput) -> @location(0) vec4<f32> {
 
     let light_offset = p-vec2<f32>(-0.65,-0.4);
     let light = exp(-dot(light_offset,light_offset)*0.28);
-    var color = mix(vec3<f32>(0.009,0.014,0.021),vec3<f32>(0.065,0.085,0.105),veil*0.65);
-    color = mix(color,vec3<f32>(0.18,0.23,0.27),far_fog*(0.40+light*0.25));
-    color = mix(color,vec3<f32>(0.30,0.35,0.39)*(0.62+light*0.38),near_fog*0.82);
+    let ink = fog.light.rgb;
+    var color = ink * mix(0.015, 0.12, veil);
+    color = mix(color, ink * 0.26, far_fog*(0.40+light*0.25));
+    color = mix(color, ink * (0.25+light*0.15), near_fog*0.82);
     let title_offset = p*vec2<f32>(0.9,1.6);
     color *= 1.0-exp(-dot(title_offset,title_offset))*0.32;
 
     let density = far_fog*0.4 + near_fog*0.6;
     let dissolve = smoothstep(density*0.25,0.75+density*0.25,params.w);
-    let alpha = (1.0-dissolve)*params.y;
+    let alpha = (1.0-dissolve)*params.y*0.60;
     return vec4<f32>(color,alpha);
 }

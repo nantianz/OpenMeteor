@@ -428,9 +428,9 @@ fn mobile_layout_control_kind(key: MobileLayoutKey) -> MobileControlKind {
 
 fn mobile_layout_preview_background(key: MobileLayoutKey) -> Color {
     match key {
-        MobileLayoutKey::Stick => Color::srgba(0.16, 0.15, 0.10, 0.97),
-        MobileLayoutKey::Attack => Color::srgba(0.41, 0.12, 0.11, 0.94),
-        _ => Color::srgba(0.13, 0.14, 0.14, 0.94),
+        MobileLayoutKey::Stick => theme::HOVER.with_alpha(0.97),
+        MobileLayoutKey::Attack => theme::PRIMARY.with_alpha(0.94),
+        _ => theme::CARD.with_alpha(0.94),
     }
 }
 
@@ -458,7 +458,7 @@ fn spawn_mobile_layout_editor_action(
             BackgroundColor(if primary {
                 theme::PRIMARY
             } else {
-                Color::srgba(0.08, 0.09, 0.09, 0.98)
+                theme::CARD.with_alpha(0.98)
             }),
             BorderColor::all(if primary {
                 theme::ACCENT_TEXT
@@ -470,13 +470,7 @@ fn spawn_mobile_layout_editor_action(
             action,
         ))
         .with_children(|button| {
-            button.spawn(editor_text(
-                label,
-                14.0,
-                Color::srgb(0.97, 0.93, 0.85),
-                font,
-                ui_scale,
-            ));
+            button.spawn(editor_text(label, 14.0, theme::TEXT, font, ui_scale));
         });
 }
 
@@ -504,7 +498,8 @@ fn spawn_mobile_layout_editor(
                 flex_direction: FlexDirection::Column,
                 ..default()
             },
-            BackgroundColor(Color::BLACK),
+            BackgroundColor(theme::BACKGROUND),
+            theme::CinematicBackdrop,
             bevy::ui::FocusPolicy::Block,
             ZIndex(500),
             MobileLayoutEditorRoot,
@@ -526,7 +521,7 @@ fn spawn_mobile_layout_editor(
                     border: UiRect::bottom(Val::Px(editor_px(1.0, unit))),
                     ..default()
                 },
-                BorderColor::all(Color::srgba(0.90, 0.72, 0.37, 0.28)),
+                BorderColor::all(theme::METAL.with_alpha(0.28)),
             ))
             .with_children(|header| {
                 header
@@ -536,26 +531,14 @@ fn spawn_mobile_layout_editor(
                         ..default()
                     },))
                     .with_children(|title| {
-                        title.spawn(editor_text(
-                            "移动端操作",
-                            12.0,
-                            Color::srgb(0.90, 0.72, 0.37),
-                            font,
-                            unit,
-                        ));
-                        title.spawn(editor_text(
-                            "调整按键布局",
-                            24.0,
-                            Color::srgb(0.94, 0.91, 0.84),
-                            font,
-                            unit,
-                        ));
+                        title.spawn(editor_text("移动端操作", 12.0, theme::METAL, font, unit));
+                        title.spawn(editor_text("调整按键布局", 24.0, theme::TEXT, font, unit));
                     });
                 header.spawn((
                     editor_text(
                         "预览按游戏画面等比缩小；拖动按键，选中后调整大小。",
                         12.0,
-                        Color::srgba(0.94, 0.91, 0.84, 0.62),
+                        theme::MUTED,
                         font,
                         unit,
                     ),
@@ -575,7 +558,7 @@ fn spawn_mobile_layout_editor(
                     overflow: Overflow::clip(),
                     ..default()
                 },
-                BackgroundColor(Color::srgb(0.08, 0.08, 0.08)),
+                BackgroundColor(theme::SCRIM.with_alpha(0.30)),
                 MobileLayoutEditorPreviewArea,
             ))
             .with_children(|area| {
@@ -587,7 +570,7 @@ fn spawn_mobile_layout_editor(
                         overflow: Overflow::clip(),
                         ..default()
                     },
-                    BackgroundColor(Color::BLACK),
+                    BackgroundColor(theme::HUD_SURFACE.with_alpha(0.45)),
                     MobileLayoutEditorPreview,
                 ))
                 .with_children(|preview| {
@@ -610,9 +593,9 @@ fn spawn_mobile_layout_editor(
                                 },
                                 BackgroundColor(mobile_layout_preview_background(key)),
                                 BorderColor::all(if key == state.selected {
-                                    Color::srgb(1.0, 0.89, 0.64)
+                                    theme::ACCENT_TEXT
                                 } else {
-                                    Color::srgba(0.91, 0.87, 0.77, 0.58)
+                                    theme::METAL.with_alpha(0.58)
                                 }),
                                 MobileLayoutEditorItem(key),
                             ))
@@ -624,7 +607,7 @@ fn spawn_mobile_layout_editor(
                                     } else {
                                         16.0
                                     }) * item.scale,
-                                    Color::srgb(0.97, 0.94, 0.87),
+                                    theme::TEXT,
                                     font,
                                     unit,
                                 ));
@@ -649,8 +632,8 @@ fn spawn_mobile_layout_editor(
                     border: UiRect::top(Val::Px(editor_px(1.0, unit))),
                     ..default()
                 },
-                BackgroundColor(Color::srgb(0.027, 0.027, 0.027)),
-                BorderColor::all(Color::srgba(0.90, 0.72, 0.37, 0.28)),
+                BackgroundColor(theme::SURFACE),
+                BorderColor::all(theme::METAL.with_alpha(0.28)),
             ))
             .with_children(|footer| {
                 footer.spawn((
@@ -660,7 +643,7 @@ fn spawn_mobile_layout_editor(
                             mobile_layout_item_label(state.selected)
                         ),
                         12.0,
-                        Color::srgba(0.94, 0.91, 0.84, 0.66),
+                        theme::MUTED,
                         font,
                         unit,
                     ),
@@ -1029,9 +1012,9 @@ fn refresh_mobile_layout_editor(
         node.height = geometry.height;
         node.margin = geometry.margin;
         border.set_all(if marker.0 == state.selected {
-            Color::srgb(1.0, 0.89, 0.64)
+            theme::ACCENT_TEXT
         } else {
-            Color::srgba(0.91, 0.87, 0.77, 0.58)
+            theme::METAL.with_alpha(0.58)
         });
         for child in children.iter() {
             if let Ok(mut font) = fonts.get_mut(child) {
@@ -1617,8 +1600,8 @@ fn spawn_mobile_controls(
                 border_radius: BorderRadius::all(Val::Percent(50.0)),
                 ..control_node(stick_region.center, stick_region.visual_size, ui_scale)
             },
-            BorderColor::all(Color::srgba(0.72, 0.80, 0.82, 0.50)),
-            BackgroundColor(Color::srgba(0.04, 0.06, 0.08, 0.46)),
+            BorderColor::all(theme::METAL.with_alpha(0.50)),
+            BackgroundColor(theme::HUD_SURFACE.with_alpha(0.46)),
             MobileControlKind::Stick,
             MobileStickNode,
             MobileBaseSize {
@@ -1646,7 +1629,7 @@ fn spawn_mobile_controls(
                 border_radius: BorderRadius::all(Val::Percent(50.0)),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.72, 0.82, 0.84, 0.64)),
+            BackgroundColor(theme::METAL.with_alpha(0.64)),
             MobileStickKnob {
                 half_size: knob_px * 0.5,
             },
@@ -1708,7 +1691,7 @@ fn spawn_mobile_controls(
                 font_size: layout_px(PAUSE_BASE_FONT * factor, ui_scale).into(),
                 ..default()
             },
-            TextColor(Color::WHITE),
+            TextColor(theme::TEXT),
         ))
         .id();
     commands.entity(pause).add_child(pause_text);
@@ -2479,9 +2462,9 @@ fn update_mobile_stick_visual(
     }
     for (indicator, mut color) in &mut indicators {
         color.0 = if state.command_direction == Some(indicator.0) {
-            Color::srgba(1.0, 0.78, 0.32, 0.95)
+            theme::ACCENT_TEXT.with_alpha(0.95)
         } else {
-            Color::srgba(0.72, 0.82, 0.84, 0.24)
+            theme::METAL.with_alpha(0.24)
         };
     }
 }

@@ -1,4 +1,4 @@
-use crate::app_state::{MenuRoot, MenuScreen, NetRoomRoot, RoomRoot, SettingsRoot};
+use crate::app_state::{MenuRoot, NetRoomRoot, RoomRoot, SettingsRoot};
 use crate::plugins::ui_components::{UiDialogSurface, UiNoticePanel, UiPanel};
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{CompressedImageFormats, ImageSampler, ImageType};
@@ -8,7 +8,7 @@ use bevy::shader::{Shader, ShaderRef};
 use bevy::text::{FontSize, LetterSpacing};
 use bevy::ui::{widget::TextShadow, FocusPolicy};
 
-pub const BACKGROUND: Color = Color::srgb(0.032, 0.033, 0.039);
+pub const BACKGROUND: Color = Color::srgb(0.032, 0.030, 0.028);
 pub const SURFACE: Color = Color::srgba(0.045, 0.042, 0.038, 0.94);
 pub const CARD: Color = Color::srgba(0.078, 0.071, 0.064, 0.90);
 pub const HOVER: Color = Color::srgb(0.17, 0.14, 0.11);
@@ -24,7 +24,7 @@ pub const TEXT: Color = Color::srgb(0.95, 0.93, 0.88);
 pub const MUTED: Color = Color::srgb(0.64, 0.62, 0.58);
 pub const METAL: Color = Color::srgb(0.82, 0.72, 0.53);
 pub const LINE: Color = Color::srgba(0.76, 0.66, 0.48, 0.26);
-pub const SCRIM: Color = Color::srgba(0.015, 0.016, 0.022, 0.84);
+pub const SCRIM: Color = Color::srgba(0.015, 0.013, 0.011, 0.84);
 pub const HUD_SURFACE: Color = Color::srgba(0.035, 0.033, 0.032, 0.86);
 pub const HEALTH: Color = Color::srgb(0.78, 0.16, 0.15);
 pub const ANGER: Color = Color::srgb(0.82, 0.64, 0.28);
@@ -33,18 +33,15 @@ pub const ANGER: Color = Color::srgb(0.82, 0.64, 0.28);
 pub(crate) struct CinematicBackdrop;
 
 #[derive(Component)]
+pub(super) struct BackdropOpacity(pub f32);
+
+#[derive(Component)]
 pub(crate) struct OrnateFrame;
 
 #[derive(Resource)]
 pub struct CinematicArt {
     pub image: Handle<Image>,
     pub size: Vec2,
-}
-
-#[derive(Resource)]
-struct InkWashArt {
-    image: Handle<Image>,
-    size: Vec2,
 }
 
 #[derive(Component, Clone, Copy)]
@@ -296,22 +293,9 @@ impl Plugin for CinematicThemePlugin {
     }
 }
 
-fn load_art(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
-    let ink = Image::from_buffer(
-        include_bytes!("../../assets/ui/ink-wash-background.png"),
-        ImageType::Extension("png"),
-        CompressedImageFormats::NONE,
-        true,
-        ImageSampler::linear(),
-        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
-    )
-    .expect("embedded ink wash background must decode");
-    commands.insert_resource(InkWashArt {
-        size: ink.size().as_vec2(),
-        image: images.add(ink),
-    });
+pub(super) fn load_art(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     match Image::from_buffer(
-        &crate::resource_io::required("ui/cinematic-fortress.png"),
+        include_bytes!("../../assets/ui/ink-wash-background.png"),
         ImageType::Extension("png"),
         CompressedImageFormats::NONE,
         true,
@@ -325,7 +309,7 @@ fn load_art(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
                 size,
             });
         }
-        Err(error) => error!("cinematic UI background failed to decode: {error}"),
+        Err(error) => error!("ink wash background failed to decode: {error}"),
     }
 }
 
@@ -334,14 +318,17 @@ pub(crate) fn cover_rect(image: Vec2, viewport: Vec2) -> Rect {
     Rect::from_center_size(image * 0.5, viewport / scale)
 }
 
-fn background_art(
+pub(super) fn background_art(
     mut commands: Commands,
     art: Option<Res<CinematicArt>>,
-    ink: Option<Res<InkWashArt>>,
-    screen: Option<Res<MenuScreen>>,
     windows: Query<&Window>,
     mut roots: Query<
-        (Entity, Option<&mut ImageNode>, Has<MenuRoot>),
+        (
+            Entity,
+            Option<&mut ImageNode>,
+            Option<&BackdropOpacity>,
+            Option<&ComputedNode>,
+        ),
         Or<(
             With<MenuRoot>,
             With<NetRoomRoot>,
@@ -357,23 +344,28 @@ fn background_art(
     let size = windows.single().map_or(Vec2::new(1280.0, 720.0), |w| {
         Vec2::new(w.width(), w.height())
     });
-    for (entity, image, menu_root) in &mut roots {
-        let ink = ink
-            .as_ref()
-            .filter(|_| menu_root && screen.as_deref().is_some_and(|s| *s == MenuScreen::Main));
-        let (handle, art_size) = ink.map_or((&art.image, art.size), |ink| (&ink.image, ink.size));
-        let rect = Some(cover_rect(art_size, size));
+    for (entity, image, opacity, computed) in &mut roots {
+        let viewport = computed
+            .map(ComputedNode::size)
+            .filter(|size| size.cmpgt(Vec2::ZERO).all())
+            .unwrap_or(size);
+        let rect = Some(cover_rect(art.size, viewport));
+        let tint = Color::srgba(0.29, 0.26, 0.23, opacity.map_or(1.0, |fade| fade.0));
         if let Some(mut image) = image {
-            if image.image != *handle {
-                image.image = handle.clone();
+            if image.image != art.image {
+                image.image = art.image.clone();
             }
             if image.rect != rect {
                 image.rect = rect;
             }
+            if image.color != tint {
+                image.color = tint;
+            }
         } else {
             commands.entity(entity).insert(ImageNode {
-                image: handle.clone(),
+                image: art.image.clone(),
                 rect,
+                color: tint,
                 ..default()
             });
         }
@@ -394,6 +386,7 @@ fn attach_atmosphere(
                 With<CinematicBackdrop>,
             )>,
             Without<HasAtmosphere>,
+            Without<BackdropOpacity>,
         ),
     >,
 ) {
@@ -792,7 +785,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "original-assets")]
     #[test]
     fn cinematic_art_is_embedded_and_crops_without_distortion() {
         let mut app = App::new();
@@ -810,6 +802,37 @@ mod tests {
             assert!(rect.min.cmpge(Vec2::splat(-0.01)).all());
             assert!(rect.max.cmple(art.size + Vec2::splat(0.01)).all());
         }
+    }
+
+    #[test]
+    fn startup_and_room_use_the_same_backdrop_through_the_intro_fade() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Image>>()
+            .add_systems(Startup, load_art)
+            .add_systems(Update, background_art);
+        let startup = app
+            .world_mut()
+            .spawn((Node::default(), CinematicBackdrop, BackdropOpacity(1.0)))
+            .id();
+        let room = app.world_mut().spawn((Node::default(), NetRoomRoot)).id();
+        app.update();
+
+        let image = |world: &World, entity| world.get::<ImageNode>(entity).unwrap().clone();
+        let startup_image = image(app.world(), startup);
+        let room_image = image(app.world(), room);
+        assert_eq!(startup_image.image, room_image.image);
+        assert_eq!(startup_image.color, room_image.color);
+
+        app.world_mut()
+            .get_mut::<BackdropOpacity>(startup)
+            .unwrap()
+            .0 = 0.5;
+        app.update();
+        assert_eq!(
+            image(app.world(), startup).color,
+            room_image.color.with_alpha(0.5)
+        );
+        assert_eq!(image(app.world(), room).color, room_image.color);
     }
 
     #[test]

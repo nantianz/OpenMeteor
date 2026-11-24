@@ -267,7 +267,7 @@ fn setup_system_notice_hud(mut commands: Commands, ui_font: Res<UiFont>) {
             bevy::text::Justify::Center,
             bevy::text::LineBreak::WordOrCharacter,
         ),
-        TextColor(Color::srgb(1.0, 0.92, 0.55)),
+        TextColor(theme::ACCENT_TEXT),
         bevy::ui::widget::TextShadow {
             offset: Vec2::splat(1.0),
             color: Color::BLACK,

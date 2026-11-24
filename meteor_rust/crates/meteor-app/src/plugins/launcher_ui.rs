@@ -654,12 +654,6 @@ pub(crate) struct LoadoutArrow {
 }
 
 #[derive(Component, Clone, Copy)]
-pub(crate) struct CreateRoomLoadoutArrow {
-    field: LoadoutField,
-    direction: i8,
-}
-
-#[derive(Component, Clone, Copy)]
 pub(crate) struct RoomStageStepArrow(pub i8);
 
 const LOADOUT_WEAPONS: [u8; 12] = [6, 5, 8, 7, 9, 4, 1, 2, 3, 10, 11, 12];
@@ -674,19 +668,11 @@ fn loadout_label(field: LoadoutField, request: &LaunchRequest) -> String {
         .map_or_else(|| label.clone(), |(_, name)| name.to_owned())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn spawn_player_loadout(
     parent: &mut ChildSpawnerCommands,
     font: &Handle<Font>,
     request: &LaunchRequest,
-) {
-    spawn_loadout_selector_rows(parent, font, request, false);
-}
-
-fn spawn_loadout_selector_rows(
-    parent: &mut ChildSpawnerCommands,
-    font: &Handle<Font>,
-    request: &LaunchRequest,
-    in_create_page: bool,
 ) {
     for (field, title) in [
         (LoadoutField::Character, "出战人物"),
@@ -709,11 +695,7 @@ fn spawn_loadout_selector_rows(
                         ..default()
                     })
                     .with_children(|row| {
-                        if in_create_page {
-                            spawn_create_room_loadout_arrow(row, field, -1);
-                        } else {
-                            spawn_loadout_arrow(row, field, -1);
-                        }
+                        spawn_loadout_arrow(row, field, -1);
                         row.spawn((
                             Node {
                                 flex_grow: 1.0,
@@ -737,42 +719,10 @@ fn spawn_loadout_selector_rows(
                                 field,
                             ));
                         });
-                        if in_create_page {
-                            spawn_create_room_loadout_arrow(row, field, 1);
-                        } else {
-                            spawn_loadout_arrow(row, field, 1);
-                        }
+                        spawn_loadout_arrow(row, field, 1);
                     });
             });
     }
-}
-
-fn spawn_create_room_loadout_arrow(
-    parent: &mut ChildSpawnerCommands,
-    field: LoadoutField,
-    direction: i8,
-) {
-    parent
-        .spawn((
-            Button,
-            Node {
-                width: Val::Px(44.0),
-                min_width: Val::Px(44.0),
-                height: Val::Px(44.0),
-                flex_shrink: 0.0,
-                border: UiRect::all(Val::Px(1.0)),
-                border_radius: BorderRadius::ZERO,
-                ..default()
-            },
-            BackgroundColor(STAGE_CARD),
-            BorderColor::all(LAUNCHER_LINE),
-            LauncherStyledButton,
-            theme::ActionStyle::SECONDARY,
-            CreateRoomLoadoutArrow { field, direction },
-        ))
-        .with_children(|button| {
-            crate::plugins::ui_components::spawn_loadout_arrow_icon(button, direction);
-        });
 }
 
 fn apply_loadout_step(request: &mut LaunchRequest, field: LoadoutField, direction: i8) {
@@ -801,21 +751,12 @@ fn apply_loadout_step(request: &mut LaunchRequest, field: LoadoutField, directio
 
 pub(crate) fn player_loadout_controls(
     buttons: Query<(&Interaction, &LoadoutArrow), (Changed<Interaction>, With<Button>)>,
-    create_buttons: Query<
-        (&Interaction, &CreateRoomLoadoutArrow),
-        (Changed<Interaction>, With<Button>),
-    >,
     stage_arrows: Query<(&Interaction, &RoomStageStepArrow), (Changed<Interaction>, With<Button>)>,
     stage_choices: Query<&MenuStockStageButton>,
     mut request: ResMut<LaunchRequest>,
     mut labels: Query<(&LoadoutField, &mut Text)>,
 ) {
     for (interaction, arrow) in &buttons {
-        if *interaction == Interaction::Pressed {
-            apply_loadout_step(&mut request, arrow.field, arrow.direction);
-        }
-    }
-    for (interaction, arrow) in &create_buttons {
         if *interaction == Interaction::Pressed {
             apply_loadout_step(&mut request, arrow.field, arrow.direction);
         }
@@ -922,7 +863,7 @@ fn spawn_network_screen(
                                 column_gap: Val::Px(12.0),
                                 ..default()
                             },
-                            BackgroundColor(Color::srgba(0.06, 0.07, 0.08, 0.45)),
+                            BackgroundColor(theme::CARD.with_alpha(0.45)),
                             BorderColor::all(LAUNCHER_LINE),
                             NativeTextEdit {
                                 field: TextField::PlayerName,
@@ -1170,14 +1111,12 @@ fn spawn_network_screen(
                                 .with_children(|settings| {
                                     settings.spawn(stock_form_section_bundle()).with_children(
                                         |section| {
-                                            spawn_native_text_field(section, font, TextField::RoomName, &request.room_name);
-                                            #[cfg(not(target_arch = "wasm32"))]
-                                            if !super::network_plugin::default_web_address().is_empty() {
-                                                spawn_stock_selectable_button(
-                                                    section, font, "公网对战", request.public_battle,
-                                                    UiSelectableKind::Checkbox, MenuPublicBattleButton,
-                                                );
-                                            }
+                                            spawn_native_text_field(
+                                                section,
+                                                font,
+                                                TextField::RoomName,
+                                                &request.room_name,
+                                            );
                                             section.spawn(launcher_text(
                                                 "对战模式",
                                                 13.0,
@@ -1226,35 +1165,6 @@ fn spawn_network_screen(
                                                 });
                                         },
                                     );
-                                    settings
-                                        .spawn((
-                                            stock_form_section_bundle(),
-                                            theme::OrnateFrame,
-                                        ))
-                                        .with_children(|hero| {
-                                            hero.spawn(launcher_text(
-                                                "出战配置",
-                                                13.0,
-                                                theme::METAL,
-                                                font,
-                                            ));
-                                            hero.spawn((
-                                                super::character_plugin::preview::CharacterPreviewViewport,
-                                                Node {
-                                                    width: Val::Percent(100.0),
-                                                    height: Val::Px(144.0),
-                                                    flex_shrink: 0.0,
-                                                    border: UiRect::all(Val::Px(1.0)),
-                                                    overflow: Overflow::clip(),
-                                                    ..default()
-                                                },
-                                                BackgroundColor(Color::srgba(
-                                                    0.025, 0.024, 0.022, 0.85,
-                                                )),
-                                                BorderColor::all(theme::METAL.with_alpha(0.45)),
-                                            ));
-                                            spawn_loadout_selector_rows(hero, font, request, true);
-                                        });
                                 });
                             });
                         create_page
@@ -1284,14 +1194,12 @@ fn spawn_network_screen(
                                     MenuNetStatusText,
                                 ));
                                 spawn_stock_page_button(
-                                    actions, font, "高级设置", UiModalAction::show(ROOM_ADVANCED_MODAL),
-                                );
-                                spawn_action_button(
                                     actions,
                                     font,
-                                    "创建房间",
-                                    MenuStockHostButton,
+                                    "高级设置",
+                                    UiModalAction::show(ROOM_ADVANCED_MODAL),
                                 );
+                                spawn_action_button(actions, font, "创建房间", MenuStockHostButton);
                             });
                     });
             }
@@ -1425,7 +1333,7 @@ fn spawn_room_map_picker(
                 ..default()
             },
             theme::OrnateFrame,
-            BackgroundColor(Color::srgb(0.045, 0.043, 0.039)),
+            BackgroundColor(theme::BACKGROUND),
             BorderColor::all(theme::METAL.with_alpha(0.50)),
             LauncherCreateLayout::MapPreview,
         ))
@@ -1456,7 +1364,7 @@ fn spawn_room_map_picker(
                         border: UiRect::top(Val::Px(1.0)),
                         ..default()
                     },
-                    BackgroundColor(Color::srgba(0.028, 0.026, 0.024, 0.92)),
+                    BackgroundColor(theme::SCRIM.with_alpha(0.92)),
                     BorderColor::all(theme::LINE),
                 ))
                 .with_children(|caption| {
@@ -1556,8 +1464,8 @@ fn spawn_stock_stage_choice(
         .or_else(|| stage_id.strip_prefix("SN"))
         .map_or_else(|| stage_id.to_uppercase(), |num| format!("卷 {num}"));
     let card_style = UiSelectableStyle::new(
-        Color::srgba(0.055, 0.052, 0.048, 0.92),
-        Color::srgba(0.32, 0.12, 0.10, 0.96),
+        theme::SURFACE.with_alpha(0.92),
+        theme::SELECTED.with_alpha(0.96),
         theme::LINE,
         theme::ACCENT_TEXT,
     );
@@ -1617,7 +1525,7 @@ fn spawn_stock_stage_choice(
                     border: UiRect::left(Val::Px(2.0)),
                     ..default()
                 },
-                BackgroundColor(Color::srgba(0.025, 0.022, 0.020, 0.84)),
+                BackgroundColor(theme::SCRIM),
                 BorderColor::all(theme::ACCENT),
             ))
             .with_children(|tag| {
@@ -1633,7 +1541,7 @@ fn spawn_stock_stage_choice(
                     border: UiRect::top(Val::Px(1.0)),
                     ..default()
                 },
-                BackgroundColor(Color::srgba(0.022, 0.020, 0.018, 0.88)),
+                BackgroundColor(theme::SCRIM.with_alpha(0.88)),
                 BorderColor::all(theme::LINE),
             ))
             .with_children(|footer| {
@@ -1749,6 +1657,15 @@ fn spawn_room_advanced_dialog(
                     row_gap: Val::Px(10.0),
                     ..default()
                 })).with_children(|settings| {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if !super::network_plugin::default_web_address().is_empty() {
+                        settings.spawn(stock_form_section_bundle()).with_children(|network| {
+                            spawn_stock_selectable_button(
+                                network, font, "公网对战", request.public_battle,
+                                UiSelectableKind::Checkbox, MenuPublicBattleButton,
+                            );
+                        });
+                    }
                     settings.spawn(stock_form_section_bundle()).with_children(|timing| {
                         for (field, label, options) in [
                             (StockConfigField::GameNum, "局数", &[(1, "1 局"), (3, "3 局"), (5, "5 局"), (10, "10 局"), (999, "999 局"), (9_999, "无限局")][..]),
@@ -1865,7 +1782,7 @@ fn spawn_stock_loadout_dialog(
                                         overflow: Overflow::clip(),
                                         ..default()
                                     },
-                                    BackgroundColor(Color::srgba(0.025, 0.024, 0.022, 0.88)),
+                                    BackgroundColor(theme::SURFACE.with_alpha(0.88)),
                                     BorderColor::all(theme::METAL.with_alpha(0.55)),
                                 ))
                                 .with_children(|stage| {
@@ -2243,13 +2160,13 @@ pub(crate) fn spawn_full_settings_page(
             BackgroundGradient(vec![LinearGradient::new(
                 LinearGradient::TO_RIGHT,
                 vec![
-                    ColorStop::new(Color::srgba(0.025, 0.028, 0.034, 0.94), Val::Percent(0.0)),
-                    ColorStop::new(Color::srgba(0.035, 0.038, 0.046, 0.86), Val::Percent(55.0)),
-                    ColorStop::new(Color::srgba(0.03, 0.033, 0.04, 0.78), Val::Percent(100.0)),
+                    ColorStop::new(theme::SURFACE, Val::Percent(0.0)),
+                    ColorStop::new(theme::SURFACE.with_alpha(0.86), Val::Percent(55.0)),
+                    ColorStop::new(theme::SURFACE.with_alpha(0.78), Val::Percent(100.0)),
                 ],
             )
             .into()]),
-            BorderColor::all(page::DIVIDER),
+            BorderColor::all(theme::LINE.with_alpha(0.16)),
             LauncherSettingsPanel,
         ))
         .with_children(|panel| {
@@ -2796,6 +2713,7 @@ fn spawn_action_button<M: Bundle>(
         });
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn spawn_loadout_arrow(parent: &mut ChildSpawnerCommands, field: LoadoutField, direction: i8) {
     parent
         .spawn((
@@ -4197,6 +4115,7 @@ mod font_tests {
                 With<MenuStockSelectOption>,
                 With<MenuStockItemRuleButton>,
                 With<crate::app_state::MenuBalanceRulesButton>,
+                With<crate::app_state::MenuPublicBattleButton>,
             )>>()
             .iter(world)
             .collect();
@@ -4210,6 +4129,13 @@ mod font_tests {
         }
         let pages: Vec<_> = world.query::<(&UiPageRoot, &Node)>().iter(world).collect();
         assert!(pages.iter().any(|(_, node)| node.display == Display::None));
+        let public_switches = world
+            .query::<&crate::app_state::MenuPublicBattleButton>()
+            .iter(world)
+            .count();
+        let expected = cfg!(not(target_arch = "wasm32"))
+            && !super::super::network_plugin::default_web_address().is_empty();
+        assert_eq!(public_switches, usize::from(expected));
     }
 
     #[test]
@@ -4383,6 +4309,25 @@ mod font_tests {
         weapons.sort_unstable();
         assert_eq!(characters, [-1, 1]);
         assert_eq!(weapons, [-1, 1]);
+        let world = app.world_mut();
+        let mut viewports = world.query_filtered::<Entity,
+            With<super::super::character_plugin::preview::CharacterPreviewViewport>>();
+        let mut dialog_previews = 0;
+        for preview in viewports.iter(world) {
+            let ancestors = std::iter::successors(Some(preview), |entity| {
+                world.get::<ChildOf>(*entity).map(ChildOf::parent)
+            });
+            for entity in ancestors {
+                assert!(!matches!(
+                    world.get::<LauncherCreateLayout>(entity),
+                    Some(LauncherCreateLayout::Page)
+                ));
+                if world.get::<MenuStockLoadoutDialog>(entity).is_some() {
+                    dialog_previews += 1;
+                }
+            }
+        }
+        assert_eq!(dialog_previews, 1);
     }
 
     #[test]

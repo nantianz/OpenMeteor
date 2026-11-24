@@ -15,10 +15,6 @@ use bevy::prelude::*;
 use bevy::ui::FocusPolicy;
 
 pub(crate) const GOLD: Color = theme::METAL;
-pub(crate) const GOLD_BRIGHT: Color = Color::srgb(0.95, 0.88, 0.72);
-pub(crate) const DIVIDER: Color = Color::srgba(0.80, 0.74, 0.60, 0.16);
-const ROW_LINE: Color = Color::srgba(0.80, 0.74, 0.60, 0.07);
-const KEYCAP: Color = Color::srgba(0.80, 0.74, 0.60, 0.10);
 
 const ROW_H: f32 = 46.0;
 const TOUCH_ROW_H: f32 = 48.0;
@@ -225,7 +221,7 @@ pub fn spawn_web_settings_form(
                 border: UiRect::right(Val::Px(1.0)),
                 ..default()
             }),
-            BorderColor::all(DIVIDER),
+            BorderColor::all(theme::LINE.with_alpha(0.16)),
             SettingsCategoryNav,
         ))
         .with_children(|nav| {
@@ -259,7 +255,11 @@ pub fn spawn_web_settings_form(
                         launcher_text(
                             label,
                             17.0,
-                            if selected { GOLD_BRIGHT } else { theme::MUTED },
+                            if selected {
+                                theme::ACCENT_TEXT
+                            } else {
+                                theme::MUTED
+                            },
                             font,
                         ),
                         SettingsCategoryLabel,
@@ -340,7 +340,7 @@ pub fn spawn_web_settings_form(
                         flex_shrink: 0.0,
                         ..default()
                     },
-                    BackgroundColor(ROW_LINE),
+                    BackgroundColor(theme::LINE.with_alpha(0.07)),
                     Visibility::Hidden,
                     SettingsScrollTrack { root },
                 ))
@@ -445,7 +445,7 @@ fn settings_nav_feedback(
         for child in children {
             if let Ok((mut color, mut font)) = labels.get_mut(*child) {
                 color.0 = if tab.selected {
-                    GOLD_BRIGHT
+                    theme::ACCENT_TEXT
                 } else if hovered {
                     theme::TEXT
                 } else {
@@ -470,7 +470,7 @@ fn settings_row_feedback(
             BorderColor::all(GOLD.with_alpha(0.55))
         } else {
             BorderColor {
-                bottom: ROW_LINE,
+                bottom: theme::LINE.with_alpha(0.07),
                 ..BorderColor::all(Color::NONE)
             }
         };
@@ -1046,14 +1046,19 @@ fn spawn_controls_page(
                 border: UiRect::all(Val::Px(1.0)),
                 ..default()
             },
-            BackgroundColor(KEYCAP),
+            BackgroundColor(theme::METAL.with_alpha(0.10)),
             BorderColor::all(GOLD.with_alpha(0.45)),
             Interaction::default(),
             LauncherStyledButton,
             OpenMobileLayoutEditorButton,
         ))
         .with_children(|button| {
-            button.spawn(launcher_text("调整按键布局", 15.0, GOLD_BRIGHT, font));
+            button.spawn(launcher_text(
+                "调整按键布局",
+                15.0,
+                theme::ACCENT_TEXT,
+                font,
+            ));
         });
     } else {
         spawn_section(page, font, "按键设置", None);
@@ -1149,7 +1154,7 @@ fn row_bundle_with_width(hint: &str, width: Val) -> impl Bundle {
         BackgroundColor(Color::NONE),
         BackgroundGradient::default(),
         BorderColor {
-            bottom: ROW_LINE,
+            bottom: theme::LINE.with_alpha(0.07),
             ..BorderColor::all(Color::NONE)
         },
         Interaction::default(),
@@ -1273,7 +1278,7 @@ fn spawn_arrow_glyph(parent: &mut ChildSpawnerCommands, right: bool) {
 
 fn value_text(font: &Handle<Font>, text: &str) -> impl Bundle {
     (
-        launcher_text(text, 15.0, GOLD_BRIGHT, font),
+        launcher_text(text, 15.0, theme::ACCENT_TEXT, font),
         TextLayout::justify(Justify::Center),
         Node {
             flex_grow: 1.0,
@@ -1406,7 +1411,12 @@ fn spawn_range_row(
                     field,
                 );
                 column.spawn((
-                    launcher_text(&format_range_value(field, value), 15.0, GOLD_BRIGHT, font),
+                    launcher_text(
+                        &format_range_value(field, value),
+                        15.0,
+                        theme::ACCENT_TEXT,
+                        font,
+                    ),
                     TextLayout::justify(Justify::Right),
                     Node {
                         width: Val::Px(40.0),
@@ -1445,7 +1455,7 @@ fn spawn_keybinding_row(
             },
         ));
         row.spawn((
-            launcher_text(&binding, 13.0, GOLD_BRIGHT, font),
+            launcher_text(&binding, 13.0, theme::ACCENT_TEXT, font),
             TextLayout::justify(Justify::Center),
             Node {
                 min_width: Val::Px(64.0),
@@ -1454,7 +1464,7 @@ fn spawn_keybinding_row(
                 flex_shrink: 0.0,
                 ..default()
             },
-            BackgroundColor(KEYCAP),
+            BackgroundColor(theme::METAL.with_alpha(0.10)),
             BorderColor::all(GOLD.with_alpha(0.35)),
             FocusPolicy::Pass,
         ));
@@ -1936,7 +1946,7 @@ pub(crate) fn spawn_settings_footer(
                 overflow: Overflow::clip(),
                 ..default()
             },
-            BorderColor::all(DIVIDER),
+            BorderColor::all(theme::LINE.with_alpha(0.16)),
             SettingsChrome { footer: true },
         ))
         .with_children(|footer| {
@@ -1963,7 +1973,7 @@ pub(crate) fn spawn_settings_footer(
                         border: UiRect::all(Val::Px(1.0)),
                         ..default()
                     },
-                    BackgroundColor(KEYCAP),
+                    BackgroundColor(theme::METAL.with_alpha(0.10)),
                     BorderColor::all(GOLD.with_alpha(0.5)),
                     SettingsRestartNotice,
                 ))
@@ -1972,7 +1982,7 @@ pub(crate) fn spawn_settings_footer(
                     notice.spawn(launcher_text(
                         "部分改动需重启游戏后生效",
                         13.0,
-                        GOLD_BRIGHT,
+                        theme::ACCENT_TEXT,
                         font,
                     ));
                 });
@@ -1988,13 +1998,13 @@ pub(crate) fn spawn_settings_footer(
                 ))
                 .with_children(|hint| {
                     hint.spawn((
-                        launcher_text("Esc", 12.0, GOLD_BRIGHT, font),
+                        launcher_text("Esc", 12.0, theme::ACCENT_TEXT, font),
                         Node {
                             padding: UiRect::axes(Val::Px(6.0), Val::Px(1.0)),
                             border: UiRect::all(Val::Px(1.0)),
                             ..default()
                         },
-                        BackgroundColor(KEYCAP),
+                        BackgroundColor(theme::METAL.with_alpha(0.10)),
                         BorderColor::all(GOLD.with_alpha(0.4)),
                     ));
                     hint.spawn(launcher_text("返回", 13.0, theme::MUTED, font));

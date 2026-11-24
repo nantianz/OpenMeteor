@@ -110,7 +110,7 @@ pub(crate) fn spawn_slider(
                     border_radius: BorderRadius::all(Val::Px(1.0)),
                     ..default()
                 },
-                BackgroundColor(crate::plugins::settings_ui::GOLD_BRIGHT),
+                BackgroundColor(crate::plugins::ui_theme::ACCENT_TEXT),
                 SliderThumb(entity),
             ));
         });

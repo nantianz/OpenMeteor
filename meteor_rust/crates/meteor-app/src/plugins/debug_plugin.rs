@@ -1,3 +1,4 @@
+use super::ui_theme as theme;
 use crate::app_state::{
     AppState, Keymap, LaunchRequest, LauncherStyledButton, RoomState, Settings,
 };
@@ -688,18 +689,12 @@ fn setup_debug_ui(mut commands: Commands, ui_font: Res<crate::plugins::launcher_
                 padding: UiRect::all(Val::Px(6.0)),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.02, 0.03, 0.08, 0.65)),
+            BackgroundColor(theme::HUD_SURFACE.with_alpha(0.65)),
             DebugUiRoot,
             DebugStatsRootNode,
         ))
         .id();
-    let stats_text = spawn_text(
-        &mut commands,
-        "",
-        13.0,
-        Color::srgb(0.85, 0.88, 0.92),
-        font.clone(),
-    );
+    let stats_text = spawn_text(&mut commands, "", 13.0, theme::TEXT, font.clone());
     commands.entity(stats_text).insert(DebugStatsText);
     commands.entity(stats_root).add_child(stats_text);
 
@@ -716,7 +711,7 @@ fn setup_debug_ui(mut commands: Commands, ui_font: Res<crate::plugins::launcher_
                 display: Display::None,
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.02, 0.02, 0.05, 0.92)),
+            BackgroundColor(theme::SURFACE.with_alpha(0.92)),
             DebugUiRoot,
             DebugConsoleRoot,
         ))
@@ -725,17 +720,11 @@ fn setup_debug_ui(mut commands: Commands, ui_font: Res<crate::plugins::launcher_
         &mut commands,
         "暗令 · 隐藏命令    Tab 补全 · ↑↓ 历史 · Esc 关闭 · ~ 开关",
         14.0,
-        Color::srgb(0.95, 0.8, 0.35),
+        theme::METAL,
         font.clone(),
     );
     commands.entity(console_root).add_child(header);
-    let log = spawn_text(
-        &mut commands,
-        " ",
-        14.0,
-        Color::srgb(0.85, 0.88, 0.92),
-        font.clone(),
-    );
+    let log = spawn_text(&mut commands, " ", 14.0, theme::TEXT, font.clone());
     commands.entity(log).insert(DebugConsoleLogText);
     commands.entity(console_root).add_child(log);
     let prompt = spawn_text(
@@ -776,8 +765,8 @@ fn setup_debug_ui(mut commands: Commands, ui_font: Res<crate::plugins::launcher_
                 border_radius: BorderRadius::all(Val::Px(10.0)),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.04, 0.05, 0.08, 0.88)),
-            BorderColor::all(Color::srgba(0.78, 0.82, 0.78, 0.38)),
+            BackgroundColor(theme::CARD.with_alpha(0.88)),
+            BorderColor::all(theme::LINE),
             Interaction::default(),
             FocusPolicy::Block,
             ZIndex(230),
@@ -787,7 +776,7 @@ fn setup_debug_ui(mut commands: Commands, ui_font: Res<crate::plugins::launcher_
             DebugPanelAction::TogglePanel,
         ))
         .id();
-    let toggle_text = spawn_text(&mut commands, "调试", 13.0, Color::WHITE, font.clone());
+    let toggle_text = spawn_text(&mut commands, "调试", 13.0, theme::TEXT, font.clone());
     commands.entity(toggle).add_child(toggle_text);
 
     let panel = commands
@@ -808,8 +797,8 @@ fn setup_debug_ui(mut commands: Commands, ui_font: Res<crate::plugins::launcher_
                 overflow: Overflow::scroll_y(),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.025, 0.03, 0.045, 0.96)),
-            BorderColor::all(Color::srgba(0.88, 0.3, 0.22, 0.75)),
+            BackgroundColor(theme::SURFACE.with_alpha(0.96)),
+            BorderColor::all(theme::ACCENT.with_alpha(0.75)),
             ScrollPosition::default(),
             Interaction::default(),
             FocusPolicy::Block,
@@ -830,7 +819,7 @@ fn setup_debug_ui(mut commands: Commands, ui_font: Res<crate::plugins::launcher_
                 ..default()
             })
             .with_children(|header| {
-                spawn_debug_label(header, &font, "调试面板", 18.0, Color::WHITE, None);
+                spawn_debug_label(header, &font, "调试面板", 18.0, theme::TEXT, None);
                 spawn_debug_button_with_node(
                     header,
                     &font,
@@ -895,7 +884,7 @@ fn setup_debug_ui(mut commands: Commands, ui_font: Res<crate::plugins::launcher_
                     &font,
                     "实时数据 · 每 250ms 更新",
                     11.0,
-                    Color::srgb(0.66, 0.72, 0.74),
+                    theme::MUTED,
                     None,
                 );
                 page.spawn((
@@ -905,7 +894,7 @@ fn setup_debug_ui(mut commands: Commands, ui_font: Res<crate::plugins::launcher_
                         font_size: 11.0.into(),
                         ..default()
                     },
-                    TextColor(Color::srgb(0.88, 0.90, 0.92)),
+                    TextColor(theme::TEXT),
                     TextLayout::new(Justify::Left, LineBreak::NoWrap),
                     Node {
                         width: Val::Percent(100.0),
@@ -929,7 +918,7 @@ fn setup_debug_ui(mut commands: Commands, ui_font: Res<crate::plugins::launcher_
                     &font,
                     "与 Web 选择器一致，切换后立即应用",
                     12.0,
-                    Color::srgb(0.66, 0.72, 0.74),
+                    theme::MUTED,
                     None,
                 );
                 spawn_debug_value_row(
@@ -1119,7 +1108,7 @@ fn setup_debug_ui(mut commands: Commands, ui_font: Res<crate::plugins::launcher_
                     &font,
                     "",
                     12.0,
-                    Color::srgb(0.72, 0.78, 0.78),
+                    theme::MUTED,
                     Some(DebugPanelTextKind::NpcHint),
                 );
             });
@@ -1128,7 +1117,7 @@ fn setup_debug_ui(mut commands: Commands, ui_font: Res<crate::plugins::launcher_
             &font,
             "",
             12.0,
-            Color::srgb(0.95, 0.76, 0.4),
+            theme::METAL,
             Some(DebugPanelTextKind::Status),
         );
     });
@@ -1300,8 +1289,8 @@ fn spawn_debug_button_with_node(
     let mut button = parent.spawn((
         Button,
         node,
-        BackgroundColor(Color::srgb(0.09, 0.11, 0.16)),
-        BorderColor::all(Color::srgba(0.72, 0.76, 0.74, 0.3)),
+        BackgroundColor(theme::CARD),
+        BorderColor::all(theme::LINE),
         Interaction::default(),
         FocusPolicy::Block,
         LauncherStyledButton,
@@ -1313,7 +1302,7 @@ fn spawn_debug_button_with_node(
             font,
             label,
             12.0,
-            Color::WHITE,
+            theme::TEXT,
             text_kind,
             Node {
                 width: Val::Percent(100.0),
@@ -1348,7 +1337,7 @@ fn spawn_debug_value_row(
                 font,
                 title,
                 12.0,
-                Color::srgb(0.72, 0.78, 0.8),
+                theme::MUTED,
                 None,
                 Node {
                     width: Val::Px(52.0),
@@ -1373,7 +1362,7 @@ fn spawn_debug_value_row(
                 font,
                 "-",
                 12.0,
-                Color::WHITE,
+                theme::TEXT,
                 Some(value_kind),
                 Node {
                     min_width: Val::Px(0.0),
@@ -1784,15 +1773,15 @@ fn debug_panel_button_visuals(
     for (interaction, action, mut color, mut border) in &mut buttons {
         let active_tab = matches!(action, DebugPanelAction::SelectTab(tab) if *tab == panel.tab);
         color.0 = match interaction {
-            Interaction::Pressed => Color::srgb(0.52, 0.18, 0.12),
-            Interaction::Hovered => Color::srgb(0.22, 0.28, 0.34),
-            Interaction::None if active_tab => Color::srgba(0.42, 0.29, 0.12, 0.88),
-            Interaction::None => Color::srgb(0.09, 0.11, 0.16),
+            Interaction::Pressed => theme::PRIMARY_PRESSED,
+            Interaction::Hovered => theme::HOVER,
+            Interaction::None if active_tab => theme::SELECTED,
+            Interaction::None => theme::CARD,
         };
         border.set_all(if active_tab {
-            Color::srgba(0.90, 0.72, 0.37, 0.78)
+            theme::ACCENT.with_alpha(0.78)
         } else {
-            Color::srgba(0.72, 0.76, 0.74, 0.3)
+            theme::LINE
         });
     }
 }

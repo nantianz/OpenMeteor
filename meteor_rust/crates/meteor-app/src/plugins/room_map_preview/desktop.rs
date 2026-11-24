@@ -302,7 +302,7 @@ fn setup_loading(mut commands: Commands, font: Res<super::super::launcher_ui::Ui
                         row_gap: Val::Px(16.0),
                         ..default()
                     },
-                    BackgroundColor(Color::srgba(0.016, 0.018, 0.019, 0.86)),
+                    BackgroundColor(theme::SCRIM.with_alpha(0.46)),
                 ))
                 .with_children(|root| {
                     let mut ring_color = BorderColor::all(theme::METAL.with_alpha(0.22));

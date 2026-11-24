@@ -1,4 +1,5 @@
 use super::character_plugin::preview::CharacterPreviewViewport;
+use super::launcher_ui::scrollable_y;
 use super::room_map_preview::MapImage;
 use super::ui_theme as theme;
 use crate::app_state::{
@@ -472,7 +473,7 @@ pub(crate) fn spawn(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, acti
                                 overflow: Overflow::clip(),
                                 ..default()
                             },
-                            BackgroundColor(Color::srgba(0.028, 0.026, 0.024, 0.72)),
+                            BackgroundColor(theme::SURFACE.with_alpha(0.72)),
                             BorderColor::all(theme::LINE),
                         ))
                         .with_children(|stage| {
@@ -528,7 +529,7 @@ pub(crate) fn spawn(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, acti
                                         },
                                         ..default()
                                     },
-                                    BackgroundColor(Color::srgba(0.032, 0.030, 0.028, 0.88)),
+                                    BackgroundColor(theme::SCRIM.with_alpha(0.88)),
                                     BorderColor::all(theme::METAL.with_alpha(0.65)),
                                     ZIndex(2),
                                 ))
@@ -555,7 +556,7 @@ pub(crate) fn spawn(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, acti
                         .spawn((
                             DetailPanel,
                             theme::OrnateFrame,
-                            Node {
+                            scrollable_y(Node {
                                 width: Val::Percent(48.0),
                                 height: Val::Percent(100.0),
                                 min_width: Val::Px(0.0),
@@ -564,10 +565,9 @@ pub(crate) fn spawn(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, acti
                                 flex_direction: FlexDirection::Column,
                                 row_gap: Val::Px(12.0),
                                 border: UiRect::left(Val::Px(2.0)),
-                                overflow: Overflow::scroll_y(),
                                 ..default()
-                            },
-                            BackgroundColor(Color::srgba(0.038, 0.035, 0.030, 0.94)),
+                            }),
+                            BackgroundColor(theme::SURFACE),
                             BorderColor::all(theme::METAL),
                         ))
                         .with_children(|panel| {
@@ -583,7 +583,7 @@ pub(crate) fn spawn(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, acti
                                         justify_content: JustifyContent::FlexEnd,
                                         ..default()
                                     },
-                                    BackgroundColor(Color::srgb(0.05, 0.048, 0.044)),
+                                    BackgroundColor(theme::BACKGROUND),
                                     BorderColor::all(theme::METAL.with_alpha(0.45)),
                                 ))
                                 .with_children(|banner| {
@@ -612,7 +612,7 @@ pub(crate) fn spawn(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, acti
                                                 border: UiRect::top(Val::Px(1.0)),
                                                 ..default()
                                             },
-                                            BackgroundColor(Color::srgba(0.03, 0.028, 0.025, 0.88)),
+                                            BackgroundColor(theme::SURFACE.with_alpha(0.88)),
                                             BorderColor::all(theme::LINE),
                                         ))
                                         .with_children(|meta| {
@@ -659,7 +659,7 @@ pub(crate) fn spawn(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, acti
                                             CampaignPin(m.id),
                                             Node {
                                                 width: Val::Percent(32.0),
-                                                min_height: Val::Px(42.0),
+                                                min_height: Val::Px(44.0),
                                                 align_items: AlignItems::Center,
                                                 justify_content: JustifyContent::Center,
                                                 ..default()
@@ -702,42 +702,34 @@ pub(crate) fn spawn(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, acti
                                                         ..default()
                                                     },
                                                     BorderColor::all(theme::LINE),
-                                                    BackgroundColor(Color::srgba(
-                                                        0.04, 0.035, 0.025, 0.85,
-                                                    )),
+                                                    BackgroundColor(
+                                                        theme::SURFACE.with_alpha(0.85),
+                                                    ),
                                                 ));
                                             },
                                         );
                                     }
                                 });
-
-                            panel.spawn(Node {
-                                flex_grow: 1.0,
-                                ..default()
-                            });
-
-                            panel
-                                .spawn(Node {
-                                    width: Val::Percent(100.0),
-                                    flex_direction: FlexDirection::Row,
-                                    align_items: AlignItems::Center,
-                                    column_gap: Val::Px(8.0),
-                                    flex_shrink: 0.0,
-                                    ..default()
-                                })
-                                .with_children(|bar| {
-                                    step_button(bar, font, "← 上一关", -1);
-                                    step_button(bar, font, "下一关 →", 1);
-                                    bar.spawn(Node {
-                                        flex_grow: 1.0,
-                                        min_width: Val::Px(110.0),
-                                        ..default()
-                                    })
-                                    .with_children(|go| {
-                                        action(go, font, "出 发", StartGameButton);
-                                    });
-                                });
                         });
+                });
+            screen
+                .spawn(Node {
+                    align_self: AlignSelf::FlexEnd,
+                    align_items: AlignItems::Center,
+                    column_gap: Val::Px(8.0),
+                    flex_shrink: 0.0,
+                    ..default()
+                })
+                .with_children(|bar| {
+                    step_button(bar, font, "← 上一关", -1);
+                    step_button(bar, font, "下一关 →", 1);
+                    bar.spawn(Node {
+                        min_width: Val::Px(110.0),
+                        ..default()
+                    })
+                    .with_children(|go| {
+                        action(go, font, "出 发", StartGameButton);
+                    });
                 });
             screen.spawn(label(
                 "右下按钮或方向键切换关卡与所持兵器    ·    Enter 出发    ·    Esc 返回",
@@ -833,10 +825,12 @@ fn fit_map(
                 Val::Percent(52.0)
             };
             node.height = if portrait {
-                Val::Percent(44.0)
+                Val::Auto
             } else {
                 Val::Percent(100.0)
             };
+            node.flex_basis = if portrait { Val::Px(0.0) } else { Val::Auto };
+            node.flex_grow = if portrait { 0.44 } else { 0.0 };
         } else if is_detail {
             node.width = if portrait {
                 Val::Percent(100.0)
@@ -844,10 +838,12 @@ fn fit_map(
                 Val::Percent(48.0)
             };
             node.height = if portrait {
-                Val::Percent(56.0)
+                Val::Auto
             } else {
                 Val::Percent(100.0)
             };
+            node.flex_basis = if portrait { Val::Px(0.0) } else { Val::Auto };
+            node.flex_grow = if portrait { 0.56 } else { 0.0 };
             node.border = if portrait {
                 UiRect::top(Val::Px(2.0))
             } else {
@@ -1017,7 +1013,7 @@ fn feedback(
         for child in children.iter() {
             if let Ok((mut color, mut background)) = labels.get_mut(child) {
                 color.0 = if selected {
-                    Color::srgb(1.0, 0.86, 0.52)
+                    theme::ACCENT_TEXT
                 } else {
                     theme::TEXT
                 };
@@ -1026,7 +1022,7 @@ fn feedback(
                 } else if *interaction != Interaction::None {
                     theme::HOVER
                 } else {
-                    Color::srgba(0.04, 0.035, 0.025, 0.85)
+                    theme::SURFACE.with_alpha(0.85)
                 };
             }
         }
