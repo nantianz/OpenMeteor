@@ -80,6 +80,8 @@ the desktop original-directory client. Standard source builds use the Bevy
 fallback font; an external `fonts/ui.ttf` in the original directory can provide
 Chinese glyph coverage. Windows release ZIPs already include a Chinese font.
 
+In original-directory mode, edit `Common/character.act` and enter a new stage from the main menu to reload the attack and combo slots for all characters, including cached ones. After changing POS or PST files, restart the client to refresh multiplayer resource checksums.
+
 ```sh
 cargo run --locked -p meteor-app --bin meteor -- --help
 cargo run --locked -p meteor-app --bin meteor -- --original-dir /path/to/game --check-resources

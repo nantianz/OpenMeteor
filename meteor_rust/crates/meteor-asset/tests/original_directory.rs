@@ -135,6 +135,11 @@ fn direct_source_preserves_bytes_aliases_masks_and_patch_overrides_without_packs
         meteor_asset::runtime_assets::read_file("Common/Character.ACT").unwrap(),
         b"fixture"
     );
+    fixture.write("COMMON/Character.ACT", b"group(314-330)");
+    assert_eq!(
+        meteor_asset::runtime_assets::read_legacy_path("Common/character.act").unwrap(),
+        b"group(314-330)"
+    );
     assert_eq!(
         meteor_asset::runtime_assets::read_file("stage/sn01.pst").unwrap(),
         b"stage\r\n\x80"

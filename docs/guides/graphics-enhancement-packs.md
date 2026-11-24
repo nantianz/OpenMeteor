@@ -420,13 +420,14 @@ P1 的 `physics.surface_collision` 用低模三角形补充人体胶囊接触。
 
 在四方阵选 P1，开启图形增强和「角色衣物摆动」。站立时检查裙腰和白纱，跑动急停后查看下摆回落，再用闪避检查大腿和裙面的交叠。
 
-## 深水和浅水
+## 清水预设
 
-水面通过 `config/water-enhancement.json` 的 `surfaces` 选择。每条规则用 `stage`、`object`、`texture` 精确匹配清水表面。省略 `profile` 时使用 `deep`。旧配置的 `legacy` 也按 `deep` 处理。金华城默认使用 `deep`，两种预设均保留触水波纹和飞溅。 水面折射遇到人物或武器前景时回退到原位置采样，清水表面不参与镜头遮挡消隐。配置编辑后重启。
+水面通过 `config/water-enhancement.json` 的 `surfaces` 选择。每条规则用 `stage`、`object`、`texture` 精确匹配清水表面。省略 `profile` 时使用 `deep`。旧配置的 `legacy` 也按 `deep` 处理。金华城默认使用 `classic`，按河床深度呈现青绿色水面，岸墙倒影会随风浪和脚边波纹扭动。三种预设均支持触水波纹和飞溅。深水与浅水的折射遇到人物或武器前景时回退到原位置采样，清水表面不参与镜头遮挡消隐。配置编辑后重启。
 
 | `profile` | 配置文件 | 随包示例 |
 | --- | --- | --- |
-| `deep` | `config/water-deep.json` | `sn06 / Cylinder01 / sn06w.jpg`、`sn09 / Plane37 / sn914.jpg`、`sn13 / Plane02 / sn13w01.jpg` |
+| `classic` | `water-enhancement.json` 中该表层的 `extinction` | `sn13 / Plane02 / sn13w01.jpg` |
+| `deep` | `config/water-deep.json` | `sn06 / Cylinder01 / sn06w.jpg`、`sn09 / Plane37 / sn914.jpg` |
 | `shallow` | `config/water-shallow.json` | 将所选清水表层的 `profile` 改成 `shallow` |
 
 两份配置的 `optics` 独立控制 `absorption`、`scattering`、`anisotropy`、`ior`、`roughness` 和 `max_path`。`refraction_strength` 设为 0 可关闭屏幕空间折射。浅水另有 `simulation`，用于调整重力、阻尼、模拟水深范围和网格大小。角色触水时，扰动沿河床范围传播。

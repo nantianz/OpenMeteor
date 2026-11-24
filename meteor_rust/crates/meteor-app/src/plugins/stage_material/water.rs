@@ -207,23 +207,7 @@ impl WaterCache {
             )
         });
         material.water_normal = Some(ripple.clone());
-        use profiles::WaterProfile;
-        let profiles = config::profiles();
-        let profile = match setting.clear_profile() {
-            Some(WaterProfile::Deep) => Some((profiles.deep, 1.0, setting.max_depth)),
-            Some(WaterProfile::Shallow) => Some((
-                profiles.shallow_optics,
-                2.0,
-                profiles.shallow.fallback_depth.min(setting.max_depth),
-            )),
-            _ => None,
-        };
-        material.water = Vec4::new(
-            setting.kind as f32,
-            setting.max_depth,
-            vertex_alpha,
-            profile.map_or(setting.extinction, |(_, _, fallback_depth)| fallback_depth),
-        );
+        configure_optics(material, setting, vertex_alpha);
         material.water_sky_reflection = sky.is_some() && material.water_sky_visibility.is_some();
         if let Some(sky) = sky {
             let p = sky.profile;
@@ -240,12 +224,6 @@ impl WaterCache {
                 p.horizon_fade[1],
             );
         }
-        material.water_optics =
-            profile.map_or_else(Default::default, |(p, style, _)| super::WaterOptics {
-                absorption_ior: Vec3::from_array(p.absorption).extend(p.ior),
-                scattering_g: Vec3::from_array(p.scattering).extend(p.anisotropy),
-                control: Vec4::new(p.roughness, p.refraction_strength, p.max_path, style),
-            });
         material.water_bounds = Vec4::new(
             bounds[0] - center[0] * MODEL_SCALE,
             bounds[1] + center[1] * MODEL_SCALE,
@@ -254,6 +232,38 @@ impl WaterCache {
         );
         true
     }
+}
+
+fn configure_optics(material: &mut GmdlMaterial, setting: &config::Surface, vertex_alpha: f32) {
+    use profiles::WaterProfile;
+    let profiles = config::profiles();
+    let optics = |p: profiles::Optics, style| super::WaterOptics {
+        absorption_ior: Vec3::from_array(p.absorption).extend(p.ior),
+        scattering_g: Vec3::from_array(p.scattering).extend(p.anisotropy),
+        control: Vec4::new(p.roughness, p.refraction_strength, p.max_path, style),
+    };
+    let (optics, depth_or_extinction) = match setting.clear_profile() {
+        Some(WaterProfile::Classic) => (
+            super::WaterOptics {
+                control: Vec4::W * 3.0,
+                ..Default::default()
+            },
+            setting.extinction,
+        ),
+        Some(WaterProfile::Deep) => (optics(profiles.deep, 1.0), setting.max_depth),
+        Some(WaterProfile::Shallow) => (
+            optics(profiles.shallow_optics, 2.0),
+            profiles.shallow.fallback_depth.min(setting.max_depth),
+        ),
+        _ => (Default::default(), setting.extinction),
+    };
+    material.water_optics = optics;
+    material.water = Vec4::new(
+        setting.kind as f32,
+        setting.max_depth,
+        vertex_alpha,
+        depth_or_extinction,
+    );
 }
 
 #[cfg(all(test, feature = "original-assets"))]

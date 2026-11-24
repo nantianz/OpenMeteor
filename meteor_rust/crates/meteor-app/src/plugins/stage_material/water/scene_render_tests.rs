@@ -16,7 +16,11 @@ use std::sync::{Arc, Mutex};
 #[derive(Resource, Default)]
 struct TestCameraFade(CameraOcclusionParams);
 
+const SN13_BRIDGE_EYE: Vec3 = Vec3::new(-190.0, -820.0, -140.0);
+
 fn render_original_liquid(stage: &str, eye: Vec3, aim: Vec3, live_reflection: bool) {
+    let bridge_view = stage == "sn13" && !live_reflection && eye == SN13_BRIDGE_EYE;
+    let benchmark = bridge_view && std::env::var_os("METEOR_SN13_BRIDGE_BENCH").is_some();
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
@@ -184,8 +188,8 @@ fn render_original_liquid(stage: &str, eye: Vec3, aim: Vec3, live_reflection: bo
                 ));
                 if stage == "sn13" {
                     assert_eq!(
-                        material.water_optics.control.w, 1.0,
-                        "sn13 uses deep optics"
+                        material.water_optics.control.w, 3.0,
+                        "sn13 uses classic river shading"
                     );
                 }
                 material.water_live_reflection = live_reflection && material.water.x == 1.0;
@@ -204,6 +208,15 @@ fn render_original_liquid(stage: &str, eye: Vec3, aim: Vec3, live_reflection: bo
             } else {
                 None
             };
+            let contact_surface = (benchmark && is_water).then(|| {
+                interaction::LiquidSurface::from_geometry(
+                    object,
+                    &indices,
+                    [0.0; 3],
+                    material.water.x,
+                    material.water.y,
+                )
+            });
             let material = app
                 .world_mut()
                 .resource_mut::<Assets<GmdlMaterial>>()
@@ -216,16 +229,21 @@ fn render_original_liquid(stage: &str, eye: Vec3, aim: Vec3, live_reflection: bo
             if let Some(wave) = wave {
                 app.world_mut().entity_mut(entity).insert(wave);
             }
+            if let Some(contact_surface) = contact_surface {
+                app.world_mut().entity_mut(entity).insert(contact_surface);
+            }
         }
     }
     assert_eq!(water_count, if stage == "sn14" { 4 } else { 1 });
     let pixels = Arc::new(Mutex::new(Vec::new()));
     let output = pixels.clone();
-    app.world_mut()
-        .spawn(Readback::texture(target))
+    let observer = app
+        .world_mut()
+        .spawn(Readback::texture(target.clone()))
         .observe(move |e: On<ReadbackComplete>| {
             *output.lock().unwrap() = e.data.clone();
-        });
+        })
+        .id();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     while app.plugins_state() != PluginsState::Ready {
         assert!(std::time::Instant::now() < deadline);
@@ -437,8 +455,8 @@ fn render_original_liquid(stage: &str, eye: Vec3, aim: Vec3, live_reflection: bo
         };
         if !live_reflection {
             assert!(
-                average(&on) < average(&off) * 0.95,
-                "deep water must attenuate the bright riverbed"
+                average(&on) < average(&off) * 0.85,
+                "classic water must attenuate the bright riverbed"
             );
         }
     } else {
@@ -479,6 +497,75 @@ fn render_original_liquid(stage: &str, eye: Vec3, aim: Vec3, live_reflection: bo
         );
         app.world_mut().resource_mut::<FrameUniforms>().seconds = 0.0;
     }
+    if bridge_view {
+        let surface = app
+            .world_mut()
+            .query_filtered::<Entity, With<super::waves::WaterWaveMesh>>()
+            .single(app.world())
+            .unwrap();
+        let impact = super::spray::Impact {
+            velocity: Vec3::X * 5.0,
+            radius: 0.7,
+            depth: 0.18,
+        };
+        let point = world(Vec3::new(-190.0, -610.0, -186.0));
+        app.world_mut().resource_mut::<FrameUniforms>().seconds = 2.25;
+        let undisturbed = capture(&mut app, &pixels);
+        app.world_mut().resource_mut::<FrameUniforms>().seconds = 2.0;
+        app.update();
+        app.world_mut()
+            .resource_mut::<super::interaction::LiquidInteractions>()
+            .impulses
+            .push(super::interaction::SurfaceImpulse {
+                surface,
+                point,
+                strength: impact.wave_strength(),
+                radius: impact.radius * 2.0,
+                direction: Vec2::X,
+            });
+        for tick in 1..=15 {
+            app.world_mut().resource_mut::<FrameUniforms>().seconds = 2.0 + f64::from(tick) / 60.0;
+            app.update();
+        }
+        let disturbed = capture(&mut app, &pixels);
+        let mut wake_pixels = 0;
+        let mut other_pixels = 0;
+        for (index, (a, b)) in undisturbed
+            .chunks_exact(4)
+            .zip(disturbed.chunks_exact(4))
+            .enumerate()
+        {
+            if (0..3).any(|i| a[i].abs_diff(b[i]) > 3) {
+                if (150..365).contains(&(index % 512)) && (140..220).contains(&(index / 512)) {
+                    wake_pixels += 1;
+                } else {
+                    other_pixels += 1;
+                }
+            }
+        }
+        eprintln!("sn13 wading impulse: {wake_pixels} changed pixels near contact, {other_pixels} elsewhere at 0.25 s");
+        assert!(
+            wake_pixels > 256,
+            "a footstep should remain visible on the river"
+        );
+        assert!(
+            other_pixels < wake_pixels / 10,
+            "the ripple must start near the contact"
+        );
+        if let Some(dir) = std::env::var_os("METEOR_WATER_CAPTURE_DIR") {
+            for (name, frame) in [("undisturbed", undisturbed), ("wake", disturbed)] {
+                image::save_buffer(
+                    std::path::Path::new(&dir).join(format!("sn13-{name}.png")),
+                    &frame,
+                    512,
+                    288,
+                    image::ColorType::Rgba8,
+                )
+                .unwrap();
+            }
+        }
+        app.world_mut().resource_mut::<FrameUniforms>().seconds = 0.0;
+    }
     app.world_mut().resource_mut::<Settings>().water_enhance = false;
     assert_eq!(
         capture(&mut app, &pixels),
@@ -486,13 +573,91 @@ fn render_original_liquid(stage: &str, eye: Vec3, aim: Vec3, live_reflection: bo
         "real scene toggle must fully restore"
     );
     eprintln!("{stage} original-material fixture: {changed} changed pixels");
+    if benchmark {
+        app.world_mut().despawn(observer);
+        bridge_benchmark(&mut app, camera, target);
+    }
+}
+
+fn bridge_benchmark(app: &mut App, camera: Entity, target: Handle<Image>) {
+    use crate::plugins::camera_plugin::GameplayCamera;
+    use bevy::core_pipeline::prepass::DepthPrepass;
+    use bevy::render::{render_resource::PollType, renderer::RenderDevice};
+    use profiles::WaterProfile::{Classic, Deep};
+    use std::time::Duration;
+
+    app.world_mut().entity_mut(camera).insert((
+        GameplayCamera,
+        bevy::pbr::ScreenSpaceTransmission {
+            steps: 2,
+            ..default()
+        },
+    ));
+    app.world_mut()
+        .resource_mut::<Assets<Image>>()
+        .get_mut(&target)
+        .unwrap()
+        .resize(Extent3d {
+            width: 2560,
+            height: 1440,
+            depth_or_array_layers: 1,
+        });
+    let mut settings = config::get()
+        .surfaces
+        .iter()
+        .find(|s| s.matches("sn13", "Plane02", "sn13w01.jpg"))
+        .unwrap()
+        .clone();
+    let mut samples = [Vec::new(), Vec::new()];
+
+    for profile in [Deep, Classic, Classic, Deep, Classic, Deep, Deep, Classic] {
+        app.world_mut().resource_mut::<Settings>().water_enhance = false;
+        app.update();
+        settings.profile = profile;
+        {
+            let mut assets = app.world_mut().resource_mut::<Assets<GmdlMaterial>>();
+            let (_, mut water) = assets.iter_mut().find(|(_, m)| m.water.x == 1.0).unwrap();
+            let vertex_alpha = water.water.z;
+            configure_optics(&mut water, &settings, vertex_alpha);
+        }
+        app.world_mut().resource_mut::<Settings>().water_enhance = true;
+        for tick in 0..48 {
+            app.world_mut().resource_mut::<FrameUniforms>().seconds = f64::from(tick) / 60.0;
+            let start = std::time::Instant::now();
+            app.update();
+            app.world()
+                .resource::<RenderDevice>()
+                .poll(PollType::Wait {
+                    submission_index: None,
+                    timeout: Some(Duration::from_secs(5)),
+                })
+                .unwrap();
+            if tick >= 16 {
+                samples[usize::from(profile == Classic)]
+                    .push(start.elapsed().as_secs_f64() * 1000.0);
+            }
+        }
+        assert_eq!(
+            app.world().get::<DepthPrepass>(camera).is_some(),
+            profile == Deep
+        );
+    }
+    for (profile, times) in [Deep, Classic].into_iter().zip(&mut samples) {
+        times.sort_by(f64::total_cmp);
+        eprintln!(
+            "sn13 bridge {profile:?}, 1440p CPU+GPU (n={}): median {:.3} ms, p95 {:.3} ms",
+            times.len(),
+            times[times.len() / 2],
+            times[(times.len() * 95).div_ceil(100) - 1]
+        );
+    }
 }
 
 #[test]
 fn headless_sn13_water_with_original_riverbed() {
     render_original_liquid(
         "sn13",
-        Vec3::new(-190.0, -820.0, -140.0),
+        SN13_BRIDGE_EYE,
         Vec3::new(-190.0, -500.0, -186.0),
         false,
     );
@@ -501,7 +666,7 @@ fn headless_sn13_water_with_original_riverbed() {
 fn headless_sn13_current_frame_wall_reflection() {
     render_original_liquid(
         "sn13",
-        Vec3::new(-190.0, -820.0, -140.0),
+        SN13_BRIDGE_EYE,
         Vec3::new(-190.0, -500.0, -186.0),
         true,
     );

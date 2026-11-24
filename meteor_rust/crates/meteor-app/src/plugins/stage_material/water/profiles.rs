@@ -13,6 +13,7 @@ pub(crate) enum WaterProfile {
     Auto,
     Deep,
     Shallow,
+    Classic,
 }
 
 #[derive(Clone, Copy, Deserialize)]

@@ -478,6 +478,7 @@ fn shade_water(in: VertexOutput, normal: vec3<f32>, color: vec4<f32>, shade: f32
         return vec4<f32>(glow * pulse * relief * clamp(shade, 0.85, 1.15), color.a);
     }
     let poison = material.water.x > 1.5;
+    let classic = material.water_optics.control.w == 3.0;
     let depth_uv = (in.world_position.xz - material.water_bounds.xy) / material.water_bounds.zw;
     let bed = textureSampleLevel(water_depth, water_depth_sampler, depth_uv, 0.0);
     let valid_bed = smoothstep(0.75, 0.98, bed.g * bed.b);
@@ -520,7 +521,7 @@ fn shade_water(in: VertexOutput, normal: vec3<f32>, color: vec4<f32>, shade: f32
         light_dir = lights.directional_lights[0u].direction_to_light;
     }
 #endif
-    if (!poison) {
+    if (!poison && !classic) {
         if (material.water_optics.control.w < 0.5) { return color; }
         if (graphics.counts.w > 0.5 || graphics.sun.w > 0.001) { light_dir = graphics.sun.xyz; }
         let optical_depth = mix(material.water.w, depth, valid_bed);
@@ -531,15 +532,19 @@ fn shade_water(in: VertexOutput, normal: vec3<f32>, color: vec4<f32>, shade: f32
     let air_cos = clamp(abs(dot(surface_normal, view_dir)), 0.0, 1.0);
     let water_cos = sqrt(1.0 - (1.0 - air_cos * air_cos) / (1.333 * 1.333));
     let absorption = 1.0 - exp(-depth * material.water.w / water_cos);
-    let alpha = mix(0.58 * coverage, absorption * coverage, valid_bed);
+    let shore = smoothstep(0.0, 0.85, bed.a);
+    let clear_absorption = clamp(absorption * mix(0.62, 1.0, shore) + 0.18 * shore, 0.0, 0.93);
+    let alpha = mix(select(color.a, 0.58 * coverage, poison), select(clear_absorption, absorption, poison) * coverage, valid_bed);
     let authored_luma = clamp(dot(color.rgb, vec3<f32>(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
-    let body = vec3<f32>(0.065, 0.27, 0.015) * shade * (0.97 + 0.06 * authored_luma);
+    let scatter = select(vec3<f32>(0.025, 0.090, 0.075), vec3<f32>(0.065, 0.27, 0.015), poison);
+    let body = scatter * shade * (0.97 + 0.06 * authored_luma);
     let ndotv = clamp(abs(dot(reflection_normal, view_dir)), 0.0, 1.0);
-    let f = 0.0204 + 0.9796 * pow(1.0 - ndotv, 5.0);
-    let reflection_weight = min(f * reflection_valid * 0.55 + screen_reflection.a * 0.12, 0.8);
+    let f0 = select(0.045, 0.0204, poison);
+    let f = f0 + (1.0 - f0) * pow(1.0 - ndotv, select(4.0, 5.0, poison));
+    let reflection_weight = min(f * reflection_valid * select(1.5, 0.55, poison) + screen_reflection.a * 0.12, 0.8);
     let half_sum = view_dir + light_dir;
     let half_v = half_sum / max(length(half_sum), 0.0001);
-    let spec = pow(max(dot(normal, half_v), 0.0), 28.0) * 0.09 * min(shade, 1.0);
+    let spec = pow(max(dot(normal, half_v), 0.0), select(64.0, 28.0, poison)) * select(0.22, 0.09, poison) * min(shade, 1.0);
     let out_alpha = reflection_weight + alpha * (1.0 - reflection_weight);
     let rgb = (body * alpha * (1.0 - reflection_weight)
         + reflected_rgb * reflection_weight + vec3<f32>(spec) * out_alpha) / max(out_alpha, 0.001);

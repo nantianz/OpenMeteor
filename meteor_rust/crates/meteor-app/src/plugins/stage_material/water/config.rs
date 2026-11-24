@@ -211,7 +211,7 @@ impl WaterConfig {
                 return Err("kind 应为 1 清水 / 2 毒液 / 3 岩浆；加色混合仅支持毒液".into());
             }
             if s.profile != WaterProfile::Auto && s.kind != 1 {
-                return Err("深水和浅水预设仅适用于清水".into());
+                return Err("光学预设仅适用于清水".into());
             }
             range("max_depth", s.max_depth, 0.1, 100.0)?;
             range("extinction", s.extinction, 0.0, 20.0)?;
@@ -312,13 +312,17 @@ fn load() -> Result<Snapshot, String> {
 mod tests {
     use super::*;
     #[test]
-    fn bundled_clear_water_is_deep_and_explicit_shallow_remains_supported() {
+    fn bundled_river_profiles_and_legacy_alias() {
         let config = WaterConfig::bundled();
         for surface in config.surfaces {
-            let expected = (surface.kind == 1).then_some(WaterProfile::Deep);
+            let expected = match (surface.kind, surface.stage.as_str()) {
+                (1, "sn13") => Some(WaterProfile::Classic),
+                (1, _) => Some(WaterProfile::Deep),
+                _ => None,
+            };
             assert_eq!(surface.clear_profile(), expected);
         }
-        let text = BUNDLED.replace("\"profile\": \"deep\"", "\"profile\": \"shallow\"");
+        let text = BUNDLED.replace("\"profile\": \"classic\"", "\"profile\": \"shallow\"");
         let config = WaterConfig::from_json(&text).unwrap();
         let sn13 = config
             .surfaces

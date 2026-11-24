@@ -69,6 +69,8 @@ cargo build --locked -p meteor-app --bin meteor --release
 
 桌面客户端支持只读加载原版游戏安装目录，或加载兼容的 MPK 资源包；这两类资源均未随仓库分发。启动 Logo、主界面标题与背景、战役地图和光晕随源码提供，并嵌入桌面原版目录客户端。常规源码构建使用 Bevy 后备字体，可通过原版目录中的 `fonts/ui.ttf` 提供中文字体；Windows 发布包已附带中文字体。
 
+在原版目录模式下，修改 `Common/character.act` 后，从主菜单进入新关卡即可重读招式表，已缓存的角色也会使用新的起手和续招槽位。修改 POS 或 PST 文件后，请重启客户端以刷新联机资源校验。
+
 ```sh
 cargo run --locked -p meteor-app --bin meteor -- --help
 cargo run --locked -p meteor-app --bin meteor -- --original-dir /path/to/game --check-resources

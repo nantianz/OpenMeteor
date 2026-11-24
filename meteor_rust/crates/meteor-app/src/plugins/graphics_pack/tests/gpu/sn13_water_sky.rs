@@ -141,7 +141,11 @@ pub(super) fn capture(
         {
             let mut assets = app.world_mut().resource_mut::<Assets<GmdlMaterial>>();
             let mut water = assets.get_mut(&material).unwrap();
-            assert!(water.water_live_reflection && water.water_screen_refraction);
+            assert!(water.water_live_reflection);
+            assert!(
+                !water.water_screen_refraction,
+                "classic shading needs no refraction pass"
+            );
             water.water_live_reflection = false;
             water.water_sky_reflection = true;
         }

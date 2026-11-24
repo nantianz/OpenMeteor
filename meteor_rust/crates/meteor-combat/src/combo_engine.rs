@@ -14,17 +14,24 @@ pub enum Dir {
 pub struct WeaponCommand {
     pub input: &'static [Dir],
     pub pose_id: u16,
-    pub action_id: Option<u16>,
+    pub action_id: u16,
     pub anger_cost: Option<u16>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ResolvedCommand {
     pub pose_id: u16,
-    pub action_id: Option<u16>,
+    pub action_id: u16,
     pub anger_cost: u16,
 
     pub matched_length: usize,
+}
+
+impl ResolvedCommand {
+    pub fn with_act_entry(mut self, act: &ActData) -> Option<Self> {
+        self.pose_id = *act.group_members.get(&self.action_id)?.first()?;
+        Some(self)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -111,38 +118,16 @@ pub const WEAPON_ATTACK_TABLE: [WeaponAttackEntry; 12] = [
 ];
 
 macro_rules! cmd {
-    ($pose:expr) => {
-        WeaponCommand {
-            input: &[],
-            pose_id: $pose,
-            action_id: None,
-            anger_cost: None,
-        }
-    };
-    ($pose:expr, $action:expr, $cost:expr) => {
-        WeaponCommand {
-            input: &[],
-            pose_id: $pose,
-            action_id: Some($action),
-            anger_cost: Some($cost),
-        }
-    };
-    ($input:expr, $pose:expr) => {
+    ($input:expr, $pose:expr, $action:expr $(, $cost:expr)?) => {
         WeaponCommand {
             input: $input,
             pose_id: $pose,
-            action_id: None,
-            anger_cost: None,
+            action_id: $action,
+            anger_cost: cmd!(@cost $($cost)?),
         }
     };
-    ($input:expr, $pose:expr, $action:expr, $cost:expr) => {
-        WeaponCommand {
-            input: $input,
-            pose_id: $pose,
-            action_id: Some($action),
-            anger_cost: Some($cost),
-        }
-    };
+    (@cost) => { None };
+    (@cost $cost:expr) => { Some($cost) };
 }
 
 #[derive(Debug, Clone)]
@@ -172,8 +157,14 @@ pub fn weapon_command_table(weapon_id: u8) -> Option<&'static WeaponCommandTable
     }
 }
 
-pub const STAFF_BLADE_FORM_BY_POSE: [(u16, u8); 6] =
-    [(430, 1), (431, 2), (440, 0), (441, 2), (447, 0), (448, 1)];
+pub fn staff_form_for_action(action_id: u16) -> Option<u8> {
+    match action_id {
+        92 | 98 => Some(0),
+        88 | 99 => Some(1),
+        89 | 93 => Some(2),
+        _ => None,
+    }
+}
 
 pub fn weapon_visual_form(weapon_id: u8, command_form: u8, pose_id: u16) -> u8 {
     if weapon_id != 10 {
@@ -195,16 +186,6 @@ pub fn weapon_visual_form(weapon_id: u8, command_form: u8, pose_id: u16) -> u8 {
     } else {
         0
     }
-}
-
-pub fn weapon_form_for_pose(weapon_id: u8, pose_id: u16) -> Option<u8> {
-    if weapon_id != 10 {
-        return None;
-    }
-    STAFF_BLADE_FORM_BY_POSE
-        .iter()
-        .find(|(p, _)| *p == pose_id)
-        .map(|(_, f)| *f)
 }
 
 pub fn is_command_suffix(history: &[Dir], command: &[Dir]) -> bool {
@@ -302,7 +283,7 @@ pub fn anger_cost_for_weapon_action(weapon_id: u8, action_id: u16) -> Option<u16
     }
     for commands in sides {
         for entry in commands {
-            if entry.action_id == Some(action_id) {
+            if entry.action_id == action_id {
                 let cost = entry.anger_cost.unwrap_or(0);
                 return if cost > 0 { Some(cost) } else { None };
             }
@@ -370,38 +351,23 @@ pub fn combo_profile(
     act: &ActData,
     can_spend_anger: impl Fn(u16) -> bool,
 ) -> Option<ComboProfile> {
-    let mut parsed = resolve_weapon_command(weapon_id, command_sequence, airborne, weapon_form);
-    if let Some(c) = &parsed {
-        if !can_pay_command(c.anger_cost, &can_spend_anger) {
-            parsed = resolve_weapon_command(weapon_id, &[], airborne, weapon_form);
-        }
-    }
-    let command_recognized = parsed.is_some() || command_sequence.is_empty();
-    let command_entry_pose_id = parsed.as_ref().map(|c| c.pose_id);
-
-    let neutral = resolve_weapon_command(weapon_id, &[], airborne, weapon_form);
-    let entry = WEAPON_ATTACK_TABLE
-        .get(weapon_id_to_table_index(weapon_id))
-        .copied();
-
-    let fallback_pose_id = match neutral {
-        Some(ref n) if poses.contains(&n.pose_id) => n.pose_id,
-        _ => {
-            let e = entry?;
-            if airborne {
-                e.air_light
-            } else {
-                e.ground_light
-            }
-        }
+    let entry = |directions: &[Dir]| {
+        let command = resolve_affordable_weapon_command(
+            weapon_id,
+            directions,
+            airborne,
+            weapon_form,
+            &can_spend_anger,
+        )?;
+        let command = if act.group_members.is_empty() {
+            command
+        } else {
+            command.with_act_entry(act)?
+        };
+        poses.contains(&command.pose_id).then_some(command)
     };
-    let entry_pose_id = match command_entry_pose_id {
-        Some(p) if poses.contains(&p) => p,
-        _ => fallback_pose_id,
-    };
-    if !poses.contains(&entry_pose_id) {
-        return None;
-    }
+    let command = entry(command_sequence).or_else(|| entry(&[]))?;
+    let entry_pose_id = command.pose_id;
 
     let mut transitions = HashMap::new();
     for (from, list) in &act.edges {
@@ -411,23 +377,13 @@ pub fn combo_profile(
         transitions.insert(*from, list.clone());
     }
 
-    let command = if command_entry_pose_id == Some(entry_pose_id) {
-        parsed
-    } else {
-        neutral
-    };
-
     Some(ComboProfile {
         entry_pose_id,
-        command_recognized,
-        command,
+        command_recognized: true,
+        command: Some(command),
         transitions,
         groups: act.groups.clone(),
     })
-}
-
-fn weapon_id_to_table_index(weapon_id: u8) -> usize {
-    (weapon_id as usize).saturating_sub(1)
 }
 
 #[cfg(feature = "original-assets")]
@@ -457,10 +413,7 @@ mod tests {
                 }
             }
             write!(output, ">{}", command.pose_id).unwrap();
-            match command.action_id {
-                Some(action) => write!(output, ":{action}").unwrap(),
-                None => output.push_str(":-"),
-            }
+            write!(output, ":{}", command.action_id).unwrap();
             match command.anger_cost {
                 Some(cost) => write!(output, ":{cost}").unwrap(),
                 None => output.push_str(":-"),
@@ -488,34 +441,34 @@ mod tests {
 
     #[test]
     fn all_weapon_command_tables_match_web_contract() {
-        let expected = r#"1.g=DUU>203:3:100,DU>201:142:60,U>209:-:-,D>210:-:-,->200:-:-
-1.a=DU>551:143:60,U>214:-:-,->202:-:-
-2.g=DUU>224:11:100,DU>552:144:60,U>220:-:-,D>222:-:-,->218:-:-
-2.a=DU>554:145:60,->338:-:-
-3.g=DUU>216:7:100,DU>215:146:60,U>207:-:-,D>208:6:20,->206:-:-
-3.a=->338:-:-
-4.g=DDU>557:148:100,LRU>556:147:60,DLR>244:20:100,UU>243:-:-,DU>240:-:-,LR>239:-:-,U>233:-:-,D>241:-:-,L>238:-:-,R>237:-:-,->230:-:-
-4.a=U>228:-:-,D>235:-:-,->226:-:-
-5.g=DUU>259:30:100,DU>257:-:-,UU>253:-:-,DD>558:87:60,U>250:-:-,D>343:-:-,L>370:-:-,R>255:-:-,->248:-:-
-5.a=DD>559:149:60,UD>256:-:-,D>252:-:-,->245:-:-
-6.g=DUU>277:-:-,LRU>368:44:100,RL>561:151:60,DD>271:-:-,DU>272:-:-,UD>274:-:-,UU>275:-:-,LR>560:150:60,U>266:-:-,D>267:-:-,L>269:-:-,R>270:-:-,->262:-:-
-6.a=D>265:-:-,->260:-:-
-7.g=UUU>571:152:60,LRD>562:153:60,DUU>293:57:100,DDU>291:-:-,LRU>292:-:-,RL>286:-:-,DD>287:-:-,DU>288:-:-,UU>289:-:-,LR>290:-:-,U>285:-:-,D>284:-:-,->279:-:-
-7.a=D>282:-:-,->338:-:-
-8.g=DDU>565:155:60,LRD>310:70:100,LRU>309:-:-,RL>572:154:60,UU>303:-:-,DU>305:-:-,DD>306:-:-,LR>374:-:-,U>299:-:-,D>300:-:-,L>301:-:-,R>302:-:-,->295:-:-
-8.a=D>298:-:-,->338:-:-
-9.g=LRU>566:156:60,DUU>567:157:100,DDU>325:81:100,LRD>372:-:-,UU>320:-:-,DD>321:-:-,DU>319:-:-,LR>322:-:-,RL>323:-:-,U>316:-:-,D>317:-:-,->315:-:-
-9.a=D>318:-:-,->338:-:-
-10.0.g=DD>431:-:-,UU>568:159:60,L>430:-:-,D>438:-:-,->432:-:-
-10.0.a=D>446:-:-,->458:-:-
-10.1.g=DD>441:-:-,DU>570:158:60,UU>444:-:-,R>440:-:-,U>443:-:-,D>445:-:-,->442:-:-
-10.1.a=D>446:-:-,->458:-:-
-10.2.g=DDU>451:103:100,DU>449:-:-,UD>450:-:-,L>448:-:-,R>447:-:-,->520:-:-
-10.2.a=D>446:-:-,->458:-:-
-11.g=DDU>489:120:100,LRD>421:119:100,DUU>420:-:-,LRU>416:114:60,UD>419:-:-,UU>418:-:-,DU>417:-:-,LL>412:-:-,RR>413:-:-,LR>411:-:-,DD>415:-:-,D>414:-:-,->407:-:-
-11.a=D>410:-:-,->405:-:-
-12.g=LRUD>468:135:50,DUU>473:140:50,DDU>470:-:-,LRU>472:-:-,LRD>535:127:50,RR>527:-:-,LL>528:-:-,DD>529:-:-,UU>526:-:-,LR>540:141:10,UD>466:-:-,DU>471:-:-,U>463:-:-,D>464:-:-,->461:-:-
-12.a=RR>531:-:-,LL>532:-:-,DD>533:-:-,UU>530:-:-,D>465:-:-,->478:-:-"#;
+        let expected = r#"1.g=DUU>203:3:100,DU>201:142:60,U>209:1:-,D>210:2:-,->200:0:-
+1.a=DU>551:143:60,U>214:86:-,->202:84:-
+2.g=DUU>224:11:100,DU>552:144:60,U>220:9:-,D>222:10:-,->218:8:-
+2.a=DU>554:145:60,->338:58:-
+3.g=DUU>216:7:100,DU>215:146:60,U>207:5:-,D>208:6:20,->206:4:-
+3.a=->338:58:-
+4.g=DDU>557:148:100,LRU>556:147:60,DLR>244:20:100,UU>243:19:-,DU>240:17:-,LR>239:16:-,U>233:13:-,D>241:18:-,L>238:15:-,R>237:14:-,->230:12:-
+4.a=U>228:22:-,D>235:23:-,->226:21:-
+5.g=DUU>259:30:100,DU>257:29:-,UU>253:26:-,DD>558:87:60,U>250:25:-,D>343:83:-,L>370:27:-,R>255:28:-,->248:24:-
+5.a=DD>559:149:60,UD>256:33:-,D>252:32:-,->245:31:-
+6.g=DUU>277:43:-,LRU>368:44:100,RL>561:151:60,DD>271:39:-,DU>272:40:-,UD>274:41:-,UU>275:42:-,LR>560:150:60,U>266:35:-,D>267:36:-,L>269:37:-,R>270:38:-,->262:34:-
+6.a=D>265:46:-,->260:45:-
+7.g=UUU>571:152:60,LRD>562:153:60,DUU>293:57:100,DDU>291:55:-,LRU>292:56:-,RL>286:50:-,DD>287:51:-,DU>288:52:-,UU>289:53:-,LR>290:54:-,U>285:49:-,D>284:48:-,->279:47:-
+7.a=D>282:59:-,->338:58:-
+8.g=DDU>565:155:60,LRD>310:70:100,LRU>309:69:-,RL>572:154:60,UU>303:65:-,DU>305:66:-,DD>306:67:-,LR>374:68:-,U>299:61:-,D>300:62:-,L>301:63:-,R>302:64:-,->295:60:-
+8.a=D>298:71:-,->338:58:-
+9.g=LRU>566:156:60,DUU>567:157:100,DDU>325:81:100,LRD>372:80:-,UU>320:76:-,DD>321:77:-,DU>319:75:-,LR>322:78:-,RL>323:79:-,U>316:73:-,D>317:74:-,->315:72:-
+9.a=D>318:82:-,->338:58:-
+10.0.g=DD>431:89:-,UU>568:159:60,L>430:88:-,D>438:91:-,->432:90:-
+10.0.a=D>446:105:-,->458:104:-
+10.1.g=DD>441:93:-,DU>570:158:60,UU>444:96:-,R>440:92:-,U>443:95:-,D>445:97:-,->442:94:-
+10.1.a=D>446:105:-,->458:104:-
+10.2.g=DDU>451:103:100,DU>449:101:-,UD>450:102:-,L>448:99:-,R>447:98:-,->520:100:-
+10.2.a=D>446:105:-,->458:104:-
+11.g=DDU>489:120:100,LRD>421:119:100,DUU>420:118:-,LRU>416:114:60,UD>419:117:-,UU>418:116:-,DU>417:115:-,LL>412:110:-,RR>413:111:-,LR>411:109:-,DD>415:113:-,D>414:112:-,->407:107:-
+11.a=D>410:108:-,->405:106:-
+12.g=LRUD>468:135:50,DUU>473:140:50,DDU>470:128:-,LRU>472:134:-,LRD>535:127:50,RR>527:137:-,LL>528:138:-,DD>529:139:-,UU>526:136:-,LR>540:141:10,UD>466:126:-,DU>471:133:-,U>463:123:-,D>464:124:-,->461:122:-
+12.a=RR>531:130:-,LL>532:131:-,DD>533:132:-,UU>530:129:-,D>465:125:-,->478:121:-"#;
 
         assert_eq!(all_weapon_command_snapshot().trim(), expected);
         let staff = weapon_command_table(10).unwrap();
@@ -576,19 +529,12 @@ mod tests {
             }
             for command in sides.into_iter().flatten() {
                 let authored_action = act.groups.get(&command.pose_id).copied();
-                assert!(
-                    authored_action.is_some(),
-                    "weapon {weapon_id} pose {} must belong to character.act",
-                    command.pose_id
+                assert_eq!(
+                    authored_action,
+                    Some(command.action_id),
+                    "weapon {weapon_id} pose {} actionId",
+                    command.pose_id,
                 );
-                if let Some(action_id) = command.action_id {
-                    assert_eq!(
-                        authored_action,
-                        Some(action_id),
-                        "weapon {weapon_id} pose {} actionId",
-                        command.pose_id
-                    );
-                }
             }
         }
     }
@@ -646,7 +592,6 @@ mod tests {
                         form,
                         "form {form}, pose {pose}"
                     );
-                    assert_eq!(weapon_form_for_pose(10, pose), None);
                 }
             }
 
@@ -657,11 +602,8 @@ mod tests {
     #[test]
     fn staff_blade_sheathing_keeps_command_form_and_animates_separate_parts() {
         for entry in [431, 441, 450, 523] {
-            let mut command_form = 2;
+            let command_form = 2;
             for (pose, visible) in [(entry, 0), (485, 0), (486, 2), (403, 2)] {
-                if let Some(next) = weapon_form_for_pose(10, pose) {
-                    command_form = next;
-                }
                 assert_eq!(weapon_visual_form(10, command_form, pose), visible);
                 assert_eq!(command_form, 2, "visual fallback must not change commands");
             }
@@ -759,6 +701,31 @@ mod tests {
     }
 
     #[test]
+    fn custom_act_ground_left_selects_all_three_authored_stages() {
+        let mut text = "group(0)\n".repeat(63);
+        text.push_str("group(600-602)\n600(602)\n602(601)");
+        let act = meteor_asset::act::parse_character_act(&text);
+        let poses = [301, 600, 601, 602];
+        let profile = combo_profile(8, false, &[Dir::Left], 0, &poses, &act, |_| true).unwrap();
+        assert_eq!(profile.entry_pose_id, 600);
+        let action = profile.command.unwrap().action_id;
+        for (source, target) in [(600, 602), (602, 601)] {
+            assert_eq!(
+                pick_act_successor(action, &act.edges[&source], &poses, &act.groups),
+                Some(target)
+            );
+        }
+    }
+
+    #[test]
+    fn staff_switch_targets_follow_all_six_registered_actions() {
+        for (action, target) in [(88, 1), (89, 2), (92, 0), (93, 2), (98, 0), (99, 1)] {
+            assert_eq!(staff_form_for_action(action), Some(target));
+        }
+        assert_eq!(staff_form_for_action(90), None);
+    }
+
+    #[test]
     fn combo_profile_neutral_entry() {
         let act = ActData {
             groups: HashMap::new(),
@@ -796,11 +763,15 @@ mod weapon_tables {
         ground: &[
             cmd!(&[D, U, U], 203, 3, ANGER_FULL),
             cmd!(&[D, U], 201, 142, 60),
-            cmd!(&[U], 209),
-            cmd!(&[D], 210),
-            cmd!(200),
+            cmd!(&[U], 209, 1),
+            cmd!(&[D], 210, 2),
+            cmd!(&[], 200, 0),
         ],
-        air: &[cmd!(&[D, U], 551, 143, 60), cmd!(&[U], 214), cmd!(202)],
+        air: &[
+            cmd!(&[D, U], 551, 143, 60),
+            cmd!(&[U], 214, 86),
+            cmd!(&[], 202, 84),
+        ],
         forms: None,
     };
 
@@ -808,11 +779,11 @@ mod weapon_tables {
         ground: &[
             cmd!(&[D, U, U], 224, 11, ANGER_FULL),
             cmd!(&[D, U], 552, 144, 60),
-            cmd!(&[U], 220),
-            cmd!(&[D], 222),
-            cmd!(218),
+            cmd!(&[U], 220, 9),
+            cmd!(&[D], 222, 10),
+            cmd!(&[], 218, 8),
         ],
-        air: &[cmd!(&[D, U], 554, 145, 60), cmd!(338)],
+        air: &[cmd!(&[D, U], 554, 145, 60), cmd!(&[], 338, 58)],
         forms: None,
     };
 
@@ -820,11 +791,11 @@ mod weapon_tables {
         ground: &[
             cmd!(&[D, U, U], 216, 7, ANGER_FULL),
             cmd!(&[D, U], 215, 146, 60),
-            cmd!(&[U], 207),
+            cmd!(&[U], 207, 5),
             cmd!(&[D], 208, 6, 20),
-            cmd!(206),
+            cmd!(&[], 206, 4),
         ],
-        air: &[cmd!(338)],
+        air: &[cmd!(&[], 338, 58)],
         forms: None,
     };
 
@@ -833,57 +804,57 @@ mod weapon_tables {
             cmd!(&[D, D, U], 557, 148, ANGER_FULL),
             cmd!(&[L, R, U], 556, 147, 60),
             cmd!(&[D, L, R], 244, 20, ANGER_FULL),
-            cmd!(&[U, U], 243),
-            cmd!(&[D, U], 240),
-            cmd!(&[L, R], 239),
-            cmd!(&[U], 233),
-            cmd!(&[D], 241),
-            cmd!(&[L], 238),
-            cmd!(&[R], 237),
-            cmd!(230),
+            cmd!(&[U, U], 243, 19),
+            cmd!(&[D, U], 240, 17),
+            cmd!(&[L, R], 239, 16),
+            cmd!(&[U], 233, 13),
+            cmd!(&[D], 241, 18),
+            cmd!(&[L], 238, 15),
+            cmd!(&[R], 237, 14),
+            cmd!(&[], 230, 12),
         ],
-        air: &[cmd!(&[U], 228), cmd!(&[D], 235), cmd!(226)],
+        air: &[cmd!(&[U], 228, 22), cmd!(&[D], 235, 23), cmd!(&[], 226, 21)],
         forms: None,
     };
 
     pub static DAGGER: WeaponCommandTable = WeaponCommandTable {
         ground: &[
             cmd!(&[D, U, U], 259, 30, ANGER_FULL),
-            cmd!(&[D, U], 257),
-            cmd!(&[U, U], 253),
+            cmd!(&[D, U], 257, 29),
+            cmd!(&[U, U], 253, 26),
             cmd!(&[D, D], 558, 87, 60),
-            cmd!(&[U], 250),
-            cmd!(&[D], 343),
-            cmd!(&[L], 370),
-            cmd!(&[R], 255),
-            cmd!(248),
+            cmd!(&[U], 250, 25),
+            cmd!(&[D], 343, 83),
+            cmd!(&[L], 370, 27),
+            cmd!(&[R], 255, 28),
+            cmd!(&[], 248, 24),
         ],
         air: &[
             cmd!(&[D, D], 559, 149, 60),
-            cmd!(&[U, D], 256),
-            cmd!(&[D], 252),
-            cmd!(245),
+            cmd!(&[U, D], 256, 33),
+            cmd!(&[D], 252, 32),
+            cmd!(&[], 245, 31),
         ],
         forms: None,
     };
 
     pub static SWORD: WeaponCommandTable = WeaponCommandTable {
         ground: &[
-            cmd!(&[D, U, U], 277),
+            cmd!(&[D, U, U], 277, 43),
             cmd!(&[L, R, U], 368, 44, ANGER_FULL),
             cmd!(&[R, L], 561, 151, 60),
-            cmd!(&[D, D], 271),
-            cmd!(&[D, U], 272),
-            cmd!(&[U, D], 274),
-            cmd!(&[U, U], 275),
+            cmd!(&[D, D], 271, 39),
+            cmd!(&[D, U], 272, 40),
+            cmd!(&[U, D], 274, 41),
+            cmd!(&[U, U], 275, 42),
             cmd!(&[L, R], 560, 150, 60),
-            cmd!(&[U], 266),
-            cmd!(&[D], 267),
-            cmd!(&[L], 269),
-            cmd!(&[R], 270),
-            cmd!(262),
+            cmd!(&[U], 266, 35),
+            cmd!(&[D], 267, 36),
+            cmd!(&[L], 269, 37),
+            cmd!(&[R], 270, 38),
+            cmd!(&[], 262, 34),
         ],
-        air: &[cmd!(&[D], 265), cmd!(260)],
+        air: &[cmd!(&[D], 265, 46), cmd!(&[], 260, 45)],
         forms: None,
     };
 
@@ -892,18 +863,18 @@ mod weapon_tables {
             cmd!(&[U, U, U], 571, 152, 60),
             cmd!(&[L, R, D], 562, 153, 60),
             cmd!(&[D, U, U], 293, 57, ANGER_FULL),
-            cmd!(&[D, D, U], 291),
-            cmd!(&[L, R, U], 292),
-            cmd!(&[R, L], 286),
-            cmd!(&[D, D], 287),
-            cmd!(&[D, U], 288),
-            cmd!(&[U, U], 289),
-            cmd!(&[L, R], 290),
-            cmd!(&[U], 285),
-            cmd!(&[D], 284),
-            cmd!(279),
+            cmd!(&[D, D, U], 291, 55),
+            cmd!(&[L, R, U], 292, 56),
+            cmd!(&[R, L], 286, 50),
+            cmd!(&[D, D], 287, 51),
+            cmd!(&[D, U], 288, 52),
+            cmd!(&[U, U], 289, 53),
+            cmd!(&[L, R], 290, 54),
+            cmd!(&[U], 285, 49),
+            cmd!(&[D], 284, 48),
+            cmd!(&[], 279, 47),
         ],
-        air: &[cmd!(&[D], 282), cmd!(338)],
+        air: &[cmd!(&[D], 282, 59), cmd!(&[], 338, 58)],
         forms: None,
     };
 
@@ -911,19 +882,19 @@ mod weapon_tables {
         ground: &[
             cmd!(&[D, D, U], 565, 155, 60),
             cmd!(&[L, R, D], 310, 70, ANGER_FULL),
-            cmd!(&[L, R, U], 309),
+            cmd!(&[L, R, U], 309, 69),
             cmd!(&[R, L], 572, 154, 60),
-            cmd!(&[U, U], 303),
-            cmd!(&[D, U], 305),
-            cmd!(&[D, D], 306),
-            cmd!(&[L, R], 374),
-            cmd!(&[U], 299),
-            cmd!(&[D], 300),
-            cmd!(&[L], 301),
-            cmd!(&[R], 302),
-            cmd!(295),
+            cmd!(&[U, U], 303, 65),
+            cmd!(&[D, U], 305, 66),
+            cmd!(&[D, D], 306, 67),
+            cmd!(&[L, R], 374, 68),
+            cmd!(&[U], 299, 61),
+            cmd!(&[D], 300, 62),
+            cmd!(&[L], 301, 63),
+            cmd!(&[R], 302, 64),
+            cmd!(&[], 295, 60),
         ],
-        air: &[cmd!(&[D], 298), cmd!(338)],
+        air: &[cmd!(&[D], 298, 71), cmd!(&[], 338, 58)],
         forms: None,
     };
 
@@ -932,62 +903,62 @@ mod weapon_tables {
             cmd!(&[L, R, U], 566, 156, 60),
             cmd!(&[D, U, U], 567, 157, ANGER_FULL),
             cmd!(&[D, D, U], 325, 81, ANGER_FULL),
-            cmd!(&[L, R, D], 372),
-            cmd!(&[U, U], 320),
-            cmd!(&[D, D], 321),
-            cmd!(&[D, U], 319),
-            cmd!(&[L, R], 322),
-            cmd!(&[R, L], 323),
-            cmd!(&[U], 316),
-            cmd!(&[D], 317),
-            cmd!(315),
+            cmd!(&[L, R, D], 372, 80),
+            cmd!(&[U, U], 320, 76),
+            cmd!(&[D, D], 321, 77),
+            cmd!(&[D, U], 319, 75),
+            cmd!(&[L, R], 322, 78),
+            cmd!(&[R, L], 323, 79),
+            cmd!(&[U], 316, 73),
+            cmd!(&[D], 317, 74),
+            cmd!(&[], 315, 72),
         ],
-        air: &[cmd!(&[D], 318), cmd!(338)],
+        air: &[cmd!(&[D], 318, 82), cmd!(&[], 338, 58)],
         forms: None,
     };
 
     pub static STAFF_BLADE: WeaponCommandTable = WeaponCommandTable {
         ground: &[
-            cmd!(&[D, D], 431),
+            cmd!(&[D, D], 431, 89),
             cmd!(&[U, U], 568, 159, 60),
-            cmd!(&[L], 430),
-            cmd!(&[D], 438),
-            cmd!(432),
+            cmd!(&[L], 430, 88),
+            cmd!(&[D], 438, 91),
+            cmd!(&[], 432, 90),
         ],
-        air: &[cmd!(&[D], 446), cmd!(458)],
+        air: &[cmd!(&[D], 446, 105), cmd!(&[], 458, 104)],
         forms: Some([
             (
                 &[
-                    cmd!(&[D, D], 431),
+                    cmd!(&[D, D], 431, 89),
                     cmd!(&[U, U], 568, 159, 60),
-                    cmd!(&[L], 430),
-                    cmd!(&[D], 438),
-                    cmd!(432),
+                    cmd!(&[L], 430, 88),
+                    cmd!(&[D], 438, 91),
+                    cmd!(&[], 432, 90),
                 ],
-                &[cmd!(&[D], 446), cmd!(458)],
+                &[cmd!(&[D], 446, 105), cmd!(&[], 458, 104)],
             ),
             (
                 &[
-                    cmd!(&[D, D], 441),
+                    cmd!(&[D, D], 441, 93),
                     cmd!(&[D, U], 570, 158, 60),
-                    cmd!(&[U, U], 444),
-                    cmd!(&[R], 440),
-                    cmd!(&[U], 443),
-                    cmd!(&[D], 445),
-                    cmd!(442),
+                    cmd!(&[U, U], 444, 96),
+                    cmd!(&[R], 440, 92),
+                    cmd!(&[U], 443, 95),
+                    cmd!(&[D], 445, 97),
+                    cmd!(&[], 442, 94),
                 ],
-                &[cmd!(&[D], 446), cmd!(458)],
+                &[cmd!(&[D], 446, 105), cmd!(&[], 458, 104)],
             ),
             (
                 &[
                     cmd!(&[D, D, U], 451, 103, ANGER_FULL),
-                    cmd!(&[D, U], 449),
-                    cmd!(&[U, D], 450),
-                    cmd!(&[L], 448),
-                    cmd!(&[R], 447),
-                    cmd!(520),
+                    cmd!(&[D, U], 449, 101),
+                    cmd!(&[U, D], 450, 102),
+                    cmd!(&[L], 448, 99),
+                    cmd!(&[R], 447, 98),
+                    cmd!(&[], 520, 100),
                 ],
-                &[cmd!(&[D], 446), cmd!(458)],
+                &[cmd!(&[D], 446, 105), cmd!(&[], 458, 104)],
             ),
         ]),
     };
@@ -996,19 +967,19 @@ mod weapon_tables {
         ground: &[
             cmd!(&[D, D, U], 489, 120, ANGER_FULL),
             cmd!(&[L, R, D], 421, 119, ANGER_FULL),
-            cmd!(&[D, U, U], 420),
+            cmd!(&[D, U, U], 420, 118),
             cmd!(&[L, R, U], 416, 114, 60),
-            cmd!(&[U, D], 419),
-            cmd!(&[U, U], 418),
-            cmd!(&[D, U], 417),
-            cmd!(&[L, L], 412),
-            cmd!(&[R, R], 413),
-            cmd!(&[L, R], 411),
-            cmd!(&[D, D], 415),
-            cmd!(&[D], 414),
-            cmd!(407),
+            cmd!(&[U, D], 419, 117),
+            cmd!(&[U, U], 418, 116),
+            cmd!(&[D, U], 417, 115),
+            cmd!(&[L, L], 412, 110),
+            cmd!(&[R, R], 413, 111),
+            cmd!(&[L, R], 411, 109),
+            cmd!(&[D, D], 415, 113),
+            cmd!(&[D], 414, 112),
+            cmd!(&[], 407, 107),
         ],
-        air: &[cmd!(&[D], 410), cmd!(405)],
+        air: &[cmd!(&[D], 410, 108), cmd!(&[], 405, 106)],
         forms: None,
     };
 
@@ -1016,27 +987,27 @@ mod weapon_tables {
         ground: &[
             cmd!(&[L, R, U, D], 468, 135, 50),
             cmd!(&[D, U, U], 473, 140, 50),
-            cmd!(&[D, D, U], 470),
-            cmd!(&[L, R, U], 472),
+            cmd!(&[D, D, U], 470, 128),
+            cmd!(&[L, R, U], 472, 134),
             cmd!(&[L, R, D], 535, 127, 50),
-            cmd!(&[R, R], 527),
-            cmd!(&[L, L], 528),
-            cmd!(&[D, D], 529),
-            cmd!(&[U, U], 526),
+            cmd!(&[R, R], 527, 137),
+            cmd!(&[L, L], 528, 138),
+            cmd!(&[D, D], 529, 139),
+            cmd!(&[U, U], 526, 136),
             cmd!(&[L, R], 540, 141, 10),
-            cmd!(&[U, D], 466),
-            cmd!(&[D, U], 471),
-            cmd!(&[U], 463),
-            cmd!(&[D], 464),
-            cmd!(461),
+            cmd!(&[U, D], 466, 126),
+            cmd!(&[D, U], 471, 133),
+            cmd!(&[U], 463, 123),
+            cmd!(&[D], 464, 124),
+            cmd!(&[], 461, 122),
         ],
         air: &[
-            cmd!(&[R, R], 531),
-            cmd!(&[L, L], 532),
-            cmd!(&[D, D], 533),
-            cmd!(&[U, U], 530),
-            cmd!(&[D], 465),
-            cmd!(478),
+            cmd!(&[R, R], 531, 130),
+            cmd!(&[L, L], 532, 131),
+            cmd!(&[D, D], 533, 132),
+            cmd!(&[U, U], 530, 129),
+            cmd!(&[D], 465, 125),
+            cmd!(&[], 478, 121),
         ],
         forms: None,
     };

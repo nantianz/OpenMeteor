@@ -38,7 +38,7 @@ use bevy::transform::helper::TransformHelper;
 use meteor_anim::pose_controller::{advance_pose_loop_cursor, pose_playback_speed_at_frame};
 use meteor_asset::res::{parse_meteor_res, CombatResourceTable, WeaponCombatStats};
 use meteor_combat::combo_engine::{
-    pick_act_successor, resolve_affordable_weapon_command, weapon_form_for_pose, Dir as CombatDir,
+    pick_act_successor, resolve_affordable_weapon_command, staff_form_for_action, Dir as CombatDir,
 };
 use meteor_combat::hit_reaction::{
     begin_be_hit, begin_death, begin_guard_hit, facing_bucket, getup_reaction_for_pose,
@@ -798,16 +798,32 @@ fn admit_intersecting_target_at_substep(
 
 fn sync_weapon_form_state(
     active_fighter: Option<Res<super::fighter_frame::ActiveFighter>>,
-    mut query: Query<(Entity, &Fighter, &PoseRuntime, &mut WeaponForm)>,
+    assets: Option<Res<CharacterAssetsSet>>,
+    mut query: Query<(
+        Entity,
+        &Fighter,
+        &PoseRuntime,
+        &mut WeaponForm,
+        Has<RemoteFighter>,
+    )>,
 ) {
-    for (entity, fighter, pose, mut form) in &mut query {
+    for (entity, fighter, pose, mut form, remote) in &mut query {
         if !super::fighter_frame::accepts(active_fighter.as_deref(), entity) {
             continue;
         }
         if fighter.weapon != 10 {
             form.current = 0;
-        } else if let Some(next) = weapon_form_for_pose(fighter.weapon, pose.pose_id) {
-            form.current = next;
+        } else if remote {
+            let action = match assets
+                .as_deref()
+                .and_then(|set| set.0.get(&format!("p{}", fighter.character_id)))
+            {
+                Some(character) => character.act.groups.get(&pose.pose_id).copied(),
+                None => pose.action_id,
+            };
+            if let Some(next) = action.and_then(staff_form_for_action) {
+                form.current = next;
+            }
         }
     }
 }
@@ -1501,6 +1517,15 @@ fn queued_attack_commit_gate(
 }
 
 impl CombatView<'_> {
+    fn accept_attack_action(&mut self, action_id: u16) {
+        self.pose.action_id = Some(action_id);
+        if self.weapon == 10 {
+            if let Some(form) = staff_form_for_action(action_id) {
+                self.weapon_form = form;
+            }
+        }
+    }
+
     fn play_pose_entry(
         &mut self,
         pose_id: u16,
@@ -1615,30 +1640,20 @@ impl FighterView for CombatView<'_> {
         Some(queued)
     }
     fn start_neutral_attack(&mut self, airborne: bool) -> bool {
-        let Some(mut resolved) = resolve_affordable_weapon_command(
-            self.weapon,
-            &self.attack_directions,
-            airborne,
-            self.weapon_form,
-            |cost| self.qi.current >= cost as f32,
-        ) else {
-            return false;
-        };
-        if !FighterView::has_pose(self, resolved.pose_id) {
-            let Some(neutral) = resolve_affordable_weapon_command(
+        let entry = |directions: &[CombatDir]| {
+            resolve_affordable_weapon_command(
                 self.weapon,
-                &[],
+                directions,
                 airborne,
                 self.weapon_form,
                 |cost| self.qi.current >= cost as f32,
-            ) else {
-                return false;
-            };
-            resolved = neutral;
-            if !FighterView::has_pose(self, resolved.pose_id) {
-                return false;
-            }
-        }
+            )?
+            .with_act_entry(&self.assets.act)
+            .filter(|command| FighterView::has_pose(self, command.pose_id))
+        };
+        let Some(resolved) = entry(&self.attack_directions).or_else(|| entry(&[])) else {
+            return false;
+        };
 
         self.play_pose_entry(
             resolved.pose_id,
@@ -1648,11 +1663,10 @@ impl FighterView for CombatView<'_> {
             true,
             false,
         );
+        self.accept_attack_action(resolved.action_id);
         self.qi.current -= resolved.anger_cost as f32;
         if resolved.anger_cost > 0 {
-            if let Some(action_id) = resolved.action_id {
-                *self.anger_spend = Some((action_id, resolved.anger_cost));
-            }
+            *self.anger_spend = Some((resolved.action_id, resolved.anger_cost));
         }
         true
     }
@@ -1674,7 +1688,7 @@ impl FighterView for CombatView<'_> {
             self.weapon_form,
             |cost| self.qi.current >= cost as f32,
         )?;
-        let requested_action = self.assets.act.groups.get(&resolved.pose_id).copied()?;
+        let requested_action = resolved.action_id;
         let candidates = self.assets.act.edges.get(&current)?;
         let poses: Vec<u16> = self.assets.poses.keys().copied().collect();
         let next_pose_id = pick_act_successor(
@@ -1689,7 +1703,7 @@ impl FighterView for CombatView<'_> {
             return None;
         }
 
-        self.pose.action_id = Some(requested_action);
+        self.accept_attack_action(requested_action);
         Some(QueuedAttack {
             source_pose_id: current,
             next_pose_id,
@@ -1736,6 +1750,7 @@ impl FighterView for CombatView<'_> {
             false,
             false,
         );
+        self.pose.action_id = Some(queued.action_id);
 
         self.blend.pending_local_chain = Some((
             self.pose.pose_instance_id,
@@ -2997,7 +3012,7 @@ type CombatTickQuery<'w, 's> = Query<
         &'static mut GunAimState,
         (
             &'static mut AiIntent,
-            &'static WeaponForm,
+            &'static mut WeaponForm,
             &'static mut FighterAttackMotion,
             Option<&'static MissionNpc>,
             Option<&'static Visibility>,
@@ -3609,7 +3624,7 @@ fn combat_tick(
         mut gun_aim,
         (
             mut intent,
-            weapon_form_state,
+            mut weapon_form_state,
             mut attack_motion,
             mission,
             _visibility,
@@ -4364,6 +4379,9 @@ fn combat_tick(
         let completing_cure =
             is_local && sm.current == FighterState::Cure && hit_reaction.current.is_none();
         sm.update(dt);
+        if weapon_form_state.current != sm.fighter_mut().weapon_form {
+            weapon_form_state.current = sm.fighter_mut().weapon_form;
+        }
         let cure_completed = completing_cure && sm.current == FighterState::Name;
         let mut projected = project_state_machine(&sm);
         drop(sm);
@@ -5408,8 +5426,6 @@ fn attack_windows(
         }
         pending.retain(|&(_, _, time)| playback.elapsed - time <= 0.1);
         if local_attacks.is_empty() {
-            // The recorded hit may arrive one animation sample before the local
-            // attack window opens. Keep it until the 0.1s tolerance expires.
             playback.pending_hit_locks = pending;
             return;
         }
@@ -5490,7 +5506,6 @@ fn attack_windows(
                 },
             );
             let Some(strategy_id) = strategy_id else {
-                // The local animation has not sampled this attack window yet.
                 retry.push((target_entity, event_context, event_time));
                 continue;
             };
@@ -10014,7 +10029,8 @@ mod tests {
         let mut app = App::new();
         app.add_systems(Update, sync_weapon_form_state);
         let mut pose = PoseRuntime::idle();
-        pose.pose_id = 430;
+        pose.pose_id = 314;
+        pose.action_id = Some(88);
         let entity = app
             .world_mut()
             .spawn((
@@ -10027,6 +10043,9 @@ mod tests {
                     weapon_slot_variants: [3, 0],
                     weapon_variant: 3,
                 },
+                RemoteFighter {
+                    player_id: "peer".into(),
+                },
                 pose,
                 WeaponForm::default(),
             ))
@@ -10037,7 +10056,7 @@ mod tests {
         app.world_mut()
             .get_mut::<PoseRuntime>(entity)
             .unwrap()
-            .pose_id = 432;
+            .action_id = Some(90);
         app.update();
         assert_eq!(app.world().get::<WeaponForm>(entity).unwrap().current, 1);
 
@@ -10864,6 +10883,112 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn custom_act_blade_air_entry_and_nonconsecutive_followup() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        let mut character = crate::plugins::character_plugin::load_character_asset_for_test(
+            std::slice::from_ref(&root),
+            "p0",
+        )
+        .unwrap();
+        let bytes = std::fs::read(root.join("Common/character.act")).unwrap();
+        let text = crate::text_codec::decode_text(&bytes)
+            .replace("group(310-314)", "group(310-313)")
+            .replace("group(298)", "group(314-330)");
+        character.act = meteor_asset::act::parse_character_act(&format!("{text}\n314(315,330)"));
+        let source = character.poses.get_mut(&314).unwrap();
+        source.next_pose = Some(meteor_asset::pos::NextPoseBlock {
+            start: Some(source.start),
+            end: Some(source.end),
+            time: 0.1,
+        });
+        let air = FighterAir::default();
+        let mut view = CombatView {
+            pose: &mut PoseRuntime::idle(),
+            blend: &mut EntryBlend::default(),
+            combat: &mut CombatState::default(),
+            health: &mut Health::default(),
+            qi: &mut Qi::default(),
+            air: &air,
+            assets: &character,
+            weapon: 8,
+            guard_held_input: false,
+            in_guard_hit_reaction: false,
+            attack_directions: vec![CombatDir::Down],
+            weapon_form: 0,
+            anger_spend: &mut None,
+            strategy_id: weapon_to_strategy(8),
+            weapon_action_vetoed: false,
+        };
+        assert!(view.start_neutral_attack(true));
+        assert_eq!((view.pose.pose_id, view.pose.action_id), (314, Some(71)));
+
+        let mut queued = view.queue_attack(true).unwrap();
+        assert_eq!((queued.action_id, queued.next_pose_id), (71, 330));
+        view.pose.frame = view.pose.end as f32;
+        assert_eq!(
+            view.consume_queued_attack(&mut queued),
+            QueuedAttackCommit::Committed
+        );
+        assert_eq!(view.pose.pose_id, 330);
+    }
+
+    #[test]
+    fn custom_act_staff_switches_on_accepted_followup_before_pose_changes() {
+        let mut h = spawn_gameplay_harness(10).unwrap();
+        let keymap = h.app.world().resource::<crate::app_state::Keymap>().clone();
+        {
+            let mut assets = h.app.world_mut().resource_mut::<CharacterAssetsSet>();
+            let character = assets.0.get_mut("p1").unwrap();
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+            let bytes = std::fs::read(root.join("Common/character.act")).unwrap();
+            let text =
+                crate::text_codec::decode_text(&bytes).replace("group(430)", "group(314,330)");
+            character.act = meteor_asset::act::parse_character_act(&format!("{text}\n432(330)"));
+            let source = character.poses.get_mut(&432).unwrap();
+            source.next_pose = Some(meteor_asset::pos::NextPoseBlock {
+                start: Some(source.start),
+                end: Some(source.end),
+                time: 0.1,
+            });
+
+            source.actions = vec![meteor_asset::pos::SpeedBlock {
+                start: Some(source.start),
+                end: Some(source.end),
+                speed: 1.0,
+            }];
+        }
+        h.press_binding(keymap.attack);
+        h.step();
+        assert_eq!(h.pose_id(), 432);
+        h.release_binding(keymap.attack);
+        h.step();
+        h.press_binding(keymap.move_left);
+        h.press_binding(keymap.attack);
+        h.step();
+        assert_eq!(h.pose_id(), 432);
+        let world = h.app.world();
+        let queued = world
+            .get::<SmState>(h.fighter)
+            .unwrap()
+            .attack_queued
+            .as_ref()
+            .unwrap();
+        assert_eq!((queued.action_id, queued.next_pose_id), (88, 330));
+        assert_eq!(world.get::<WeaponForm>(h.fighter).unwrap().current, 1);
+        for _ in 0..180 {
+            h.step();
+            if h.pose_id() == 330 {
+                break;
+            }
+        }
+        assert_eq!(h.pose_id(), 330);
+        assert_eq!(
+            h.app.world().get::<WeaponForm>(h.fighter).unwrap().current,
+            1
+        );
     }
 
     #[test]

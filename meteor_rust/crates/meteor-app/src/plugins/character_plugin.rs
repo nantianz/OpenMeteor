@@ -898,6 +898,14 @@ fn resource_roots(workdir: &std::path::Path) -> Vec<PathBuf> {
     crate::plugins::audio_plugin::resource_roots(workdir)
 }
 
+fn load_character_act(roots: &[PathBuf]) -> meteor_asset::act::ActData {
+    read_first(roots, "Common/character.act")
+        .map(|bytes| {
+            meteor_asset::act::parse_character_act(&crate::text_codec::decode_text(&bytes))
+        })
+        .unwrap_or_default()
+}
+
 fn read_first(roots: &[PathBuf], path: &str) -> Option<Vec<u8>> {
     if let Some(bytes) = meteor_asset::runtime_assets::read_legacy_path(path) {
         return Some(bytes);
@@ -1000,6 +1008,13 @@ pub(crate) fn load_character_assets(
         .map(|cache| std::mem::take(&mut cache.0))
         .unwrap_or_default();
     assets.retain(|id, _| ids.contains(id));
+
+    if !assets.is_empty() {
+        let act = load_character_act(&roots);
+        for character in assets.values_mut() {
+            character.act.clone_from(&act);
+        }
+    }
     for character_id in &ids {
         if assets.contains_key(character_id) {
             continue;
@@ -1146,10 +1161,7 @@ pub(super) fn try_load_character_asset(
     let pos_text = crate::text_codec::decode_text(&required(".POS")?);
     let amb_bytes = required(".amb")?;
 
-    let act = read_first(roots, "Common/character.act")
-        .map(|bytes| crate::text_codec::decode_text(&bytes))
-        .map(|text| meteor_asset::act::parse_character_act(&text))
-        .unwrap_or_default();
+    let act = load_character_act(roots);
 
     let legacy_pak = |name| {
         roots
@@ -3238,6 +3250,26 @@ fn head_track(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_act_stage_entry_refreshes_cached_character() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        let mut character = load_character_asset_for_test(&[root], "p0").unwrap();
+        character.act = meteor_asset::act::parse_character_act("group(600)");
+        let mut app = App::new();
+        app.insert_resource(crate::app_state::LaunchRequest {
+            character_id: 0,
+            spawn_room_npcs: false,
+            ..Default::default()
+        })
+        .init_resource::<crate::app_state::RoomState>()
+        .init_resource::<crate::plugins::network_plugin::NetState>()
+        .insert_resource(CharacterAssetsSet([("p0".into(), character)].into()))
+        .add_systems(Update, load_character_assets);
+        app.update();
+        let assets = app.world().resource::<CharacterAssetsSet>();
+        assert_eq!(assets.0["p0"].act.group_members[&71], [298]);
+    }
 
     #[test]
     fn pause_preserves_models_and_suspended_exit_cleans_them() {
