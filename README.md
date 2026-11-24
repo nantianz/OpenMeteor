@@ -10,6 +10,14 @@ OpenMeteor 通过模块化的 Rust 工程探索原版游戏的战斗、移动、
 
 [▶ 在 Bilibili 观看项目介绍视频](https://www.bilibili.com/video/BV1HceY6nEbx/)
 
+## QQ 交流群
+
+**流星再世测试版** · 群号 `1058837934`
+
+在 QQ 中搜索群号，或扫描下方二维码加入。
+
+<a href="docs/images/qq-group.jpg"><img src="docs/images/qq-group.jpg" width="240" alt="流星再世测试版 QQ 群二维码"></a>
+
 ## 游戏截图
 
 截图展示搭配游戏资源运行时的画面；游戏资源需自行准备。

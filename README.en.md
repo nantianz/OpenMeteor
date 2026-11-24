@@ -13,6 +13,14 @@ gameplay coverage and compatibility are incomplete.
 
 [▶ Watch the project introduction on Bilibili](https://www.bilibili.com/video/BV1HceY6nEbx/)
 
+## QQ community
+
+**流星再世测试版** · Group ID `1058837934`
+
+Search for the group ID in QQ or scan the QR code to join.
+
+<a href="docs/images/qq-group.jpg"><img src="docs/images/qq-group.jpg" width="240" alt="QR code for the OpenMeteor QQ group"></a>
+
 ## Screenshots
 
 These screenshots show the game running with game resources, which must be provided separately.
