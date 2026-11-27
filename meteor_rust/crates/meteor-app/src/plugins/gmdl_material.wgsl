@@ -56,6 +56,9 @@ fn reflected_sky(origin: vec3<f32>, ray: vec3<f32>) -> vec3<f32> {
 @group(#{MATERIAL_BIND_GROUP}) @binding(16) var surface_detail_sampler: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(18) var surface_aux: texture_2d<f32>;
 
+#ifdef WATER_DEPTH_HIERARCHY
+@group(#{MATERIAL_BIND_GROUP}) @binding(22) var water_depth_hierarchy: texture_2d<f32>;
+#endif
 #ifdef WATER_SKY_REFLECTION
 fn water_sky_horizon(depth_uv: vec2<f32>, ray: vec3<f32>) -> f32 {
     let dimensions = textureDimensions(surface_aux);
@@ -110,6 +113,7 @@ struct GmdlGpuParams {
     grass_underlay_scale: f32,
     water_sky_style: vec4<f32>,
     water_sky_ranges: vec4<f32>,
+    stage_render_flags: u32,
 };
 
 struct WaterOptics {
@@ -264,8 +268,7 @@ fn opaque_depth_range(pixel: vec2<i32>) -> vec2<f32> {
     return depths;
 }
 
-fn sample_screen_ray(world: vec3<f32>, ray: vec3<f32>, distance_along: f32) -> ScreenRaySample {
-    let clip = view.clip_from_world * vec4<f32>(world + ray * distance_along, 1.0);
+fn project_screen_ray(clip: vec4<f32>) -> ScreenRaySample {
     if (clip.w <= 0.0) { return ScreenRaySample(vec2<f32>(0.0), vec3<f32>(0.0), 0.0, false); }
     let ndc = clip.xyz / clip.w;
     let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
@@ -273,10 +276,37 @@ fn sample_screen_ray(world: vec3<f32>, ray: vec3<f32>, distance_along: f32) -> S
         || any(uv <= vec2<f32>(0.01)) || any(uv >= vec2<f32>(0.99))) {
         return ScreenRaySample(uv, ndc, 0.0, false);
     }
-    return ScreenRaySample(uv, ndc,
-        textureLoad(depth_prepass_texture, screen_ray_pixel(uv), 0), true);
+    return ScreenRaySample(uv, ndc, 0.0, true);
 }
 
+fn load_screen_ray(sample: ScreenRaySample) -> ScreenRaySample {
+    var result = sample;
+    if (sample.valid) {
+        result.depth = textureLoad(depth_prepass_texture, screen_ray_pixel(sample.uv), 0);
+    }
+    return result;
+}
+fn sample_screen_ray(world: vec3<f32>, ray: vec3<f32>, distance_along: f32) -> ScreenRaySample {
+    let clip = view.clip_from_world * vec4<f32>(world + ray * distance_along, 1.0);
+    return load_screen_ray(project_screen_ray(clip));
+}
+#ifdef WATER_DEPTH_HIERARCHY
+fn screen_ray_block_in_front(first: ScreenRaySample, last: ScreenRaySample) -> bool {
+    if (!first.valid || !last.valid) { return false; }
+    let a = vec2<u32>(screen_ray_pixel(first.uv));
+    let b = vec2<u32>(screen_ray_pixel(last.uv));
+    let levels = textureNumLevels(water_depth_hierarchy);
+    let differing_bits = (a.x ^ b.x) | (a.y ^ b.y);
+    let shift = max(2u, 32u - countLeadingZeros(differing_bits));
+    let level = shift - 2u;
+    if (level >= levels) { return false; }
+    let cell = a >> vec2<u32>(shift);
+    if (any(cell >= textureDimensions(water_depth_hierarchy, level))) { return false; }
+    let nearest_encoded = textureLoad(water_depth_hierarchy, vec2<i32>(cell), i32(level)).r;
+    return nearest_encoded >= 1.0
+        && min(first.ndc.z, last.ndc.z) > nearest_encoded - 1.0 + 0.000001;
+}
+#endif
 fn water_refraction_color(world: vec3<f32>, pixel: vec2<i32>, depths: vec2<f32>,
     confidence: f32) -> vec4<f32> {
 
@@ -294,13 +324,34 @@ fn water_refraction_color(world: vec3<f32>, pixel: vec2<i32>, depths: vec2<f32>,
 fn water_screen_reflection(world: vec3<f32>, normal: vec3<f32>, view_dir: vec3<f32>) -> vec4<f32> {
 #ifdef DEPTH_PREPASS
     if ((u32(material.detail.y) & 1u) == 0u) { return vec4<f32>(0.0); }
+    if (view.world_position.y <= world.y + 0.02 || view_dir.y <= 0.02) { return vec4<f32>(0.0); }
     let ray = normalize(reflect(-view_dir, normal));
     if (ray.y <= 0.02) { return vec4<f32>(0.0); }
-    var distance_along = 0.15;
+    var distance_along = 0.20;
     var previous_distance = 0.0;
     var previous_front = true;
-    for (var step = 0u; step < 8u; step += 1u) {
+#ifdef WATER_DEPTH_HIERARCHY
+    let ray_origin_clip = view.clip_from_world * vec4<f32>(world, 1.0);
+    let ray_direction_clip = view.clip_from_world * vec4<f32>(ray, 0.0);
+#endif
+    for (var step = 0u; step < 6u; step += 1u) {
+#ifdef WATER_DEPTH_HIERARCHY
+        let first = project_screen_ray(ray_origin_clip + ray_direction_clip * distance_along);
+        if (step + 3u < 6u) {
+            let block_end = ((distance_along * 2.0) * 2.0) * 2.0;
+            let last = project_screen_ray(ray_origin_clip + ray_direction_clip * block_end);
+            if (screen_ray_block_in_front(first, last)) {
+                previous_front = true;
+                previous_distance = block_end;
+                distance_along = block_end * 2.0;
+                step += 3u;
+                continue;
+            }
+        }
+        let sample = load_screen_ray(first);
+#else
         let sample = sample_screen_ray(world, ray, distance_along);
+#endif
         if (!sample.valid) { break; }
         let behind = sample.depth > 0.0 && sample.ndc.z <= sample.depth;
         if (behind && previous_front) {
@@ -308,9 +359,13 @@ fn water_screen_reflection(world: vec3<f32>, normal: vec3<f32>, view_dir: vec3<f
             var far = distance_along;
             var hit = sample;
 
-            for (var refine = 0u; refine < 4u; refine += 1u) {
+            for (var refine = 0u; refine < 2u; refine += 1u) {
                 let middle = (near + far) * 0.5;
+#ifdef WATER_DEPTH_HIERARCHY
+                let candidate = load_screen_ray(project_screen_ray(ray_origin_clip + ray_direction_clip * middle));
+#else
                 let candidate = sample_screen_ray(world, ray, middle);
+#endif
                 if (candidate.valid && candidate.depth > 0.0
                     && candidate.ndc.z <= candidate.depth) {
                     far = middle;
@@ -336,7 +391,7 @@ fn water_screen_reflection(world: vec3<f32>, normal: vec3<f32>, view_dir: vec3<f
         }
         previous_front = !behind;
         previous_distance = distance_along;
-        distance_along *= 1.85;
+        distance_along *= 2.0;
     }
 #endif
     return vec4<f32>(0.0);
@@ -347,46 +402,17 @@ fn water_screen_refraction(world: vec3<f32>, frag_coord: vec3<f32>,
 #ifdef DEPTH_PREPASS
     if ((u32(material.detail.y) & 2u) == 0u || ray.y >= -0.02 || path <= 0.06) { return vec4<f32>(0.0); }
     let source_pixel = vec2<i32>(frag_coord.xy);
-    let source_depths = opaque_depth_range(source_pixel);
-
-    if (source_depths.y > frag_coord.z + 0.000001) { return vec4<f32>(0.0); }
-    var near = 0.04;
-    let start = sample_screen_ray(world, ray, near);
-    if (start.valid && (start.depth <= 0.0 || start.ndc.z > start.depth)) {
-        for (var step = 1u; step <= 8u; step += 1u) {
-            let t = f32(step) / 8.0;
-            var far = mix(0.04, path * 1.2, t * t);
-            var hit = sample_screen_ray(world, ray, far);
-            if (!hit.valid) { break; }
-            if (hit.depth <= 0.0 || hit.ndc.z > hit.depth) {
-                near = far;
-                continue;
+    let source_depth = textureLoad(depth_prepass_texture, source_pixel, 0);
+    if (source_depth > frag_coord.z + 0.000001) { return vec4<f32>(0.0); }
+    let refracted = sample_screen_ray(world, ray, min(path, 2.2));
+    if (refracted.valid && refracted.depth > 0.0 && refracted.depth <= frag_coord.z + 0.000001) {
+        let pixel = screen_ray_pixel(refracted.uv);
+        let edge = max(abs(refracted.uv.x * 2.0 - 1.0), abs(refracted.uv.y * 2.0 - 1.0));
+        let color = water_refraction_color(world, pixel, vec2<f32>(refracted.depth),
+            1.0 - smoothstep(0.82, 0.98, edge));
+        if (color.a > 0.0) { return color; }
             }
-            for (var i = 0u; i < 3u; i += 1u) {
-                let middle = (near + far) * 0.5;
-                let sample = sample_screen_ray(world, ray, middle);
-                if (sample.valid && sample.depth > 0.0 && sample.ndc.z <= sample.depth) {
-                    hit = sample;
-                    far = middle;
-                } else {
-                    near = middle;
-                }
-            }
-            let position = view.world_from_clip * vec4<f32>(hit.ndc.xy, hit.depth, 1.0);
-            if (abs(position.w) < 0.0001) { break; }
-            let delta = position.xyz / position.w - world;
-            let along = dot(delta, ray);
-            if (delta.y >= -0.025 || along <= 0.0
-                || length(delta - ray * along) > max(0.12, 0.08 * along)) { break; }
-            let edge = max(abs(hit.uv.x * 2.0 - 1.0), abs(hit.uv.y * 2.0 - 1.0));
-            let pixel = screen_ray_pixel(hit.uv);
-            let color = water_refraction_color(world, pixel, opaque_depth_range(pixel),
-                1.0 - smoothstep(0.8, 0.98, edge));
-            if (color.a > 0.0) { return color; }
-            break;
-        }
-    }
-    return water_refraction_color(world, source_pixel, source_depths, 1.0);
+    return water_refraction_color(world, source_pixel, vec2<f32>(source_depth), 1.0);
 #endif
     return vec4<f32>(0.0);
 }
@@ -623,26 +649,118 @@ fn grass_patch(point: vec2<f32>) -> f32 {
         weight.y);
 }
 
+#ifndef NO_ARRAY_TEXTURES_SUPPORT
+#import bevy_pbr::mesh_view_bindings::directional_shadow_textures;
+#import bevy_pbr::shadows::{get_cascade_index, world_to_directional_light_local};
+fn authored_shadow_sample(index: u32, position: vec4<f32>, normal: vec3<f32>, row: i32) -> f32 {
+    let light = &lights.directional_lights[0u];
+    let cosine = max(dot(normal, (*light).direction_to_light), 0.0);
+    let offset = cosine * (*light).shadow_normal_bias * (*light).cascades[index].texel_size * normal;
+    let biased = position.xyz + offset + (*light).shadow_depth_bias * (*light).direction_to_light;
+    let projected = world_to_directional_light_local(0u, index, vec4<f32>(biased, position.w));
+    if (projected.w == 0.0) { return 1.0; }
+    let size = vec2<i32>(textureDimensions(directional_shadow_textures));
+    let pixel = projected.xy * vec2<f32>(size);
+    let first = vec2<i32>(floor(pixel - vec2<f32>(0.5 * f32(row - 1))));
+    let layer = i32((*light).depth_texture_base_index + index);
+    var samples = 0.0;
+    for (var y = 0; y < row; y += 1) {
+        for (var x = 0; x < row; x += 1) {
+            let coordinate = clamp(first + vec2<i32>(x, y), vec2<i32>(0), size - vec2<i32>(1));
+            let blocker = textureLoad(directional_shadow_textures, coordinate, layer, 0);
+            samples += select(0.0, 1.0, projected.z >= blocker);
+        }
+    }
+    return samples / f32(row * row);
+}
+fn authored_directional_shadow(position: vec4<f32>, normal: vec3<f32>, depth: f32, row: i32) -> f32 {
+    let light = &lights.directional_lights[0u];
+    let index = get_cascade_index(0u, depth);
+    if (index >= (*light).num_cascades) { return 1.0; }
+    let active_row = select(1, min(row, 3), index == 0u);
+    let here = authored_shadow_sample(index, position, normal, active_row);
+    if (index > 0u || (*light).cascades_overlap_proportion == 0.0 || index + 1u >= (*light).num_cascades) {
+        return here;
+    }
+    let near = 0.0;
+    let far = (*light).cascades[index].far_bound;
+    let remaining = (far + depth) / max(far - near, 0.001);
+    if (remaining >= 0.1) { return here; }
+    let next = authored_shadow_sample(index + 1u, position, normal, 1);
+    return mix(next, here, smoothstep(0.0, 0.1, remaining));
+}
+#endif
 fn scene_lighting(in: VertexOutput, detail_normal: vec3<f32>) -> vec3<f32> {
 
     if (material.base.mode == 2u || material.base.mode == 3u || material.base.mode == 4u) {
         return vec3<f32>(1.0);
     }
+    let sky_lit = graphics.counts.w > 0.5;
+    let sun_cosine = max(dot(detail_normal, graphics.sun.xyz), 0.0);
     var shadow = 1.0;
+#ifndef GMDL_CHARACTER
+    let authored = (material.stage_render_flags & 1u) != 0u;
+    let authored_sun = authored && !sky_lit;
+    let authored_unlit = authored && (material.stage_render_flags & 2u) != 0u;
+    let authored_lambert = select(1.0, max(dot(detail_normal, graphics.stage_render.sun.xyz), 0.0), authored_sun);
+    let skip_authored_backface_shadow = authored_sun
+        && !authored_unlit
+        && graphics.stage_render.ambient.w > 0.0
+        && material.base.has_texture != 0u
+        && authored_lambert <= 0.0;
+#else
+    let skip_authored_backface_shadow = false;
+#endif
 #ifdef VERTEX_OUTPUT_INSTANCE_INDEX
     if (lights.n_directional_lights > 0u && lighting.w > 0.0
+        && !skip_authored_backface_shadow
+        && (!sky_lit || (graphics.sun.w > 0.0 && sun_cosine > 0.0))
         && (mesh[in.instance_index].flags & MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u) {
-        shadow = fetch_directional_shadow(0u, in.world_position, normalize(in.world_normal),
-            (view.view_from_world * in.world_position).z, in.position.xy);
+        let view_depth = (view.view_from_world * in.world_position).z;
+        let normal = normalize(in.world_normal);
+#ifndef NO_ARRAY_TEXTURES_SUPPORT
+#ifndef GMDL_CHARACTER
+        if (authored_sun && graphics.stage_render.point_count.z > 0.0) {
+            shadow = authored_directional_shadow(in.world_position, normal, view_depth,
+                i32(graphics.stage_render.point_count.z));
+        } else
+#endif
+        {
+            shadow = fetch_directional_shadow(0u, in.world_position, normal, view_depth, in.position.xy);
+        }
+#else
+        shadow = fetch_directional_shadow(0u, in.world_position, normal, view_depth, in.position.xy);
+#endif
     }
 #endif
-    if (graphics.counts.w > 0.5) {
+#ifndef GMDL_CHARACTER
+    if (authored && (material.stage_render_flags & 2u) != 0u) {
+        let transmission = select(mix(1.0, shadow, lighting.w), mix(shadow, 1.0, graphics.stage_render.sun.w), authored_sun);
+        return vec3<f32>(transmission);
+    }
+    if (authored_sun) {
+        let room = &graphics.stage_render;
+        let transmission = mix(shadow, 1.0, (*room).sun.w);
+        if ((*room).ambient.w > 0.0 && material.base.has_texture != 0u) {
+            let lambert = max(dot(detail_normal, (*room).sun.xyz), 0.0);
+            let light = (*room).ambient.rgb + (*room).sun_color.rgb * lambert * transmission;
+            return light + authored_point_lighting(in.world_position.xyz, detail_normal);
+        }
+    }
+#endif
+    if (sky_lit) {
         let irradiance = mix(graphics.ground.rgb, graphics.sky.rgb, detail_normal.y * 0.5 + 0.5);
-        let sun = graphics.sun_color.rgb * graphics.sun.w * max(dot(detail_normal, graphics.sun.xyz), 0.0);
+        let sun = graphics.sun_color.rgb * graphics.sun.w * sun_cosine;
         let exposure = select(graphics.environment.z, 1.0, unified_hdr());
         let linear = exposure * (1.60 * irradiance + sun * (0.55 * mix(1.0, shadow, lighting.w)));
-        if (unified_hdr()) { return linear; }
-        return pack_linear_to_srgb(linear);
+        var points = vec3<f32>(0.0);
+#ifndef GMDL_CHARACTER
+        if (authored && graphics.stage_render.point_count.x > 0.0) {
+            points = authored_point_lighting(in.world_position.xyz, detail_normal);
+        }
+#endif
+        if (unified_hdr()) { return linear + pack_srgb_to_linear(points); }
+        return pack_linear_to_srgb(linear) + points;
     }
 #ifdef VERTEX_OUTPUT_INSTANCE_INDEX
     if (lighting.x > 0.0 && lights.n_directional_lights > 0u) {
@@ -655,6 +773,12 @@ fn scene_lighting(in: VertexOutput, detail_normal: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(mix(1.0, shadow, lighting.w) * scene_detail_factor(in, detail_normal));
 }
 
+struct StageRenderFrame {
+    ambient: vec4<f32>, sun: vec4<f32>, sun_color: vec4<f32>,
+    fog_params: vec4<f32>, fog_color: vec4<f32>, point_count: vec4<f32>,
+    point_positions: array<vec4<f32>, 255>, point_colors: array<vec4<f32>, 255>,
+    point_grid: vec4<f32>, point_cells: array<vec4<u32>, 256>,
+};
 struct GraphicsFrame {
     sky: vec4<f32>, ground: vec4<f32>, sun: vec4<f32>, sun_color: vec4<f32>,
     environment: vec4<f32>,
@@ -664,9 +788,36 @@ struct GraphicsFrame {
     water_wind: vec4<f32>, water_wind_cross: vec4<f32>,
     color_pipeline: vec4<f32>,
     fx_lights: array<vec4<f32>,8>, fx_light_colors: array<vec4<f32>,8>,
+    stage_render: StageRenderFrame,
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(17) var<uniform> graphics: GraphicsFrame;
 
+fn authored_point_lighting(position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    let room = &graphics.stage_render;
+    let count = u32((*room).point_count.x);
+    let localized = count > 16u;
+    var indices = vec4<u32>(0u);
+    if (localized) {
+        let grid = (*room).point_grid;
+        let cell = vec2<u32>(clamp((position.xz - grid.xy) * grid.zw, vec2<f32>(0.0), vec2<f32>(15.0)));
+        indices = (*room).point_cells[cell.y * 16u + cell.x];
+    }
+    var sum = vec3<f32>(0.0);
+    for (var slot = 0u; slot < min(count, 16u); slot += 1u) {
+        let entry = select(slot + 1u, (indices[slot / 4u] >> ((slot % 4u) * 8u)) & 255u, localized);
+        if (entry == 0u) { break; }
+        let index = entry - 1u;
+        let point = (*room).point_positions[index];
+        let vector = point.xyz - position;
+        let distance_sq = dot(vector, vector);
+        let range_factor = 1.0 - distance_sq * point.w * point.w;
+        if (range_factor > 0.0) {
+            let diffuse = max(dot(normal, vector * inverseSqrt(max(distance_sq, 0.000001))), 0.0);
+            sum += (*room).point_colors[index].rgb * range_factor * (1.0 + diffuse);
+        }
+    }
+    return sum;
+}
 fn unified_hdr() -> bool {
 #ifdef METEOR_HDR_TARGET
     return graphics.color_pipeline.x > 0.5;
@@ -709,7 +860,8 @@ fn pack_pbr(in: VertexOutput, n: vec3<f32>, texel: vec3<f32>, vertex: vec3<f32>,
     let g = nv/(nv*(1.0-k)+k) * nl/(nl*(1.0-k)+k);
     var shadow = 1.0;
 #ifdef VERTEX_OUTPUT_INSTANCE_INDEX
-    if (lights.n_directional_lights > 0u && lighting.w > 0.0) {
+    if (nl > 0.0 && graphics.sun.w > 0.0 && material.pbr_lighting.x > 0.0
+        && lights.n_directional_lights > 0u && lighting.w > 0.0) {
         shadow = mix(1.0, fetch_directional_shadow(0u,in.world_position,n,(view.view_from_world*in.world_position).z,in.position.xy), lighting.w);
     }
 #endif
@@ -740,7 +892,9 @@ fn pack_fx_lights(position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
         let to_light = light.xyz - position;
         let distance_sq = max(dot(to_light, to_light), 0.01);
         let range = max(light.w, 0.01);
-        let window = clamp(1.0 - distance_sq / (range * range), 0.0, 1.0);
+        let range_sq = range * range;
+        if (distance_sq >= range_sq) { continue; }
+        let window = 1.0 - distance_sq / range_sq;
         let n_dot_l = max(dot(normal, to_light * inverseSqrt(distance_sq)), 0.0);
         sum += graphics.fx_light_colors[i].rgb * (window * window * n_dot_l / (1.0 + distance_sq));
     }
@@ -779,21 +933,50 @@ fn pack_fog(position: vec3<f32>, color: vec3<f32>) -> vec3<f32> {
     return color*transmittance+tint/max(optical_depth,0.0001)*(1.0-transmittance);
 }
 
+fn authored_stage_fog(position: vec4<f32>, color: vec3<f32>) -> vec3<f32> {
+    let stage = &graphics.stage_render;
+    if ((material.stage_render_flags & 1u) == 0u || (*stage).fog_color.w == 0.0 ||
+        all(color == vec3<f32>(0.0))) {
+        return color;
+    }
+    let depth = -(view.view_from_world * position).z * (*stage).point_count.y;
+    let params = (*stage).fog_params;
+    var visible = saturate((params.x - depth) * params.y);
+    if ((*stage).fog_color.w == 2.0) {
+        let height = (position.y - params.z) * params.w;
+        visible = min(visible, 1.0 - exp(-height * height));
+    }
+    let fog = select((*stage).fog_color.rgb, pack_srgb_to_linear((*stage).fog_color.rgb), unified_hdr());
+    let background = select(fog, color + fog, (material.stage_render_flags & 4u) != 0u);
+    return mix(background, color, visible);
+}
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let params = material.base;
 
+#ifdef GMDL_MULTIPLY_SHADOW
     if (params.mode == 3u && lighting.w > 0.0) { discard; }
 
-    let fade_view = distance(view.world_position, occlusion.eye.xyz) < 0.01;
+#endif
+#ifdef GMDL_CHARACTER
+    if (material.first_person_clip.w > 0.0 && occlusion.self_eye.w > 0.0
+        && distance(view.world_position, occlusion.self_eye.xyz) < 0.01
+        && distance(in.world_position.xyz, occlusion.self_eye.xyz) < material.first_person_clip.w) {
+        discard;
+    }
+#endif
     let elapsed = simulation_time.xy - material.scroll.zw;
     let scroll_time = elapsed.x + elapsed.y;
     var uv_offset = params.uv_offset;
     if (any(material.scroll.xy != vec2<f32>(0.0))) {
         uv_offset = fract(params.uv_offset + fract(material.scroll.xy * elapsed.x) + fract(material.scroll.xy * elapsed.y));
     }
+#ifdef GMDL_CHARACTER
+    let water = false;
+#else
     let water = water_enhance_active(params.mode);
 
+#endif
     var texel = vec4<f32>(1.0);
     if (params.has_texture == 1u) {
         let uv_a = in.uv + uv_offset;
@@ -803,24 +986,40 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
 #ifdef VERTEX_COLORS
     diffuse = in.color;
 #endif
+    var color = texel * diffuse;
+    color.a *= params.opacity;
+#ifdef GMDL_ALPHA_TEST
+    if (params.alpha_cutoff > 0.0 && color.a < params.alpha_cutoff) {
+        discard;
+    }
+#endif
+#ifdef GMDL_CAMERA_FADE
+    if (occlusion.eye.w > 0.0
+        && distance(view.world_position, occlusion.eye.xyz) < 0.01
+        && camera_fade(in.world_position.xyz, in.position.xy)) {
+        discard;
+    }
+#endif
     var shading_normal = normalize(in.world_normal);
+#ifndef GMDL_CHARACTER
     if (water) {
         shading_normal = water_surface_normal(in);
     } else {
         shading_normal = scene_detail_normal(in, in.uv + uv_offset);
     }
-    var color = texel * diffuse;
+#endif
     if (unified_hdr() && !water && material.pbr.x <= 0.5 && (params.mode == 0u || params.mode == 1u)) {
         color = vec4<f32>(pack_srgb_to_linear(color.rgb), color.a);
     }
-    color.a *= params.opacity;
 
     if (params.mode == 3u) {
 
         color = vec4<f32>(vec3<f32>(1.0) - color.rgb, 1.0);
     } else {
 
-        let shade = scene_lighting(in, shading_normal);
+        var shade = vec3<f32>(1.0);
+#ifndef GMDL_CHARACTER
+        let pbr = material.pbr.x > 0.5;
         if (material.water.x == 7.0) {
 
             if (graphics.counts.w > 0.5) {
@@ -861,14 +1060,20 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
                 color = vec4<f32>(color.rgb * select(pack_linear_to_srgb(light), light, unified_hdr()), color.a);
             }
         } else if (water) {
+            shade = scene_lighting(in, shading_normal);
             color = shade_water(in, shading_normal, color, dot(shade, vec3<f32>(0.2126, 0.7152, 0.0722)));
         } else if (material.water.x == 4.0) {
+            shade = scene_lighting(in, shading_normal);
             color = shade_spray(in, shading_normal, color, dot(shade, vec3<f32>(0.2126, 0.7152, 0.0722)));
-        } else if (material.pbr.x > 0.5) {
+        } else if (pbr) {
             color = vec4<f32>(pack_pbr(in, shading_normal, texel.rgb, diffuse.rgb, in.uv + uv_offset), color.a);
-        } else {
+        } else
+#endif
+        {
+            shade = scene_lighting(in, shading_normal);
             color = vec4<f32>(color.rgb * shade, color.a);
         }
+#ifndef GMDL_CHARACTER
         if (graphics.counts.z > 0.5 && material.grass_ground.w > 0.0 && material.water.x == 0.0) {
             let point = in.world_position.xz;
             let uv = (point - material.grass_bounds.xy) / material.grass_bounds.zw;
@@ -899,28 +1104,21 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
                         ground_color = material.grass_ground.rgb * variation * fringe;
                     }
                     let amount = material.grass_ground.w * slope * edge;
+                    if (pbr) {
+                        shade = scene_lighting(in, shading_normal);
+                    }
                     color = vec4<f32>(mix(color.rgb, ground_color * shade, amount), color.a);
                 }
             }
         }
+#endif
     }
+#ifndef GMDL_CHARACTER
     if (material.pbr_textures.w > 0.5 && params.mode == 0u) {
         color = vec4<f32>(color.rgb * pack_contacts(in.world_position.xyz, normalize(in.world_normal)), color.a);
     }
 
-    if (material.first_person_clip.w > 0.0 && occlusion.self_eye.w > 0.0
-        && distance(view.world_position, occlusion.self_eye.xyz) < 0.01
-        && distance(in.world_position.xyz, occlusion.self_eye.xyz) < material.first_person_clip.w) {
-        discard;
-    }
-    if (params.alpha_cutoff > 0.0 && color.a < params.alpha_cutoff) {
-        discard;
-    }
-
-    if (!(water && material.water.x == 1.0) && fade_view && material.first_person_clip.w <= 0.0
-        && occlusion.eye.w > 0.0 && camera_fade(in.world_position.xyz, in.position.xy)) {
-        discard;
-    }
+#endif
 
     if (material.body_glow.w > 0.0) {
         let t = simulation_time.y;
@@ -962,7 +1160,12 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         color = vec4<f32>(color.rgb + lit, color.a);
     }
     if (params.mode == 0u || params.mode == 1u) {
-        color = vec4<f32>(pack_fog(in.world_position.xyz, color.rgb), color.a);
+#ifdef GMDL_CHARACTER
+        let fogged = color.rgb;
+#else
+        let fogged = authored_stage_fog(in.world_position, color.rgb);
+#endif
+        color = vec4<f32>(pack_fog(in.world_position.xyz, fogged), color.a);
     }
     return color;
 }

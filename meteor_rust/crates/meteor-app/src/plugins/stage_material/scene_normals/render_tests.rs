@@ -76,9 +76,15 @@ fn headless_scene_normals_change_pixels_and_toggle_back_exactly() {
         bevy::core_pipeline::tonemapping::Tonemapping::None,
         Transform::from_xyz(0.0, 9.0, 3.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
-    let normal = load_scene_normal(
+    let texture = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../config/graphics-packs/scene-normals/textures/sn03/sn314.jpg.normal.png",
+    ))
+    .unwrap();
+    let normal = load_hd_scene_normal(
         "sn03",
         "sn314.jpg",
+        &texture,
         &mut app.world_mut().resource_mut::<Assets<Image>>(),
         &mut HashMap::new(),
         0,
@@ -167,60 +173,64 @@ fn headless_scene_normals_change_pixels_and_toggle_back_exactly() {
         );
         eprintln!("normal-map changed pixels: environment={lit}, pixels={changed}");
     }
-    let hd_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../asset-tools/generated/scene-textures/sn06");
-    let hd_color_bytes = std::fs::read(hd_root.join("sn06mian5.jpg")).unwrap();
-    let hd_normal_bytes = std::fs::read(hd_root.join("sn06mian5.jpg.normal.png")).unwrap();
-    let hd_color = crate::plugins::pak_textures::image_handle_with_quality(
-        &mut app.world_mut().resource_mut::<Assets<Image>>(),
-        &hd_color_bytes,
-        0,
-    )
-    .unwrap();
-    let hd_normal = load_hd_scene_normal(
-        "sn06",
-        "sn06mian5.jpg",
-        &hd_normal_bytes,
-        &mut app.world_mut().resource_mut::<Assets<Image>>(),
-        &mut HashMap::new(),
-        0,
-    )
-    .unwrap();
+    #[cfg(feature = "original-assets")]
     {
-        let mut materials = app.world_mut().resource_mut::<Assets<GmdlMaterial>>();
-        let mut material = materials.get_mut(&material).unwrap();
-        material.texture = Some(hd_color);
-        material.params.has_texture = 1;
-        material.normal_texture = Some(hd_normal);
-        material.normal_strength = 1.8;
-        material.normal_contrast = 1.5;
-    }
-    for lit in [false, true] {
-        app.world_mut().resource_mut::<FrameUniforms>().lighting.x = if lit { 1.0 } else { 0.0 };
-        app.world_mut().resource_mut::<Settings>().scene_normal_maps = false;
-        let flat = capture(&mut app, &pixels);
-        app.world_mut().resource_mut::<Settings>().scene_normal_maps = true;
-        let relief = capture(&mut app, &pixels);
-        let mean = flat
-            .chunks_exact(4)
-            .zip(relief.chunks_exact(4))
-            .map(|(a, b)| f64::from(a[0].abs_diff(b[0])))
-            .sum::<f64>()
-            / (128.0 * 128.0);
-        let changed = flat
-            .chunks_exact(4)
-            .zip(relief.chunks_exact(4))
-            .filter(|(a, b)| a[0].abs_diff(b[0]) > 2)
-            .count();
-        eprintln!(
+        let hd_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../asset-tools/generated/scene-textures/sn06");
+        let hd_color_bytes = std::fs::read(hd_root.join("sn06mian5.jpg")).unwrap();
+        let hd_normal_bytes = std::fs::read(hd_root.join("sn06mian5.jpg.normal.png")).unwrap();
+        let hd_color = crate::plugins::pak_textures::image_handle_with_quality(
+            &mut app.world_mut().resource_mut::<Assets<Image>>(),
+            &hd_color_bytes,
+            0,
+        )
+        .unwrap();
+        let hd_normal = load_hd_scene_normal(
+            "sn06",
+            "sn06mian5.jpg",
+            &hd_normal_bytes,
+            &mut app.world_mut().resource_mut::<Assets<Image>>(),
+            &mut HashMap::new(),
+            0,
+        )
+        .unwrap();
+        {
+            let mut materials = app.world_mut().resource_mut::<Assets<GmdlMaterial>>();
+            let mut material = materials.get_mut(&material).unwrap();
+            material.texture = Some(hd_color);
+            material.params.has_texture = 1;
+            material.normal_texture = Some(hd_normal);
+            material.normal_strength = 1.8;
+            material.normal_contrast = 1.5;
+        }
+        for lit in [false, true] {
+            app.world_mut().resource_mut::<FrameUniforms>().lighting.x =
+                if lit { 1.0 } else { 0.0 };
+            app.world_mut().resource_mut::<Settings>().scene_normal_maps = false;
+            let flat = capture(&mut app, &pixels);
+            app.world_mut().resource_mut::<Settings>().scene_normal_maps = true;
+            let relief = capture(&mut app, &pixels);
+            let mean = flat
+                .chunks_exact(4)
+                .zip(relief.chunks_exact(4))
+                .map(|(a, b)| f64::from(a[0].abs_diff(b[0])))
+                .sum::<f64>()
+                / (128.0 * 128.0);
+            let changed = flat
+                .chunks_exact(4)
+                .zip(relief.chunks_exact(4))
+                .filter(|(a, b)| a[0].abs_diff(b[0]) > 2)
+                .count();
+            eprintln!(
             "HD floor relief: environment={lit}, mean_delta={mean:.4}, changed_pixels={changed}"
         );
-        assert!(
-            mean > 2.0 && changed > 1500,
-            "HD floor relief is too weak: mean={mean}, changed={changed}"
-        );
-        app.world_mut().resource_mut::<Settings>().scene_normal_maps = false;
-        assert_eq!(capture(&mut app, &pixels), flat);
+            assert!(
+                mean > 2.0 && changed > 1500,
+                "HD floor relief is too weak: mean={mean}, changed={changed}"
+            );
+            app.world_mut().resource_mut::<Settings>().scene_normal_maps = false;
+            assert_eq!(capture(&mut app, &pixels), flat);
+        }
     }
     app.world_mut()
         .resource_mut::<Assets<GmdlMaterial>>()
@@ -252,5 +262,87 @@ fn headless_scene_normals_change_pixels_and_toggle_back_exactly() {
         capture(&mut app, &pixels),
         missing,
         "collapsed UV basis must keep geometric lighting"
+    );
+    let base_color = Image::new_fill(
+        bevy::render::render_resource::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        bevy::render::render_resource::TextureDimension::D2,
+        &[180, 180, 180, 255],
+        TextureFormat::Rgba8UnormSrgb,
+        bevy::asset::RenderAssetUsages::default(),
+    );
+    let base_color = app
+        .world_mut()
+        .resource_mut::<Assets<Image>>()
+        .add(base_color);
+    {
+        let mut materials = app.world_mut().resource_mut::<Assets<GmdlMaterial>>();
+        let mut material = materials.get_mut(&material).unwrap();
+        material.texture = Some(base_color);
+        material.params.has_texture = 1;
+    }
+    app.world_mut().resource_mut::<FrameUniforms>().lighting = Vec4::ZERO;
+    let baseline = capture(&mut app, &pixels);
+    app.world_mut()
+        .resource_mut::<Assets<GmdlMaterial>>()
+        .get_mut(&material)
+        .unwrap()
+        .stage_render_flags = 1;
+    app.world_mut()
+        .resource_mut::<FrameUniforms>()
+        .graphics
+        .stage_render
+        .ambient = Vec4::new(0.25, 0.25, 0.25, 1.0);
+    let ambient = capture(&mut app, &pixels);
+    assert!(
+        ambient != baseline,
+        "authored ambient affects the rendered surface"
+    );
+    {
+        let mut frame = app.world_mut().resource_mut::<FrameUniforms>();
+        frame.graphics.stage_render.point_count.x = 1.0;
+        frame.graphics.stage_render.point_positions[0] = Vec4::new(0.0, 5.0, 0.0, 0.05);
+        frame.graphics.stage_render.point_colors[0] = Vec4::new(0.12, 0.5, 0.08, 0.0);
+    }
+    let single_light = capture(&mut app, &pixels);
+    assert_ne!(
+        single_light, ambient,
+        "an authored point light changes the pixels"
+    );
+    {
+        let mut frame = app.world_mut().resource_mut::<FrameUniforms>();
+        let stage = &mut frame.graphics.stage_render;
+        stage.point_count.x = 255.0;
+        stage.point_positions[1..].fill(Vec4::new(1024.0, 3.0, 1024.0, 0.05));
+        stage.point_colors[1..].fill(Vec4::ONE);
+        stage.point_cells[0] = UVec4::new(1, 0, 0, 0);
+    }
+    assert_eq!(
+        capture(&mut app, &pixels),
+        single_light,
+        "faraway lights stay out of the local loop"
+    );
+    {
+        let mut frame = app.world_mut().resource_mut::<FrameUniforms>();
+        frame.graphics.stage_render.fog_params = Vec4::new(0.001, 1000.0, 0.0, 0.0);
+        frame.graphics.stage_render.fog_color = Vec4::new(0.75, 0.04, 0.75, 1.0);
+        frame.graphics.stage_render.point_count.y = 1.0 / 1200.0;
+    }
+    assert_ne!(
+        capture(&mut app, &pixels),
+        single_light,
+        "authored fog affects the rendered surface"
+    );
+    app.world_mut()
+        .resource_mut::<FrameUniforms>()
+        .graphics
+        .stage_render = default();
+    assert_eq!(
+        capture(&mut app, &pixels),
+        baseline,
+        "leaving a stage clears its authored shading"
     );
 }

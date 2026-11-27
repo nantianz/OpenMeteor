@@ -27,13 +27,13 @@ pub(super) const LODS: [Lod; 4] = [
         clumps: 144,
         leaves: 4,
         curved_leaves: 2,
-        stem: &[0., 0.65, 0.84, 0.94],
+        stem: &[0., 0.67, 0.82, 0.94],
     },
     Lod {
         clumps: 96,
         leaves: 2,
         curved_leaves: 1,
-        stem: &[0., 0.79],
+        stem: &[0., 0.67],
     },
     Lod {
         clumps: 96,

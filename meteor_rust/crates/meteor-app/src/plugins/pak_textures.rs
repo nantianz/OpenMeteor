@@ -2,9 +2,28 @@ use bevy::asset::RenderAssetUsages;
 use bevy::image::{Image, ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy::render::renderer::RenderDevice;
 use meteor_asset::pak::PakArchive;
-use meteor_asset::texture::decode_image;
-use std::collections::HashMap;
+use meteor_asset::texture::{decode_image, decode_image_with_budget, DecodedImage};
+use std::collections::{HashMap, TryReserveError};
+use std::sync::atomic::{AtomicU32, Ordering};
+const MAX_DECODED_BYTES: usize =
+    if cfg!(all(target_pointer_width = "64", not(target_os = "android"))) {
+        256 * 1024 * 1024
+    } else {
+        64 * 1024 * 1024
+    };
+static DEVICE_TEXTURE_SIDE: AtomicU32 = AtomicU32::new(u32::MAX);
+pub(super) fn update_texture_device_limit(device: Option<Res<RenderDevice>>) {
+    if let Some(device) = device.filter(|device| device.is_changed()) {
+        DEVICE_TEXTURE_SIDE.store(device.limits().max_texture_dimension_2d, Ordering::Relaxed);
+    }
+}
+pub(super) fn decode_quality_image(bytes: &[u8]) -> Option<DecodedImage> {
+    decode_image_with_budget(bytes, MAX_DECODED_BYTES)
+        .map_err(|error| warn!("texture decode failed: {error}"))
+        .ok()
+}
 
 #[derive(Resource, Default)]
 pub struct QualityTextureHandles(pub Vec<Handle<Image>>);
@@ -21,11 +40,7 @@ pub fn sync_quality_texture_samplers(
     if !settings.is_changed() {
         return;
     }
-    for handle in &handles.0 {
-        if let Some(mut image) = images.get_mut(handle) {
-            apply_texture_quality(&mut image, settings.texture_quality);
-        }
-    }
+    sync_texture_samplers(&mut images, &handles.0, settings.texture_quality);
 }
 
 pub fn clear_quality_texture_handles(mut handles: ResMut<QualityTextureHandles>) {
@@ -256,12 +271,7 @@ pub fn image_handle_with_quality(
     bytes: &[u8],
     texture_quality: u8,
 ) -> Option<Handle<Image>> {
-    let decoded = decode_image(bytes).ok()?;
-    Some(image_from_decoded_with_quality(
-        images,
-        &decoded,
-        texture_quality,
-    ))
+    image_from_decoded_with_quality(images, decode_quality_image(bytes)?, texture_quality)
 }
 
 pub fn legacy_alpha_companion_name(name: &str) -> Option<String> {
@@ -345,14 +355,14 @@ pub fn image_handle_with_legacy_style(
     Some(image_from_decoded(images, &color))
 }
 
-fn decode_legacy_style(
+pub(super) fn decode_legacy_style(
     color_bytes: &[u8],
     companion_bytes: Option<&[u8]>,
     luminance_fallback: bool,
     color_key: bool,
 ) -> Option<meteor_asset::texture::DecodedImage> {
-    let mut color = decode_image(color_bytes).ok()?;
-    let companion = companion_bytes.and_then(|bytes| decode_image(bytes).ok());
+    let mut color = decode_quality_image(color_bytes)?;
+    let companion = companion_bytes.and_then(decode_quality_image);
     apply_legacy_alpha(&mut color, companion.as_ref(), luminance_fallback);
     if color_key && companion.is_none() {
         punch_color_key(&mut color.rgba, 8, 26);
@@ -369,7 +379,7 @@ pub(crate) fn hd_image_handle_with_legacy_style_quality(
     color_key: bool,
     quality: u8,
 ) -> Option<Handle<Image>> {
-    let mut hd = decode_image(hd_bytes).ok()?;
+    let mut hd = decode_quality_image(hd_bytes)?;
     if let Some(bytes) = original_bytes {
         let original = decode_legacy_style(bytes, companion_bytes, luminance_fallback, color_key)?;
         for y in 0..hd.height {
@@ -385,7 +395,7 @@ pub(crate) fn hd_image_handle_with_legacy_style_quality(
     } else if companion_bytes.is_some() || luminance_fallback || color_key {
         return None;
     }
-    Some(image_from_decoded_with_quality(images, &hd, quality))
+    image_from_decoded_with_quality(images, hd, quality)
 }
 
 pub fn image_handle_with_legacy_style_quality(
@@ -397,11 +407,7 @@ pub fn image_handle_with_legacy_style_quality(
     texture_quality: u8,
 ) -> Option<Handle<Image>> {
     let color = decode_legacy_style(color_bytes, companion_bytes, luminance_fallback, color_key)?;
-    Some(image_from_decoded_with_quality(
-        images,
-        &color,
-        texture_quality,
-    ))
+    image_from_decoded_with_quality(images, color, texture_quality)
 }
 
 pub fn image_from_decoded(
@@ -432,13 +438,34 @@ pub fn image_from_decoded(
 }
 
 pub fn apply_texture_quality(image: &mut Image, texture_quality: u8) {
+    image.sampler = texture_quality_sampler(texture_quality);
+}
+pub(super) fn sync_texture_samplers(
+    images: &mut Assets<Image>,
+    handles: &[Handle<Image>],
+    texture_quality: u8,
+) {
+    let sampler = texture_quality_sampler(texture_quality);
+    for handle in handles {
+        if images
+            .get(handle)
+            .is_none_or(|image| image.sampler == sampler)
+        {
+            continue;
+        }
+        if let Some(mut image) = images.get_mut(handle) {
+            image.sampler = sampler.clone();
+        }
+    }
+}
+fn texture_quality_sampler(texture_quality: u8) -> ImageSampler {
     let original_point = texture_quality == 2;
     let filter = if original_point {
         ImageFilterMode::Nearest
     } else {
         ImageFilterMode::Linear
     };
-    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+    ImageSampler::Descriptor(ImageSamplerDescriptor {
         address_mode_u: ImageAddressMode::Repeat,
         address_mode_v: ImageAddressMode::Repeat,
         address_mode_w: ImageAddressMode::Repeat,
@@ -454,68 +481,118 @@ pub fn apply_texture_quality(image: &mut Image, texture_quality: u8) {
             16
         },
         ..Default::default()
-    });
+    })
 }
 
 pub fn image_from_decoded_with_quality(
     images: &mut Assets<Image>,
-    decoded: &meteor_asset::texture::DecodedImage,
+    decoded: DecodedImage,
     texture_quality: u8,
-) -> Handle<Image> {
-    let mut image = Image::new(
+) -> Option<Handle<Image>> {
+    let max_side = texture_device_side();
+    if decoded.width.max(decoded.height) > max_side {
+        info!(
+            "texture {}x{} exceeds device limit {max_side}; using a smaller mip",
+            decoded.width, decoded.height
+        );
+    }
+    Some(images.add(prepare_quality_image(decoded, texture_quality, max_side)?))
+}
+pub(super) fn texture_device_side() -> u32 {
+    DEVICE_TEXTURE_SIDE.load(Ordering::Relaxed).max(1)
+}
+pub(super) fn prepare_quality_image(
+    decoded: DecodedImage,
+    texture_quality: u8,
+    max_side: u32,
+) -> Option<Image> {
+    let decoded = fit_to_texture_limit(decoded, max_side)
+        .map_err(|error| warn!("texture resize failed: {error}"))
+        .ok()?;
+    let mut image = Image::new_uninit(
         Extent3d {
             width: decoded.width,
             height: decoded.height,
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
-        decoded.rgba.clone(),
         TextureFormat::Rgba8Unorm,
         RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
     );
-    let (data, mip_level_count) = rgba8_mip_chain(decoded);
+    let (data, mip_level_count) = rgba8_mip_chain(decoded)
+        .map_err(|error| warn!("texture mip allocation failed: {error}"))
+        .ok()?;
     image.data = Some(data);
     image.texture_descriptor.mip_level_count = mip_level_count;
     apply_texture_quality(&mut image, texture_quality);
-    images.add(image)
+    Some(image)
 }
 
-fn rgba8_mip_chain(decoded: &meteor_asset::texture::DecodedImage) -> (Vec<u8>, u32) {
-    let mut data = decoded.rgba.clone();
-    let mut level = decoded.rgba.clone();
-    let mut width = decoded.width;
-    let mut height = decoded.height;
-    let mut mip_level_count = 1;
-    while width > 1 || height > 1 {
+fn fit_to_texture_limit(
+    mut image: DecodedImage,
+    max_side: u32,
+) -> Result<DecodedImage, TryReserveError> {
+    while image.width.max(image.height) > max_side {
+        let width = (image.width / 2).max(1);
+        let height = (image.height / 2).max(1);
+        let len = width as usize * height as usize * 4;
+        let mut rgba = Vec::new();
+        rgba.try_reserve_exact(len)?;
+        rgba.resize(len, 0);
+        downsample_rgba8(&image.rgba, image.width, image.height, &mut rgba);
+        image = DecodedImage {
+            width,
+            height,
+            rgba,
+        };
+    }
+    Ok(image)
+}
+fn rgba8_mip_chain(decoded: DecodedImage) -> Result<(Vec<u8>, u32), TryReserveError> {
+    let DecodedImage {
+        mut width,
+        mut height,
+        rgba: mut data,
+    } = decoded;
+    let levels = u32::BITS - width.max(height).leading_zeros();
+    let extra_bytes = (1..levels)
+        .map(|level| (width >> level).max(1) as usize * (height >> level).max(1) as usize * 4)
+        .sum();
+    data.try_reserve_exact(extra_bytes)?;
+    let mut offset = 0;
+    for _ in 1..levels {
         let next_width = (width / 2).max(1);
         let next_height = (height / 2).max(1);
-        let mut next = vec![0u8; (next_width * next_height * 4) as usize];
-        for y in 0..next_height {
-            for x in 0..next_width {
-                let mut sum = [0u32; 4];
-                let mut count = 0u32;
-                for source_y in (y * 2)..((y * 2 + 2).min(height)) {
-                    for source_x in (x * 2)..((x * 2 + 2).min(width)) {
-                        let index = ((source_y * width + source_x) * 4) as usize;
-                        for channel in 0..4 {
-                            sum[channel] += u32::from(level[index + channel]);
-                        }
-                        count += 1;
-                    }
-                }
-                let index = ((y * next_width + x) * 4) as usize;
-                for channel in 0..4 {
-                    next[index + channel] = ((sum[channel] + count / 2) / count) as u8;
-                }
-            }
-        }
-        data.extend_from_slice(&next);
-        level = next;
+        let end = data.len();
+        data.resize(end + next_width as usize * next_height as usize * 4, 0);
+        let (written, next) = data.split_at_mut(end);
+        downsample_rgba8(&written[offset..], width, height, next);
+        offset = end;
         width = next_width;
         height = next_height;
-        mip_level_count += 1;
     }
-    (data, mip_level_count)
+    Ok((data, levels))
+}
+fn downsample_rgba8(source: &[u8], width: u32, height: u32, next: &mut [u8]) {
+    let width = width as usize;
+    let height = height as usize;
+    let stride = width * 4;
+    let next_stride = (width / 2).max(1) * 4;
+    for (y, row) in next.chunks_exact_mut(next_stride).enumerate() {
+        let top = y * 2 * stride;
+        let bottom = (y * 2 + 1).min(height - 1) * stride;
+        for (x, pixel) in row.chunks_exact_mut(4).enumerate() {
+            let left = x * 2 * 4;
+            let right = (x * 2 + 1).min(width - 1) * 4;
+            for (channel, value) in pixel.iter_mut().enumerate() {
+                let sum = u16::from(source[top + left + channel])
+                    + u16::from(source[top + right + channel])
+                    + u16::from(source[bottom + left + channel])
+                    + u16::from(source[bottom + right + channel]);
+                *value = ((sum + 2) / 4) as u8;
+            }
+        }
+    }
 }
 
 #[cfg(feature = "original-assets")]
@@ -588,10 +665,47 @@ mod tests {
                 0, 10, 20, 30, 100, 110, 120, 130, 200, 210, 220, 230, 252, 250, 248, 246,
             ],
         };
-        let (data, levels) = rgba8_mip_chain(&decoded);
+        let (data, levels) = rgba8_mip_chain(decoded).unwrap();
         assert_eq!(levels, 2);
         assert_eq!(data.len(), 20);
         assert_eq!(&data[16..20], &[138, 145, 152, 159]);
+    }
+    #[test]
+    fn oversized_texture_uses_its_device_compatible_mip_suffix() {
+        let decoded = DecodedImage {
+            width: 7,
+            height: 3,
+            rgba: (0..84).collect(),
+        };
+        let (full, _) = rgba8_mip_chain(decoded.clone()).unwrap();
+        let fitted = fit_to_texture_limit(decoded, 3).unwrap();
+        assert_eq!((fitted.width, fitted.height), (3, 1));
+        let (data, levels) = rgba8_mip_chain(fitted).unwrap();
+        assert_eq!(levels, 2);
+        assert_eq!(data, full[84..]);
+    }
+    #[cfg(all(target_pointer_width = "64", not(target_os = "android")))]
+    #[test]
+    fn large_scene_tga_keeps_8k_mip_chain() {
+        let size = 8192u16;
+        let mut tga = vec![0; 18];
+        tga[2] = 10;
+        tga[12..14].copy_from_slice(&size.to_le_bytes());
+        tga[14..16].copy_from_slice(&size.to_le_bytes());
+        tga[16] = 32;
+        tga[17] = 8;
+        let pixel = [30, 20, 10, 192];
+        for _ in 0..usize::from(size).pow(2) / 128 {
+            tga.push(255);
+            tga.extend_from_slice(&pixel);
+        }
+        let image = decode_quality_image(&tga).expect("8K desktop decode");
+        let (mips, levels) = rgba8_mip_chain(image).unwrap();
+        let expected_len: usize = (0..14).map(|level| (8192usize >> level).pow(2) * 4).sum();
+        assert_eq!(levels, 14);
+        assert_eq!(mips.len(), expected_len);
+        assert_eq!(&mips[..4], &[10, 20, 30, 192]);
+        assert_eq!(&mips[mips.len() - 4..], &[10, 20, 30, 192]);
     }
 
     #[test]

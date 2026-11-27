@@ -1,5 +1,6 @@
 use super::cloth_binding::{DetailMesh, Pinning};
 use super::config::*;
+use crate::plugins::stage_material::water::WaterPackage;
 use bevy::prelude::*;
 use meteor_asset::texture::DecodedImage;
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
@@ -26,7 +27,7 @@ pub struct GraphicsPacks {
     pub packs: Vec<LoadedPack>,
     pub error: Option<String>,
     catalog: Arc<[PackManifest]>,
-    pub(crate) listing: GraphicsPackCatalog,
+    water: Option<Arc<WaterPackage>>,
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     pub(super) loose_root: Option<PathBuf>,
 }
@@ -66,213 +67,51 @@ pub fn decode_resource(bytes: &[u8]) -> Result<DecodedImage, String> {
     meteor_asset::texture::decode_image(bytes)
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct PackSelection {
-    pub master: Option<bool>,
-
-    pub choices: BTreeMap<String, bool>,
-
-    pub index_authoritative: bool,
-}
-
-impl PackSelection {
-    pub fn from_settings(settings: &crate::app_state::Settings) -> Self {
-        Self {
-            master: settings.graphics_packs,
-            choices: settings.graphics_pack_choices.clone(),
-            index_authoritative: false,
-        }
-    }
-    fn master(&self, index_enabled: bool) -> bool {
-        if self.index_authoritative {
-            index_enabled
-        } else {
-            self.master.unwrap_or(index_enabled)
-        }
-    }
-    fn pack(&self, id: &str) -> bool {
-        self.index_authoritative || self.choices.get(id).copied().unwrap_or(true)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct CatalogEntry {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-
-    pub stages: Vec<String>,
-
-    pub active: bool,
-
-    pub error: Option<String>,
-}
-
-#[derive(Resource, Clone, Debug, Default)]
-pub struct GraphicsPackCatalog {
-    pub index_enabled: bool,
-
-    pub master_active: bool,
-    pub index_authoritative: bool,
-    pub entries: Vec<CatalogEntry>,
-}
-
-impl GraphicsPackCatalog {
-    pub fn master_wanted(&self, settings: &crate::app_state::Settings) -> bool {
-        if self.index_authoritative {
-            self.index_enabled
-        } else {
-            settings.graphics_packs.unwrap_or(self.index_enabled)
-        }
-    }
-    pub fn pack_wanted(&self, settings: &crate::app_state::Settings, id: &str) -> bool {
-        self.index_authoritative
-            || settings
-                .graphics_pack_choices
-                .get(id)
-                .copied()
-                .unwrap_or(true)
-    }
-
-    pub fn restart_pending(&self, settings: &crate::app_state::Settings) -> bool {
-        let master = self.master_wanted(settings);
-        if master != self.master_active {
-            return true;
-        }
-        master
-            && self
-                .entries
-                .iter()
-                .filter(|entry| entry.error.is_none())
-                .any(|entry| entry.active != self.pack_wanted(settings, &entry.id))
-    }
-}
-
-fn manifest_summary(path: &str, bytes: &[u8]) -> (String, String, String, Vec<String>) {
-    let value: serde_json::Value = serde_json::from_slice(bytes).unwrap_or_default();
-    let text = |key: &str| {
-        value
-            .get(key)
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_owned()
-    };
-    let id = text("id");
-    let name = Some(text("name"))
-        .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| {
-            if id.is_empty() {
-                path.to_owned()
-            } else {
-                id.clone()
-            }
-        });
-    let stages = value
-        .get("scenes")
-        .and_then(|v| v.as_array())
-        .map(|scenes| {
-            let mut stages: Vec<String> = scenes
-                .iter()
-                .filter_map(|scene| {
-                    scene
-                        .get("stage")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_owned)
-                })
-                .collect();
-            stages.dedup();
-            stages
-        })
-        .unwrap_or_default();
-    (id, name, text("description"), stages)
-}
-
-#[cfg(test)]
 pub(super) fn load_catalog_with_reader(
     index: &[u8],
-    read: impl FnMut(&str) -> Result<Vec<u8>, String>,
-) -> Result<GraphicsPacks, String> {
-    load_catalog_with_selection(index, read, &PackSelection::default())
-}
-
-pub(crate) fn load_catalog_with_selection(
-    index: &[u8],
     mut read: impl FnMut(&str) -> Result<Vec<u8>, String>,
-    selection: &PackSelection,
 ) -> Result<GraphicsPacks, String> {
     let index = parse_index(index)?;
-    let master = selection.master(index.enabled);
+    if !index.enabled {
+        return Ok(GraphicsPacks::default());
+    }
     let mut catalog = Vec::new();
-    let mut entries = Vec::new();
     let mut ids = HashSet::new();
-    let mut first_error = None;
     for path in index.packs {
-        let bytes = match read(&path) {
-            Ok(bytes) if bytes.len() <= 1_048_576 => bytes,
-            Ok(_) => return Err(format!("{path}: manifest exceeds 1 MiB")),
-            Err(error) => {
-                let error = format!("{path}: {error}");
-                entries.push(CatalogEntry {
-                    id: path.clone(),
-                    name: path.clone(),
-                    description: String::new(),
-                    stages: vec![],
-                    active: false,
-                    error: Some(error.clone()),
-                });
-                if master {
-                    return Err(error);
+        let bytes = read(&path).map_err(|error| format!("{path}: {error}"))?;
+        if bytes.len() > 1_048_576 {
+            return Err(format!("{path}: manifest exceeds 1 MiB"));
+        }
+        let config: Pack =
+            serde_json::from_slice(&bytes).map_err(|error| format!("{path}: {error}"))?;
+        config
+            .validate()
+            .map_err(|error| format!("{path}: {error}"))?;
+        if !ids.insert(config.id.clone()) {
+            return Err(format!("{path}: duplicate pack id: {}", config.id));
+        }
+        catalog.push(PackManifest { path, config });
+    }
+    let water = catalog
+        .iter()
+        .rev()
+        .find_map(|pack| pack.config.water.as_ref().map(|files| (&pack.path, files)))
+        .map(|(path, files)| {
+            let prefix = path.rsplit_once('/').map_or("", |(prefix, _)| prefix);
+            WaterPackage::load(files, |name| {
+                if !relative_path(name) {
+                    return Err(format!("invalid water resource path: {name}"));
                 }
-                continue;
-            }
-        };
-        let (id, name, description, stages) = manifest_summary(&path, &bytes);
-        if !id.is_empty() && !ids.insert(id.clone()) {
-            return Err(format!("duplicate pack id: {id}"));
-        }
-        let wanted = master && selection.pack(&id);
-        let parsed = serde_json::from_slice::<Pack>(&bytes)
-            .map_err(|e| format!("{path}: {e}"))
-            .and_then(|config| {
-                config
-                    .validate()
-                    .map(|_| config)
-                    .map_err(|e| format!("{path}: {e}"))
-            });
-        let mut entry = CatalogEntry {
-            id,
-            name,
-            description,
-            stages,
-            active: false,
-            error: None,
-        };
-        match parsed {
-            Ok(config) if wanted => {
-                entry.active = true;
-                catalog.push(PackManifest { path, config });
-            }
-            Ok(_) => {}
-
-            Err(error) if wanted => return Err(error),
-            Err(error) => {
-                first_error.get_or_insert(error.clone());
-                entry.error = Some(error);
-            }
-        }
-        entries.push(entry);
-    }
-    if let Some(error) = first_error {
-        info!("graphics packs: inactive manifest skipped: {error}");
-    }
+                let full = resource_path(prefix, name);
+                read(&full).map_err(|error| format!("{full}: {error}"))
+            })
+            .map(Arc::new)
+            .map_err(|error| format!("{path}: {error}"))
+        })
+        .transpose()?;
     Ok(GraphicsPacks {
         catalog: catalog.into(),
-        listing: GraphicsPackCatalog {
-            index_enabled: index.enabled,
-            master_active: master,
-            index_authoritative: selection.index_authoritative,
-            entries,
-        },
+        water,
         ..default()
     })
 }
@@ -534,17 +373,15 @@ impl GraphicsPacks {
         self
     }
 
-    pub fn load(settings: &crate::app_state::Settings) -> Self {
-        let mut selection = PackSelection::from_settings(settings);
-        match Self::try_load(&mut selection) {
+    pub fn load() -> Self {
+        match Self::try_load() {
             Ok(p) => {
                 info!("graphics packs: {} manifests enabled", p.catalog.len());
                 p
             }
             Err(error) => {
-                error!("图形增强包加载失败: {error}");
+                warn!("图形增强包加载失败: {error}");
                 Self {
-                    packs: vec![],
                     error: Some(error),
                     ..default()
                 }
@@ -552,15 +389,10 @@ impl GraphicsPacks {
         }
     }
 
-    pub(crate) fn listing(&self) -> &GraphicsPackCatalog {
-        &self.listing
-    }
-
-    fn try_load(selection: &mut PackSelection) -> Result<Self, String> {
+    fn try_load() -> Result<Self, String> {
         #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
         {
             let explicit = std::env::var_os("METEOR_GRAPHICS_CONFIG").map(PathBuf::from);
-            selection.index_authoritative = explicit.is_some();
             let mut paths = vec![];
             if let Some(dir) = std::env::var_os("METEOR_USER_DATA_DIR") {
                 paths.push(PathBuf::from(dir).join("config/graphics-enhancement.json"));
@@ -585,30 +417,35 @@ impl GraphicsPacks {
                     .ok_or("invalid graphics config filename")?;
                 let bytes = read_bounded(root, filename)?;
                 info!("graphics config: {}", path.display());
-                let mut packs = load_catalog_with_selection(
-                    &bytes,
-                    |name| read_bounded(root, name),
-                    selection,
-                )?;
+                let mut packs = load_catalog_with_reader(&bytes, |name| read_bounded(root, name))?;
                 packs.loose_root = Some(root.to_owned());
                 return Ok(packs);
             }
         }
-        let bundled = include_bytes!("../../../../../config/graphics-enhancement.json");
-
-        let bytes = meteor_asset::runtime_assets::read_entry("graphics/graphics-enhancement.json");
-        load_catalog_with_selection(
-            bytes.as_deref().unwrap_or(bundled),
-            read_mounted_resource,
-            selection,
-        )
+        let Some(index) =
+            meteor_asset::runtime_assets::read_entry("graphics/graphics-enhancement.json")
+        else {
+            return Ok(Self::default());
+        };
+        load_catalog_with_reader(&index, read_mounted_resource)
+    }
+    #[cfg(all(test, not(any(target_arch = "wasm32", target_os = "android"))))]
+    pub(crate) fn test_scene_pbr(stage: &str) -> Self {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config");
+        let index = br#"{"schema_version":1,"enabled":true,"packs":["graphics-packs/scene-normals/pack.json"]}"#;
+        let mut graphics = load_catalog_with_reader(index, |name| read_bounded(&root, name))
+            .unwrap()
+            .with_test_loose_root(root);
+        graphics.prepare_stage(stage);
+        assert!(graphics.error.is_none(), "{:?}", graphics.error);
+        graphics
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn catalog_snapshot(&self) -> Self {
         Self {
             catalog: self.catalog.clone(),
-            listing: self.listing.clone(),
+            water: self.water.clone(),
             error: self.error.clone(),
             #[cfg(not(target_os = "android"))]
             loose_root: self.loose_root.clone(),
@@ -645,7 +482,12 @@ impl GraphicsPacks {
                 }
                 self.packs = packs;
             }
-            Err(error) => warn!("graphics stage {stage}: {error}; using original visuals"),
+            Err(error) => {
+                warn!("graphics stage {stage}: {error}; disabling graphics packs");
+                self.catalog = Arc::default();
+                self.water = None;
+                self.error = Some(error);
+            }
         }
     }
 
@@ -686,6 +528,9 @@ impl GraphicsPacks {
         })
     }
 
+    pub(crate) fn water(&self) -> Option<&Arc<WaterPackage>> {
+        self.water.as_ref()
+    }
     pub(crate) fn water_sky<'a>(
         &'a self,
         stage: &'a str,
@@ -721,6 +566,30 @@ mod tests {
     use super::*;
     use crate::app_state::AppState;
 
+    #[test]
+    fn missing_stage_resource_disables_packs_for_the_session() {
+        let index = br#"{"schema_version":1,"enabled":true,"packs":["p.json", "q.json"]}"#;
+        let mut graphics = load_catalog_with_reader(index, |name| {
+            Ok(match name {
+                "p.json" => br#"{"schema_version":1,"id":"p","scenes":[{"stage":"sn03"}]}"#.to_vec(),
+                "q.json" => br#"{"schema_version":1,"id":"q","resources":{"missing":"missing-pack-test.png"},
+                    "scenes":[{"stage":"sn06","grass_ground":{"image":"missing","world_size":4}}]}"#.to_vec(),
+                _ => unreachable!(),
+            })
+        })
+        .unwrap();
+        graphics.prepare_stage("sn03");
+        assert_eq!(graphics.packs.len(), 1);
+        graphics.prepare_stage("sn06");
+        assert!(graphics.packs.is_empty());
+        assert!(graphics
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("missing-pack-test.png"));
+        graphics.prepare_stage("sn03");
+        assert!(graphics.packs.is_empty());
+    }
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     #[test]
     fn sn03_and_sn06_share_a_catalog_without_sharing_the_texture_budget() {

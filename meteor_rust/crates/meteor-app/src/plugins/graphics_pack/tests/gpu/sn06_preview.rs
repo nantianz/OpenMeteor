@@ -25,16 +25,32 @@ fn headless_sn06_scan_enhancement_preview() {
     let output_dir = Path::new(&output_dir);
     std::fs::create_dir_all(output_dir).unwrap();
     let project = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let base = project.join("meteor_rust/config");
+    let installed = std::env::var_os("METEOR_SN06_ORIGINAL_DIR").map(std::path::PathBuf::from);
+    let base = installed.as_ref().map_or_else(
+        || project.join("meteor_rust/config"),
+        |root| root.join("config"),
+    );
     let baseline = std::env::var_os("METEOR_SN06_SCAN_BASELINE").is_some();
     let capture_only = baseline || std::env::var_os("METEOR_SN06_SCAN_CAPTURE_ONLY").is_some();
-    let root = project.join("origin_res");
+    let root = installed
+        .clone()
+        .unwrap_or_else(|| project.join("origin_res"));
+    if installed.is_some() {
+        use meteor_asset::{original_directory::OriginalDirectory, runtime_assets};
+        runtime_assets::initialize_original(OriginalDirectory::open(&root, &[]).unwrap()).unwrap();
+    }
     let read = |name: &str| std::fs::read(root.join(name)).unwrap();
     let wp = crate::text_codec::decode_text(&read("Level/sn06.wp"));
     let center = meteor_scene::stage_loader::get_stage_center("sn06", Some(&wp));
     let index = std::env::var_os("METEOR_SN06_SCAN_CONFIG")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| base.join("graphics-enhancement-sn06.json"));
+        .unwrap_or_else(|| {
+            base.join(if installed.is_some() {
+                "graphics-enhancement.json"
+            } else {
+                "graphics-enhancement-sn06.json"
+            })
+        });
     let mut packs = loader::load_catalog_with_reader(&std::fs::read(index).unwrap(), |name| {
         std::fs::read(base.join(name)).map_err(|e| e.to_string())
     })
@@ -124,6 +140,8 @@ fn headless_sn06_scan_enhancement_preview() {
         grass_enhance: true,
         hd_scene: true,
         volumetric_fog: true,
+        dynamic_shadows: installed.is_some(),
+        environment_lighting: installed.is_some() || Settings::default().environment_lighting,
         ..default()
     })
     .insert_resource(LoadedStageInfo {
@@ -146,6 +164,10 @@ fn headless_sn06_scan_enhancement_preview() {
     .add_systems(PostUpdate, runtime::update_frame);
     sky::install(&mut app);
     grass::install(&mut app);
+    if installed.is_some() {
+        app.add_plugins(crate::plugins::dynamic_shadows_plugin::DynamicShadowsPlugin);
+        super::super::super::effects::install(&mut app);
+    }
     crate::plugins::frame_work::install(&mut app);
     let (width, height) = (960, 576);
     let mut target = Image::new_target_texture(width, height, TextureFormat::Rgba8UnormSrgb, None);
@@ -285,6 +307,23 @@ fn headless_sn06_scan_enhancement_preview() {
         *app.world_mut().get_mut::<Transform>(camera).unwrap() =
             Transform::from_translation(eye).looking_at(eye + direction, Vec3::Y);
         let data = capture_size(&mut app, &pixels, width, height);
+        if installed.is_some() && view == "east" {
+            use crate::plugins::render_plugin::legacy_stage_render::SceneRenderProfile;
+            let profile = app.world().resource::<SceneRenderProfile>();
+            assert!(profile.sun.is_some());
+            assert!(profile.frame.fog_color.w > 0.0);
+            let graphics = app.world().resource::<FrameUniforms>().graphics;
+            assert_eq!(graphics.counts.x, 2.0);
+            assert_eq!(graphics.counts.w, 1.0);
+            assert_eq!(graphics.stage_render.fog_color.w, 0.0);
+            let mut suns = app.world_mut().query_filtered::<(
+                &GlobalTransform,
+                &bevy::light::CascadeShadowConfig,
+            ), With<DirectionalLight>>();
+            let (sun, cascades) = suns.single(app.world()).unwrap();
+            assert_eq!(cascades.bounds.len(), 1);
+            assert!(sun.back().dot(graphics.sun.truncate().normalize()) > 0.999);
+        }
         if view == "falls" && std::env::var_os("METEOR_SN06_EXPECT_WATERFALL_LAYERS").is_some() {
             app.world_mut().resource_mut::<FrameUniforms>().seconds = 1.5;
             let animated = capture_size(&mut app, &pixels, width, height);

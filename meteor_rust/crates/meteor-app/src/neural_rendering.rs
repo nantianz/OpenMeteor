@@ -163,6 +163,13 @@ fn sync_cameras(
         control.ready = false;
         control.label = "DLSS 5 NR：运行库执行失败，已回退（详情见日志）".into();
         warn!("{}", control.label);
+        for (entity, _, neural, _) in &mut cameras {
+            if neural.is_some() {
+                commands
+                    .entity(entity)
+                    .remove::<(DlssNeuralRendering, TemporalAntiAliasing)>();
+            }
+        }
         return;
     }
     control.enabled = settings.dlss5_neural_rendering;
@@ -194,7 +201,9 @@ fn sync_cameras(
                 }
             }
         } else if neural.is_some() {
-            commands.entity(entity).remove::<DlssNeuralRendering>();
+            commands
+                .entity(entity)
+                .remove::<(DlssNeuralRendering, TemporalAntiAliasing)>();
         }
         *previous = Some((*state.get(), *transform));
     }

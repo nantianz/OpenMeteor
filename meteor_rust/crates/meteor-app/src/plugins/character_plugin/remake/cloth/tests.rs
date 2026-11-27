@@ -133,7 +133,7 @@ fn cloth_capsules_and_particle_self_contacts_separate_without_moving_pins() {
         radius: 0.2,
     };
     let mut p = Vec3::new(0.01, 0.5, 0.);
-    project_capsule(&mut p, capsule, 0.01);
+    project_capsule_limited(&mut p, capsule, 0.01, f32::INFINITY);
     assert!((p.x - 0.21).abs() < 1e-6);
     let mut data = sheet();
     let mut sim = Simulation::default();
@@ -146,6 +146,55 @@ fn cloth_capsules_and_particle_self_contacts_separate_without_moving_pins() {
     sim.collide_self(&data, &weights, 0.01, 1.);
     assert_eq!(sim.positions[0], pinned);
     assert!(sim.positions[24].distance(pinned) >= 0.0199);
+}
+#[test]
+fn scene_cloth_capsules_limit_contact_and_keep_continuing_actor_history() {
+    let data = sheet();
+    let mut cloth = SceneCloth::new(data.points.clone(), data.freedom, data.triangles);
+    let mut world = World::new();
+    let actor = world.spawn_empty().id();
+    let capsule = Capsule {
+        a: Vec3::new(0.2, 0.0, 0.15),
+        b: Vec3::new(0.2, 2.0, 0.15),
+        radius: 0.3,
+    };
+    let config = Clothing {
+        gravity_scale: 0.0,
+        collision_friction: 0.25,
+        ..default()
+    };
+    let dt = 1.0 / 240.0;
+    cloth.advance(dt, Vec3::ZERO, &[(actor, capsule)], &config);
+    let updated = cloth.advance(dt, Vec3::ZERO, &[(actor, capsule)], &config);
+    assert_eq!(updated[..5], data.points[..5]);
+    let movement = updated
+        .iter()
+        .zip(&data.points)
+        .map(|(position, rest)| position.distance(*rest))
+        .fold(0.0, f32::max);
+    assert!(
+        (0.07..0.18).contains(&movement),
+        "first contact moved {movement}"
+    );
+    assert!(cloth
+        .simulation
+        .velocities
+        .iter()
+        .all(|velocity| velocity.length() < 12.0));
+    let moved = Capsule {
+        a: capsule.a + Vec3::Z * 0.08,
+        b: capsule.b + Vec3::Z * 0.08,
+        ..capsule
+    };
+    let newcomer = world.spawn_empty().id();
+    cloth.advance(
+        dt,
+        Vec3::ZERO,
+        &[(actor, moved), (newcomer, capsule)],
+        &config,
+    );
+    assert_eq!(cloth.simulation.capsules[0].a, capsule.a);
+    assert_eq!(cloth.simulation.capsules[1].a, capsule.a);
 }
 #[test]
 fn cloth_reset_clears_particle_momentum_and_zero_dt_is_frozen() {

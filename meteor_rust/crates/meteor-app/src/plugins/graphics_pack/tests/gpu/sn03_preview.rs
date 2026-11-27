@@ -179,6 +179,9 @@ fn headless_sn03_ravine_enhancement_preview() {
     };
     app.world_mut().insert_resource(packs);
     app.world_mut().run_system_once(setup_stage_scene).unwrap();
+    app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+        std::time::Duration::from_secs_f64(1.0 / 60.0),
+    ));
     app.world_mut().resource_mut::<Time<Virtual>>().pause();
 
     if let Some(stock) = stock_collider {
@@ -221,6 +224,9 @@ fn headless_sn03_ravine_enhancement_preview() {
         *app.world_mut().get_mut::<Transform>(camera).unwrap() =
             Transform::from_translation(Vec3::from_array(eye) - origin_offset)
                 .looking_at(Vec3::from_array(look) - origin_offset, Vec3::Y);
+        for _ in 0..84 {
+            app.update();
+        }
         let data = capture_size(&mut app, &pixels, width, height);
         if !baseline {
             assert_eq!(

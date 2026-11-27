@@ -1,9 +1,9 @@
+use super::pak_textures::{decode_quality_image, image_from_decoded_with_quality};
 use crate::plugins::pak_textures::{punch_color_key, PakCache};
 use crate::plugins::stage_material::scene_textures::SceneTexturePack;
 use crate::plugins::stage_material::GmdlMaterial;
 use bevy::image::Image;
 use bevy::prelude::*;
-use meteor_asset::texture::decode_image;
 
 pub const IFL_FPS: f32 = 12.0;
 
@@ -139,19 +139,15 @@ fn load_ifl_frames_inner(
             frames.push(handle);
             continue;
         }
-        let Ok(mut decoded) = decode_image(&bytes) else {
+        let Some(mut decoded) = decode_quality_image(&bytes) else {
             continue;
         };
         if color_key {
             punch_color_key(&mut decoded.rgba, 8, 26);
         }
-        frames.push(
-            crate::plugins::pak_textures::image_from_decoded_with_quality(
-                images,
-                &decoded,
-                texture_quality,
-            ),
-        );
+        if let Some(handle) = image_from_decoded_with_quality(images, decoded, texture_quality) {
+            frames.push(handle);
+        }
     }
     if frames.is_empty() {
         None

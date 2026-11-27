@@ -13,22 +13,24 @@ use std::collections::{HashMap, HashSet};
 use crate::plugins::graphics_pack::sky::cache::{CacheView, CloudCache};
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 use bevy::render::{
+    render_asset::RenderAssets,
     render_resource::{
-        binding_types::{sampler, texture_2d_array},
+        binding_types::{sampler, texture_2d, texture_2d_array},
         SamplerBindingType, TextureSampleType, TextureViewDimension,
     },
-    texture::FallbackImage,
+    texture::{FallbackImage, GpuImage},
 };
 
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 type SkyBindingParams = (
     Option<Res<'static, CloudCache>>,
     Res<'static, FallbackImage>,
+    Res<'static, RenderAssets<GpuImage>>,
 );
 #[cfg(any(target_arch = "wasm32", target_os = "android"))]
 type SkyBindingParams = ();
 
-type ParamKey = [u32; 83];
+type ParamKey = [u32; 84];
 
 #[derive(Resource, Default, Clone)]
 pub(crate) struct FrameUniforms {
@@ -68,6 +70,7 @@ struct GpuParams {
     grass_underlay_scale: f32,
     water_sky_style: Vec4,
     water_sky_ranges: Vec4,
+    stage_render_flags: u32,
 }
 
 impl GmdlMaterial {
@@ -125,7 +128,7 @@ impl GmdlMaterial {
             self.pbr_textures.z.to_bits(),
             self.pbr_textures.w.to_bits(),
         ];
-        let mut key = [0; 83];
+        let mut key = [0; 84];
         key[..50].copy_from_slice(&existing);
         key[50] = u32::from(self.water_screen_refraction);
         key[51..55].copy_from_slice(
@@ -143,6 +146,7 @@ impl GmdlMaterial {
         key[74] = self.grass_underlay_scale.to_bits();
         key[75..79].copy_from_slice(&self.water_sky_style.to_array().map(f32::to_bits));
         key[79..83].copy_from_slice(&self.water_sky_ranges.to_array().map(f32::to_bits));
+        key[83] = self.stage_render_flags;
         key
     }
 }
@@ -226,6 +230,7 @@ impl ParamBuffers {
                     grass_underlay_scale: material.grass_underlay_scale,
                     water_sky_style: material.water_sky_style,
                     water_sky_ranges: material.water_sky_ranges,
+                    stage_render_flags: material.stage_render_flags,
                     detail: Vec4::new(
                         if material.normal_texture.is_some() {
                             1.0
@@ -364,7 +369,7 @@ impl AsBindGroup for GmdlMaterial {
         ));
         #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
         {
-            let (clouds, fallback) = _sky;
+            let (clouds, fallback, images) = _sky;
             let (view, sampler, buffer) = if self.water_sky_reflection {
                 clouds
                     .as_ref()
@@ -391,6 +396,21 @@ impl AsBindGroup for GmdlMaterial {
                 ),
                 (21, OwnedBindingResource::Buffer(buffer.clone())),
             ]);
+            if water::depth_hierarchy::supported(device) {
+                let view = match self.water_depth_hierarchy.as_ref() {
+                    Some(handle) => {
+                        &images
+                            .get(handle)
+                            .ok_or(AsBindGroupError::RetryNextUpdate)?
+                            .texture_view
+                    }
+                    None => &fallback.d2.texture_view,
+                };
+                result.bindings.push((
+                    22,
+                    OwnedBindingResource::TextureView(TextureViewDimension::D2, view.clone()),
+                ));
+            }
         }
         let buffer = cache.get_buffer(self, device, queue);
         result
@@ -431,6 +451,13 @@ impl AsBindGroup for GmdlMaterial {
             sampler(SamplerBindingType::Filtering).build(20, ShaderStages::FRAGMENT),
             uniform_buffer::<CacheView>(false).build(21, ShaderStages::FRAGMENT),
         ]);
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        if water::depth_hierarchy::supported(device) {
+            entries.push(
+                texture_2d(TextureSampleType::Float { filterable: false })
+                    .build(22, ShaderStages::FRAGMENT),
+            );
+        }
         entries
     }
 }
@@ -659,25 +686,28 @@ mod tests {
         );
 
         let entries = GmdlMaterial::bind_group_layout_entries(&device, false);
-        assert_eq!(
-            entries.len(),
-            if cfg!(any(target_arch = "wasm32", target_os = "android")) {
-                19
-            } else {
-                22
-            }
-        );
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        let (base_bindings, hierarchy) = (22, water::depth_hierarchy::supported(&device));
+        #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+        let (base_bindings, hierarchy) = (19, false);
+        assert_eq!(entries.len(), base_bindings + usize::from(hierarchy));
+        assert_eq!(entries.iter().any(|entry| entry.binding == 22), hierarchy);
 
         use bevy::render::render_resource::*;
-        let source = super::super::standalone_shader_source(true)
+        let source = super::super::standalone_shader_source(true, hierarchy)
             + "\n@vertex fn test_vertex() -> VertexOutput { var o: VertexOutput; o.position=vec4<f32>(0.0,0.0,0.0,1.0); o.world_position=o.position; o.uv=vec2<f32>(0.0); o.color=vec4<f32>(1.0); return o; }";
         let shader = device.create_and_validate_shader_module(ShaderModuleDescriptor {
             label: None,
             source: ShaderSource::Wgsl(source.into()),
         });
+        #[derive(ShaderType)]
+        struct TestView {
+            world_position: Vec3,
+            view_from_world: Mat4,
+        }
         let view_layout = device.create_bind_group_layout(
             "test view",
-            &[uniform_buffer::<Vec4>(false).build(0, ShaderStages::FRAGMENT)],
+            &[uniform_buffer::<TestView>(false).build(0, ShaderStages::FRAGMENT)],
         );
         let empty = device.create_bind_group_layout("test empty", &[]);
         let layout = GmdlMaterial::bind_group_layout(&device);

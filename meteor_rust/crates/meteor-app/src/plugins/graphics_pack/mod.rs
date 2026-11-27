@@ -1,3 +1,4 @@
+pub(super) mod campfires;
 pub(crate) mod cloth_binding;
 pub(crate) mod cloth_obj;
 mod color_pipeline;
@@ -9,16 +10,18 @@ mod ground_cover;
 mod loader;
 pub(crate) mod meshlets;
 mod runtime;
+mod scene_actors;
 pub(crate) mod sky;
 pub(super) mod snow;
 mod surfaces;
 pub(super) mod waterfalls;
 mod weapons;
 use crate::app_state::AppState;
+use bevy::picking::Pickable;
 use bevy::prelude::*;
 #[cfg(test)]
 pub(crate) use loader::load_with_reader;
-pub(crate) use loader::{CatalogEntry, GraphicsPackCatalog, GraphicsPacks};
+pub(crate) use loader::GraphicsPacks;
 pub(crate) use runtime::GraphicsFrame;
 pub(crate) use surfaces::SceneGraphics;
 
@@ -29,8 +32,9 @@ pub fn install(app: &mut App) {
     color_pipeline::install(app);
     effects::install(app);
     fx::install(app);
+    campfires::install(app);
     app.init_resource::<GraphicsPacks>()
-        .add_systems(Startup, show_error)
+        .add_systems(Update, show_error)
         .add_systems(
             OnExit(AppState::Playing),
             release_stage_assets.run_if(super::ends_playing_session),
@@ -48,31 +52,66 @@ pub fn install(app: &mut App) {
 fn release_stage_assets(mut packs: ResMut<GraphicsPacks>) {
     packs.packs.clear();
 }
+pub(super) const FAILURE_NOTICE: &str = "图形增强包加载失败，已关闭。";
+#[derive(Component)]
+struct PackFailureNotice {
+    expires_at: f64,
+}
 fn show_error(
     mut commands: Commands,
     packs: Res<GraphicsPacks>,
     font: Res<crate::plugins::launcher_ui::UiFont>,
+    state: Res<State<AppState>>,
+    time: Res<Time<Real>>,
+    notices: Query<(Entity, &PackFailureNotice)>,
+    mut shown: Local<bool>,
 ) {
-    if let Some(error) = &packs.error {
-        commands.spawn((
+    let now = time.elapsed_secs_f64();
+    for (entity, notice) in &notices {
+        if now >= notice.expires_at {
+            commands.entity(entity).despawn();
+        }
+    }
+    if *shown || packs.error.is_none() || !matches!(state.get(), AppState::Menu | AppState::Playing)
+    {
+        return;
+    }
+    *shown = true;
+    commands
+        .spawn((
+            PackFailureNotice {
+                expires_at: now + 7.0,
+            },
             GlobalZIndex(4000),
+            Pickable::IGNORE,
+            bevy::ui::FocusPolicy::Pass,
             Node {
                 position_type: PositionType::Absolute,
-                width: percent(100), height: percent(100),
-                padding: UiRect::all(px(40)),
-                align_items: AlignItems::Center,
+                top: px(24),
+                left: px(16),
+                right: px(16),
                 justify_content: JustifyContent::Center,
                 ..default()
             },
-            BackgroundColor(Color::srgb(0.04, 0.04, 0.05)),
-        )).with_children(|root| {
+        ))
+        .with_children(|root| {
             root.spawn((
-                Text::new(format!("图形增强包加载失败\n{error}\n\n修正配置，或将 graphics-enhancement.json 的 enabled 改为 false 后重启。")),
-                TextFont { font: font.0.clone().into(), font_size: 18.0.into(), ..default() },
-                TextColor(Color::srgb(0.95, 0.8, 0.6)),
+                super::launcher_ui::launcher_text(
+                    FAILURE_NOTICE,
+                    14.0,
+                    super::ui_theme::ACCENT_TEXT,
+                    &font.0,
+                ),
+                Pickable::IGNORE,
+                bevy::ui::FocusPolicy::Pass,
+                TextLayout::justify(Justify::Center),
+                Node {
+                    padding: UiRect::axes(px(16), px(8)),
+                    ..default()
+                },
+                BackgroundColor(super::ui_theme::SURFACE),
             ));
         });
-    }
 }
 impl GraphicsPacks {
     pub(crate) fn wind<'a>(&'a self, stage: &'a str) -> Option<&'a config::Wind> {

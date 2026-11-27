@@ -7,7 +7,17 @@ mod substeps {
     include!("duel_lab_substeps.rs");
 }
 
+mod peers {
+    include!("duel_lab_peers.rs");
+}
 fn duel_harness(distance: f32, weapon: u8) -> (GameplayHarness, Entity) {
+    duel_harness_with_camera_schedule(distance, weapon, Update)
+}
+fn duel_harness_with_camera_schedule(
+    distance: f32,
+    weapon: u8,
+    camera_schedule: impl bevy::ecs::schedule::ScheduleLabel,
+) -> (GameplayHarness, Entity) {
     let (mut h, npc, _) = spawn_local_stock_hit_harness_with_loadouts(weapon, weapon, true);
     h.app.insert_resource(NetState::default());
     h.app.insert_resource(State::new(AppState::Playing));
@@ -30,7 +40,7 @@ fn duel_harness(distance: f32, weapon: u8) -> (GameplayHarness, Entity) {
         .entity_mut(h.fighter)
         .insert(HeadTrackState::default());
 
-    crate::plugins::camera_plugin::install_camera_input_for_test(&mut h.app);
+    crate::plugins::camera_plugin::install_camera_input_for_test_on(&mut h.app, camera_schedule);
     h.app.world_mut().spawn((
         crate::plugins::camera_plugin::GameplayCamera,
         crate::plugins::camera_plugin::ThirdPersonState::default(),
@@ -192,6 +202,18 @@ fn headless_duel_stdio() {
         windows: u32,
         #[serde(default)]
         weapon: Option<u8>,
+        #[serde(default)]
+        opponent: LabOpponent,
+        character: Option<u8>,
+    }
+    #[derive(Default, serde::Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum LabOpponent {
+        #[default]
+        Rush,
+        Heavy,
+        Patient,
+        Mobile,
     }
     #[derive(serde::Deserialize)]
     #[serde(untagged)]
@@ -209,6 +231,8 @@ fn headless_duel_stdio() {
         distance,
         windows,
         weapon,
+        opponent,
+        character,
     } = request;
     let weapon = weapon.unwrap_or(DAGGER);
     assert!(
@@ -217,6 +241,47 @@ fn headless_duel_stdio() {
             && (1..=12).contains(&weapon)
     );
     let (mut h, npc) = duel_harness(distance, weapon);
+    if let Some(character) = character {
+        assert!(character <= 19);
+        let name = format!("p{character}");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+        let asset = crate::plugins::character_plugin::load_character_asset_for_test(&[root], &name)
+            .expect("original duel character resources");
+        let mut pose = PoseRuntime::idle();
+        asset.apply_pose(&mut pose, 0, true);
+        let world = h.app.world_mut();
+        world
+            .resource_mut::<CharacterAssetsSet>()
+            .0
+            .insert(name, asset);
+        world.get_mut::<Fighter>(h.fighter).unwrap().character_id = character;
+        world.entity_mut(h.fighter).insert(pose);
+    }
+    let profile = match opponent {
+        LabOpponent::Rush => None,
+        LabOpponent::Heavy => Some(NpcCombatProfile {
+            attack2: 25.0,
+            attack3: 75.0,
+            ..default()
+        }),
+        LabOpponent::Patient => Some(NpcCombatProfile {
+            attack1: 25.0,
+            attack2: 20.0,
+            guard: 55.0,
+            ..default()
+        }),
+        LabOpponent::Mobile => Some(NpcCombatProfile {
+            attack1: 37.0,
+            attack2: 24.0,
+            guard: 12.0,
+            dodge: 23.0,
+            jump: 4.0,
+            ..default()
+        }),
+    };
+    if let Some(profile) = profile {
+        h.app.world_mut().entity_mut(npc).insert(profile);
+    }
     let keymap = h.app.world().resource::<crate::app_state::Keymap>().clone();
     let mut output = io::stdout().lock();
     let mut impacts = MessageCursor::<CombatImpactEvent>::default();

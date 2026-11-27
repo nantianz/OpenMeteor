@@ -11,10 +11,14 @@ extern "system" {
 }
 
 pub fn initialize() -> io::Result<File> {
-    let executable = std::env::current_exe()?;
-    let path = executable.with_file_name("console.log");
-
-    let file = File::create(path)?;
+    redirect(File::create(
+        std::env::current_exe()?.with_file_name("console.log"),
+    )?)
+}
+pub fn initialize_bot(directory: &std::path::Path) -> io::Result<File> {
+    redirect(File::create_new(directory.join("console.log"))?)
+}
+fn redirect(file: File) -> io::Result<File> {
     for kind in [(-11_i32) as u32, (-12_i32) as u32] {
         if unsafe { SetStdHandle(kind, file.as_raw_handle()) } == 0 {
             return Err(io::Error::last_os_error());

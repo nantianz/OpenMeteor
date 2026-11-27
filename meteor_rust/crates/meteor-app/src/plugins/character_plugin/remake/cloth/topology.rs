@@ -31,6 +31,26 @@ fn mask(s: &SkinMesh, i: usize) -> f32 {
         .sum()
 }
 impl Topology {
+    pub fn from_triangles(
+        points: Vec<Vec3>,
+        freedom: Vec<f32>,
+        triangles: Vec<[usize; 3]>,
+    ) -> Self {
+        let mut topology = Self {
+            area: vec![0.; points.len()],
+            points,
+            freedom,
+            triangles,
+            skin_vertices: Vec::new(),
+            edges: Vec::new(),
+            bends: Vec::new(),
+            bindings: Vec::new(),
+            normal_vertices: Vec::new(),
+            normal_triangles: Vec::new(),
+        };
+        topology.constraints();
+        topology
+    }
     pub fn prepare(low: &SkinMesh, render: &SkinMesh) -> Result<Self, String> {
         let mut weld = BTreeMap::new();
         let mut points = Vec::new();

@@ -43,12 +43,19 @@ pub(super) fn update(
         if let Some(entry) = cached_handles.get(id) {
             return entry.clone();
         }
-        let path = library.as_ref().and_then(|lib| lib.0.get(id))?;
-        let baked = load_bake(path)?;
-        let size = baked.size().as_vec2();
-        let handle = assets.add(baked);
-        cached_handles.insert(id.to_owned(), Some((handle.clone(), size)));
-        Some((handle, size))
+        let resolved = load_provided_preview(id)
+            .or_else(|| {
+                library
+                    .as_ref()
+                    .and_then(|lib| lib.0.get(id))
+                    .and_then(load_bake)
+            })
+            .map(|image| {
+                let size = image.size().as_vec2();
+                (assets.add(image), size)
+            });
+        cached_handles.insert(id.to_owned(), resolved.clone());
+        resolved
     };
 
     let selected_row = stage_rows
@@ -78,7 +85,7 @@ pub(super) fn update(
     }
 
     let message = if resolved.is_some() {
-        "场景实景"
+        ""
     } else if selected_row.is_none() && !stage_rows.is_empty() {
         "当前规则无可用地图"
     } else {
@@ -107,15 +114,73 @@ pub(super) fn update(
     }
 }
 
-fn load_bake(path: &std::path::Path) -> Option<Image> {
-    let bytes = std::fs::read(path).ok()?;
+pub(super) const GENERATED_PREVIEW: &str = "preview.generated.jpg";
+fn load_provided_preview(stage: &str) -> Option<Image> {
+    if !super::stage_presentation::is_stage_id(stage) {
+        return None;
+    }
+    [
+        ("preview.png", "png"),
+        ("preview.jpg", "jpg"),
+        ("preview.jpeg", "jpg"),
+        (GENERATED_PREVIEW, "jpg"),
+    ]
+    .into_iter()
+    .find_map(|(name, extension)| {
+        let bytes = crate::resource_io::read(format!("{stage}/{name}")).ok()?;
+        decode_preview(&bytes, extension)
+    })
+}
+fn load_bake(path: &std::path::PathBuf) -> Option<Image> {
+    decode_preview(&std::fs::read(path).ok()?, "jpg")
+}
+fn decode_preview(bytes: &[u8], extension: &str) -> Option<Image> {
     Image::from_buffer(
-        &bytes,
-        ImageType::Extension("jpg"),
+        bytes,
+        ImageType::Extension(extension),
         CompressedImageFormats::NONE,
         true,
         ImageSampler::linear(),
         RenderAssetUsages::default(),
     )
     .ok()
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn authored_stage_preview_wins_and_bad_images_fall_back_to_generated() {
+        let png = include_bytes!("../../assets/ui/campaign-halo.png");
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+            .encode(&[42, 54, 65], 1, 1, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        let mut data = Vec::new();
+        let entries: Vec<_> = [
+            ("stage/sn96.preview.png", png.as_slice()),
+            ("stage/sn96.preview.generated.jpg", jpeg.as_slice()),
+            ("stage/sn95.preview.png", b"broken".as_slice()),
+            ("stage/sn95.preview.generated.jpg", jpeg.as_slice()),
+        ]
+        .into_iter()
+        .map(|(name, bytes)| {
+            let entry = serde_json::json!({"name": name, "off": data.len(), "len": bytes.len()});
+            data.extend_from_slice(bytes);
+            entry
+        })
+        .collect();
+        let manifest = serde_json::to_vec(&serde_json::json!({
+            "formatVersion": 1, "kind": "test", "packId": "test/stage-previews", "entries": entries,
+        }))
+        .unwrap();
+        let mut pack = b"MPK1".to_vec();
+        pack.extend((manifest.len() as u32).to_le_bytes());
+        pack.extend(manifest);
+        pack.extend(data);
+        meteor_asset::runtime_assets::register_mpk1(&pack).unwrap();
+        let authored = load_provided_preview("sn96").unwrap();
+        assert_eq!(authored.size(), decode_preview(png, "png").unwrap().size());
+        let generated = load_provided_preview("sn95").unwrap();
+        assert_eq!(generated.size(), UVec2::ONE);
+    }
 }

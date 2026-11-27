@@ -84,7 +84,7 @@ const ORIGINAL_ASPECT: f32 = 4.0 / 3.0;
 
 const CAMERA_NEAR: f32 = 2.0 * MODEL_SCALE;
 
-const CAMERA_FAR: f32 = 1200.0;
+pub(super) const CAMERA_FAR: f32 = 1200.0;
 
 #[derive(Resource, Default)]
 pub(crate) struct LocalTurnState(pub meteor_physics::locomotion::TurnInPlace);
@@ -168,6 +168,9 @@ fn sync_pointer_lock(
     dbg: Option<Res<crate::plugins::debug_plugin::DebugConsoleState>>,
     performance: Option<Res<super::stage_plugin::PlayerPerformance>>,
     pst: Option<Res<super::stage_plugin::pst_extensions::PstSession>>,
+    mrc: Option<Res<super::replay_plugin::MrcPlayback>>,
+    replay: Option<Res<super::replay_plugin::ReplayPlayer>>,
+    replay_controls: Option<Res<super::ui_plugin::ReplayScrubState>>,
     mut windows: Query<(&Window, &mut CursorOptions), With<PrimaryWindow>>,
 ) {
     let Ok((window, mut cursor)) = windows.single_mut() else {
@@ -175,9 +178,13 @@ fn sync_pointer_lock(
     };
 
     let playing = matches!(state.get(), AppState::Playing);
+    let replay_controls_visible = (mrc.is_some_and(|mrc| mrc.active)
+        || replay.is_some_and(|replay| replay.active))
+        && replay_controls.is_none_or(|controls| !controls.controls_hidden);
     let ui_capture = dbg.is_some_and(|dbg| dbg.captures_input())
         || performance.is_some_and(|performance| performance.ui_modal)
-        || pst.is_some_and(|pst| pst.0.mouse_released());
+        || pst.is_some_and(|pst| pst.0.mouse_released())
+        || replay_controls_visible;
     let focused = window.focused;
     let lock = playing && !ui_capture && focused && !cfg!(target_os = "android");
     let want_mode = if lock {
@@ -212,12 +219,17 @@ fn update_camera_input_gate(
     mut gate: ResMut<CameraInputGate>,
     mut previous: Local<Option<(bool, bool, CursorGrabMode)>>,
     mut mobile: Option<ResMut<crate::plugins::mobile_controls_plugin::MobileLookDelta>>,
+    #[cfg(not(target_arch = "wasm32"))] bot: Option<Res<super::stock_bot::StockBot>>,
 ) {
     let window = windows.single().ok();
+    #[cfg(not(target_arch = "wasm32"))]
+    let bot_focus = bot.is_some();
+    #[cfg(target_arch = "wasm32")]
+    let bot_focus = false;
     let enabled = *state.get() == AppState::Playing
         && !debug.is_some_and(|debug| debug.captures_input())
         && !performance.is_some_and(|performance| performance.ui_modal)
-        && window.is_none_or(|(window, _)| window.focused);
+        && (bot_focus || window.is_none_or(|(window, _)| window.focused));
     let capture = window.map_or(CursorGrabMode::None, |(_, cursor)| cursor.grab_mode);
     let current = (enabled, mode.fly, capture);
     gate.discard = !enabled || *previous != Some(current);
@@ -685,17 +697,16 @@ fn begin_manual_turn_frame(
     }
 }
 
-fn apply_keyboard_yaw_to_fighter(
-    motion: &mut crate::components::fighter::MotionState,
-    state: meteor_core::FighterState,
-    switching_weapon: bool,
-    yaw_step_deg: f32,
-) -> bool {
-    if state != meteor_core::FighterState::Name || switching_weapon || yaw_step_deg == 0.0 {
-        return false;
-    }
-    motion.facing -= yaw_step_deg * DEG;
-    true
+#[derive(Resource, Default)]
+pub(crate) struct BotLookDelta(pub(crate) f32);
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn bot_look_degrees(name: &str, pressed: bool) -> Option<f32> {
+    let delta = match name {
+        "look_left" => -60.0,
+        "look_right" => 60.0,
+        _ => return None,
+    };
+    Some(if pressed { delta } else { 0.0 })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -707,7 +718,11 @@ fn apply_follow_camera_input(
         Option<Res<CameraInputGate>>,
         Option<Res<CameraMode>>,
     ),
-    (time, mut turn): (Res<Time>, Option<ResMut<LocalTurnState>>),
+    (time, mut turn, mut bot_look): (
+        Res<Time>,
+        Option<ResMut<LocalTurnState>>,
+        Option<ResMut<BotLookDelta>>,
+    ),
     frame_clock: Option<Res<crate::plugins::FrameClock>>,
     window: Query<&CursorOptions, With<PrimaryWindow>>,
     windows: Query<&Window, With<PrimaryWindow>>,
@@ -730,6 +745,10 @@ fn apply_follow_camera_input(
         With<LocalFighter>,
     >,
 ) {
+    let bot_yaw = bot_look
+        .as_deref_mut()
+        .map(|look| std::mem::take(&mut look.0))
+        .unwrap_or_default();
     let (Ok((mut cam, view)), Ok((mut fighter_motion, fighter_state, switching, air))) =
         (camera.single_mut(), fighter.single_mut())
     else {
@@ -828,19 +847,6 @@ fn apply_follow_camera_input(
     }
     if yaw_step != 0.0 {
         apply_camera_look(&mut cam, lock_active, yaw_step, 0.0, view);
-        if !spectating {
-            let applied = apply_keyboard_yaw_to_fighter(
-                &mut fighter_motion,
-                fighter_state.current,
-                switching.is_some(),
-                yaw_step,
-            );
-            if applied && !replay.as_deref().is_some_and(|replay| replay.active) {
-                if let Some(turn) = turn.as_deref_mut() {
-                    turn.0.degrees += yaw_step;
-                }
-            }
-        }
     }
 
     let mobile_delta = mobile_look
@@ -850,7 +856,9 @@ fn apply_follow_camera_input(
     let pointer_locked = window
         .single()
         .is_ok_and(|cursor| cursor.grab_mode != CursorGrabMode::None);
-    let looking = pointer_locked || mouse.pressed(MouseButton::Left) || mobile_delta != Vec2::ZERO;
+    let focused = windows.single().ok().is_none_or(|window| window.focused);
+    let looking = focused && (pointer_locked || mouse.pressed(MouseButton::Left))
+        || mobile_delta != Vec2::ZERO;
     let yaw_deg_per_count = (settings.mouse_speed + 1.0) / 140.0;
 
     let pitch_deg_per_count = (settings.mouse_speed + 1.0) / 280.0;
@@ -895,10 +903,13 @@ fn apply_follow_camera_input(
         mouse_motion.clear();
     }
 
-    let can_turn_from_pointer = !spectating
-        && !lock_active
-        && !replay.as_deref().is_some_and(|replay| replay.active)
-        && switching.is_none()
+    if horizontal_look && bot_yaw != 0.0 {
+        pointer_yaw_deg += bot_yaw;
+        apply_camera_look(&mut cam, lock_active, bot_yaw, 0.0, view);
+    }
+    let manual_yaw_deg = yaw_step + pointer_yaw_deg;
+    let can_turn_fighter = horizontal_look
+        && !spectating
         && matches!(
             fighter_state.current,
             meteor_core::FighterState::Name | meteor_core::FighterState::Jump
@@ -908,17 +919,17 @@ fn apply_follow_camera_input(
                 || air.air.motion_mode == meteor_physics::jump::AirMotionMode::Ballistic
         });
     let facing_before = fighter_motion.facing;
-    if can_turn_from_pointer {
-        fighter_motion.facing -= pointer_yaw_deg * DEG;
+    if can_turn_fighter {
+        fighter_motion.facing -= manual_yaw_deg * DEG;
         if fighter_state.current == meteor_core::FighterState::Name
             && air.is_none_or(|air| !air.air.airborne || air.recovery_ground_mode == Some(true))
         {
             if let Some(turn) = turn.as_deref_mut() {
-                turn.0.degrees += pointer_yaw_deg;
+                turn.0.degrees += manual_yaw_deg;
             }
         }
     }
-    if pointer_yaw_deg != 0.0 && air.is_some_and(|air| air.air.airborne) {
+    if manual_yaw_deg != 0.0 && air.is_some_and(|air| air.air.airborne) {
         debug!(
             target: "meteor_air_turn",
             "air-turn state={:?} mode={:?} auto={} lock={:?} switch={} replay={} pointer_locked={} delta_deg={:.4} applied={} facing={:.6}->{:.6} camera={:.6}",
@@ -929,8 +940,8 @@ fn apply_follow_camera_input(
             switching.is_some(),
             replay.as_deref().is_some_and(|replay| replay.active),
             pointer_locked,
-            pointer_yaw_deg,
-            can_turn_from_pointer,
+            manual_yaw_deg,
+            can_turn_fighter,
             facing_before,
             fighter_motion.facing,
             cam.yaw,
@@ -1321,11 +1332,18 @@ fn follow_fighter_camera(
 
 #[cfg(test)]
 pub(crate) fn install_camera_input_for_test(app: &mut App) {
+    install_camera_input_for_test_on(app, Update);
+}
+#[cfg(test)]
+pub(crate) fn install_camera_input_for_test_on(
+    app: &mut App,
+    schedule: impl bevy::ecs::schedule::ScheduleLabel,
+) {
     app.init_resource::<LocalTurnState>()
         .init_resource::<Messages<MouseMotion>>()
         .init_resource::<Messages<MouseWheel>>()
         .add_systems(
-            Update,
+            schedule,
             (
                 begin_manual_turn_frame,
                 apply_follow_camera_input,
@@ -1429,6 +1447,23 @@ mod tests {
             );
             assert_eq!(cursor.visible, !captured);
         }
+        app.insert_resource(State::new(AppState::Playing))
+            .insert_resource(super::super::replay_plugin::MrcPlayback {
+                active: true,
+                ..default()
+            })
+            .init_resource::<super::super::ui_plugin::ReplayScrubState>();
+        app.update();
+        let cursor = app.world().get::<CursorOptions>(entity).unwrap();
+        assert_eq!(cursor.grab_mode, CursorGrabMode::None);
+        assert!(cursor.visible);
+        app.world_mut()
+            .resource_mut::<super::super::ui_plugin::ReplayScrubState>()
+            .controls_hidden = true;
+        app.update();
+        let cursor = app.world().get::<CursorOptions>(entity).unwrap();
+        assert_eq!(cursor.grab_mode, CursorGrabMode::Confined);
+        assert!(!cursor.visible);
     }
 
     #[test]
@@ -2020,37 +2055,6 @@ mod tests {
     }
 
     #[test]
-    fn held_turn_rotates_only_name_state_fighter() {
-        let mut motion = crate::components::fighter::MotionState {
-            movement_mode: meteor_core::MovementMode::Idle,
-            velocity: Vec3::ZERO,
-            facing: 0.0,
-        };
-        assert!(apply_keyboard_yaw_to_fighter(
-            &mut motion,
-            meteor_core::FighterState::Name,
-            false,
-            12.0,
-        ));
-        assert!((motion.facing + 12.0 * DEG).abs() < 1e-6);
-
-        let facing = motion.facing;
-        assert!(!apply_keyboard_yaw_to_fighter(
-            &mut motion,
-            meteor_core::FighterState::Attack1,
-            false,
-            12.0,
-        ));
-        assert!(!apply_keyboard_yaw_to_fighter(
-            &mut motion,
-            meteor_core::FighterState::Name,
-            true,
-            12.0,
-        ));
-        assert_eq!(motion.facing, facing);
-    }
-
-    #[test]
     fn production_camera_input_publishes_same_tick_basis_and_facing() {
         let mut time: Time = Time::default();
         time.advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
@@ -2231,6 +2235,41 @@ mod tests {
                         "pointer delta must only be consumed once"
                     );
                 }
+            }
+        }
+    }
+    #[test]
+    fn production_air_keyboard_turn_publishes_facing_before_direction_drive() {
+        use crate::components::fighter::{LockOnController, MotionState};
+        use crate::plugins::movement_plugin::FighterAir;
+        for locked in [false, true] {
+            let (mut app, fighter) = airborne_pointer_app();
+            let world = app.world_mut();
+            if locked {
+                let target = world.spawn_empty().id();
+                world.resource_mut::<LockOnController>().lock_entity = Some(target);
+            }
+            let mut keys = world.resource_mut::<ButtonInput<KeyCode>>();
+            keys.press(KeyCode::ArrowRight);
+            keys.press(KeyCode::KeyW);
+            keys.clear_just_pressed(KeyCode::ArrowRight);
+            let mut camera = world.query_filtered::<&mut ThirdPersonState, With<GameplayCamera>>();
+            camera.single_mut(world).unwrap().yaw_axis_hold = 0.5;
+            world
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
+            app.update();
+            let world = app.world();
+            let facing = world.get::<MotionState>(fighter).unwrap().facing;
+            let air = &world.get::<FighterAir>(fighter).unwrap().air;
+            assert!(air.planar_z > 11.0, "turn must preserve forward inertia");
+            if locked {
+                assert_eq!(facing, 0.0);
+                assert_eq!(air.planar_x, 0.0);
+            } else {
+                assert!(facing < 0.0);
+                assert_eq!(world.resource::<CameraBasis>().yaw, facing);
+                assert!(air.planar_x < 0.0, "W must use the updated facing");
             }
         }
     }

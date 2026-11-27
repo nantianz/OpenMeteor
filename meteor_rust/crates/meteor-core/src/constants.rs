@@ -18,6 +18,9 @@ pub const ANIM_FPS: f32 = 30.0;
 
 pub const MAX_FRAME_DT: f32 = 0.2;
 
+pub const PHYSICS_HZ_MIN: u32 = 30;
+pub const PHYSICS_HZ_MAX: u32 = 200;
+pub const PHYSICS_HZ_DEFAULT: u32 = 120;
 pub const MAX_COMBO_STAGE: usize = 3;
 
 pub const MAX_WEAPON_SLOTS: usize = 2;

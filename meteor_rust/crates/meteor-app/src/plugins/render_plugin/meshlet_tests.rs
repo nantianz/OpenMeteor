@@ -35,7 +35,7 @@ fn demo_packs(edit: impl FnOnce(&mut serde_json::Value)) -> GraphicsPacks {
 fn scene(
     packs: GraphicsPacks,
     backend: wgpu::Backend,
-) -> (usize, Vec<(usize, usize)>, StageMeshCollider) {
+) -> (usize, usize, Vec<(usize, usize)>, StageMeshCollider) {
     let source = assets_dir().join("origin_res/sn07");
     let gmb = std::fs::read(source.join("sn07.gmb")).unwrap();
     let cob = std::fs::read(source.join("sn07.cob")).unwrap();
@@ -93,7 +93,7 @@ fn scene(
         .query_filtered::<(&Mesh3d, &Transform), With<PlayingSceneEntity>>();
     let count = query.iter(app.world()).count();
     let meshes = app.world().resource::<Assets<Mesh>>();
-    let replaced = query
+    let replaced: Vec<_> = query
         .iter(app.world())
         .filter_map(|(handle, transform)| {
             if transform.translation.distance(anchor) > 1e-5 {
@@ -103,26 +103,46 @@ fn scene(
             Some((m.count_vertices(), m.indices().unwrap().len() / 3))
         })
         .collect();
+    let drawn_triangles = query
+        .iter(app.world())
+        .map(|(handle, _)| {
+            let mesh = meshes.get(&handle.0).unwrap();
+            mesh.indices()
+                .map_or_else(|| mesh.count_vertices(), Indices::len)
+                / 3
+        })
+        .sum::<usize>();
+    let object_triangles = if replaced.is_empty() {
+        object.num_faces
+    } else {
+        replaced.iter().map(|(_, triangles)| triangles).sum()
+    };
     let collider = app
         .world_mut()
         .resource_mut::<StageCollider>()
         .mesh
         .take()
         .unwrap();
-    (count, replaced, collider)
+    (
+        count,
+        drawn_triangles - object_triangles,
+        replaced,
+        collider,
+    )
 }
 
 #[test]
 fn meshlet_stage_demo_replaces_only_display_and_preserves_every_collision_triangle() {
-    let (stock_count, stock, stock_collider) = scene(GraphicsPacks::default(), wgpu::Backend::Dx12);
+    let (_, stock_triangles, stock, stock_collider) =
+        scene(GraphicsPacks::default(), wgpu::Backend::Dx12);
     assert!(stock.is_empty());
-    let (meshlet_count, meshes, collider) = scene(demo_packs(|_| {}), wgpu::Backend::Dx12);
+    let (_, meshlet_triangles, meshes, collider) = scene(demo_packs(|_| {}), wgpu::Backend::Dx12);
     assert_eq!(meshes.len(), 74);
     assert_eq!(meshes.iter().map(|(_, tris)| tris).sum::<usize>(), 6912);
     assert!(meshes
         .iter()
         .all(|&(verts, tris)| verts <= 64 && tris <= 124));
-    assert_eq!(meshlet_count, stock_count - 1 + meshes.len());
+    assert_eq!(meshlet_triangles, stock_triangles);
     assert_eq!(collider.positions, stock_collider.positions);
     assert_eq!(collider.indices, stock_collider.indices);
     assert_eq!(collider.wall_tris, stock_collider.wall_tris);
@@ -133,8 +153,8 @@ fn meshlet_stage_demo_replaces_only_display_and_preserves_every_collision_triang
 
 #[test]
 fn meshlet_stage_demo_falls_back_per_object() {
-    let (stock, _, _) = scene(GraphicsPacks::default(), wgpu::Backend::Dx12);
-    let (gl, meshes, _) = scene(demo_packs(|_| {}), wgpu::Backend::Gl);
+    let (stock, _, _, _) = scene(GraphicsPacks::default(), wgpu::Backend::Dx12);
+    let (gl, _, meshes, _) = scene(demo_packs(|_| {}), wgpu::Backend::Gl);
     assert_eq!(gl, stock);
     assert!(meshes.is_empty());
     for invalid in ["missing", "mismatch", "conflict"] {
@@ -154,7 +174,7 @@ fn meshlet_stage_demo_falls_back_per_object() {
             }
             _ => unreachable!(),
         });
-        let (count, meshes, _) = scene(packs, wgpu::Backend::Dx12);
+        let (count, _, meshes, _) = scene(packs, wgpu::Backend::Dx12);
         assert_eq!(count, stock, "{invalid}");
         assert!(meshes.is_empty(), "{invalid}");
     }
@@ -162,7 +182,7 @@ fn meshlet_stage_demo_falls_back_per_object() {
 
 #[test]
 fn meshlet_props_add_display_instances_without_replacing_geometry_or_collision() {
-    let (stock, _, original) = scene(GraphicsPacks::default(), wgpu::Backend::Dx12);
+    let (stock, _, _, original) = scene(GraphicsPacks::default(), wgpu::Backend::Dx12);
     let props = || {
         demo_packs(|json| {
             let stage = &mut json["scenes"][0];
@@ -176,7 +196,7 @@ fn meshlet_props_add_display_instances_without_replacing_geometry_or_collision()
             }]);
         })
     };
-    let (display, replaced, collider) = scene(props(), wgpu::Backend::Dx12);
+    let (display, _, replaced, collider) = scene(props(), wgpu::Backend::Dx12);
     assert_eq!(display, stock + 2 * 74);
     assert!(replaced.is_empty());
     assert_eq!(collider.positions, original.positions);

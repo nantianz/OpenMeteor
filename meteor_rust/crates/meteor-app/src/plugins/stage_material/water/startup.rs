@@ -16,7 +16,6 @@ struct BakeCaption;
 #[derive(Component)]
 struct BakeBar;
 pub(crate) fn install(app: &mut App) {
-    super::config::initialize();
     app.init_resource::<WaterStartup>()
         .add_systems(Startup, begin)
         .add_systems(Update, poll);
@@ -27,21 +26,24 @@ fn begin(
     font: Res<crate::plugins::launcher_ui::UiFont>,
     graphics: Option<Res<crate::plugins::graphics_pack::GraphicsPacks>>,
 ) {
-    let graphics = graphics
-        .as_deref()
-        .map(|packs| packs.catalog_snapshot())
-        .unwrap_or_default();
+    let Some((graphics, water)) = graphics.as_deref().and_then(|packs| {
+        packs
+            .water()
+            .filter(|water| water.enabled())
+            .map(|water| (packs, water.clone()))
+    }) else {
+        state.ready = true;
+        return;
+    };
+    let graphics = graphics.catalog_snapshot();
     *state.progress.lock().unwrap() = (0.0, "正在检查水面烘焙缓存".into());
     let progress = state.progress.clone();
     let (tx, rx) = mpsc::channel();
     state.receiver = Some(Mutex::new(rx));
     std::thread::spawn(move || {
         let result = std::panic::catch_unwind(|| {
-            if let Some(error) = super::config::error() {
-                return Err(format!("水面配置无效：{error}"));
-            }
             super::bake_cache::prepare(
-                super::config::get(),
+                &water.config,
                 &graphics,
                 &super::bake_cache::directory(),
                 |value, caption| {

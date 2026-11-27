@@ -97,11 +97,12 @@ fn room_metadata(mode: Option<&str>, stage: Option<&str>, teams: Option<[usize; 
     let stage = stage
         .filter(|id| !id.is_empty())
         .map(|id| {
-            meteor_scene::stage_registry::official_stages()
+            let fallback = meteor_scene::stage_registry::official_stages()
                 .into_iter()
                 .find(|stage| stage.id.eq_ignore_ascii_case(id))
                 .map(|stage| stage.name)
-                .unwrap_or_else(|| id.to_owned())
+                .unwrap_or_else(|| id.to_owned());
+            crate::plugins::stage_presentation::display_name(id, &fallback)
         })
         .unwrap_or_else(|| "地图未提供".into());
     let mode_label = mode

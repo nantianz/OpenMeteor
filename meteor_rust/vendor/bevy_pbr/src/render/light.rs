@@ -75,6 +75,15 @@ use decal::clustered::RenderClusteredDecals;
 use tracing::info_span;
 use tracing::{error, warn};
 
+mod static_shadow_cache;
+use static_shadow_cache::PreparedStaticDepth;
+pub(crate) use static_shadow_cache::{
+    extract_static_shadow_casters, init_static_depth_copy, register_static_depth_copy_shader,
+};
+pub use static_shadow_cache::{CacheStaticDirectionalShadows, StaticShadowCaster};
+#[doc(hidden)]
+pub use static_shadow_cache::{ExtractedStaticCasters, ShadowCacheTarget};
+
 #[derive(Component)]
 #[require(PointAndSpotLightViewEntities)]
 pub struct ExtractedPointLight {
@@ -124,8 +133,18 @@ pub struct ExtractedDirectionalLight {
     pub soft_shadow_size: Option<f32>,
 
     pub occlusion_culling: bool,
+    pub cache_static_shadows: bool,
+    pub shadow_casters: DirectionalShadowCasters,
     pub sun_disk_angular_size: f32,
     pub sun_disk_intensity: f32,
+}
+
+#[derive(Component, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum DirectionalShadowCasters {
+    #[default]
+    All,
+    StaticOnly,
+    DynamicOnly,
 }
 
 bitflags::bitflags! {
@@ -371,6 +390,8 @@ pub fn extract_lights(
                 Option<&VolumetricLight>,
                 Has<OcclusionCulling>,
                 Option<&SunDisk>,
+                Has<CacheStaticDirectionalShadows>,
+                Option<&DirectionalShadowCasters>,
             ),
             (
                 Without<SpotLight>,
@@ -386,6 +407,8 @@ pub fn extract_lights(
                     Changed<VolumetricLight>,
                     Changed<OcclusionCulling>,
                     Changed<SunDisk>,
+                    Changed<CacheStaticDirectionalShadows>,
+                    Changed<DirectionalShadowCasters>,
                 )>,
             ),
         >,
@@ -448,7 +471,6 @@ pub fn extract_lights(
         if !point_light.shadow_maps_enabled {
             clear_shadow_maps(&mut commands, render_entity);
         } else {
-
             let (
                 mut render_extracted_shadow_map_visible_entities,
                 mut render_shadow_map_visible_entities,
@@ -559,7 +581,6 @@ pub fn extract_lights(
         if !spot_light.shadow_maps_enabled {
             clear_shadow_maps(&mut commands, render_entity);
         } else {
-
             let (
                 mut render_extracted_shadow_map_visible_entities,
                 mut render_shadow_map_visible_entities,
@@ -673,6 +694,8 @@ pub fn extract_lights(
         volumetric_light,
         occlusion_culling,
         sun_disk,
+        cache_static_shadows,
+        shadow_casters,
     ) in &directional_lights
     {
         if !view_visibility.get() {
@@ -692,7 +715,6 @@ pub fn extract_lights(
         if !directional_light.shadow_maps_enabled {
             clear_shadow_maps(&mut commands, entity);
         } else {
-
             let (
                 mut existing_extracted_shadow_map_visible_entities,
                 mut existing_shadow_map_visible_entities,
@@ -778,6 +800,9 @@ pub fn extract_lights(
             ));
         }
 
+        let shadow_casters = shadow_casters.copied().unwrap_or_default();
+        let cache_static_shadows =
+            cache_static_shadows && shadow_casters != DirectionalShadowCasters::DynamicOnly;
         let extracted_directional_light = ExtractedDirectionalLight {
             color: directional_light.color.into(),
             illuminance: directional_light.illuminance,
@@ -796,7 +821,9 @@ pub fn extract_lights(
             cascade_shadow_config: cascade_config.clone(),
             cascades: extracted_cascades,
             frusta: extracted_frusta,
-            occlusion_culling,
+            occlusion_culling: occlusion_culling && !cache_static_shadows,
+            cache_static_shadows,
+            shadow_casters,
             sun_disk_angular_size: sun_disk.unwrap_or_default().angular_size,
             sun_disk_intensity: sun_disk.unwrap_or_default().intensity,
         };
@@ -909,6 +936,7 @@ pub struct PointAndSpotLightViewEntities(Vec<Entity>);
 pub struct ShadowView {
     pub depth_attachment: DepthAttachment,
     pub pass_name: String,
+    shadow_casters: DirectionalShadowCasters,
 }
 
 #[derive(Component)]
@@ -921,7 +949,6 @@ pub struct ViewShadowBindings {
 
 #[derive(Component)]
 pub struct ViewLightEntities {
-
     pub lights: Vec<Entity>,
 }
 
@@ -953,7 +980,11 @@ pub enum LightEntity {
 pub fn prepare_lights(
     mut commands: Commands,
     mut texture_cache: ResMut<TextureCache>,
-    (render_device, render_queue, render_adapter): (Res<RenderDevice>, Res<RenderQueue>, Res<RenderAdapter>),
+    (render_device, render_queue, render_adapter): (
+        Res<RenderDevice>,
+        Res<RenderQueue>,
+        Res<RenderAdapter>,
+    ),
     mut global_clusterable_object_meta: ResMut<GlobalClusterableObjectMeta>,
     mut light_meta: ResMut<LightMeta>,
     views: Query<
@@ -1021,17 +1052,25 @@ pub fn prepare_lights(
         Res<GpuPreprocessingSupport>,
         Option<Res<RenderClusteredDecals>>,
     ),
-    (existing_shadow_views, mut light_key_cache, mut specialized_shadow_material_pipeline_cache): (
+    (
+        existing_shadow_views,
+        existing_static_caches,
+        mut light_key_cache,
+        mut specialized_shadow_material_pipeline_cache,
+    ): (
         Query<&ShadowView>,
+        Query<&ShadowCacheTarget>,
         ResMut<LightKeyCache>,
         ResMut<SpecializedShadowMaterialPipelineCache>,
     ),
 ) {
-
     let native_gles = cfg!(all(target_os = "windows", feature = "native-gles"))
         && render_adapter.get_info().backend == wgpu_types::Backend::Gl;
     let supports_cube_arrays = !native_gles
-        || render_adapter.get_downlevel_capabilities().flags.contains(DownlevelFlags::CUBE_ARRAY_TEXTURES);
+        || render_adapter
+            .get_downlevel_capabilities()
+            .flags
+            .contains(DownlevelFlags::CUBE_ARRAY_TEXTURES);
     let views_iter = views.iter();
     let views_count = views_iter.len();
     let Some(mut view_gpu_lights_writer) =
@@ -1076,7 +1115,11 @@ pub fn prepare_lights(
         not(target_arch = "wasm32"),
         feature = "webgpu"
     ))]
-    let max_texture_cubes = if supports_cube_arrays { max_texture_array_layers / 6 } else { 1 };
+    let max_texture_cubes = if supports_cube_arrays {
+        max_texture_array_layers / 6
+    } else {
+        1
+    };
     #[cfg(all(feature = "webgl", target_arch = "wasm32", not(feature = "webgpu")))]
     let max_texture_array_layers = 1;
     #[cfg(all(feature = "webgl", target_arch = "wasm32", not(feature = "webgpu")))]
@@ -1234,24 +1277,19 @@ pub fn prepare_lights(
                 let spot_offset = -cos_outer * spot_scale;
 
                 (
-
                     light_direction.xz().extend(spot_scale).extend(spot_offset),
                     ops::tan(outer),
                 )
             }
-            None => {
-                (
-
-                    Vec4::new(
-                        cube_face_projection.z_axis.z,
-                        cube_face_projection.z_axis.w,
-                        cube_face_projection.w_axis.z,
-                        cube_face_projection.w_axis.w,
-                    ),
-
-                    0.0,
-                )
-            }
+            None => (
+                Vec4::new(
+                    cube_face_projection.z_axis.z,
+                    cube_face_projection.z_axis.w,
+                    cube_face_projection.w_axis.z,
+                    cube_face_projection.w_axis.w,
+                ),
+                0.0,
+            ),
         };
 
         global_clusterable_object_meta
@@ -1365,7 +1403,11 @@ pub fn prepare_lights(
                         feature = "webgpu"
                     )
                 ))]
-                dimension: Some(if supports_cube_arrays { TextureViewDimension::CubeArray } else { TextureViewDimension::Cube }),
+                dimension: Some(if supports_cube_arrays {
+                    TextureViewDimension::CubeArray
+                } else {
+                    TextureViewDimension::Cube
+                }),
                 #[cfg(any(
                     target_abi = "sim",
                     all(feature = "webgl", target_arch = "wasm32", not(feature = "webgpu"))
@@ -1379,12 +1421,25 @@ pub fn prepare_lights(
                 array_layer_count: None,
             });
 
-    let directional_layers = (num_directional_cascades_enabled + spot_light_shadow_maps_count).max(1) as u32;
+    let directional_layers =
+        (num_directional_cascades_enabled + spot_light_shadow_maps_count).max(1) as u32;
     let directional_layers = if native_gles {
         let layers = directional_layers.max(2);
         layers + u32::from(layers % 6 == 0)
-    } else { directional_layers };
+    } else {
+        directional_layers
+    };
 
+    let cache_static_shadows = directional_lights
+        .iter()
+        .any(|(_, _, light, _)| light.cache_static_shadows);
+    let direct_copy =
+        cache_static_shadows && render_adapter.get_info().backend == wgpu_types::Backend::Vulkan;
+    let shadow_map_copy = if direct_copy {
+        TextureUsages::COPY_DST
+    } else {
+        TextureUsages::empty()
+    };
     let directional_light_depth_texture = texture_cache.get(
         &render_device,
         TextureDescriptor {
@@ -1400,7 +1455,9 @@ pub fn prepare_lights(
             dimension: TextureDimension::D2,
             format: CORE_3D_DEPTH_FORMAT,
             label: Some("directional_light_shadow_map_texture"),
-            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
+            usage: TextureUsages::RENDER_ATTACHMENT
+                | TextureUsages::TEXTURE_BINDING
+                | shadow_map_copy,
             view_formats: &[],
         },
     );
@@ -1431,7 +1488,6 @@ pub fn prepare_lights(
 
     for light_entity in point_light_entities
         .iter()
-
         .take(point_light_count.min(max_texture_cubes))
     {
         let (
@@ -1452,7 +1508,6 @@ pub fn prepare_lights(
         }
 
         if point_and_spot_light_view_entities.0.is_empty() {
-
             let light_view_entities: Vec<_> = (0..6).map(|_| commands.spawn_empty().id()).collect();
 
             create_point_shadow_maps(
@@ -1472,7 +1527,6 @@ pub fn prepare_lights(
 
             point_and_spot_light_view_entities.0 = light_view_entities;
         } else if changed_point_lights.get(*light_entity).is_ok() {
-
             create_point_shadow_maps(
                 &mut commands,
                 &mut point_light_depth_attachments,
@@ -1547,7 +1601,6 @@ pub fn prepare_lights(
                 &mut directional_light_depth_attachments,
                 (num_directional_cascades_enabled, light_index),
                 &directional_light_depth_texture,
-
                 point_and_spot_light_view_entities.0[0],
                 (light_entity, light_main_entity, light, light_render_layers),
                 spot_light_frustum,
@@ -1657,7 +1710,6 @@ pub fn prepare_lights(
             }
 
             gpu_directional_lights[index] = GpuDirectionalLight {
-
                 cascades: [GpuDirectionalCascade::default(); MAX_CASCADES_PER_LIGHT],
 
                 color: Vec4::from_slice(&light.color.to_f32_array()) * light.illuminance,
@@ -1805,6 +1857,22 @@ pub fn prepare_lights(
 
                 let depth_attachment = DepthAttachment::new(depth_texture_view.clone(), Some(0.0));
 
+                if cache_static_shadows && light.cache_static_shadows && !light.occlusion_culling {
+                    commands
+                        .entity(view_light_entity)
+                        .insert(ShadowCacheTarget::new(
+                            &render_device,
+                            &directional_light_depth_texture.texture,
+                            directional_depth_texture_array_index,
+                            direct_copy,
+                            existing_static_caches.get(view_light_entity).ok(),
+                        ));
+                } else if existing_static_caches.contains(view_light_entity) {
+                    commands
+                        .entity(view_light_entity)
+                        .remove::<ShadowCacheTarget>();
+                }
+
                 directional_depth_texture_array_index += 1;
 
                 let mut frustum = *frustum;
@@ -1824,6 +1892,7 @@ pub fn prepare_lights(
                 commands.entity(view_light_entity).insert((
                     ShadowView {
                         depth_attachment,
+                        shadow_casters: light.shadow_casters,
                         pass_name: format!(
                             "shadow_directional_light_{light_index}_cascade_{cascade_index}"
                         ),
@@ -2003,6 +2072,7 @@ fn create_point_shadow_maps(
         commands.entity(view_light_entity).insert((
             ShadowView {
                 depth_attachment,
+                shadow_casters: DirectionalShadowCasters::All,
                 pass_name: format!(
                     "shadow_point_light_{}_{}",
                     light_index,
@@ -2093,6 +2163,7 @@ fn create_spot_shadow_map(
     commands.entity(view_light_entity).insert((
         ShadowView {
             depth_attachment,
+            shadow_casters: DirectionalShadowCasters::All,
             pass_name: format!("shadow_spot_light_{light_index}"),
         },
         ExtractedView {
@@ -2142,7 +2213,6 @@ pub struct LightKeyCache(HashMap<RetainedViewEntity, MeshPipelineKey>);
 
 #[derive(Resource, Deref, DerefMut, Default)]
 pub struct SpecializedShadowMaterialPipelineCache {
-
     #[deref]
     map: HashMap<RetainedViewEntity, SpecializedShadowMaterialViewPipelineCache>,
 }
@@ -2325,7 +2395,6 @@ pub(crate) fn specialize_shadows(
                 };
 
                 if !material.properties.shadows_enabled {
-
                     continue;
                 }
                 if !mesh_instance
@@ -2438,6 +2507,7 @@ pub fn queue_shadows(
     specialized_material_pipeline_cache: Res<SpecializedShadowMaterialPipelineCache>,
     mut pending_shadow_queues: ResMut<PendingShadowQueues>,
     dirty_specializations: Res<DirtySpecializations>,
+    static_casters: Res<ExtractedStaticCasters>,
 ) {
     for (light_entity, extracted_view_light, view_light_render_layers) in &view_light_entities {
         let Some(shadow_phase) =
@@ -2485,7 +2555,6 @@ pub fn queue_shadows(
 
             let Some(mesh_instance) = render_mesh_instances.render_mesh_queue_data(*main_entity)
             else {
-
                 view_pending_shadow_queues
                     .current_frame
                     .insert((*render_entity, *main_entity));
@@ -2508,7 +2577,6 @@ pub fn queue_shadows(
                 continue;
             };
             let Some(material) = render_materials.get(material_instance.asset_id) else {
-
                 view_pending_shadow_queues
                     .current_frame
                     .insert((*render_entity, *main_entity));
@@ -2533,6 +2601,8 @@ pub fn queue_shadows(
                 draw_function,
                 material_bind_group_index,
                 slabs: mesh_slabs,
+                static_caster: matches!(light_entity, LightEntity::Directional { .. })
+                    && static_casters.0.contains(main_entity),
             };
 
             shadow_phase.add(
@@ -2552,7 +2622,6 @@ pub fn queue_shadows(
 }
 
 pub struct Shadow {
-
     pub batch_set_key: ShadowBatchSetKey,
 
     pub bin_key: ShadowBinKey,
@@ -2563,6 +2632,7 @@ pub struct Shadow {
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ShadowBatchSetKey {
+    pub static_caster: bool,
 
     pub pipeline: CachedRenderPipelineId,
 
@@ -2581,7 +2651,6 @@ impl PhaseItemBatchSetKey for ShadowBatchSetKey {
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ShadowBinKey {
-
     pub asset_id: UntypedAssetId,
 }
 
@@ -2719,18 +2788,46 @@ fn view_shadow_pass<const IS_LATE: bool>(
     #[cfg(feature = "trace")]
     let _shadow_pass_span = info_span!("", "{}", view_light.pass_name).entered();
 
-    let depth_stencil_attachment = Some(view_light.depth_attachment.get_attachment(StoreOp::Store));
+    let cached = world
+        .get::<ShadowCacheTarget>(view_light_entity)
+        .and_then(|cache| {
+            cache.prepare(
+                world,
+                ctx,
+                view_light_entity,
+                extracted_light_view,
+                shadow_phase,
+            )
+        });
+    let mut attachment = view_light.depth_attachment.get_attachment(StoreOp::Store);
+    if matches!(cached, Some(PreparedStaticDepth::Copied)) {
+        attachment.depth_ops.as_mut().unwrap().load = LoadOp::Load;
+    }
 
     let mut render_pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
         label: Some(&view_light.pass_name),
         color_attachments: &[],
-        depth_stencil_attachment,
+        depth_stencil_attachment: Some(attachment),
         timestamp_writes: None,
         occlusion_query_set: None,
         multiview_mask: None,
     });
 
-    if let Err(err) = shadow_phase.render(&mut render_pass, world, view_light_entity) {
+    if let Some(PreparedStaticDepth::Draw { pipeline, source }) = &cached {
+        render_pass.set_render_pipeline(pipeline);
+        render_pass.set_bind_group(0, source, &[]);
+        render_pass.draw(0..3, 0..1);
+    }
+    if let Err(err) =
+        shadow_phase.render_filtered(&mut render_pass, world, view_light_entity, |key| {
+            if key.static_caster {
+                cached.is_none()
+                    && view_light.shadow_casters != DirectionalShadowCasters::DynamicOnly
+            } else {
+                view_light.shadow_casters != DirectionalShadowCasters::StaticOnly
+            }
+        })
+    {
         error!("Error encountered while rendering the shadow phase {err:?}");
     }
 }
@@ -2768,7 +2865,6 @@ fn get_shadow_map_visible_entities<'w, 's: 'w>(
             light_entity,
             face_index,
         } => {
-
             let retained_view_entity = RetainedViewEntity {
                 main_entity: extracted_view_light.retained_view_entity.main_entity,
                 auxiliary_entity: MainEntity::from(Entity::PLACEHOLDER),
@@ -2782,7 +2878,6 @@ fn get_shadow_map_visible_entities<'w, 's: 'w>(
                 .expect("Failed to get point light visible entity for face")
         }
         LightEntity::Spot { light_entity } => {
-
             let retained_view_entity = RetainedViewEntity {
                 main_entity: extracted_view_light.retained_view_entity.main_entity,
                 auxiliary_entity: MainEntity::from(Entity::PLACEHOLDER),

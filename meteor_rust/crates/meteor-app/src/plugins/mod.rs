@@ -12,6 +12,7 @@ mod jump_trace;
 #[cfg(not(target_arch = "wasm32"))]
 mod landing_trace;
 pub(crate) mod rebalance_plugin;
+mod render_pacing;
 pub(crate) mod status_plugin;
 
 use bevy::prelude::{
@@ -40,17 +41,27 @@ pub(crate) struct FrameClock {
     pub sim_dt: f32,
     pub wall_dt: f32,
     pub wall_step: f32,
-    accumulator: f32,
     pending_wall: f64,
+    fixed_steps: Option<FixedControllerSteps>,
+    #[cfg(test)]
+    accumulator: f32,
+    #[cfg(test)]
     target_fps: u32,
     pub(crate) measured_wall_step: f64,
 
+    pub(crate) completed_controller_steps: u32,
     play_elapsed_seconds: Option<f64>,
     play_frame_seconds: f64,
 
     pub(crate) substep: Option<ControllerSubstep>,
 
     pub(crate) replay_steps: Vec<f32>,
+}
+#[derive(Debug, Clone, Copy)]
+struct FixedControllerSteps {
+    count: u32,
+    wall_dt: f64,
+    sim_dt: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -70,10 +81,14 @@ impl Default for FrameClock {
             sim_dt: 0.0,
             wall_dt: 0.0,
             wall_step: 0.0,
-            accumulator: 0.0,
             pending_wall: 0.0,
+            fixed_steps: None,
+            #[cfg(test)]
+            accumulator: 0.0,
+            #[cfg(test)]
             target_fps: 0,
             measured_wall_step: 0.0,
+            completed_controller_steps: 0,
             play_elapsed_seconds: None,
             play_frame_seconds: 0.0,
             substep: None,
@@ -87,16 +102,9 @@ fn advance_frame_clock(clock: &mut FrameClock, raw_wall_dt: f32, target_fps: u32
     advance_frame_clock_seconds(clock, f64::from(raw_wall_dt), target_fps);
 }
 
+#[cfg(test)]
 fn advance_frame_clock_seconds(clock: &mut FrameClock, raw_wall_dt: f64, target_fps: u32) {
-    let raw = raw_wall_dt.max(0.0);
-    clock.play_frame_seconds = raw;
-    if let Some(elapsed) = &mut clock.play_elapsed_seconds {
-        *elapsed += raw;
-    }
-    clock.substep = None;
-    clock.replay_steps.clear();
-    clock.wall_dt = raw as f32;
-    clock.pending_wall += raw;
+    let raw = start_clock_frame(clock, raw_wall_dt);
     if clock.target_fps != target_fps {
         clock.target_fps = target_fps;
         clock.accumulator = 0.0;
@@ -124,9 +132,62 @@ fn advance_frame_clock_seconds(clock: &mut FrameClock, raw_wall_dt: f64, target_
     }
 }
 
+fn start_clock_frame(clock: &mut FrameClock, raw_wall_dt: f64) -> f64 {
+    let raw = raw_wall_dt.max(0.0);
+    clock.play_frame_seconds = raw;
+    if let Some(elapsed) = &mut clock.play_elapsed_seconds {
+        *elapsed += raw;
+    }
+    clock.substep = None;
+    clock.completed_controller_steps = 0;
+    clock.replay_steps.clear();
+    clock.fixed_steps = None;
+    clock.wall_dt = raw as f32;
+    clock.pending_wall += raw;
+    raw
+}
+fn advance_gameplay_clock(clock: &mut FrameClock, raw_wall_dt: f64, physics_hz: u32) {
+    start_clock_frame(clock, raw_wall_dt);
+    let elapsed = clock.pending_wall;
+    let available = elapsed.min(f64::from(meteor_core::MAX_FRAME_DT));
+    clock.sim_dt = available as f32;
+    clock.pending_wall = 0.0;
+    if physics_hz != 0 {
+        let wall_dt = 1.0 / f64::from(physics_hz);
+        let count = ((available + 1e-9) / wall_dt).floor() as u32;
+        clock.pending_wall = (available - f64::from(count) * wall_dt).max(0.0);
+        let sim_dt = wall_dt as f32;
+        clock.sim_dt = count as f32 * sim_dt;
+        clock.fixed_steps = Some(FixedControllerSteps {
+            count,
+            wall_dt,
+            sim_dt,
+        });
+    }
+    clock.measured_wall_step = (elapsed - clock.pending_wall).max(0.0);
+    clock.wall_step = clock.measured_wall_step as f32;
+}
+fn effective_physics_hz(
+    settings: &crate::app_state::Settings,
+    net: Option<&network_plugin::NetState>,
+) -> u32 {
+    if let Some(net) = net.filter(|net| net.status == network_plugin::NetStatus::InRoom) {
+        return if net.is_stock_udp() {
+            net.stock_physics_hz
+        } else {
+            meteor_core::PHYSICS_HZ_DEFAULT
+        };
+    }
+    if settings.variable_physics {
+        0
+    } else {
+        settings.physics_hz
+    }
+}
 fn begin_frame_clock(
     time: Res<bevy::time::Time<bevy::time::Real>>,
     settings: Res<crate::app_state::Settings>,
+    net: Option<Res<network_plugin::NetState>>,
     impact: Option<Res<crate::plugins::impact_fx_plugin::ImpactSimulationScale>>,
     debug_sim: Option<Res<crate::plugins::debug_plugin::DebugSimControl>>,
     mut clock: ResMut<FrameClock>,
@@ -134,10 +195,16 @@ fn begin_frame_clock(
     mut mrc: Option<ResMut<replay_plugin::MrcPlayback>>,
     seek: Option<Res<replay_plugin::ReplaySeekRequest>>,
     player: Option<Res<replay_plugin::ReplayPlayer>>,
+    mrc_timeline: Option<Res<replay_plugin::MrcTimeline>>,
 ) {
-    advance_frame_clock_seconds(&mut clock, time.delta_secs_f64(), settings.target_fps);
+    let physics_hz = effective_physics_hz(&settings, net.as_deref());
+    advance_gameplay_clock(&mut clock, time.delta_secs_f64(), physics_hz);
     if loading.is_some_and(|loading| loading.active) {
         clock.sim_dt = 0.0;
+        clock.pending_wall = 0.0;
+    } else if mrc_timeline.is_some() && mrc.as_deref().is_some_and(|mrc| mrc.active) {
+        suspend_clock_frame(&mut clock);
+        return;
     } else if let Some(mrc) = mrc.as_deref_mut().filter(|mrc| {
         mrc.active
             && !mrc.paused
@@ -154,13 +221,20 @@ fn begin_frame_clock(
         pace_recorded_frames(&mut clock, mrc, time.delta_secs_f64() * speed);
         return;
     }
-    clock.sim_dt *= impact.as_deref().map_or(1.0, |impact| impact.scale);
+    let impact_scale = impact.as_deref().map_or(1.0, |impact| impact.scale);
+    clock.sim_dt *= impact_scale;
+    if let Some(steps) = &mut clock.fixed_steps {
+        steps.sim_dt *= impact_scale;
+    }
 
     if let Some(debug_sim) = debug_sim.as_deref() {
         if debug_sim.paused {
             suspend_clock_frame(&mut clock);
         } else {
             clock.sim_dt = (clock.sim_dt * debug_sim.time_scale).max(0.0);
+            if let Some(steps) = &mut clock.fixed_steps {
+                steps.sim_dt = (steps.sim_dt * debug_sim.time_scale).max(0.0);
+            }
         }
     }
     if mrc.as_deref().is_some_and(|mrc| mrc.active && mrc.paused)
@@ -169,6 +243,23 @@ fn begin_frame_clock(
             .is_some_and(|player| player.active && player.paused)
     {
         suspend_clock_frame(&mut clock);
+    }
+}
+impl FrameClock {
+    pub(crate) fn set_mrc_step(&mut self, elapsed: f32, dt: f32) {
+        self.sim_dt = dt;
+        self.wall_dt = dt;
+        self.wall_step = dt;
+        self.measured_wall_step = f64::from(dt);
+        self.play_elapsed_seconds = Some(f64::from(elapsed));
+        self.pending_wall = 0.0;
+        self.substep = None;
+        self.completed_controller_steps = 0;
+        self.fixed_steps = None;
+        self.replay_steps.clear();
+        if dt > 0.0 {
+            self.replay_steps.push(dt);
+        }
     }
 }
 
@@ -195,7 +286,9 @@ fn pace_recorded_frames(
         clock.sim_dt = 0.0;
         clock.wall_step = 0.0;
         clock.measured_wall_step = 0.0;
+        clock.pending_wall = 0.0;
         clock.replay_steps.clear();
+        clock.fixed_steps = None;
         return;
     }
     let mut previous = mrc.elapsed.min(mrc.frame_times[start]);
@@ -217,6 +310,7 @@ fn pace_recorded_frames(
     clock.wall_step = total;
     clock.measured_wall_step = f64::from(total);
     clock.pending_wall = 0.0;
+    clock.fixed_steps = None;
     clock.replay_steps = steps;
 }
 
@@ -306,6 +400,9 @@ pub(crate) fn install_frame_clock(app: &mut App) {
             suspend_offline_frame_clock
                 .after(bevy::state::state::StateTransitionSystems::EnterSchedules),
         );
+}
+pub(crate) fn install_render_pacing(app: &mut App) {
+    render_pacing::install(app);
 }
 
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -513,6 +610,39 @@ mod tests {
         advance_frame_clock(&mut clock, 0.2, 0);
         assert_eq!(clock.sim_dt, meteor_core::MAX_FRAME_DT);
         assert!((clock.wall_step - 0.2).abs() < 1e-6);
+    }
+    #[test]
+    fn network_room_uses_host_frequency_without_overwriting_solo_preference() {
+        let settings = crate::app_state::Settings {
+            physics_hz: 150,
+            ..Default::default()
+        };
+        let mut net = network_plugin::NetState::default();
+        assert_eq!(effective_physics_hz(&settings, Some(&net)), 150);
+        net.status = network_plugin::NetStatus::InRoom;
+        assert_eq!(effective_physics_hz(&settings, Some(&net)), 120);
+        assert_eq!(effective_physics_hz(&settings, None), 150);
+        let settings = crate::app_state::Settings {
+            variable_physics: true,
+            ..settings
+        };
+        assert_eq!(effective_physics_hz(&settings, Some(&net)), 120);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            net.address = "udp://127.0.0.1:5230".into();
+            net.stock_physics_hz = 173;
+            assert_eq!(effective_physics_hz(&settings, Some(&net)), 173);
+            let mut clock = FrameClock::default();
+            advance_gameplay_clock(
+                &mut clock,
+                1.0 / 173.0,
+                effective_physics_hz(&settings, Some(&net)),
+            );
+            assert_eq!(clock.fixed_steps.unwrap().count, 1);
+            net.address = "ws://127.0.0.1:9000".into();
+            assert_eq!(effective_physics_hz(&settings, Some(&net)), 120);
+        }
+        assert_eq!(effective_physics_hz(&settings, None), 0);
     }
 
     #[test]
@@ -838,10 +968,14 @@ pub mod ranged_plugin;
 pub mod render_plugin;
 pub mod replay_plugin;
 pub(crate) mod room_map_preview;
+mod scene_render_optimizations;
 pub mod settings_ui;
 pub mod stage_collider;
 pub mod stage_material;
 pub mod stage_plugin;
+mod stage_presentation;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod stock_bot;
 pub(crate) mod system_notice;
 pub mod ui_components;
 pub mod ui_plugin;

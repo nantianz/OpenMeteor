@@ -2,7 +2,7 @@ use super::config::{EffectEmitter, EmitterBlend, EmitterKind};
 use crate::app_state::AppState;
 use crate::plugins::camera_plugin::GameplayCamera;
 use bevy::asset::RenderAssetUsages;
-use bevy::camera::visibility::NoFrustumCulling;
+use bevy::camera::visibility::{NoFrustumCulling, VisibilitySystems};
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::material::AlphaMode;
 use bevy::pbr::{Material, MaterialPipeline, MaterialPipelineKey, MaterialPlugin};
@@ -181,7 +181,11 @@ pub(super) fn install(app: &mut App) {
         )
         .add_systems(
             PostUpdate,
-            (tick_emitters, tick_lights, tick_anchors)
+            (
+                tick_emitters.before(VisibilitySystems::VisibilityPropagate),
+                tick_lights,
+                tick_anchors,
+            )
                 .after(bevy::transform::TransformSystems::Propagate)
                 .run_if(crate::plugins::simulation_frame)
                 .run_if(in_state(AppState::Playing).or_else(in_state(AppState::Paused))),
@@ -192,7 +196,7 @@ pub(super) fn install(app: &mut App) {
         );
 }
 
-fn placeholder_mesh() -> Mesh {
+pub(super) fn placeholder_mesh() -> Mesh {
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
@@ -300,7 +304,7 @@ pub(crate) fn spawn_emitters(
     spawned
 }
 
-fn next_unit(rng: &mut u32) -> f32 {
+pub(super) fn next_unit(rng: &mut u32) -> f32 {
     let mut x = *rng;
     x ^= x << 13;
     x ^= x >> 17;
@@ -380,7 +384,7 @@ pub(crate) struct SpriteBuffers {
 }
 
 impl SpriteBuffers {
-    fn with_capacity(quads: usize) -> Self {
+    pub(super) fn with_capacity(quads: usize) -> Self {
         Self {
             positions: Vec::with_capacity(quads * 4),
             uvs: Vec::with_capacity(quads * 4),
@@ -391,14 +395,14 @@ impl SpriteBuffers {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn push_quad(
+    pub(super) fn push_quad(
         &mut self,
         center: Vec3,
         right: Vec3,
         up: Vec3,
         uv_min: Vec2,
         uv_max: Vec2,
-        soft: f32,
+        secondary_uv: [f32; 2],
         color: [f32; 4],
     ) {
         let first = self.positions.len() as u32;
@@ -414,13 +418,13 @@ impl SpriteBuffers {
             [uv_max.x, uv_min.y],
             [uv_min.x, uv_min.y],
         ]);
-        self.uvs_b.extend([[soft, 0.0]; 4]);
+        self.uvs_b.extend([secondary_uv; 4]);
         self.colors.extend([color; 4]);
         self.indices
             .extend([first, first + 1, first + 2, first, first + 2, first + 3]);
     }
 
-    fn write(&self, mesh: &mut Mesh) {
+    pub(super) fn write(&self, mesh: &mut Mesh) {
         let normals = vec![[0.0, 1.0, 0.0]; self.positions.len()];
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, self.positions.clone());
         mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
@@ -472,7 +476,7 @@ pub(crate) fn build_burst_sprites(emitter: &FxEmitter, camera: &GlobalTransform)
             up,
             Vec2::ZERO,
             Vec2::ONE,
-            soft,
+            [soft, 0.0],
             particle_color(spec, t),
         );
     }
@@ -512,7 +516,7 @@ pub(crate) fn build_flipbook_sprite(
         camera.up().as_vec3() * half,
         uv_min,
         uv_max,
-        soft,
+        [soft, 0.0],
         particle_color(spec, emitter.age / duration),
     );
     Some(out)

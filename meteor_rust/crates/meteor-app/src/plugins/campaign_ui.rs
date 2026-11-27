@@ -146,7 +146,6 @@ pub(crate) struct Mission {
     pub minutes: u32,
     pub primary_item: i64,
     pub secondary_item: i64,
-    pub description: &'static str,
 }
 
 pub(crate) const MISSIONS: &[Mission] = &[
@@ -157,7 +156,6 @@ pub(crate) const MISSIONS: &[Mission] = &[
         minutes: 10,
         primary_item: 6,
         secondary_item: 0,
-        description: "孤岛临海，赤焰映空。\n江湖路远，从此踏上征途。",
     },
     Mission {
         id: "sn01",
@@ -166,7 +164,6 @@ pub(crate) const MISSIONS: &[Mission] = &[
         minutes: 10,
         primary_item: 5,
         secondary_item: 1,
-        description: "幽谷深处，洞壑纵横。\n循着暗处的声息，踏入江湖。",
     },
     Mission {
         id: "sn03",
@@ -175,7 +172,6 @@ pub(crate) const MISSIONS: &[Mission] = &[
         minutes: 15,
         primary_item: 15,
         secondary_item: 0,
-        description: "两崖相峙，一线通天。\n夺取镖物，返回己方安全区。",
     },
     Mission {
         id: "sn13",
@@ -184,7 +180,6 @@ pub(crate) const MISSIONS: &[Mission] = &[
         minutes: 15,
         primary_item: 24,
         secondary_item: 14,
-        description: "烟水绕城，长街入夜。\n刀光隐于街巷，步步皆需留心。",
     },
     Mission {
         id: "sn04",
@@ -193,7 +188,6 @@ pub(crate) const MISSIONS: &[Mission] = &[
         minutes: 20,
         primary_item: 16,
         secondary_item: 13,
-        description: "雪落孤城，兵戈未息。\n城墙之内，危机四伏。",
     },
     Mission {
         id: "sn15",
@@ -202,7 +196,6 @@ pub(crate) const MISSIONS: &[Mission] = &[
         minutes: 25,
         primary_item: 13,
         secondary_item: 10,
-        description: "危堡高悬，云断山门。\n越过重重险隘，踏入堡中。",
     },
     Mission {
         id: "sn05",
@@ -211,7 +204,6 @@ pub(crate) const MISSIONS: &[Mission] = &[
         minutes: 30,
         primary_item: 24,
         secondary_item: 21,
-        description: "重门深锁，楼阙森严。\n穿过繁华，直面暗藏的杀机。",
     },
     Mission {
         id: "sn09",
@@ -220,7 +212,6 @@ pub(crate) const MISSIONS: &[Mission] = &[
         minutes: 5,
         primary_item: 5,
         secondary_item: 1,
-        description: "绝壁断路，生死一线。\n方寸之间，须臾定胜负。",
     },
     Mission {
         id: "sn10",
@@ -229,7 +220,6 @@ pub(crate) const MISSIONS: &[Mission] = &[
         minutes: 30,
         primary_item: 31,
         secondary_item: 33,
-        description: "炉火不熄，铁壁如狱。\n深入险地，寻找破局之机。",
     },
 ];
 
@@ -295,7 +285,7 @@ pub(crate) fn prepare_launch(request: &mut LaunchRequest, progress: &CampaignPro
     let Some(mission) = mission(&request.stage_id) else {
         return false;
     };
-    request.stage_name = mission.name.into();
+    request.stage_name = super::stage_presentation::display_name(mission.id, mission.name);
     request.mode = "single".into();
     request.character_id = 0;
     request.spawn_room_npcs = false;
@@ -315,8 +305,6 @@ struct MapViewport;
 struct HeroShowcaseColumn;
 #[derive(Component)]
 struct MissionTitle;
-#[derive(Component)]
-struct MissionDescription;
 #[derive(Component)]
 struct MissionTime;
 #[derive(Component)]
@@ -535,7 +523,7 @@ pub(crate) fn spawn(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, acti
                                 ))
                                 .with_children(|pedestal| {
                                     pedestal.spawn(label(
-                                        "出战人物 · 孟星魂（本关配发兵器预览）",
+                                        "出战人物 · 孟星魂",
                                         12.0,
                                         theme::METAL,
                                         font,
@@ -627,7 +615,10 @@ pub(crate) fn spawn(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, acti
                                         });
                                 });
 
-                            panel.spawn((MissionDescription, label("", 14.0, theme::TEXT, font)));
+                            panel.spawn((
+                                super::stage_presentation::StageDescription::default(),
+                                label("", 14.0, theme::TEXT, font),
+                            ));
 
                             panel.spawn((
                                 Node {
@@ -681,7 +672,12 @@ pub(crate) fn spawn(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, acti
                                                 pin.spawn((
                                                     PinLabel,
                                                     label(
-                                                        format!("{numeral} · {}", m.name),
+                                                        format!(
+                                                            "{numeral} · {}",
+                                                            super::stage_presentation::display_name(
+                                                                m.id, m.name
+                                                            )
+                                                        ),
                                                         14.0,
                                                         theme::TEXT,
                                                         font,
@@ -731,12 +727,6 @@ pub(crate) fn spawn(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, acti
                         action(go, font, "出 发", StartGameButton);
                     });
                 });
-            screen.spawn(label(
-                "右下按钮或方向键切换关卡与所持兵器    ·    Enter 出发    ·    Esc 返回",
-                12.0,
-                theme::METAL,
-                font,
-            ));
         });
 }
 
@@ -854,9 +844,9 @@ fn fit_map(
 }
 
 fn select(request: &mut LaunchRequest, tab: &mut StageListTab, m: &Mission) {
-    if request.stage_id != m.id || request.stage_name != m.name || request.mode != "single" {
+    if request.stage_id != m.id || request.mode != "single" {
         request.stage_id = m.id.into();
-        request.stage_name = m.name.into();
+        request.stage_name = super::stage_presentation::display_name(m.id, m.name);
         request.mode = "single".into();
         request.character_id = 0;
         request.spawn_room_npcs = false;
@@ -938,15 +928,24 @@ fn feedback(
     mut start: Query<&mut Node, (With<StartGameButton>, Without<CampaignPin>)>,
     mut labels: Query<(&mut TextColor, &mut BackgroundColor), With<PinLabel>>,
     mut halos: Query<(&PinHalo, &mut Visibility)>,
-    mut copy: Query<(
-        &mut Text,
-        Option<&MissionTitle>,
-        Option<&MissionDescription>,
-        Option<&MissionTime>,
-        Option<&MissionBest>,
-        Option<&MissionOrdinal>,
-        Option<&MissionWeaponText>,
-    )>,
+    mut title_cache: Local<(&'static str, String)>,
+    mut copy: Query<
+        (
+            &mut Text,
+            Option<&MissionTitle>,
+            Option<&MissionTime>,
+            Option<&MissionBest>,
+            Option<&MissionOrdinal>,
+            Option<&MissionWeaponText>,
+        ),
+        Or<(
+            With<MissionTitle>,
+            With<MissionTime>,
+            With<MissionBest>,
+            With<MissionOrdinal>,
+            With<MissionWeaponText>,
+        )>,
+    >,
 ) {
     let mut installed = MISSIONS
         .iter()
@@ -963,12 +962,10 @@ fn feedback(
             Display::None
         };
     }
-    for (mut text, title, description, time, best, ordinal, weapon_text) in &mut copy {
+    for (mut text, title, time, best, ordinal, weapon_text) in &mut copy {
         let Some(m) = m else {
             text.0 = if title.is_some() {
                 "缺少战役资源".into()
-            } else if description.is_some() {
-                "请安装已解锁章节的地图和任务脚本。".into()
             } else {
                 String::new()
             };
@@ -985,10 +982,12 @@ fn feedback(
             );
         }
         if title.is_some() {
-            text.0 = m.name.into();
-        }
-        if description.is_some() {
-            text.0 = m.description.into();
+            if title_cache.0 != m.id {
+                *title_cache = (m.id, super::stage_presentation::display_name(m.id, m.name));
+            }
+            if text.0 != title_cache.1 {
+                text.0.clone_from(&title_cache.1);
+            }
         }
         if time.is_some() {
             text.0 = format!("任务时限   {} 分钟", m.minutes);

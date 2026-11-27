@@ -1,0 +1,183 @@
+[
+  {
+    "stage": "sn06",
+    "object": "Cylinder01",
+    "texture": "sn06w.jpg",
+    "kind": 1,
+    "max_depth": 12.0,
+    "vertex_alpha": 0.4980392156862745,
+    "additive": false,
+    "bounds": [
+      -180.2446142578125,
+      -182.9862890625,
+      361.3584375,
+      361.3584375
+    ],
+    "reflection_face": 64,
+    "reflection": "baked/sn06-Cylinder01-reflection.png",
+    "depth": "baked/sn06-Cylinder01-depth.png"
+  },
+  {
+    "stage": "sn09",
+    "object": "Plane37",
+    "texture": "sn914.jpg",
+    "kind": 1,
+    "max_depth": 6.0,
+    "vertex_alpha": 0.4980392156862745,
+    "additive": false,
+    "bounds": [
+      -59.55375,
+      -59.5393212890625,
+      120.0219287109375,
+      120.29975830078125
+    ],
+    "reflection_face": 64,
+    "reflection": "baked/sn09-Plane37-reflection.png",
+    "depth": "baked/sn09-Plane37-depth.png"
+  },
+  {
+    "stage": "sn13",
+    "object": "Plane02",
+    "texture": "sn13w01.jpg",
+    "kind": 1,
+    "max_depth": 12.0,
+    "vertex_alpha": 0.596078431372549,
+    "additive": false,
+    "bounds": [
+      -82.7197412109375,
+      30.695405273437498,
+      298.18374023437497,
+      298.5271142578125
+    ],
+    "reflection_face": 128,
+    "reflection": "baked/sn13-Plane02-reflection.png",
+    "depth": "baked/sn13-Plane02-depth.png",
+    "sky_visibility": {
+      "file": "baked/sn13-Plane02-sky-visibility.png",
+      "layout": [
+        48,
+        16
+      ],
+      "skybox": [
+        {
+          "object": "Sphere01",
+          "texture": "sky1.bmp"
+        },
+        {
+          "object": "Sphere01",
+          "texture": "sky2.bmp"
+        },
+        {
+          "object": "Sphere01",
+          "texture": "sky3.bmp"
+        },
+        {
+          "object": "Sphere02",
+          "texture": "am2sky1.jpg"
+        },
+        {
+          "object": "Sphere03",
+          "texture": "am2sky1.jpg"
+        }
+      ]
+    }
+  },
+  {
+    "stage": "sn08",
+    "object": "Plane03",
+    "texture": "sn08du.jpg",
+    "kind": 2,
+    "max_depth": 6.0,
+    "vertex_alpha": 0.396078431372549,
+    "additive": false,
+    "bounds": [
+      -71.8057177734375,
+      -74.76806396484375,
+      143.131552734375,
+      143.131552734375
+    ],
+    "reflection_face": 64,
+    "reflection": "baked/sn08-Plane03-reflection.png",
+    "depth": "baked/sn08-Plane03-depth.png"
+  },
+  {
+    "stage": "sn10",
+    "object": "Virus02",
+    "texture": "sn1009.JPG",
+    "kind": 2,
+    "max_depth": 4.0,
+    "vertex_alpha": 0.9882352941176471,
+    "additive": true,
+    "bounds": [
+      -63.05641845703125,
+      -63.1190185546875,
+      126.121201171875,
+      126.121201171875
+    ],
+    "reflection_face": 64
+  },
+  {
+    "stage": "sn14",
+    "object": "Plane38",
+    "texture": "asn14012.jpg",
+    "kind": 3,
+    "max_depth": 1.0,
+    "vertex_alpha": 1.0,
+    "additive": false,
+    "bounds": [
+      -355.18611328124996,
+      -219.13728515625,
+      543.83203125,
+      413.04310546874996
+    ],
+    "reflection_face": 64
+  },
+  {
+    "stage": "sn14",
+    "object": "Object02",
+    "texture": "asn14012.jpg",
+    "kind": 3,
+    "max_depth": 1.0,
+    "vertex_alpha": 1.0,
+    "additive": false,
+    "bounds": [
+      -176.5794140625,
+      -5.12660659790039,
+      45.873896484374995,
+      25.140285186767578
+    ],
+    "reflection_face": 64
+  },
+  {
+    "stage": "sn14",
+    "object": "Object03",
+    "texture": "asn14012.jpg",
+    "kind": 3,
+    "max_depth": 1.0,
+    "vertex_alpha": 1.0,
+    "additive": false,
+    "bounds": [
+      -324.372041015625,
+      -220.7130615234375,
+      28.338251953125,
+      44.8651904296875
+    ],
+    "reflection_face": 64
+  },
+  {
+    "stage": "sn14",
+    "object": "Object06",
+    "texture": "asn14012.jpg",
+    "kind": 3,
+    "max_depth": 1.0,
+    "vertex_alpha": 1.0,
+    "additive": false,
+    "bounds": [
+      -191.90748046874998,
+      43.51810913085937,
+      42.2691650390625,
+      32.088197021484376
+    ],
+    "reflection_face": 64
+  }
+]

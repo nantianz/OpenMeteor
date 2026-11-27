@@ -124,7 +124,6 @@ fn shader_ref(path: PathBuf) -> ShaderRef {
 }
 
 pub struct PbrPlugin {
-
     pub prepass_enabled: bool,
 
     pub add_default_deferred_lighting_plugin: bool,
@@ -150,7 +149,6 @@ impl Default for PbrPlugin {
 
 #[derive(Resource)]
 pub struct Bluenoise {
-
     pub texture: Handle<Image>,
 }
 
@@ -166,6 +164,7 @@ pub struct DfgLut {
 
 impl Plugin for PbrPlugin {
     fn build(&self, app: &mut App) {
+        register_static_depth_copy_shader(app);
         load_shader_library!(app, "render/pbr_types.wgsl");
         load_shader_library!(app, "render/pbr_bindings.wgsl");
         load_shader_library!(app, "render/utils.wgsl");
@@ -344,6 +343,7 @@ impl Plugin for PbrPlugin {
                 RenderStartup,
                 (
                     init_shadow_samplers,
+                    init_static_depth_copy,
                     init_global_clusterable_object_meta,
                     init_fallback_bindless_resources,
                 ),
@@ -361,6 +361,7 @@ impl Plugin for PbrPlugin {
                 ExtractSchedule,
                 (
                     extract_lights,
+                    extract_static_shadow_casters,
                     extract_ambient_light_resource,
                     extract_ambient_light,
                     extract_shadow_filtering_method,
@@ -386,6 +387,7 @@ impl Plugin for PbrPlugin {
             .init_gpu_resource::<LightMeta>()
             .init_gpu_resource::<RenderMaterialBindings>()
             .init_resource::<RenderShadowLodOrigin>()
+            .init_resource::<ExtractedStaticCasters>()
             .allow_ambiguous_resource::<RenderMaterialBindings>();
 
         render_app.world_mut().add_observer(add_light_view_entities);

@@ -32,23 +32,25 @@ fn fragment(in: VertexOutput)
 {
     let params = material.base;
     if (params.mode == 3u && lighting.w > 0.0) { discard; }
+    if (params.alpha_cutoff > 0.0) {
     var alpha = params.opacity;
 #ifdef VERTEX_COLORS
     alpha *= in.color.a;
 #endif
 #ifdef VERTEX_UVS_A
+        if (params.has_texture != 0u) {
     let elapsed = simulation_time.xy - material.scroll.zw;
     let offset = fract(params.uv_offset + fract(material.scroll.xy * elapsed.x) + fract(material.scroll.xy * elapsed.y));
-    if (params.has_texture != 0u) {
         alpha *= textureSample(base_color_texture, base_color_sampler, in.uv + offset).a;
     }
 #endif
+        if (alpha < params.alpha_cutoff) { discard; }
+    }
     if (material.first_person_clip.w > 0.0 && occlusion.self_eye.w > 0.0
         && distance(view.world_position, occlusion.self_eye.xyz) < 0.01
         && distance(in.world_position.xyz, occlusion.self_eye.xyz) < material.first_person_clip.w) {
         discard;
     }
-    if (params.alpha_cutoff > 0.0 && alpha < params.alpha_cutoff) { discard; }
     #ifdef PREPASS_FRAGMENT
     var out: FragmentOutput;
 #ifdef NORMAL_PREPASS

@@ -38,7 +38,18 @@ fn native_bake_real_water_cache_and_invalidation() {
         .iter()
         .find(|scene| scene.stage == s.stage)
         .unwrap();
-    let profile = &scene.water_sky_reflections[0];
+    let water: crate::plugins::graphics_pack::config::Pack =
+        serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/graphics-packs/water/pack.json"
+        )))
+        .unwrap();
+    let profile = &water
+        .scenes
+        .iter()
+        .find(|scene| scene.stage == s.stage)
+        .unwrap()
+        .water_sky_reflections[0];
     let skybox = &scene.sky.as_ref().unwrap().skybox;
     let sky = Some(WaterSkySelection { profile, skybox });
     let root = std::env::temp_dir().join(format!("water-real-bake-{}", std::process::id()));
@@ -49,7 +60,9 @@ fn native_bake_real_water_cache_and_invalidation() {
     assert!(!hit);
     assert_eq!(progress.last(), Some(&1.0));
     assert!(progress.windows(2).all(|p| p[0] <= p[1]));
-    let original = super::super::source("sn13", "Plane02", "sn13w01.jpg").unwrap();
+    let original = &super::super::source("sn13", "Plane02", "sn13w01.jpg")
+        .unwrap()
+        .entry;
     for (a, b) in maps.bounds.iter().zip(original.bounds) {
         assert!((a - b).abs() < 0.001);
     }

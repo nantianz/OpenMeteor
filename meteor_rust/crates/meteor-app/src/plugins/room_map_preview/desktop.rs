@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Seek, SeekFrom},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
 };
 
@@ -22,6 +22,9 @@ pub(super) fn library() -> PreviewLibrary {
     let paths = super::super::launcher_ui::available_room_stages(&custom)
         .into_iter()
         .filter_map(|stage| {
+            if super::load_provided_preview(&stage.id).is_some() {
+                return None;
+            }
             let mut hash = Sha256::new();
             hash.update(CACHE_VERSION);
             if let Some(revision) =
@@ -40,10 +43,44 @@ pub(super) fn library() -> PreviewLibrary {
             }
             let revision = format!("{:x}", hash.finalize());
             let path = root.join(format!("{}-{}.jpg", stage.id, &revision[..24]));
+            if path.is_file() {
+                publish_source_preview(&stage.id, &path);
+            }
             Some((stage.id, path))
         })
         .collect();
     PreviewLibrary(paths)
+}
+pub(super) fn publish_source_preview(stage: &str, cached: &Path) {
+    let Some(directory) = meteor_asset::runtime_assets::original_stage_directory(stage) else {
+        return;
+    };
+    let output = directory.join(super::GENERATED_PREVIEW);
+    if let Err(error) = publish_cached_preview(cached, &output) {
+        warn!(
+            "map preview {} uses the local cache: {error}",
+            output.display()
+        );
+    }
+}
+fn publish_cached_preview(cached: &Path, output: &Path) -> std::io::Result<()> {
+    if output.exists() {
+        return Ok(());
+    }
+    let temporary = output.with_extension(format!("{}.tmp", std::process::id()));
+    let mut image = File::open(cached)?;
+    let mut temp = File::options()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    let copied = std::io::copy(&mut image, &mut temp);
+    drop(temp);
+    let published = copied.and_then(|_| std::fs::hard_link(&temporary, output));
+    let _ = std::fs::remove_file(&temporary);
+    match published {
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        result => result,
+    }
 }
 
 fn cache_root() -> PathBuf {
@@ -419,6 +456,30 @@ fn cleanup_loading(mut commands: Commands, root: Query<Entity, With<LoadingRoot>
 mod tests {
     use super::*;
 
+    #[test]
+    fn generated_preview_is_published_in_the_stage_directory_once() {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "meteor-map-preview-{}-{timestamp}",
+            std::process::id()
+        ));
+        let stage = root.join("sn23");
+        std::fs::create_dir_all(&stage).unwrap();
+        let cached = root.join("cached.jpg");
+        let output = stage.join(super::super::GENERATED_PREVIEW);
+        std::fs::write(&cached, b"first preview").unwrap();
+        publish_cached_preview(&cached, &output).unwrap();
+        std::fs::write(&cached, b"other preview").unwrap();
+        publish_cached_preview(&cached, &output).unwrap();
+        assert_eq!(std::fs::read(&output).unwrap(), b"first preview");
+        std::fs::remove_file(cached).unwrap();
+        std::fs::remove_file(output).unwrap();
+        std::fs::remove_dir(stage).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
     #[test]
     fn startup_stays_on_progress_until_worker_has_finished_all_previews() {
         let mut app = App::new();

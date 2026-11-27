@@ -96,6 +96,7 @@ fn spawn_stock_preview(app: &mut App, stage: &'static str) -> Option<[Transform;
                     &cob.face_ids,
                     Some(&support),
                     center,
+                    &[],
                 )
                 .expect("stock grass profile");
                 let mut cache = pak_textures::PakCache::default();
@@ -168,6 +169,24 @@ fn spawn_stock_preview(app: &mut App, stage: &'static str) -> Option<[Transform;
         )
         .unwrap();
     Some(cameras)
+}
+#[test]
+fn grass_distance_lod_holds_through_boundary_jitter() {
+    let boundaries = [9.0, 18.0, 53.0];
+    for (tier, boundary) in boundaries.into_iter().enumerate() {
+        let mut level = tier;
+        for offset in [0.2_f32, -0.2, 0.4, -0.4] {
+            level = distance_lod((boundary + offset).powi(2), boundaries, level, false);
+            assert_eq!(level, tier);
+        }
+        level = distance_lod((boundary + 1.6).powi(2), boundaries, level, false);
+        assert_eq!(level, tier + 1);
+        assert_eq!(
+            distance_lod((boundary - 0.1).powi(2), boundaries, level, false),
+            tier
+        );
+    }
+    assert_eq!(distance_lod(0.0, boundaries, DISTANT, true), 1);
 }
 
 #[test]
@@ -323,7 +342,7 @@ fn si_fang_zhen_courtyard_reaches_all_edges_with_a_bounded_distant_lod() {
     assert!(tiles.len() >= 125, "only {} tiles", tiles.len());
     assert!(tiles.len() <= profile.max_visible_tiles);
     assert!(LODS[DISTANT].triangles(ROOTS_PER_TILE) * tiles.len() <= 49_152);
-    assert!(profile.max_triangles <= 168_000);
+    assert_eq!(profile.max_triangles, 300_000);
     eprintln!("sn06 courtyard: {} occupied grass tiles", tiles.len());
 }
 
@@ -463,6 +482,7 @@ fn grass_gpu_draws_tracks_recovers_and_honors_visible_tile_limit() {
         .unwrap();
     profile.tile_size = 6.0;
     profile.max_visible_tiles = 12;
+    profile.max_triangles = 104_000;
     profile.patch_variation = 0.0;
     let ground = GroundMaterial::new_scene(
         GmdlMaterialParams {
@@ -512,6 +532,7 @@ fn grass_gpu_draws_tracks_recovers_and_honors_visible_tile_limit() {
                     &BTreeSet::new(),
                     None,
                     [0.; 3],
+                    &[],
                 )
                 .unwrap();
                 coverage.configure(
@@ -767,6 +788,97 @@ fn grass_gpu_draws_tracks_recovers_and_honors_visible_tile_limit() {
     app.world_mut().despawn(fighter);
     let recovered = capture(&mut app, 85);
     assert_eq!(recovered, baseline);
+    let edge_energy = |a: &[u8], b: &[u8]| {
+        a.chunks_exact(4)
+            .zip(b.chunks_exact(4))
+            .map(|(p, q)| u64::from(p[1].abs_diff(q[1])).pow(2))
+            .sum::<u64>()
+    };
+    let original_camera = *app.world().get::<Transform>(camera).unwrap();
+    app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+        Duration::ZERO,
+    ));
+    let shifted_camera = Transform {
+        translation: original_camera.translation + Vec3::X * 0.009,
+        ..original_camera
+    };
+    *app.world_mut().get_mut::<Transform>(camera).unwrap() = shifted_camera;
+    let shifted = capture(&mut app, 12);
+    let hard_edges = edge_energy(&baseline, &shifted);
+    app.world_mut().entity_mut(camera).insert(Msaa::Sample4);
+    let shifted_aa = capture(&mut app, 16);
+    *app.world_mut().get_mut::<Transform>(camera).unwrap() = original_camera;
+    let aa = capture(&mut app, 16);
+    let filtered_edges = edge_energy(&aa, &shifted_aa);
+    assert!(
+        filtered_edges < hard_edges && green_pixels(&aa) > (WIDTH * HEIGHT / 3) as usize,
+        "subpixel motion energy: {filtered_edges} filtered vs {hard_edges} single-sample"
+    );
+    eprintln!(
+        "grass subpixel motion energy: {filtered_edges} filtered vs {hard_edges} single-sample"
+    );
+    assert!(
+        capture(&mut app, 8) == aa,
+        "a calm multisampled field must stay still"
+    );
+    app.world_mut().entity_mut(camera).insert(Msaa::Off);
+    app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+        Duration::from_millis(34),
+    ));
+    let sample_lods = |world: &mut World| {
+        let mut samples: Vec<_> = world
+            .query::<(&GrassTile, &MeshTag)>()
+            .iter(world)
+            .map(|(tile, tag)| (tile.row, tile.lod, tile.target_lod, tile.bucket, tag.0))
+            .collect();
+        samples.sort_unstable_by_key(|sample| sample.0);
+        samples
+    };
+    let original_lods = sample_lods(app.world_mut());
+    let mut previous = original_lods.clone();
+    let mut transitioning = false;
+    for frame in 0..64 {
+        let offset = (frame as f32).min(64.0 - frame as f32) * 0.62;
+        app.world_mut()
+            .get_mut::<Transform>(camera)
+            .unwrap()
+            .translation = original_camera.translation + Vec3::X * offset;
+        app.update();
+        let current = sample_lods(app.world_mut());
+        for (&(_, before, _, _, _), &(_, after, target, _, tag)) in previous.iter().zip(&current) {
+            assert!((before - after).abs() <= 0.05 / LOD_TRANSITION_SECONDS + 0.001);
+            if after.fract() > 0.0 {
+                transitioning |= after != target as f32 && tag >> 16 > 0;
+            }
+        }
+        let costs = current
+            .iter()
+            .map(|&(_, lod, _, bucket, _)| lod_cost(lod, bucket));
+        assert!(costs.clone().sum::<usize>() <= 104_000);
+        assert!(costs.filter(|&cost| cost > 0).count() <= 12);
+        previous = current;
+    }
+    assert!(
+        transitioning,
+        "the moving camera must use intermediate LOD weights"
+    );
+    *app.world_mut().get_mut::<Transform>(camera).unwrap() = original_camera;
+    for _ in 0..48 {
+        app.update();
+    }
+    let settled = sample_lods(app.world_mut());
+    assert!(
+        settled
+            .iter()
+            .zip(&original_lods)
+            .all(|(actual, original)| { actual.2 == original.2 && actual.1 == actual.2 as f32 }),
+        "LOD allocation must settle after returning"
+    );
+    let returned = capture(&mut app, 12);
+    assert!(
+        returned == baseline,
+        "settled grass must match at the same camera pose"
+    );
     app.world_mut().resource_mut::<Settings>().grass_enhance = false;
     let off = capture(&mut app, 16);
     assert_eq!(count(app.world_mut()), 0);
@@ -889,6 +1001,10 @@ fn grass_gpu_draws_tracks_recovers_and_honors_visible_tile_limit() {
                 );
             }
             if stage == "sn06" {
+                let world = app.world_mut();
+                let mut fields = world.query::<&GrassField>();
+                let profile = &fields.single(world).unwrap().profile;
+                let (max_triangles, max_tiles) = (profile.max_triangles, profile.max_visible_tiles);
                 let combat_lanes = std::env::var("METEOR_GRASS_COMBAT_BENCH")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
@@ -963,7 +1079,9 @@ fn grass_gpu_draws_tracks_recovers_and_honors_visible_tile_limit() {
                         if enabled {
                             let triangles = submitted(app.world_mut());
                             let tiles = count(app.world_mut());
-                            assert!(triangles > 0 && triangles <= 168_000 && tiles <= 512);
+                            assert!(
+                                triangles > 0 && triangles <= max_triangles && tiles <= max_tiles
+                            );
                             eprintln!(
                                 "sn06 view {}: {triangles} triangles, {tiles} grass tiles",
                                 i + 1

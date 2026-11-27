@@ -23,6 +23,7 @@ use meteor_asset::bnc::parse_bones;
 use meteor_asset::pak::PakArchive;
 use meteor_asset::pos::parse_poses;
 use meteor_asset::skc::parse_skin;
+pub(super) use remake::{SceneCloth, SceneClothCapsule};
 use std::path::PathBuf;
 
 pub fn apply_color_variant(name: &str, color_index: u8) -> String {
@@ -1845,7 +1846,7 @@ fn load_weapon_texture(
     quality_handles: &mut crate::plugins::pak_textures::QualityTextureHandles,
 ) -> Option<Handle<bevy::image::Image>> {
     let bytes = resolve_weapon_texture(assets, name)?;
-    let mut decoded = meteor_asset::texture::decode_image(&bytes).ok()?;
+    let mut decoded = crate::plugins::pak_textures::decode_quality_image(&bytes)?;
     match alpha {
         WeaponTextureAlpha::None => {}
         WeaponTextureAlpha::ColorKey => {
@@ -1873,9 +1874,9 @@ fn load_weapon_texture(
     }
     let handle = crate::plugins::pak_textures::image_from_decoded_with_quality(
         images,
-        &decoded,
+        decoded,
         texture_quality,
-    );
+    )?;
     crate::plugins::pak_textures::register_quality_texture(quality_handles, handle.clone());
     Some(handle)
 }
@@ -2199,7 +2200,7 @@ fn spawn_gmc_weapon(
                     let (mode, opacity, alpha_cutoff) = shader
                         .map(classify_gmc_shader)
                         .unwrap_or((GmdlMode::Opaque, 1.0, 0.0));
-                    materials.add(GmdlMaterial::new(
+                    materials.add(GmdlMaterial::new_character(
                         GmdlMaterialParams {
                             opacity,
                             alpha_cutoff,
@@ -2333,7 +2334,7 @@ fn spawn_gmdl_weapon(
                     quality_handles,
                 )
             });
-            let material = materials.add(GmdlMaterial::new(
+            let material = materials.add(GmdlMaterial::new_character(
                 GmdlMaterialParams {
                     opacity,
                     alpha_cutoff,
@@ -2443,7 +2444,7 @@ fn build_skin_material(
     quality_handles: &mut crate::plugins::pak_textures::QualityTextureHandles,
 ) -> Handle<GmdlMaterial> {
     let Some(def) = def else {
-        return materials.add(GmdlMaterial::new(
+        return materials.add(GmdlMaterial::new_character(
             GmdlMaterialParams {
                 opacity: 1.0,
                 alpha_cutoff: 0.0,
@@ -2482,7 +2483,7 @@ fn build_skin_material(
                 None
             })
     });
-    materials.add(GmdlMaterial::new(
+    materials.add(GmdlMaterial::new_character(
         GmdlMaterialParams {
             opacity: 1.0,
 

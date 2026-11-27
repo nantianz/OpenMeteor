@@ -1,5 +1,7 @@
 {
   "schema_version": 1,
+  "live_reflections": false,
+  "depth_hierarchy": false,
   "geometry": {
     "subdivisions": 24,
     "max_vertices": 24000,

@@ -72,6 +72,9 @@ pub trait FighterView {
 
     fn is_airborne(&self) -> bool;
 
+    fn in_ground_movement_mode(&self) -> bool {
+        !self.is_airborne()
+    }
     fn ground_contact(&self) -> Option<bool>;
 
     fn play_pose(&mut self, pose_id: u16, hard: bool);
@@ -446,7 +449,7 @@ impl<F: FighterView> StateMachine<F> {
                 true
             }
             Action::Cure => {
-                if self.current != FighterState::Name {
+                if self.current != FighterState::Name || !self.fighter.in_ground_movement_mode() {
                     return false;
                 }
 
@@ -697,6 +700,7 @@ mod tests {
         pose: u16,
         finished: bool,
         airborne: bool,
+        ground_movement_mode: Option<bool>,
         ground_contact: Option<bool>,
         poses: Vec<u16>,
         links: Vec<(u16, u16)>,
@@ -724,6 +728,7 @@ mod tests {
                 pose: 0,
                 finished: false,
                 airborne: false,
+                ground_movement_mode: None,
                 ground_contact: Some(true),
                 poses: vec![0, 22, 35, 93, 112, 113, 117, 119, 120],
                 links: Vec::new(),
@@ -754,6 +759,9 @@ mod tests {
     impl FighterView for StubFighter {
         fn can_guard(&self) -> bool {
             self.can_guard
+        }
+        fn in_ground_movement_mode(&self) -> bool {
+            self.ground_movement_mode.unwrap_or(!self.airborne)
         }
         fn guard_held(&self) -> bool {
             self.guard_held
@@ -1066,12 +1074,15 @@ mod tests {
     }
 
     #[test]
-    fn cure_uses_controller_mode_without_extra_weapon_or_ground_contact_gates() {
+    fn cure_requires_ground_movement_mode_without_a_weapon_or_contact_gate() {
         let mut fighter = StubFighter::new();
         fighter.airborne = true;
         fighter.ground_contact = Some(false);
         fighter.veto = true;
         let mut sm = StateMachine::new(fighter);
+        assert!(!sm.handle_input(Action::Cure));
+        assert_eq!(sm.current, FighterState::Name);
+        sm.fighter.ground_movement_mode = Some(true);
         assert!(sm.handle_input(Action::Cure));
         assert_eq!(sm.current, FighterState::Cure);
 

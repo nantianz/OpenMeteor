@@ -1,8 +1,5 @@
 use crate::plugins::ifl_plugin::{load_scene_ifl_frames, IflAnim};
-use crate::plugins::pak_textures::{
-    image_handle_with_legacy_style_quality, image_handle_with_quality, legacy_alpha_companion_name,
-    pak_files_root, PakCache,
-};
+use crate::plugins::pak_textures::{legacy_alpha_companion_name, pak_files_root, PakCache};
 use crate::plugins::stage_collider::{StageCollider, StageMeshCollider};
 use crate::plugins::stage_material::scene_textures::SceneTexturePack;
 use crate::plugins::stage_material::{GmdlMaterial, GmdlMaterialParams, GmdlMode};
@@ -20,12 +17,16 @@ use meteor_physics::collision::{CollisionSystem, Point3};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 mod gem_visual;
+pub(crate) mod legacy_stage_render;
 #[cfg(all(
     test,
     feature = "original-assets",
     not(any(target_arch = "wasm32", target_os = "android"))
 ))]
 mod meshlet_tests;
+mod static_batches;
+#[cfg(all(target_pointer_width = "64", not(target_os = "android")))]
+mod texture_streaming;
 #[cfg(test)]
 mod tree_opacity_tests;
 #[cfg(test)]
@@ -57,6 +58,15 @@ fn clear_stage_texture_handles(mut handles: ResMut<StageTextureHandles>) {
     handles.0.clear();
 }
 
+fn clear_stage_render_profile(
+    mut commands: Commands,
+    frame: Option<ResMut<super::stage_material::FrameUniforms>>,
+) {
+    commands.remove_resource::<legacy_stage_render::SceneRenderProfile>();
+    if let Some(mut frame) = frame {
+        frame.graphics.stage_render = default();
+    }
+}
 fn sync_stage_texture_quality(
     settings: Res<crate::app_state::Settings>,
     handles: Res<StageTextureHandles>,
@@ -65,14 +75,7 @@ fn sync_stage_texture_quality(
     if !settings.is_changed() {
         return;
     }
-    for handle in &handles.0 {
-        if let Some(mut image) = images.get_mut(handle) {
-            crate::plugins::pak_textures::apply_texture_quality(
-                &mut image,
-                settings.texture_quality,
-            );
-        }
-    }
+    super::pak_textures::sync_texture_samplers(&mut images, &handles.0, settings.texture_quality);
 }
 
 fn load_stage_collision(
@@ -347,6 +350,7 @@ fn spawn_stage_props(
         des_override,
         texture_quality,
         None,
+        None,
         texture_handles,
         collider,
         script,
@@ -368,6 +372,7 @@ fn spawn_stage_props_with_hd(
     des_override: Option<&str>,
     texture_quality: u8,
     hd_pack: Option<&SceneTexturePack>,
+    render_config: Option<&legacy_stage_render::StageRenderConfig>,
     texture_handles: &mut Vec<Handle<bevy::image::Image>>,
     collider: &mut StageMeshCollider,
     script: Option<&meteor_scene::scene_script_runtime::SceneScriptRuntime>,
@@ -392,7 +397,7 @@ fn spawn_stage_props_with_hd(
     );
     let asset_reader = super::escort_assets::StageAssetReader::new(&loaded.stage_id);
     let mut model_cache: HashMap<String, Option<GmdlMesh>> = HashMap::new();
-    let mut material_cache: HashMap<(String, i32, Option<usize>), Handle<GmdlMaterial>> =
+    let mut material_cache: HashMap<(String, i32, Option<usize>, u32), Handle<GmdlMaterial>> =
         HashMap::new();
     let mut image_cache: HashMap<String, LoadedStageTexture> = HashMap::new();
     let mut ifl_cache: HashMap<(String, i32), Vec<Handle<Image>>> = HashMap::new();
@@ -424,6 +429,10 @@ fn spawn_stage_props_with_hd(
                 .name_attr
                 .as_deref()
                 .is_none_or(|name| name.eq_ignore_ascii_case("treasure"));
+        let rule = render_config.and_then(|config| config.object_rule(&dummy.name));
+        let stage_render_flags = render_config.map_or(0, |_| {
+            legacy_stage_render::StageRenderConfig::material_flags(rule)
+        });
         let model_desc = gem
             .then(|| {
                 stems.iter().find_map(|stem| {
@@ -506,6 +515,14 @@ fn spawn_stage_props_with_hd(
             broken: false,
         };
 
+        let static_prop = runtime_instance.is_none()
+            && active
+            && visible
+            && !objective_model
+            && !treasure
+            && !prop_marker.breakable
+            && dummy.billboard != 1
+            && fmc.is_none();
         let mut prop_collider_owner = None;
         let mut collider_parts: Vec<Option<(usize, Vec<[f32; 3]>)>> =
             vec![None; model_mesh.objects.len()];
@@ -555,6 +572,17 @@ fn spawn_stage_props_with_hd(
                 if mat_idx >= 0 {
                     let mat = &model_mesh.materials[mat_idx as usize];
                     let (mode, opacity, alpha_cutoff) = classify_gmdl_material(mat);
+                    if static_prop
+                        && mode == GmdlMode::Opaque
+                        && rule.is_none_or(|rule| {
+                            !rule.is_sky_box && rule.shadows.cast_shadows != Some(false)
+                        })
+                        && model_mesh
+                            .resolve_texture_name(mat)
+                            .is_none_or(|name| !name.to_ascii_lowercase().ends_with(".ifl"))
+                    {
+                        bundle.insert(bevy::pbr::StaticShadowCaster);
+                    }
                     let animation_key = (key.clone(), mat_idx);
                     if let Some(name) = model_mesh
                         .resolve_texture_name(mat)
@@ -605,9 +633,14 @@ fn spawn_stage_props_with_hd(
                         textured += 1;
                     }
                     let handle = material_cache
-                        .entry((key.clone(), mat_idx, gem.then_some(obj_idx)))
+                        .entry((
+                            key.clone(),
+                            mat_idx,
+                            gem.then_some(obj_idx),
+                            stage_render_flags,
+                        ))
                         .or_insert_with(|| {
-                            materials.add(GmdlMaterial::new_scene(
+                            let mut material = GmdlMaterial::new_scene(
                                 GmdlMaterialParams {
                                     opacity,
                                     alpha_cutoff,
@@ -617,23 +650,36 @@ fn spawn_stage_props_with_hd(
                                     uv_offset: Vec2::ZERO,
                                 },
                                 texture,
-                                mat.two_side,
+                                render_config
+                                    .map_or(mat.two_side, |config| config.two_side(mat.two_side)),
                                 mode,
-                            ))
+                            );
+                            material.stage_render_flags = stage_render_flags;
+                            materials.add(material)
                         })
                         .clone();
                     let mesh = build_prop_mesh(object, &indices);
                     let mesh = meshes.add(mesh);
                     if treasure {
                         bundle.with_children(|children| {
-                            children.spawn((
+                            let mut visual = children.spawn((
                                 gem_visual::GemVisual,
                                 Mesh3d(mesh),
                                 MeshMaterial3d(handle.clone()),
                                 Transform::default(),
                             ));
+                            if let Some(rule) = rule {
+                                visual.insert(rule.shadows);
+                            }
                         });
-                        if gem && gem_scroll_tracks.insert((key.clone(), obj_idx, mat_idx)) {
+                        if gem
+                            && gem_scroll_tracks.insert((
+                                key.clone(),
+                                obj_idx,
+                                mat_idx,
+                                stage_render_flags,
+                            ))
+                        {
                             if let Some(anim) = model_desc
                                 .as_ref()
                                 .and_then(|desc| {
@@ -653,12 +699,15 @@ fn spawn_stage_props_with_hd(
                         }
                     } else {
                         bundle.insert((Mesh3d(mesh), MeshMaterial3d(handle.clone())));
+                        if let Some(rule) = rule {
+                            bundle.insert(rule.shadows);
+                        }
                     }
                     if let Some(frames) = ifl_cache
                         .get(&animation_key)
                         .filter(|frames| !frames.is_empty())
                     {
-                        if ifl_tracks.insert(animation_key) {
+                        if ifl_tracks.insert((animation_key, stage_render_flags)) {
                             bundle.insert(IflAnim {
                                 frames: frames.clone(),
                                 material: handle,
@@ -1037,6 +1086,11 @@ fn install_stage_lifecycle(app: &mut App) {
 }
 
 fn install_stage_cleanup(app: &mut App) {
+    #[cfg(all(target_pointer_width = "64", not(target_os = "android")))]
+    app.add_systems(
+        OnExit(crate::app_state::AppState::Playing),
+        texture_streaming::clear.run_if(crate::plugins::ends_playing_session),
+    );
     app.add_systems(
         OnExit(crate::app_state::AppState::Playing),
         (
@@ -1044,6 +1098,7 @@ fn install_stage_cleanup(app: &mut App) {
             clear_stage_collision,
             clear_stage_mesh,
             clear_stage_texture_handles,
+            clear_stage_render_profile,
         )
             .run_if(crate::plugins::ends_playing_session),
     );
@@ -1054,6 +1109,13 @@ pub struct RenderPlugin;
 impl Plugin for RenderPlugin {
     fn build(&self, app: &mut App) {
         install_stage_lifecycle(app);
+        #[cfg(all(target_pointer_width = "64", not(target_os = "android")))]
+        app.add_systems(
+            PostUpdate,
+            texture_streaming::update
+                .after(bevy::camera::visibility::VisibilitySystems::CheckVisibility)
+                .run_if(in_state(crate::app_state::AppState::Playing)),
+        );
         app.init_resource::<super::stage_material::FrameUniforms>();
         app.insert_resource(ClearColor(Color::BLACK))
             .insert_resource(StageCollision::default())
@@ -2697,6 +2759,263 @@ fn is_preview_sky_object(
 #[derive(Resource)]
 pub(super) struct MapPreviewScene;
 
+#[derive(Resource)]
+pub(crate) struct PrebuiltStageGeometry {
+    stage_id: String,
+    gmdl: Option<GmdlMesh>,
+    collision: Option<StageCollision>,
+    des_text: Option<String>,
+    stage_desc: Option<meteor_asset::des::StageDescription>,
+    collider: Option<StageMeshCollider>,
+}
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn prebuild_stage_geometry(
+    loaded: &crate::app_state::LoadedStageInfo,
+    loaded_assets: &crate::app_state::LoadedStageAssets,
+) -> Option<PrebuiltStageGeometry> {
+    let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let roots = stage_asset_roots(&root);
+    let relative = format!("{}/{}.gmb", loaded.stage_id, loaded.stage_id);
+    let disk_gmb = if loaded_assets.gmb.is_none() {
+        roots
+            .iter()
+            .find_map(|base| crate::resource_io::read(base.join(&relative)).ok())
+    } else {
+        None
+    };
+    let bytes = loaded_assets.gmb.as_deref().or(disk_gmb.as_deref())?;
+    let gmdl = decode_gmdl(bytes).ok()?;
+    let mut stage_collision = StageCollision::default();
+    load_stage_collision(
+        &roots,
+        loaded,
+        loaded_assets.cob.as_deref(),
+        &mut stage_collision,
+    );
+    let has_collision = !stage_collision.stage_id.is_empty();
+    let des_path = format!("{}/{}.des", loaded.stage_id, loaded.stage_id);
+    let des_text = loaded_assets
+        .des
+        .as_deref()
+        .map(crate::text_codec::decode_text)
+        .or_else(|| {
+            roots
+                .iter()
+                .find_map(|base| crate::resource_io::read_to_string(base.join(&des_path)).ok())
+        });
+    let mut stage_desc = None;
+    let mut collider = None;
+    if let Some(text) = &des_text {
+        let mut desc = meteor_asset::des::parse_stage_description(text);
+        if let Some(mask) = loaded_assets.ticket_mask {
+            desc.apply_ticket_mask(mask);
+        }
+        let mesh = StageMeshCollider::from_gmdl(
+            &gmdl,
+            &desc,
+            (!stage_collision.face_ids.is_empty()).then_some(&stage_collision.face_ids),
+            loaded.center,
+        );
+        collider = Some(mesh);
+        stage_desc = Some(desc);
+    }
+    Some(PrebuiltStageGeometry {
+        stage_id: loaded.stage_id.clone(),
+        gmdl: Some(gmdl),
+        collision: has_collision.then_some(stage_collision),
+        des_text,
+        stage_desc,
+        collider,
+    })
+}
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
+fn predecode_stage_textures(
+    gmdl: &GmdlMesh,
+    images: &mut Assets<Image>,
+    cache: &mut HashMap<String, LoadedStageTexture>,
+    pak_cache: &mut PakCache,
+    pak_root: &std::path::Path,
+    stage_id: &str,
+    texture_quality: u8,
+    hd_pack: &SceneTexturePack,
+    #[cfg(all(target_pointer_width = "64", not(target_os = "android")))] texture_stream: Option<
+        &mut texture_streaming::StageTextureStream,
+    >,
+) {
+    struct DecodeJob {
+        key: String,
+        name: String,
+        bytes: Vec<u8>,
+        companion: Option<Vec<u8>>,
+        luminance_fallback: bool,
+        color_key: bool,
+        alpha_channel: bool,
+        allow_stream: bool,
+    }
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut jobs: Vec<DecodeJob> = Vec::new();
+    for mat in &gmdl.materials {
+        let Some(name) = gmdl.resolve_texture_name(mat) else {
+            continue;
+        };
+        if name.to_ascii_lowercase().ends_with(".ifl") {
+            continue;
+        }
+        if hd_pack.diffuse(stage_id, name).is_some() {
+            continue;
+        }
+        let color_key = mat.blend == "COLORKEY";
+        let alpha_channel = mat.blend.eq_ignore_ascii_case("ALPHACHANNEL");
+        let key = format!(
+            "{}|ck={}|alpha={}|quality={}",
+            name.to_ascii_lowercase(),
+            u8::from(color_key),
+            u8::from(alpha_channel),
+            texture_quality
+        );
+        if cache.contains_key(&key) || !seen.insert(key.clone()) {
+            continue;
+        }
+        let Some(bytes) = pak_cache.resolve(pak_root, stage_id, name) else {
+            cache.insert(
+                key,
+                LoadedStageTexture {
+                    handle: None,
+                    hd_texture: false,
+                },
+            );
+            continue;
+        };
+        let companion = legacy_alpha_companion_name(name)
+            .map(|companion| sibling_texture_name(name, &companion))
+            .and_then(|companion| pak_cache.resolve_exact(pak_root, stage_id, &companion));
+        let luminance_fallback =
+            alpha_channel && companion.is_none() && !name.to_ascii_lowercase().ends_with(".tga");
+        #[cfg(all(target_pointer_width = "64", not(target_os = "android")))]
+        let allow_stream = texture_stream.is_some();
+        #[cfg(not(all(target_pointer_width = "64", not(target_os = "android"))))]
+        let allow_stream = false;
+        jobs.push(DecodeJob {
+            key,
+            name: name.to_string(),
+            bytes,
+            companion,
+            luminance_fallback,
+            color_key,
+            alpha_channel,
+            allow_stream,
+        });
+    }
+    if jobs.len() <= 1 {
+        return;
+    }
+    let device_side = super::pak_textures::texture_device_side();
+    let run_job = |job: &DecodeJob| -> Option<(Image, Option<(u32, u32)>)> {
+        let decoded = super::pak_textures::decode_legacy_style(
+            &job.bytes,
+            job.companion.as_deref(),
+            job.luminance_fallback,
+            job.color_key,
+        )?;
+        #[cfg(all(target_pointer_width = "64", not(target_os = "android")))]
+        let (target_side, full_size) = if job.allow_stream {
+            texture_streaming::stream_target_side(decoded.width, decoded.height, device_side)
+        } else {
+            (device_side, None)
+        };
+        #[cfg(not(all(target_pointer_width = "64", not(target_os = "android"))))]
+        let (target_side, full_size) = {
+            let _ = job.allow_stream;
+            (device_side, None)
+        };
+        let image =
+            super::pak_textures::prepare_quality_image(decoded, texture_quality, target_side)?;
+        Some((image, full_size))
+    };
+    let results: Vec<Option<(Image, Option<(u32, u32)>)>> =
+        if let Some(pool) = bevy::tasks::ComputeTaskPool::try_get() {
+            pool.scope(|scope| {
+                for job in &jobs {
+                    scope.spawn(async move { run_job(job) });
+                }
+            })
+        } else {
+            jobs.iter().map(run_job).collect()
+        };
+    #[cfg(all(target_pointer_width = "64", not(target_os = "android")))]
+    let mut stream = texture_stream;
+    for (job, result) in jobs.into_iter().zip(results) {
+        let handle = result.map(|(image, full_size)| {
+            let handle = images.add(image);
+            #[cfg(all(target_pointer_width = "64", not(target_os = "android")))]
+            if let (Some(stream), Some(full_size)) = (stream.as_deref_mut(), full_size) {
+                stream.register_prepared(
+                    &handle,
+                    &job.name,
+                    job.color_key,
+                    job.alpha_channel,
+                    full_size,
+                );
+            }
+            let _ = (&job.name, job.color_key, job.alpha_channel, full_size);
+            handle
+        });
+        cache.insert(
+            job.key,
+            LoadedStageTexture {
+                handle,
+                hd_texture: false,
+            },
+        );
+    }
+}
+#[allow(clippy::too_many_arguments)]
+fn hollow_gmdl_materials(
+    gmdl: &GmdlMesh,
+    cutoff: f32,
+    images: &mut Assets<Image>,
+    cache: &mut HashMap<String, LoadedStageTexture>,
+    pak_cache: &mut PakCache,
+    pak_root: &std::path::Path,
+    stage_id: &str,
+    texture_quality: u8,
+    hd_pack: &SceneTexturePack,
+) -> HashSet<i32> {
+    gmdl.materials
+        .iter()
+        .enumerate()
+        .filter_map(|(index, mat)| {
+            if mat.blend != "NORMAL" || classify_gmdl_material(mat).0 != GmdlMode::Opaque {
+                return None;
+            }
+            let name = gmdl.resolve_texture_name(mat)?;
+            let (_, ext) = name.rsplit_once('.')?;
+            if !ext.eq_ignore_ascii_case("tga") {
+                return None;
+            }
+            let texture = load_or_cache_scene_texture(
+                images,
+                cache,
+                pak_cache,
+                pak_root,
+                stage_id,
+                name,
+                false,
+                false,
+                texture_quality,
+                hd_pack,
+            );
+            let image = images.get(texture.handle.as_ref()?)?;
+            image
+                .data
+                .as_ref()?
+                .chunks_exact(4)
+                .any(|pixel| f32::from(pixel[3]) / 255.0 < cutoff)
+                .then_some(index as i32)
+        })
+        .collect()
+}
 #[allow(clippy::too_many_arguments)]
 pub(super) fn setup_stage_scene(
     mut commands: Commands,
@@ -2714,12 +3033,22 @@ pub(super) fn setup_stage_scene(
     mut hazards: ResMut<super::hazard_plugin::StageHazardRuntime>,
     graphics: Option<Res<super::graphics_pack::GraphicsPacks>>,
     render_adapter: Option<Res<bevy::render::renderer::RenderAdapterInfo>>,
-    (mut cloud_materials, mut cloud_noise, mut grass_materials, mut snow_materials, preview): (
+    (
+        mut cloud_materials,
+        mut cloud_noise,
+        mut grass_materials,
+        mut snow_materials,
+        mut fx_materials,
+        preview,
+        mut prebuilt,
+    ): (
         Option<ResMut<Assets<super::graphics_pack::sky::CloudSkyMaterial>>>,
         Option<ResMut<super::graphics_pack::sky::CloudNoise>>,
         Option<ResMut<Assets<super::graphics_pack::grass::GrassMaterial>>>,
         Option<ResMut<Assets<super::graphics_pack::snow::SnowMaterial>>>,
+        Option<ResMut<Assets<super::graphics_pack::fx::FxMaterial>>>,
         Option<Res<MapPreviewScene>>,
+        Option<ResMut<PrebuiltStageGeometry>>,
     ),
 ) {
     hazards.0 = Default::default();
@@ -2728,12 +3057,19 @@ pub(super) fn setup_stage_scene(
     let pak_root = pak_files_root(&roots, &loaded.stage_id);
     let relative = format!("{}/{}.gmb", loaded.stage_id, loaded.stage_id);
     let candidates: Vec<_> = roots.iter().map(|base| base.join(&relative)).collect();
-    load_stage_collision(
-        &roots,
-        &loaded,
-        loaded_assets.cob.as_deref(),
-        &mut collision,
-    );
+    let mut prebuilt = prebuilt
+        .as_deref_mut()
+        .filter(|pre| pre.stage_id == loaded.stage_id && preview.is_none());
+    if let Some(pre_collision) = prebuilt.as_mut().and_then(|pre| pre.collision.take()) {
+        *collision = pre_collision;
+    } else {
+        load_stage_collision(
+            &roots,
+            &loaded,
+            loaded_assets.cob.as_deref(),
+            &mut collision,
+        );
+    }
     let disk_gmb = if loaded_assets.gmb.is_none() {
         candidates
             .iter()
@@ -2748,36 +3084,87 @@ pub(super) fn setup_stage_scene(
         );
         return;
     };
-    info!(
-        "decoding stage mesh for {} ({} bytes)",
-        loaded.stage_id,
-        bytes.len()
-    );
-    let gmdl = match decode_gmdl(bytes) {
-        Ok(mesh) => mesh,
-        Err(error) => {
-            warn!("unable to decode GMB for {}: {error}", loaded.stage_id);
-            return;
+    let gmdl = if let Some(gmdl) = prebuilt.as_mut().and_then(|pre| pre.gmdl.take()) {
+        info!(
+            "reusing prebuilt stage mesh for {} ({} objects)",
+            loaded.stage_id,
+            gmdl.objects.len()
+        );
+        gmdl
+    } else {
+        info!(
+            "decoding stage mesh for {} ({} bytes)",
+            loaded.stage_id,
+            bytes.len()
+        );
+        match decode_gmdl(bytes) {
+            Ok(mesh) => mesh,
+            Err(error) => {
+                warn!("unable to decode GMB for {}: {error}", loaded.stage_id);
+                return;
+            }
         }
     };
+    let render_config = legacy_stage_render::StageRenderConfig::load(&loaded.stage_id);
+    let render_profile = render_config
+        .as_ref()
+        .map(|config| config.prepare(&gmdl, loaded.center, script.script()));
+    commands.queue(move |world: &mut World| {
+        if let Some(mut frame) = world.get_resource_mut::<super::stage_material::FrameUniforms>() {
+            frame.graphics.stage_render = render_profile
+                .as_ref()
+                .map_or_else(default, |profile| profile.frame);
+        }
+        if let Some(profile) = render_profile {
+            world.insert_resource(profile);
+        } else {
+            world.remove_resource::<legacy_stage_render::SceneRenderProfile>();
+        }
+    });
     hazards.0.world_bounds = super::hazard_plugin::build_world_bounds(&gmdl, loaded.center);
 
     let des_path = format!("{}/{}.des", loaded.stage_id, loaded.stage_id);
-    let mut stage_desc: Option<meteor_asset::des::StageDescription> = None;
-    let des_text = loaded_assets
-        .des
-        .as_deref()
-        .map(crate::text_codec::decode_text)
+    let mut stage_desc: Option<meteor_asset::des::StageDescription> =
+        prebuilt.as_mut().and_then(|pre| pre.stage_desc.take());
+    let des_text = prebuilt
+        .as_mut()
+        .and_then(|pre| pre.des_text.take())
         .or_else(|| {
-            roots
-                .iter()
-                .find_map(|base| crate::resource_io::read_to_string(base.join(&des_path)).ok())
+            loaded_assets
+                .des
+                .as_deref()
+                .map(crate::text_codec::decode_text)
+                .or_else(|| {
+                    roots.iter().find_map(|base| {
+                        crate::resource_io::read_to_string(base.join(&des_path)).ok()
+                    })
+                })
         });
-    if let Some(text) = &des_text {
-        let mut desc = meteor_asset::des::parse_stage_description(text);
-        if let Some(mask) = loaded_assets.ticket_mask {
-            desc.apply_ticket_mask(mask);
+    if let Some(pre_collider) = prebuilt.as_mut().and_then(|pre| pre.collider.take()) {
+        if let Some(desc) = &stage_desc {
+            info!(
+                "reusing prebuilt stage mesh collider: {} verts, {} tris (wall {}, floor {}, steep {}, ceiling {})",
+                pre_collider.positions.len(),
+                pre_collider.triangle_count(),
+                pre_collider.wall_tris.len(),
+                pre_collider.floor_tris.len(),
+                pre_collider.steep_tris.len(),
+                pre_collider.ceiling_tris.len(),
+            );
+            stage_collider.mesh = Some(pre_collider);
+            hazards.0.build_from_stage(
+                super::hazard_plugin::build_volumes(&gmdl, desc, loaded.center),
+                vec![],
+            );
         }
+    } else if let Some(text) = &des_text {
+        let desc = stage_desc.take().unwrap_or_else(|| {
+            let mut d = meteor_asset::des::parse_stage_description(text);
+            if let Some(mask) = loaded_assets.ticket_mask {
+                d.apply_ticket_mask(mask);
+            }
+            d
+        });
         let mesh = StageMeshCollider::from_gmdl(
             &gmdl,
             &desc,
@@ -2806,6 +3193,9 @@ pub(super) fn setup_stage_scene(
         );
     }
 
+    if prebuilt.is_some() {
+        commands.remove_resource::<PrebuiltStageGeometry>();
+    }
     let mut pak_cache = PakCache::default();
     let paks = pak_cache.chain(&pak_root, &loaded.stage_id);
     if paks.is_empty() {
@@ -2829,7 +3219,12 @@ pub(super) fn setup_stage_scene(
     }
     let mut normal_cache = HashMap::new();
     let hd_pack = SceneTexturePack::load(&loaded.stage_id, settings.hd_scene);
-    let mut water_cache = super::stage_material::water::WaterCache::default();
+    let mut water_cache = super::stage_material::water::WaterCache::new(
+        graphics
+            .as_deref()
+            .and_then(|packs| packs.water())
+            .map(std::sync::Arc::as_ref),
+    );
     let mut meshlets = super::graphics_pack::meshlets::SceneMeshlets::new(
         graphics.as_deref(),
         &loaded.stage_id,
@@ -2842,8 +3237,44 @@ pub(super) fn setup_stage_scene(
     let mut world_min = Vec3::splat(f32::MAX);
     let mut world_max = Vec3::splat(f32::MIN);
     let mut image_cache: HashMap<String, LoadedStageTexture> = HashMap::new();
+    #[cfg(all(target_pointer_width = "64", not(target_os = "android")))]
+    let mut texture_stream = (preview.is_none() && render_adapter.is_some()).then(|| {
+        texture_streaming::StageTextureStream::new(pak_root.clone(), loaded.stage_id.clone())
+    });
+    #[cfg(not(target_arch = "wasm32"))]
+    predecode_stage_textures(
+        &gmdl,
+        &mut images,
+        &mut image_cache,
+        &mut pak_cache,
+        &pak_root,
+        &loaded.stage_id,
+        settings.texture_quality,
+        &hd_pack,
+        #[cfg(all(target_pointer_width = "64", not(target_os = "android")))]
+        texture_stream.as_mut(),
+    );
+    let hollow_cutoff = render_config
+        .as_ref()
+        .and_then(legacy_stage_render::StageRenderConfig::hollow_cutoff);
+    let hollow_materials = hollow_cutoff.map_or_else(HashSet::new, |cutoff| {
+        hollow_gmdl_materials(
+            &gmdl,
+            cutoff,
+            &mut images,
+            &mut image_cache,
+            &mut pak_cache,
+            &pak_root,
+            &loaded.stage_id,
+            settings.texture_quality,
+            &hd_pack,
+        )
+    });
     let mut stage_texture_handles = Vec::new();
-    let mut material_cache: HashMap<(usize, i32), Handle<GmdlMaterial>> = HashMap::new();
+    let mut static_material_pool: HashMap<
+        (Option<bevy::asset::AssetId<Image>>, bool, u32),
+        Vec<Handle<GmdlMaterial>>,
+    > = HashMap::new();
     let mut drawn_objects = 0usize;
     let mut drawn_faces = 0usize;
     let mut textured_faces = 0usize;
@@ -2925,7 +3356,17 @@ pub(super) fn setup_stage_scene(
             Err(error) => warn!("{} sky enhancement skipped: {error}", loaded.stage_id),
         }
     }
-    if !enhanced_sky && preview.is_none() {
+    let object_rules: Vec<_> = gmdl
+        .objects
+        .iter()
+        .map(|object| {
+            render_config
+                .as_ref()
+                .and_then(|config| config.object_rule(&object.name))
+        })
+        .collect();
+    let has_authored_sky = object_rules.iter().flatten().any(|rule| rule.is_sky_box);
+    if !enhanced_sky && !has_authored_sky && preview.is_none() {
         spawn_stage_sky(
             &mut commands,
             &mut meshes,
@@ -2935,6 +3376,25 @@ pub(super) fn setup_stage_scene(
             &loaded.stage_id,
         );
     }
+    let campfires =
+        if let Some(fx_materials) = fx_materials.as_deref_mut().filter(|_| preview.is_none()) {
+            let fires = super::graphics_pack::campfires::placements(
+                graphics.as_deref(),
+                &loaded.stage_id,
+                stage_collider.mesh.as_ref(),
+            );
+            super::graphics_pack::campfires::spawn(
+                &mut commands,
+                &mut meshes,
+                &mut images,
+                &mut standard_materials,
+                fx_materials,
+                &fires,
+            );
+            fires
+        } else {
+            Vec::new()
+        };
     let grass_ground = if let (Some(packs), Some(materials)) =
         (graphics.as_deref(), grass_materials.as_deref_mut())
     {
@@ -2950,6 +3410,7 @@ pub(super) fn setup_stage_scene(
             &collision.face_ids,
             stage_collider.mesh.as_ref(),
             loaded.center,
+            &campfires,
         )
     } else {
         None
@@ -2962,48 +3423,87 @@ pub(super) fn setup_stage_scene(
         })
         .filter(|_| stage_collider.mesh.is_some() && snow_materials.is_some());
 
+    let optimizations = super::scene_render_optimizations::options(&loaded.stage_id);
+    let classify_static_shadows = preview.is_none();
+    let mut static_batches = static_batches::StaticBatches::default();
+    let scene_objects_by_name: HashMap<&str, &meteor_asset::des::StageObject> = stage_desc
+        .as_ref()
+        .map(|desc| {
+            let mut map = HashMap::with_capacity(desc.scene_objects.len());
+            for obj in &desc.scene_objects {
+                map.entry(obj.name.as_str()).or_insert(obj);
+            }
+            map
+        })
+        .unwrap_or_default();
     for (obj_idx, object) in gmdl.objects.iter().enumerate() {
+        let rule = object_rules[obj_idx];
+        let stage_render_flags = render_config.as_ref().map_or(0, |_| {
+            legacy_stage_render::StageRenderConfig::material_flags(rule)
+        });
         if skip_render.contains(object.name.as_str()) {
             continue;
         }
         if object.indices.is_empty() || object.positions.is_empty() {
             continue;
         }
-        let scene_obj = stage_desc
-            .as_ref()
-            .and_then(|d| d.scene_objects.iter().find(|obj| obj.name == object.name));
-        if preview.is_some() && is_preview_sky_object(object, scene_obj, loaded.center) {
+        let scene_obj = scene_objects_by_name.get(object.name.as_str()).copied();
+        if preview.is_some()
+            && (rule.is_some_and(|rule| rule.is_sky_box)
+                || is_preview_sky_object(object, scene_obj, loaded.center))
+        {
             continue;
         }
-        let replacement = (!sky_replacements.iter().any(|&(index, _)| index == obj_idx))
-            .then(|| {
-                meshlets.replace(
-                    &gmdl,
-                    object,
-                    scene_obj,
-                    loaded.center,
-                    || {
-                        script.script().is_some_and(|script| {
-                            script.host().resolve_name(&object.name).is_some()
-                        })
-                    },
-                    &mut surfaces,
-                    &mut images,
-                )
-            })
-            .flatten();
+        let has_hollow_faces = !hollow_materials.is_empty()
+            && object
+                .face_mat
+                .iter()
+                .any(|index| hollow_materials.contains(index));
+        let replacement = (!has_hollow_faces
+            && !sky_replacements.iter().any(|&(index, _)| index == obj_idx))
+        .then(|| {
+            meshlets.replace(
+                &gmdl,
+                object,
+                scene_obj,
+                loaded.center,
+                || {
+                    script
+                        .script()
+                        .is_some_and(|script| script.host().resolve_name(&object.name).is_some())
+                },
+                &mut surfaces,
+                &mut images,
+            )
+        })
+        .flatten();
         if let Some(replacement) = replacement {
-            for (clusters, material) in replacement.primitives {
+            for (clusters, mut material) in replacement.primitives {
+                material.stage_render_flags = stage_render_flags;
+                if let Some(config) = &render_config {
+                    material.two_side = config.two_side(material.two_side);
+                }
+                let static_caster = classify_static_shadows
+                    && material.mode == GmdlMode::Opaque
+                    && rule.is_none_or(|rule| {
+                        !rule.is_sky_box && rule.shadows.cast_shadows != Some(false)
+                    });
                 let material = materials.add(material);
                 for mesh in clusters {
                     drawn_objects += 1;
                     drawn_faces += mesh.indices().map_or(0, |indices| indices.len() / 3);
-                    commands.spawn((
+                    let mut entity = commands.spawn((
                         PlayingSceneEntity,
                         Mesh3d(meshes.add(mesh)),
                         MeshMaterial3d(material.clone()),
                         replacement.transform,
                     ));
+                    if let Some(rule) = rule {
+                        entity.insert(rule.shadows);
+                    }
+                    if static_caster {
+                        entity.insert(bevy::pbr::StaticShadowCaster);
+                    }
                 }
             }
             continue;
@@ -3033,7 +3533,10 @@ pub(super) fn setup_stage_scene(
             {
                 continue;
             }
-            let (mode, opacity, alpha_cutoff) = classify_gmdl_material(mat);
+            let (mode, opacity, mut alpha_cutoff) = classify_gmdl_material(mat);
+            if let Some(cutoff) = hollow_cutoff.filter(|_| hollow_materials.contains(&mat_idx)) {
+                alpha_cutoff = cutoff;
+            }
 
             let color_key = mat.blend == "COLORKEY";
             let mut used_hd_texture = false;
@@ -3059,18 +3562,60 @@ pub(super) fn setup_stage_scene(
                         ifl_frames.as_ref().and_then(|f| f.first().cloned())
                     } else {
                         textured_faces += indices.len() / 3;
-                        let loaded_texture = load_or_cache_scene_texture(
-                            &mut images,
-                            &mut image_cache,
-                            &mut pak_cache,
-                            &pak_root,
-                            &loaded.stage_id,
-                            name,
-                            color_key,
-                            mat.blend.eq_ignore_ascii_case("ALPHACHANNEL"),
-                            settings.texture_quality,
-                            &hd_pack,
-                        );
+                        let alpha_channel = mat.blend.eq_ignore_ascii_case("ALPHACHANNEL");
+                        #[cfg(all(target_pointer_width = "64", not(target_os = "android")))]
+                        let streamed = texture_stream
+                            .as_mut()
+                            .filter(|_| hd_pack.diffuse(&loaded.stage_id, name).is_none())
+                            .map(|stream| {
+                                let texture = load_or_cache_texture_with(
+                                    &mut images,
+                                    &mut image_cache,
+                                    &mut pak_cache,
+                                    &pak_root,
+                                    &loaded.stage_id,
+                                    name,
+                                    color_key,
+                                    alpha_channel,
+                                    settings.texture_quality,
+                                    |images, decoded| {
+                                        stream.prepare(
+                                            images,
+                                            decoded,
+                                            name,
+                                            color_key,
+                                            alpha_channel,
+                                            settings.texture_quality,
+                                        )
+                                    },
+                                );
+                                if let Some(handle) = &texture.handle {
+                                    stream.use_cached_mip_tail(
+                                        &mut images,
+                                        handle,
+                                        name,
+                                        color_key,
+                                        alpha_channel,
+                                    );
+                                }
+                                texture
+                            });
+                        #[cfg(not(all(target_pointer_width = "64", not(target_os = "android"))))]
+                        let streamed: Option<LoadedStageTexture> = None;
+                        let loaded_texture = streamed.unwrap_or_else(|| {
+                            load_or_cache_scene_texture(
+                                &mut images,
+                                &mut image_cache,
+                                &mut pak_cache,
+                                &pak_root,
+                                &loaded.stage_id,
+                                name,
+                                color_key,
+                                alpha_channel,
+                                settings.texture_quality,
+                                &hd_pack,
+                            )
+                        });
                         used_hd_texture = loaded_texture.hd_texture;
                         if let Some(handle) = &loaded_texture.handle {
                             stage_texture_handles.push(handle.clone());
@@ -3080,23 +3625,21 @@ pub(super) fn setup_stage_scene(
                 }
                 None => None,
             };
-            let material_handle = material_cache
-                .entry((obj_idx, mat_idx))
-                .or_insert_with(|| {
-                    materials.add(GmdlMaterial::new_scene(
-                        GmdlMaterialParams {
-                            opacity,
-                            alpha_cutoff,
-                            mode: mode.as_u32(),
-                            has_texture: texture.is_some() as u32,
-                            uv_offset: Vec2::ZERO,
-                        },
-                        texture,
-                        mat.two_side,
-                        mode,
-                    ))
-                })
-                .clone();
+            let mut material = GmdlMaterial::new_scene(
+                GmdlMaterialParams {
+                    opacity,
+                    alpha_cutoff,
+                    mode: mode.as_u32(),
+                    has_texture: texture.is_some() as u32,
+                    uv_offset: Vec2::ZERO,
+                },
+                texture,
+                render_config
+                    .as_ref()
+                    .map_or(mat.two_side, |config| config.two_side(mat.two_side)),
+                mode,
+            );
+            material.stage_render_flags = stage_render_flags;
 
             for v in object.positions.chunks_exact(3) {
                 let p = Vec3::new(
@@ -3112,51 +3655,33 @@ pub(super) fn setup_stage_scene(
             let deform = scene_obj.and_then(|obj| SceneDeform::from_mesh(object, &mesh, obj));
 
             let scrolling = scene_obj.is_some_and(|obj| obj.texture_animation.enabled);
-            let curated_surface = alpha_cutoff == 0.0
+            let curated_surface = mode == GmdlMode::Opaque
+                && opacity == 1.0
+                && alpha_cutoff == 0.0
                 && ifl_frames.is_none()
                 && deform.is_none()
-                && scene_obj.is_none_or(|obj| obj.billboard != 1)
-                && match mode {
-                    GmdlMode::Opaque => opacity == 1.0,
-                    GmdlMode::Blend => scrolling,
-                    _ => false,
-                };
+                && scene_obj.is_none_or(|obj| obj.billboard != 1);
             if curated_surface {
-                let mut hd_normal_used = false;
                 if let Some(normal) = gmdl.resolve_texture_name(mat).and_then(|name| {
-                    let hd_normal = used_hd_texture
-                        .then(|| hd_pack.normal(&loaded.stage_id, name))
-                        .flatten()
-                        .and_then(|bytes| {
-                            super::stage_material::scene_normals::load_hd_scene_normal(
-                                &loaded.stage_id,
-                                name,
-                                bytes,
-                                &mut images,
-                                &mut normal_cache,
-                                settings.texture_quality,
-                            )
-                        });
-                    hd_normal_used = hd_normal.is_some();
-                    hd_normal.or_else(|| {
-                        super::stage_material::scene_normals::load_scene_normal(
-                            &loaded.stage_id,
-                            name,
-                            &mut images,
-                            &mut normal_cache,
-                            settings.texture_quality,
-                        )
-                    })
+                    if !used_hd_texture {
+                        return None;
+                    }
+                    let bytes = hd_pack.normal(&loaded.stage_id, name)?;
+                    super::stage_material::scene_normals::load_hd_scene_normal(
+                        &loaded.stage_id,
+                        name,
+                        bytes,
+                        &mut images,
+                        &mut normal_cache,
+                        settings.texture_quality,
+                    )
                 }) {
                     match mesh.generate_tangents() {
                         Ok(()) => {
-                            let mut material = materials.get_mut(&material_handle).unwrap();
                             material.normal_texture = Some(normal);
-                            if hd_normal_used {
-                                let style = hd_pack.normal_style();
-                                material.normal_strength = style.strength;
-                                material.normal_contrast = style.contrast;
-                            }
+                            let style = hd_pack.normal_style();
+                            material.normal_strength = style.strength;
+                            material.normal_contrast = style.contrast;
                             normal_batches += 1;
                         }
                         Err(error) => warn!("scene normal skipped for {}: {error}", object.name),
@@ -3171,7 +3696,6 @@ pub(super) fn setup_stage_scene(
                 && scene_obj.is_none_or(|obj| obj.billboard != 1)
             {
                 if let Some(name) = gmdl.resolve_texture_name(mat) {
-                    let mut material = materials.get_mut(&material_handle).unwrap();
                     let water_sky = graphics
                         .as_deref()
                         .filter(|_| enhanced_sky)
@@ -3203,11 +3727,7 @@ pub(super) fn setup_stage_scene(
                         &mesh, &indices, stage_wind, &transform,
                     )
                 {
-                    wave.configure_shallow(
-                        materials.get(&material_handle).unwrap(),
-                        &images,
-                        &transform,
-                    );
+                    wave.configure_shallow(&material, &images, &transform);
                     mesh = refined;
                     Some(wave)
                 } else {
@@ -3223,7 +3743,7 @@ pub(super) fn setup_stage_scene(
             let wind = surfaces.configure(
                 &object.name,
                 gmdl.resolve_texture_name(mat),
-                &mut materials.get_mut(&material_handle).unwrap(),
+                &mut material,
                 &mut mesh,
                 curated_surface && liquid_surface.is_none(),
                 deform.is_none()
@@ -3240,7 +3760,7 @@ pub(super) fn setup_stage_scene(
                 surfaces.configure_additive_texture(
                     &object.name,
                     gmdl.resolve_texture_name(mat),
-                    &mut materials.get_mut(&material_handle).unwrap(),
+                    &mut material,
                     &mut images,
                 )
             } else {
@@ -3261,11 +3781,7 @@ pub(super) fn setup_stage_scene(
                 if let (Some(field), Some(texture)) =
                     (&grass_ground, gmdl.resolve_texture_name(mat))
                 {
-                    field.configure(
-                        &object.name,
-                        texture,
-                        &mut materials.get_mut(&material_handle).unwrap(),
-                    );
+                    field.configure(&object.name, texture, &mut material);
                 }
             }
             if curated_surface
@@ -3277,6 +3793,59 @@ pub(super) fn setup_stage_scene(
                 if let (Some(field), Some(texture)) = (&mut snow, gmdl.resolve_texture_name(mat)) {
                     field.add_surface(&object.name, texture, &mesh, &transform);
                 }
+            }
+            let dynamic_material = ifl_frames.is_some() || scrolling || liquid_surface.is_some();
+            let material_handle = if dynamic_material {
+                materials.add(material)
+            } else {
+                let pool_key = (
+                    material.texture.as_ref().map(Handle::id),
+                    material.two_side,
+                    material.params.mode,
+                );
+                let bucket = static_material_pool.entry(pool_key).or_default();
+                if let Some(existing) = bucket.iter().find(|h| materials.get(*h) == Some(&material))
+                {
+                    existing.clone()
+                } else {
+                    let handle = materials.add(material);
+                    bucket.push(handle.clone());
+                    handle
+                }
+            };
+            #[cfg(all(target_pointer_width = "64", not(target_os = "android")))]
+            if let (Some(stream), Some(texture)) = (
+                &mut texture_stream,
+                materials
+                    .get(&material_handle)
+                    .and_then(|mat| mat.texture.as_ref()),
+            ) {
+                stream.bind(texture.id(), &material_handle);
+            }
+            let static_batchable = preview.is_none()
+                && mode == GmdlMode::Opaque
+                && opacity == 1.0
+                && !scrolling
+                && wind.is_none()
+                && liquid_surface.is_none()
+                && ifl_frames.is_none()
+                && deform.is_none()
+                && scene_obj.is_none_or(|obj| obj.billboard != 1);
+            let static_caster = classify_static_shadows
+                && mode == GmdlMode::Opaque
+                && !scrolling
+                && wind.is_none()
+                && liquid_surface.is_none()
+                && ifl_frames.is_none()
+                && deform.is_none()
+                && scene_obj.is_none_or(|obj| obj.billboard != 1)
+                && rule.is_none_or(|rule| {
+                    !rule.is_sky_box && rule.shadows.cast_shadows != Some(false)
+                })
+                && !is_preview_sky_object(object, scene_obj, loaded.center);
+            if optimizations.batches && static_batchable && rule.is_none() {
+                static_batches.add(mesh, material_handle, transform, &materials, static_caster);
+                continue;
             }
             let wind_bounds = wind.as_ref().map(|w| {
                 use bevy::camera::primitives::Aabb;
@@ -3307,6 +3876,14 @@ pub(super) fn setup_stage_scene(
                     transform,
                 ))
                 .id();
+            if static_caster {
+                commands
+                    .entity(entity)
+                    .insert(bevy::pbr::StaticShadowCaster);
+            }
+            if let Some(rule) = rule {
+                commands.entity(entity).insert(rule.shadows);
+            }
             if let Some(wind) = wind {
                 commands.entity(entity).insert((wind, wind_bounds.unwrap()));
             }
@@ -3347,6 +3924,7 @@ pub(super) fn setup_stage_scene(
         }
     }
 
+    static_batches.spawn(&mut commands, &mut meshes, &loaded.stage_id);
     info!(
         "spawned {} stage mesh batches, {} faces (textured {} faces, ifl materials {}, ifl frames {})",
         drawn_objects, drawn_faces, textured_faces, ifl_materials, ifl_frames_total
@@ -3392,6 +3970,7 @@ pub(super) fn setup_stage_scene(
             des_text.as_deref(),
             settings.texture_quality,
             Some(&hd_pack),
+            render_config.as_ref(),
             &mut stage_texture_handles,
             mesh,
             script.script(),
@@ -3411,6 +3990,7 @@ pub(super) fn setup_stage_scene(
             des_text.as_deref(),
             settings.texture_quality,
             Some(&hd_pack),
+            render_config.as_ref(),
             &mut stage_texture_handles,
             &mut StageMeshCollider::default(),
             script.script(),
@@ -3429,13 +4009,17 @@ pub(super) fn setup_stage_scene(
         warn!("stage mesh contains no drawable objects");
     }
     info!(
-        "stage {}: {} curated normal textures, {} wall/floor batches",
+        "stage {}: {} HD normal textures, {} batches",
         loaded.stage_id,
         normal_cache.len(),
         normal_batches
     );
     stage_texture_handles.extend(normal_cache.into_values());
     commands.insert_resource(StageTextureHandles(stage_texture_handles));
+    #[cfg(all(target_pointer_width = "64", not(target_os = "android")))]
+    if let Some(stream) = texture_stream.filter(|stream| stream.has_materials()) {
+        commands.insert_resource(stream);
+    }
 }
 
 pub(crate) fn build_scene_mesh(
@@ -3447,7 +4031,14 @@ pub(crate) fn build_scene_mesh(
     let axes = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
     let mut transform = Transform::from_rotation(axes).with_scale(Vec3::splat(MODEL_SCALE));
     let Some(obj) = scene_obj.filter(|obj| obj.billboard == 1) else {
-        return (build_mesh(object, indices, center), transform);
+        let keep_full_verts =
+            scene_obj.is_some_and(|obj| obj.deform.is_some() || obj.texture_animation.enabled);
+        let mesh = if keep_full_verts {
+            build_mesh(object, indices, center)
+        } else {
+            build_compact_mesh(object, indices, center)
+        };
+        return (mesh, transform);
     };
     let pivot = Vec3::new(obj.position.x, obj.position.y, obj.position.z);
     let rotation = Quat::from_xyzw(
@@ -3478,6 +4069,67 @@ pub(crate) fn build_scene_mesh(
     transform.translation = axes * (pivot - Vec3::from_array(center)) * MODEL_SCALE;
     transform.rotation = axes * rotation;
     (mesh, transform)
+}
+fn build_compact_mesh(
+    object: &meteor_asset::gmdl::GmdlObject,
+    indices: &[u32],
+    center: [f32; 3],
+) -> Mesh {
+    let num_verts = object.positions.len() / 3;
+    if num_verts == 0 || indices.is_empty() {
+        return build_mesh(object, indices, center);
+    }
+    let mut remap = vec![u32::MAX; num_verts];
+    let mut positions = Vec::new();
+    let mut normals = Vec::new();
+    let mut uvs = Vec::new();
+    let mut colors = Vec::new();
+    let mut remapped_indices = Vec::with_capacity(indices.len());
+    let has_normals = object.normals.len() >= num_verts * 3;
+    let has_uvs = object.uvs.len() >= num_verts * 2;
+    let has_colors = object.colors.len() >= num_verts * 4;
+    for &old in indices {
+        let idx = old as usize;
+        if idx >= num_verts {
+            continue;
+        }
+        let new_idx = if remap[idx] != u32::MAX {
+            remap[idx]
+        } else {
+            let id = positions.len() as u32;
+            remap[idx] = id;
+            let p = &object.positions[idx * 3..idx * 3 + 3];
+            positions.push([p[0] - center[0], p[1] - center[1], p[2] - center[2]]);
+            if has_normals {
+                let n = &object.normals[idx * 3..idx * 3 + 3];
+                normals.push([n[0], n[1], n[2]]);
+            } else {
+                normals.push([0.0, 0.0, 1.0]);
+            }
+            if has_uvs {
+                let u = &object.uvs[idx * 2..idx * 2 + 2];
+                uvs.push([u[0], u[1]]);
+            } else {
+                uvs.push([0.0, 0.0]);
+            }
+            if has_colors {
+                colors.push(gmdl_vertex_color(&object.colors[idx * 4..idx * 4 + 4]));
+            } else {
+                colors.push([1.0, 1.0, 1.0, 1.0]);
+            }
+            id
+        };
+        remapped_indices.push(new_idx);
+    }
+    Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
+    .with_inserted_indices(Indices::U32(remapped_indices))
 }
 
 fn build_mesh(object: &meteor_asset::gmdl::GmdlObject, indices: &[u32], center: [f32; 3]) -> Mesh {
@@ -3628,7 +4280,7 @@ mod hd_scene_texture_tests {
             let companion = legacy_alpha_companion_name(name)
                 .and_then(|name| cache.resolve_exact(&origin, "sn03", &name));
             let mut images = Assets::<bevy::image::Image>::default();
-            let old = image_handle_with_legacy_style_quality(
+            let old = super::super::pak_textures::image_handle_with_legacy_style_quality(
                 &mut images,
                 &bytes,
                 companion.as_deref(),
@@ -3749,7 +4401,7 @@ fn sibling_texture_name(name: &str, sibling: &str) -> String {
 
 #[allow(clippy::too_many_arguments)]
 fn load_or_cache_texture(
-    images: &mut Assets<bevy::image::Image>,
+    images: &mut Assets<Image>,
     cache: &mut HashMap<String, LoadedStageTexture>,
     pak_cache: &mut PakCache,
     root: &std::path::Path,
@@ -3758,6 +4410,37 @@ fn load_or_cache_texture(
     color_key: bool,
     alpha_channel: bool,
     texture_quality: u8,
+) -> LoadedStageTexture {
+    load_or_cache_texture_with(
+        images,
+        cache,
+        pak_cache,
+        root,
+        scope,
+        name,
+        color_key,
+        alpha_channel,
+        texture_quality,
+        |images, decoded| {
+            super::pak_textures::image_from_decoded_with_quality(images, decoded, texture_quality)
+        },
+    )
+}
+#[allow(clippy::too_many_arguments)]
+fn load_or_cache_texture_with(
+    images: &mut Assets<Image>,
+    cache: &mut HashMap<String, LoadedStageTexture>,
+    pak_cache: &mut PakCache,
+    root: &std::path::Path,
+    scope: &str,
+    name: &str,
+    color_key: bool,
+    alpha_channel: bool,
+    texture_quality: u8,
+    prepare: impl FnOnce(
+        &mut Assets<Image>,
+        meteor_asset::texture::DecodedImage,
+    ) -> Option<Handle<Image>>,
 ) -> LoadedStageTexture {
     let key = format!(
         "{}|ck={}|alpha={}|quality={}",
@@ -3769,51 +4452,47 @@ fn load_or_cache_texture(
     if let Some(cached) = cache.get(&key) {
         return cached.clone();
     }
-    let loaded = match pak_cache.resolve(root, scope, name) {
-        Some(bytes) => {
-            let companion_name = legacy_alpha_companion_name(name)
-                .map(|companion| sibling_texture_name(name, &companion));
-            let named_companion = companion_name
-                .as_deref()
-                .and_then(|companion| pak_cache.resolve_exact(root, scope, companion));
-            if named_companion.is_some() {
-                if let Some(companion_name) = companion_name.as_deref() {
-                    info!("stage texture companion alpha: {name} <- {companion_name}");
-                }
-            }
-            let companion = named_companion.as_deref();
-            let luminance_fallback = alpha_channel
-                && companion.is_none()
-                && !name.to_ascii_lowercase().ends_with(".tga");
-
-            let handle = if alpha_channel || color_key || companion.is_some() {
-                image_handle_with_legacy_style_quality(
-                    images,
-                    &bytes,
-                    companion,
-                    luminance_fallback,
-                    color_key,
-                    texture_quality,
-                )
-            } else {
-                image_handle_with_quality(images, &bytes, texture_quality)
-            };
-            let handle = handle.or_else(|| {
-                warn!("stage texture decode failed: {name}");
-                None
-            });
-            LoadedStageTexture {
-                handle,
-                hd_texture: false,
-            }
-        }
-        None => {
-            info!("stage texture missing: {name} (untextured fallback)");
-            LoadedStageTexture::default()
-        }
+    let handle = decode_stage_texture(pak_cache, root, scope, name, color_key, alpha_channel)
+        .and_then(|decoded| prepare(images, decoded));
+    let loaded = LoadedStageTexture {
+        handle,
+        hd_texture: false,
     };
     cache.insert(key, loaded.clone());
     loaded
+}
+fn decode_stage_texture(
+    pak_cache: &mut PakCache,
+    root: &std::path::Path,
+    scope: &str,
+    name: &str,
+    color_key: bool,
+    alpha_channel: bool,
+) -> Option<meteor_asset::texture::DecodedImage> {
+    let Some(bytes) = pak_cache.resolve(root, scope, name) else {
+        info!("stage texture missing: {name} (untextured fallback)");
+        return None;
+    };
+    let companion_name =
+        legacy_alpha_companion_name(name).map(|companion| sibling_texture_name(name, &companion));
+    let companion = companion_name
+        .as_deref()
+        .and_then(|companion| pak_cache.resolve_exact(root, scope, companion));
+    if let Some(companion_name) = companion_name.filter(|_| companion.is_some()) {
+        info!("stage texture companion alpha: {name} <- {companion_name}");
+    }
+    let luminance_fallback =
+        alpha_channel && companion.is_none() && !name.to_ascii_lowercase().ends_with(".tga");
+    let decoded = super::pak_textures::decode_legacy_style(
+        &bytes,
+        companion.as_deref(),
+        luminance_fallback,
+        color_key,
+    );
+    if decoded.is_none() {
+        warn!("stage texture decode failed: {scope}/{name}");
+    }
+    decoded
 }
 
 #[cfg(feature = "original-assets")]
@@ -5368,7 +6047,9 @@ mod tests {
     }
 
     #[test]
-    fn curated_wall_floor_normals_have_valid_original_mesh_tangents() {
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    fn migrated_pbr_normals_cover_original_surfaces_and_have_valid_tangents() {
+        use super::super::graphics_pack::{GraphicsPacks, SceneGraphics};
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
         let manifest: serde_json::Value = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -5390,11 +6071,12 @@ mod tests {
             "cover every solo mission plus the two requested arenas"
         );
         for stage in stages {
+            let graphics = GraphicsPacks::test_scene_pbr(stage);
+            let mut surfaces = SceneGraphics::new(Some(&graphics), stage);
             let gmdl =
                 decode_gmdl(&std::fs::read(root.join(format!("{stage}/{stage}.gmb"))).unwrap())
                     .unwrap();
             let mut images = Assets::<Image>::default();
-            let mut cache = HashMap::new();
             let mut used = std::collections::HashSet::new();
             let mut batches = 0;
             for object in &gmdl.objects {
@@ -5404,12 +6086,7 @@ mod tests {
                     };
                     let (mode, opacity, cutoff) = classify_gmdl_material(mat);
 
-                    let eligible = cutoff == 0.0
-                        && match mode {
-                            GmdlMode::Opaque => opacity == 1.0,
-                            GmdlMode::Blend => true,
-                            _ => false,
-                        };
+                    let eligible = mode == GmdlMode::Opaque && opacity == 1.0 && cutoff == 0.0;
                     if !eligible {
                         continue;
                     }
@@ -5425,19 +6102,38 @@ mod tests {
                     if indices.is_empty() {
                         continue;
                     }
-                    if super::super::stage_material::scene_normals::load_scene_normal(
-                        stage,
-                        name,
-                        &mut images,
-                        &mut cache,
-                        0,
-                    )
-                    .is_none()
-                    {
-                        continue;
-                    }
                     let mut mesh = build_mesh(object, &indices, [0.0; 3]);
-                    mesh.generate_tangents().unwrap();
+                    let mut material = GmdlMaterial::new_scene(
+                        GmdlMaterialParams {
+                            opacity,
+                            alpha_cutoff: cutoff,
+                            mode: mode.as_u32(),
+                            has_texture: 0,
+                            uv_offset: Vec2::ZERO,
+                        },
+                        None,
+                        false,
+                        mode,
+                    );
+                    surfaces.configure(
+                        &object.name,
+                        Some(name),
+                        &mut material,
+                        &mut mesh,
+                        true,
+                        false,
+                        &mut images,
+                    );
+                    let Some(handle) = &material.normal_texture else {
+                        continue;
+                    };
+                    assert_eq!(material.pbr.x, 1.0);
+                    let image = images.get(handle).unwrap();
+                    assert_eq!(
+                        image.texture_descriptor.format,
+                        bevy::render::render_resource::TextureFormat::Rgba8Unorm
+                    );
+                    assert!(image.texture_descriptor.mip_level_count > 1);
                     let Some(bevy::mesh::VertexAttributeValues::Float32x4(tangents)) =
                         mesh.attribute(Mesh::ATTRIBUTE_TANGENT)
                     else {
@@ -5472,11 +6168,18 @@ mod tests {
             let expected: std::collections::HashSet<String> = selected
                 .iter()
                 .filter(|entry| entry["stage"] == stage)
-                .map(|entry| entry["texture"].as_str().unwrap().to_owned())
+                .map(|entry| entry["texture"].as_str().unwrap())
+                .filter(|texture| {
+                    !matches!(
+                        (stage, *texture),
+                        ("sn06", "sn06w.jpg") | ("sn09", "sn914.jpg") | ("sn13", "sn13w01.jpg")
+                    )
+                })
+                .map(str::to_owned)
                 .collect();
             assert_eq!(
                 used, expected,
-                "curated resources must actually be used by {stage}"
+                "PBR normal resources must be used by {stage}"
             );
         }
     }

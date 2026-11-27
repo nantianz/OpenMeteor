@@ -7,6 +7,67 @@ pub(super) mod contact;
 mod tests;
 pub(super) mod topology;
 
+pub(in crate::plugins) struct SceneCloth {
+    topology: topology::Topology,
+    simulation: Simulation,
+    actors: Vec<Entity>,
+}
+impl SceneCloth {
+    pub fn new(points: Vec<Vec3>, freedom: Vec<f32>, triangles: Vec<[usize; 3]>) -> Self {
+        let topology = topology::Topology::from_triangles(points, freedom, triangles);
+        let mut simulation = Simulation {
+            scene_contacts: true,
+            ..default()
+        };
+        simulation.reset(&topology.points);
+        Self {
+            topology,
+            simulation,
+            actors: Vec::new(),
+        }
+    }
+    pub fn advance(
+        &mut self,
+        dt: f32,
+        wind: Vec3,
+        contacts: &[(Entity, Capsule)],
+        config: &Clothing,
+    ) -> &[Vec3] {
+        if !self
+            .actors
+            .iter()
+            .copied()
+            .eq(contacts.iter().map(|(entity, _)| *entity))
+        {
+            let previous = std::mem::take(&mut self.simulation.capsules);
+            self.simulation.capsules = contacts
+                .iter()
+                .map(|(entity, capsule)| {
+                    self.actors
+                        .iter()
+                        .position(|actor| actor == entity)
+                        .and_then(|index| previous.get(index))
+                        .copied()
+                        .unwrap_or(*capsule)
+                })
+                .collect();
+            self.actors.clear();
+            self.actors
+                .extend(contacts.iter().map(|(entity, _)| *entity));
+        }
+        let capsules: Vec<_> = contacts.iter().map(|(_, capsule)| *capsule).collect();
+        self.simulation.advance(
+            &self.topology,
+            &self.topology.points,
+            &capsules,
+            dt,
+            wind,
+            1.0,
+            config,
+        );
+        &self.simulation.positions
+    }
+}
 #[derive(Clone)]
 pub(super) struct Edge {
     pub ids: [usize; 2],
@@ -18,7 +79,7 @@ pub(super) struct Bend {
     pub rest: f32,
 }
 #[derive(Clone, Copy)]
-pub(super) struct Capsule {
+pub(in crate::plugins) struct Capsule {
     pub a: Vec3,
     pub b: Vec3,
     pub radius: f32,
@@ -30,6 +91,7 @@ pub(super) struct Simulation {
     pub anchors: Vec<Vec3>,
     pub accumulator: f32,
     capsules: Vec<Capsule>,
+    scene_contacts: bool,
 }
 impl Simulation {
     pub fn reset(&mut self, anchors: &[Vec3]) {
@@ -138,6 +200,11 @@ impl Simulation {
         }
         let mut stretch_lambda = vec![0.; data.edges.len()];
         let mut bend_lambda = vec![0.; data.bends.len()];
+        let contact_limit = if self.scene_contacts {
+            16.0 * dt / (config.iterations as f32 + 1.0)
+        } else {
+            f32::INFINITY
+        };
         for _ in 0..config.iterations {
             for (edge, lambda) in data.edges.iter().zip(&mut stretch_lambda) {
                 let [a, b] = edge.ids;
@@ -196,7 +263,12 @@ impl Simulation {
                     + (self.positions[i] - anchors[i])
                         .clamp_length_max(config.motion_limit * data.freedom[i]);
                 for capsule in capsules {
-                    let _ = project_capsule(&mut self.positions[i], *capsule, config.thickness);
+                    project_capsule_limited(
+                        &mut self.positions[i],
+                        *capsule,
+                        config.thickness,
+                        contact_limit,
+                    );
                 }
             }
         }
@@ -219,9 +291,12 @@ impl Simulation {
             let mut contact = Vec3::ZERO;
             if inverse_mass[i] > 0. {
                 for capsule in capsules {
-                    if let Some(normal) =
-                        project_capsule(&mut self.positions[i], *capsule, config.thickness)
-                    {
+                    if let Some(normal) = project_capsule_limited(
+                        &mut self.positions[i],
+                        *capsule,
+                        config.thickness,
+                        contact_limit,
+                    ) {
                         contact += normal;
                     }
                 }
@@ -232,8 +307,13 @@ impl Simulation {
             self.velocities[i] = ((self.positions[i] - previous[i]) / dt).clamp_length_max(25.);
             if let Some(normal) = contact.try_normalize() {
                 let velocity = self.velocities[i];
-                self.velocities[i] -=
-                    (velocity - normal * velocity.dot(normal)) * config.collision_friction;
+                let tangent = velocity - normal * velocity.dot(normal);
+                self.velocities[i] = if self.scene_contacts {
+                    tangent * (1.0 - config.collision_friction)
+                        + normal * velocity.dot(normal).clamp(0.0, 3.0)
+                } else {
+                    velocity - tangent * config.collision_friction
+                };
             }
             if inverse_mass[i] == 0. {
                 self.velocities[i] = Vec3::ZERO;
@@ -312,7 +392,7 @@ fn dihedral([a, b, c, d]: [Vec3; 4]) -> Option<(f32, [Vec3; 4])> {
     let gb = -gc * ((c - a).dot(e) / l2) - gd * ((d - a).dot(e) / l2);
     Some((angle, [-gb - gc - gd, gb, gc, gd]))
 }
-fn project_capsule(p: &mut Vec3, c: Capsule, thickness: f32) -> Option<Vec3> {
+fn project_capsule_limited(p: &mut Vec3, c: Capsule, thickness: f32, limit: f32) -> Option<Vec3> {
     let ab = c.b - c.a;
     let t = ((*p - c.a).dot(ab) / ab.length_squared().max(1e-12)).clamp(0., 1.);
     let closest = c.a + ab * t;
@@ -326,7 +406,11 @@ fn project_capsule(p: &mut Vec3, c: Capsule, thickness: f32) -> Option<Vec3> {
             ab.normalize_or(Vec3::Y).any_orthonormal_vector()
         };
         if distance_squared < radius * radius {
-            *p = closest + normal * radius;
+            if limit.is_finite() {
+                *p += normal * (radius - distance_squared.sqrt()).min(limit);
+            } else {
+                *p = closest + normal * radius;
+            }
         }
         Some(normal)
     } else {

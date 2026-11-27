@@ -481,6 +481,7 @@ pub struct NetState {
     pub(crate) pending_npc_vitals: Vec<(Entity, [f32; 3])>,
     pub(crate) stock_room_max_health: f32,
 
+    pub(crate) stock_physics_hz: u32,
     pub(crate) pending_web_join: Option<Message>,
     pub(crate) lobby: meteor_network::protocol::RoomLobbyWire,
     pub(crate) room_latency:
@@ -750,6 +751,7 @@ impl Default for NetState {
             pending_npc_hits: Vec::new(),
             pending_npc_vitals: Vec::new(),
             stock_room_max_health: 2_000.0,
+            stock_physics_hz: meteor_core::PHYSICS_HZ_DEFAULT,
             #[cfg(target_arch = "wasm32")]
             match_epoch: restored.match_epoch,
             #[cfg(not(target_arch = "wasm32"))]
@@ -1959,6 +1961,12 @@ impl Plugin for NetworkPlugin {
             )
             .add_systems(
                 Update,
+                stock_bot_autohost
+                    .before(menu_stock_connection_buttons)
+                    .run_if(in_state(AppState::Menu)),
+            )
+            .add_systems(
+                Update,
                 stock_connection_dialog::input
                     .after(crate::plugins::UiTouchGestureSet)
                     .after(crate::plugins::launcher_ui::launcher_ui_scroll)
@@ -1991,7 +1999,11 @@ impl Plugin for NetworkPlugin {
             .init_resource::<NativeNetThread>()
             .add_systems(
                 Update,
-                menu_public_battle_button
+                (
+                    menu_public_battle_button,
+                    super::launcher_ui::room_physics_slider_changes,
+                )
+                    .chain()
                     .in_set(crate::plugins::UiTouchActionSet)
                     .before(menu_net_button)
                     .run_if(in_state(AppState::Menu)),
@@ -2103,6 +2115,7 @@ struct StockConnectionConfig {
     game_num: u32,
     game_time_minutes: u32,
     life_adjust_percent: u32,
+    physics_hz: u32,
     item_rules: StockRoomItemRules,
     battle_rules: meteor_combat::battle_rules::BattleRules,
     camp: u32,
@@ -2167,6 +2180,7 @@ fn begin_network_connection(
         game_num: request.stock_game_num,
         game_time_minutes: request.stock_game_time_minutes,
         life_adjust_percent: request.stock_life_adjust_percent,
+        physics_hz: request.stock_physics_hz,
         battle_rules,
         item_rules: StockRoomItemRules {
             hide_item: request.stock_hide_item,
@@ -2184,6 +2198,62 @@ fn begin_network_connection(
     });
     native_thread.install(&thread_address, handle);
     Ok(())
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn stock_bot_autohost(
+    bot: Option<Res<crate::plugins::stock_bot::StockBot>>,
+    mut net: ResMut<NetState>,
+    mut request: ResMut<LaunchRequest>,
+    mut net_tx: ResMut<NetTx>,
+    mut net_rx: ResMut<NetRx>,
+    mut worker: ResMut<NativeNetThread>,
+    mut dialog: ResMut<StockConnectionDialog>,
+    mut started: Local<bool>,
+) {
+    let Some(bot) = bot else {
+        return;
+    };
+    if *started || net.status != NetStatus::Disconnected {
+        return;
+    }
+    if let Some(error) = &bot.error {
+        *started = true;
+        dialog.fail(format!("机器人模型未能启动：{error}"));
+        return;
+    }
+    if !bot.ready {
+        return;
+    }
+    *started = true;
+    let bot = &bot.config;
+    request.stage_id.clone_from(&bot.stage_id);
+    request.stage_name = meteor_scene::stage_registry::official_stages()
+        .into_iter()
+        .find(|stage| stage.id == bot.stage_id)
+        .map_or_else(|| bot.stage_id.clone(), |stage| stage.name);
+    request.player_name.clone_from(&bot.player_name);
+    request.room_name.clone_from(&bot.room_name);
+    request.character_id = bot.character_id;
+    request.weapon = bot.weapon;
+    request.stock_rule = 1;
+    request.stock_camp = 0;
+    request.public_battle = false;
+    request.spawn_room_npcs = false;
+    request.stock_password.clear();
+    net.address = format!("udp-host://0.0.0.0:{}", bot.port);
+    net.error = None;
+    info!(
+        "stock bot: hosting {} as {}:{} at {}",
+        request.stage_id, request.player_name, request.character_id, net.address
+    );
+    stock_connection_dialog::start(
+        &mut dialog,
+        &mut net,
+        &mut net_tx,
+        &mut net_rx,
+        &mut worker,
+        &request,
+    );
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -2698,6 +2768,12 @@ fn validate_stock_selection(request: &LaunchRequest) -> Result<(), String> {
     }
     if !(10..=500).contains(&request.stock_life_adjust_percent) {
         return Err("生命调整必须是 10%..500%".into());
+    }
+    if !request.public_battle
+        && !(meteor_core::PHYSICS_HZ_MIN..=meteor_core::PHYSICS_HZ_MAX)
+            .contains(&request.stock_physics_hz)
+    {
+        return Err("局域网判定频率必须是 30–200 Hz".into());
     }
     if request.stock_rule == 1 && request.stock_camp != 0 {
         return Err("盟主模式必须选择无阵营".into());
@@ -3326,6 +3402,7 @@ fn run_stock_host_connection(
         ));
     server.set_round_time_minutes(stock.game_time_minutes);
     server.set_life_adjust_percent(stock.life_adjust_percent);
+    server.set_physics_hz(stock.physics_hz);
     server.set_item_rules(stock.item_rules);
     server.set_battle_rules(stock.battle_rules);
     server.set_scene_frame(stock_scene_frame(&stock.stage_id));
@@ -4078,6 +4155,11 @@ fn run_stock_client_loop(
                     }
                     let disconnect_reason = match &event {
                         StockGameEvent::PeerDisconnected { reason, .. }
+                            if *reason == meteor_network::stock_game::STOCK_REJECT_ROOM_PHYSICS =>
+                        {
+                            Some("房间使用自定义判定频率，请与房主使用同一新版客户端")
+                        }
+                        StockGameEvent::PeerDisconnected { reason, .. }
                             if *reason
                                 == meteor_network::stock_session::STOCK_REJECT_RESTRICTED =>
                         {
@@ -4779,6 +4861,9 @@ fn handle_stock_game_event(
         StockGameEvent::BattleRules(rules) => {
             net.battle_rules = rules;
         }
+        StockGameEvent::RoomPhysicsHz(hz) => {
+            net.stock_physics_hz = hz;
+        }
         StockGameEvent::TransportConnected {
             peer: _,
             transport_id,
@@ -4786,6 +4871,7 @@ fn handle_stock_game_event(
             info!("net: stock transport connected id={transport_id}");
             net_tx.activate();
             net.transport_connected = true;
+            net.stock_physics_hz = meteor_core::PHYSICS_HZ_DEFAULT;
             net.stock_runtime_generation = None;
             net.stock_entry_prepared.clear();
             net.projectile_sync_enabled = false;
@@ -4997,6 +5083,8 @@ fn handle_stock_game_event(
                 if let Some(profile) = net.remote_actor_profiles.get_mut(&player_id) {
                     profile.1 = weapon;
                 }
+            } else {
+                net.stock_equipped_weapons.remove(&player_id);
             }
         }
         StockGameEvent::PoseStart(pose) | StockGameEvent::PoseChain(pose) => {
@@ -5626,6 +5714,7 @@ fn hard_disconnect(net: &mut NetState, next_state: &mut NextState<AppState>, cur
     net.status = NetStatus::Disconnected;
     net.transport_connected = false;
     net.battle_rules = Default::default();
+    net.stock_physics_hz = meteor_core::PHYSICS_HZ_DEFAULT;
     net.friendly_fire = false;
     net.match_epoch = None;
     net.round_epoch = None;
@@ -9450,7 +9539,9 @@ fn net_handle_hit(
                     kind,
                     attacker: attacker_entity,
                     defender: entity,
-                    reaction_pose: None,
+                    reaction_pose: hit
+                        .stock_guard_bucket
+                        .and_then(|_| hit.reaction.as_ref()?.target_pose),
                     effect_strategy: hit.effect_strategy,
                     contact: (attacker_position + transform.translation + Vec3::Y * 2.2) * 0.5,
                     direction: transform.translation - attacker_position,
@@ -10374,6 +10465,7 @@ fn net_room_leave_button(
     net.reconnect_at = None;
     net.status = NetStatus::Disconnected;
     net.battle_rules = Default::default();
+    net.stock_physics_hz = meteor_core::PHYSICS_HZ_DEFAULT;
     net.friendly_fire = false;
     net.match_epoch = None;
     net.round_epoch = None;
@@ -16664,6 +16756,7 @@ mod tests {
                         game_num: 1,
                         game_time_minutes: 999,
                         life_adjust_percent: 200,
+                        physics_hz: meteor_core::PHYSICS_HZ_DEFAULT,
                         item_rules: meteor_network::stock_game::StockRoomItemRules::default(),
                         camp: 0,
                         stage_id: "sn06".into(),
@@ -16747,6 +16840,7 @@ mod tests {
                     game_num: 1,
                     game_time_minutes: 999,
                     life_adjust_percent: 200,
+                    physics_hz: 173,
                     item_rules: meteor_network::stock_game::StockRoomItemRules::default(),
                     camp: 1,
                     stage_id: "sn04".into(),
@@ -16759,6 +16853,7 @@ mod tests {
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
         let mut entered = false;
+        let mut room_physics_hz = None;
         let mut endpoint = None;
         let mut seen = Vec::new();
         while std::time::Instant::now() < deadline {
@@ -16768,6 +16863,9 @@ mod tests {
                 {
                     entered = true;
                     break;
+                }
+                Ok(NetInbound::StockGame(StockGameEvent::RoomPhysicsHz(hz))) => {
+                    room_physics_hz = Some(hz);
                 }
                 Ok(NetInbound::StockGame(StockGameEvent::TransportConnected { peer, .. })) => {
                     endpoint = Some(peer)
@@ -16781,6 +16879,11 @@ mod tests {
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
+        assert_eq!(
+            room_physics_hz,
+            Some(173),
+            "loopback host receives its room setting before entering"
+        );
         let mut advertised_name = None;
         if let Some(endpoint) = endpoint {
             let mut discovery =

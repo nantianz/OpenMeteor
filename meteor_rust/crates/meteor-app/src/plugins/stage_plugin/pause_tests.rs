@@ -119,11 +119,11 @@ fn solo_pause_freezes_sn09_mission_and_scene_until_resume() {
 
 #[cfg(feature = "original-assets")]
 #[test]
-fn solo_pause_discards_capped_frame_debt_without_changing_target_fps() {
+fn solo_pause_discards_partial_fixed_step_without_changing_settings() {
     let mut app = app();
     app.world_mut()
         .resource_mut::<crate::app_state::Settings>()
-        .target_fps = 30;
+        .physics_hz = 60;
     step(&mut app, 0.008);
     let elapsed = mission(&app).elapsed();
     transition(&mut app, AppState::Paused);
@@ -131,30 +131,28 @@ fn solo_pause_discards_capped_frame_debt_without_changing_target_fps() {
     app.world_mut()
         .resource_mut::<NextState<AppState>>()
         .set(AppState::Playing);
-    for _ in 0..4 {
+    for _ in 0..2 {
         step(&mut app, 0.008);
     }
     assert_eq!(mission(&app).elapsed(), elapsed);
     step(&mut app, 0.008);
     let clock = app.world().resource::<FrameClock>();
 
-    assert!((clock.sim_dt - 0.04).abs() < 1e-6);
+    assert_eq!(clock.sim_dt, 1.0 / 60.0);
     assert_eq!(
         app.world()
             .resource::<crate::app_state::Settings>()
-            .target_fps,
-        30
+            .physics_hz,
+        60
     );
-    assert!((clock.wall_step - 0.04).abs() < 1e-6);
-    assert!((mission(&app).elapsed() - elapsed - 0.04).abs() < 1e-6);
-
-    for _ in 0..4 {
+    assert!((clock.wall_step - 1.0 / 60.0).abs() < 1e-6);
+    assert!((mission(&app).elapsed() - elapsed - 1.0 / 60.0).abs() < 1e-6);
+    for _ in 0..2 {
         step(&mut app, 0.008);
     }
     let clock = app.world().resource::<FrameClock>();
-    assert!((clock.sim_dt - 0.032).abs() < 1e-6);
-    assert!((clock.wall_step - 0.032).abs() < 1e-6);
-    assert!((mission(&app).elapsed() - elapsed - 0.072).abs() < 1e-6);
+    assert_eq!(clock.sim_dt, 1.0 / 60.0);
+    assert!((mission(&app).elapsed() - elapsed - 2.0 / 60.0).abs() < 1e-6);
 }
 
 #[cfg(feature = "original-assets")]

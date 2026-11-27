@@ -58,6 +58,25 @@ impl OriginalDirectory {
                     result
                         .entries
                         .insert(format!("stage/{file}"), Entry::File(path.clone()));
+                    if file.rsplit_once('.').is_some_and(|(_, ext)| {
+                        matches!(
+                            ext,
+                            "bmp"
+                                | "dib"
+                                | "dds"
+                                | "tga"
+                                | "jpg"
+                                | "jpeg"
+                                | "png"
+                                | "gif"
+                                | "webp"
+                                | "ifl"
+                        )
+                    }) {
+                        result
+                            .entries
+                            .insert(format!("texture/{dir}/{file}"), Entry::File(path.clone()));
+                    }
                 }
             } else if name.ends_with(".pak") {
                 result.index_archive(name, path)?;
@@ -117,6 +136,12 @@ impl OriginalDirectory {
             && ROOM_STAGE_EXTENSIONS
                 .iter()
                 .all(|ext| self.entries.contains_key(&format!("{stage}/{stage}.{ext}")))
+    }
+    pub(crate) fn stage_directory(&self, stage: &str) -> Option<&Path> {
+        let Entry::File(path) = self.entries.get(&format!("{stage}/{stage}.gmb"))? else {
+            return None;
+        };
+        path.parent()
     }
 
     pub fn stage_preview_revision(&self, stage: &str) -> String {
@@ -514,6 +539,7 @@ fn index_files(
                     "pscriptlib",
                     "music",
                     "fonts",
+                    "ui",
                     "image",
                     "patch",
                     "texture",

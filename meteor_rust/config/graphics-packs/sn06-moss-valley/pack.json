@@ -42,12 +42,15 @@
       "normal": "boulder-normal",
       "orm": "boulder-orm",
       "tint": [
-        0.84,
-        0.95,
-        0.85
+        1.45,
+        1.6,
+        0.84
       ],
       "normal_strength": 0.9,
-      "roughness": 1.0
+      "roughness": 1.0,
+      "direct_light": 1.68,
+      "ambient_light": 0.72,
+      "fog_strength": 0.32
     },
     "ridge-bedrock": {
       "base_color": "ridge-bedrock-base",
@@ -225,7 +228,7 @@
         "mid_distance": 18.0,
         "max_distance": 110.0,
         "max_visible_tiles": 512,
-        "max_triangles": 180000,
+        "max_triangles": 320000,
         "clump_radius": 0.56,
         "patch_size": 4.8,
         "ground_cover": 1.0,

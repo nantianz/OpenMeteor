@@ -1,14 +1,22 @@
 use super::profiles::{Profiles, WaterProfile};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashSet, sync::OnceLock};
-
-pub(super) const BUNDLED: &str = include_str!("../../../../../../config/water-enhancement.json");
+use std::{
+    collections::HashSet,
+    sync::{Arc, OnceLock},
+};
+#[cfg(test)]
+const BUNDLED: &str =
+    include_str!("../../../../../../config/graphics-packs/water/water-enhancement.json");
 pub(super) const MAX_WAVES: usize = 8;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct WaterConfig {
     pub schema_version: u32,
+    #[serde(default)]
+    pub live_reflections: bool,
+    #[serde(default)]
+    pub depth_hierarchy: bool,
     pub geometry: Geometry,
     pub wind_waves: Vec<WindWave>,
     pub simulation: Simulation,
@@ -118,6 +126,7 @@ pub(super) fn range(name: &str, v: f32, lo: f32, hi: f32) -> Result<(), String> 
     }
 }
 impl WaterConfig {
+    #[cfg(test)]
     pub fn bundled() -> Self {
         Self::from_json(BUNDLED).expect("bundled water configuration")
     }
@@ -223,89 +232,36 @@ impl WaterConfig {
     }
 }
 
-struct Snapshot {
-    config: WaterConfig,
-    profiles: Profiles,
-    error: Option<String>,
-}
-static CONFIG: OnceLock<Snapshot> = OnceLock::new();
-impl Snapshot {
-    fn bundled() -> Self {
-        Self {
-            config: WaterConfig::bundled(),
-            profiles: Profiles::bundled(),
-            error: None,
-        }
+static ACTIVE: OnceLock<Arc<super::WaterPackage>> = OnceLock::new();
+fn package() -> &'static super::WaterPackage {
+    #[cfg(test)]
+    {
+        ACTIVE
+            .get()
+            .map(Arc::as_ref)
+            .unwrap_or_else(|| super::WaterPackage::fixture())
+    }
+    #[cfg(not(test))]
+    {
+        ACTIVE
+            .get()
+            .expect("water requires an active graphics pack")
     }
 }
 pub(super) fn get() -> &'static WaterConfig {
-    &CONFIG.get_or_init(Snapshot::bundled).config
+    &package().config
 }
 pub(super) fn profiles() -> &'static Profiles {
-    &CONFIG.get_or_init(Snapshot::bundled).profiles
+    &package().profiles
 }
-pub(super) fn initialize() {
-    CONFIG.get_or_init(|| {
-        load().unwrap_or_else(|error| Snapshot {
-            error: Some(error),
-            ..Snapshot::bundled()
-        })
-    });
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+pub(super) fn depth_hierarchy_enabled() -> bool {
+    ACTIVE
+        .get()
+        .is_some_and(|package| package.depth_hierarchy())
 }
-pub(super) fn error() -> Option<&'static str> {
-    CONFIG.get().and_then(|c| c.error.as_deref())
-}
-fn load() -> Result<Snapshot, String> {
-    #[cfg(all(not(test), not(any(target_arch = "wasm32", target_os = "android"))))]
-    {
-        use std::{
-            io::Read,
-            path::{Path, PathBuf},
-        };
-        let mut directories = vec![PathBuf::from("config"), PathBuf::from("meteor_rust/config")];
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(parent) = exe.parent() {
-                directories.push(parent.join("config"));
-            }
-        }
-        let explicit = std::env::var_os("METEOR_WATER_CONFIG").map(PathBuf::from);
-        let path = explicit.or_else(|| {
-            directories
-                .iter()
-                .map(|dir| dir.join("water-enhancement.json"))
-                .find(|p| p.is_file())
-        });
-        if let Some(path) = path {
-            let mut json = String::new();
-            std::fs::File::open(&path)
-                .and_then(|f| f.take(1_048_577).read_to_string(&mut json))
-                .map_err(|e| format!("{}: {e}", path.display()))?;
-            bevy::log::info!("水面配置: {}", path.display());
-            let config =
-                WaterConfig::from_json(&json).map_err(|e| format!("{}: {e}", path.display()))?;
-            let directory = path
-                .parent()
-                .filter(|p| !p.as_os_str().is_empty())
-                .unwrap_or(Path::new("."));
-            return Ok(Snapshot {
-                config,
-                profiles: Profiles::load(directory)?,
-                error: None,
-            });
-        }
-        if let Some(directory) = directories.iter().find(|dir| {
-            [super::profiles::DEEP_FILE, super::profiles::SHALLOW_FILE]
-                .iter()
-                .any(|name| dir.join(name).exists())
-        }) {
-            return Ok(Snapshot {
-                config: WaterConfig::bundled(),
-                profiles: Profiles::load(directory)?,
-                error: None,
-            });
-        }
-    }
-    Ok(Snapshot::bundled())
+pub(super) fn initialize(water: Arc<super::WaterPackage>) {
+    let _ = ACTIVE.set(water);
 }
 
 #[cfg(test)]

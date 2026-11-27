@@ -1,7 +1,9 @@
 use crate::app_state::{AppState, Settings};
 use crate::components::fighter::Fighter;
 use crate::plugins::camera_plugin::GameplayCamera;
+use crate::plugins::render_plugin::SceneDeform;
 use crate::plugins::stage_material::FrameUniforms;
+use bevy::camera::primitives::Frustum;
 use bevy::prelude::*;
 use bevy::render::render_resource::ShaderType;
 use meteor_core::constants::MODEL_SCALE;
@@ -42,6 +44,37 @@ pub(crate) struct LiquidSurface {
 impl LiquidSurface {
     pub(crate) fn is_clear_water(&self) -> bool {
         self.kind == 1.0
+    }
+    pub(super) fn near_camera(&self, eye: Vec3, max_distance: f32) -> bool {
+        if self.triangles.is_empty() {
+            return true;
+        }
+        let closest = eye.xz().clamp(self.min.xz(), self.max.xz());
+        eye.xz().distance_squared(closest) <= max_distance * max_distance
+    }
+    pub(super) fn may_be_visible(
+        &self,
+        frustum: Option<&Frustum>,
+        wave: Option<&super::waves::WaterWaveMesh>,
+        deformed: bool,
+    ) -> bool {
+        let Some(frustum) = frustum else {
+            return true;
+        };
+        if deformed || self.triangles.is_empty() {
+            return true;
+        }
+        let Some(wave_height) = wave.map_or(Some(0.0), |wave| wave.max_displacement()) else {
+            return true;
+        };
+        self.triangles.iter().any(|triangle| {
+            frustum.0.half_spaces.iter().all(|plane| {
+                let margin = 0.01 + plane.normal().y.abs() * wave_height;
+                !triangle
+                    .iter()
+                    .all(|vertex| plane.normal_d().dot(vertex.extend(1.0)) < -margin)
+            })
+        })
     }
 
     #[cfg(test)]
@@ -530,7 +563,7 @@ pub(super) fn update(
         &LiquidSurface,
         Option<&Mesh3d>,
         Option<&Transform>,
-        Option<&crate::plugins::render_plugin::SceneDeform>,
+        Option<&SceneDeform>,
         Option<&super::waves::WaterWaveMesh>,
     )>,
     meshes: Option<Res<Assets<Mesh>>>,

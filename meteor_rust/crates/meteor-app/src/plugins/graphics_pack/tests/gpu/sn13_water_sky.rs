@@ -52,6 +52,14 @@ pub(super) fn capture(
             ..default()
         },
     ));
+    if std::env::var_os("METEOR_SN13_RETURN_PROBE").is_some() {
+        probe_repeated_returns(app, camera, to_world);
+        return;
+    }
+    if std::env::var_os("METEOR_SN13_RENDER_BENCH").is_some() {
+        benchmark_render_paths(app, output, camera, target, to_world);
+        return;
+    }
     app.world_mut().resource_mut::<Time<Virtual>>().pause();
     let readback = Arc::new(Mutex::new(Vec::new()));
     let pixels = readback.clone();
@@ -203,6 +211,265 @@ pub(super) fn capture(
     }
 }
 
+fn probe_repeated_returns(app: &mut App, camera: Entity, to_world: impl Fn(Vec3) -> Vec3) {
+    use super::sky_benchmark::{summarize, wait};
+    use crate::components::fighter::Fighter;
+    use std::time::{Duration, Instant};
+    app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+        Duration::from_secs_f64(1.0 / 120.0),
+    ));
+    set_reflection_fov(app, camera);
+    app.world_mut().entity_mut(camera).insert(Msaa::Sample4);
+    load_sn13_variant(app, true);
+    let spawn = Vec3::new(-104.507484, 3.3983998, 225.19263);
+    let street_eye = spawn + Vec3::new(0.0, 6.5, 9.8);
+    let street_view =
+        Transform::from_translation(street_eye).looking_at(spawn + Vec3::Y * 2.0, Vec3::Y);
+    let river = Vec3::new(-190.0, -820.0, -140.0);
+    let river_view = Transform::from_translation(to_world(river))
+        .looking_at(to_world(river + Vec3::new(0.0, 1.0, 0.08)), Vec3::Y);
+    let actor = app
+        .world_mut()
+        .spawn((
+            Fighter {
+                character_id: 0,
+                player_slot: 0,
+                weapon: 0,
+                weapon_slots: [0; 2],
+                weapon_slot: 0,
+                weapon_slot_variants: [0; 2],
+                weapon_variant: 0,
+            },
+            Transform::IDENTITY,
+        ))
+        .id();
+    let mut seconds = 0.0;
+    for cycle in 0..5 {
+        for (view, count, name) in [(street_view, 150, "street"), (river_view, 300, "river")] {
+            if cycle == 4 && name == "river" {
+                break;
+            }
+            *app.world_mut().get_mut::<Transform>(camera).unwrap() = view;
+            let mut elapsed = Vec::new();
+            let mut cpu = Vec::new();
+            let mut contact_frames = 0;
+            for frame in 0..count {
+                let p = if name == "river" {
+                    let t = ((frame % 60) as f32 / 60.0) * std::f32::consts::TAU;
+                    let start = Vec3::new(
+                        -190.0 + 65.0 * cycle as f32,
+                        -820.0 - 110.0 * cycle as f32,
+                        -187.0,
+                    );
+                    to_world(
+                        start
+                            + Vec3::new(11.0 * t.sin(), 11.0 * t.cos(), (t.sin() * 17.0).max(-8.0)),
+                    )
+                } else {
+                    spawn
+                };
+                app.world_mut()
+                    .get_mut::<Transform>(actor)
+                    .unwrap()
+                    .translation = p;
+                seconds += 1.0 / 120.0;
+                app.world_mut().resource_mut::<FrameUniforms>().seconds = seconds;
+                let begin = Instant::now();
+                app.update();
+                let update_ms = begin.elapsed().as_secs_f64() * 1000.0;
+                wait(app.world().resource::<RenderDevice>());
+                if frame >= count - 60 {
+                    elapsed.push(begin.elapsed().as_secs_f64() * 1000.0);
+                    cpu.push(update_ms);
+                }
+                contact_frames += u32::from(
+                    app.world()
+                        .resource::<FrameUniforms>()
+                        .liquid_contacts
+                        .counts
+                        .x
+                        > 0.0,
+                );
+            }
+            let device = app.world().resource::<RenderDevice>().wgpu_device();
+            let allocation = device.generate_allocator_report().map(|report| {
+                (
+                    report.allocations.len(),
+                    report.allocations.iter().map(|a| a.size).sum::<u64>(),
+                )
+            });
+            let phase = app.world().get::<DepthPrepass>(camera).is_some();
+            eprintln!("SN13 RETURN {cycle} {name}: {}, cpu {}, contacts {contact_frames}, depth {phase}, allocations {allocation:?}",
+                summarize(&mut elapsed), summarize(&mut cpu));
+            if name == "river" {
+                assert!(
+                    contact_frames > count / 2,
+                    "fixture must produce recurring water contacts"
+                );
+            }
+        }
+    }
+}
+fn benchmark_render_paths(
+    app: &mut App,
+    output: &Path,
+    camera: Entity,
+    target: &Handle<Image>,
+    to_world: impl Fn(Vec3) -> Vec3,
+) {
+    use super::sky_benchmark::{summarize, wait};
+    use crate::plugins::scene_render_optimizations;
+    use crate::plugins::stage_plugin::LocalFighter;
+    use std::time::{Duration, Instant};
+    let (width, height) = if std::env::var_os("METEOR_SN13_ORIGINAL_DIR").is_some() {
+        (2560, 1494)
+    } else {
+        (1920, 1080)
+    };
+    let size = Extent3d {
+        width,
+        height,
+        depth_or_array_layers: 1,
+    };
+    app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+        Duration::from_secs_f64(1.0 / 150.0),
+    ));
+    app.world_mut().entity_mut(camera).insert(Msaa::Sample4);
+    let window = app
+        .world_mut()
+        .query_filtered::<Entity, With<PrimaryWindow>>()
+        .single(app.world())
+        .unwrap();
+    app.world_mut()
+        .get_mut::<Window>(window)
+        .unwrap()
+        .resolution = WindowResolution::new(width, height);
+    app.world_mut()
+        .resource_mut::<Assets<Image>>()
+        .get_mut(target)
+        .unwrap()
+        .resize(size);
+    set_reflection_fov(app, camera);
+    load_sn13_variant(app, true);
+    {
+        let mut settings = app.world_mut().resource_mut::<Settings>();
+        settings.dynamic_shadows = true;
+        settings.environment_lighting = true;
+        settings.volumetric_fog = true;
+    }
+    let actor_mesh = app
+        .world_mut()
+        .resource_mut::<Assets<Mesh>>()
+        .add(Cuboid::new(0.8, 2.0, 0.8));
+    let actor_material = app
+        .world_mut()
+        .resource_mut::<Assets<StandardMaterial>>()
+        .add(Color::srgb(0.7, 0.15, 0.05));
+    let actor = app
+        .world_mut()
+        .spawn((
+            LocalFighter,
+            Mesh3d(actor_mesh),
+            MeshMaterial3d(actor_material),
+        ))
+        .id();
+    let street = Vec3::new(-794.0, -178.0, 63.0);
+    let street_eye = to_world(street);
+    let street_target = to_world(street + Vec3::new(-0.58, 0.81, -0.13));
+    let river_eye = Vec3::new(20.0, -17.0, 55.0);
+    let river_target = Vec3::new(12.9, -22.0, 60.7);
+    let views = [
+        ("street", street_eye, street_target, false),
+        ("walking", street_eye, street_target, true),
+        ("river", river_eye, river_target, false),
+    ];
+    for (name, eye, aim, moving) in views {
+        let transform = Transform::from_translation(eye).looking_at(aim, Vec3::Y);
+        *app.world_mut().get_mut::<Transform>(camera).unwrap() = transform;
+        let start = eye + (aim - eye).normalize() * 4.0 - Vec3::Y * 1.9;
+        let update = |app: &mut App, frame| {
+            let position = start
+                + Vec3::X
+                    * if moving {
+                        f32::sin(frame as f32 / 50.0) * 8.0
+                    } else {
+                        0.0
+                    };
+            app.world_mut()
+                .get_mut::<Transform>(actor)
+                .unwrap()
+                .translation = position;
+            app.world_mut().resource_mut::<FrameUniforms>().seconds = f64::from(frame) / 150.0;
+            app.update();
+        };
+        let mut serial = Vec::new();
+        let mut cpu = Vec::new();
+        for frame in 0..150 {
+            let begin = Instant::now();
+            update(app, frame);
+            let update_ms = begin.elapsed().as_secs_f64() * 1000.0;
+            wait(app.world().resource::<RenderDevice>());
+            if frame >= 60 {
+                serial.push(begin.elapsed().as_secs_f64() * 1000.0);
+                cpu.push(update_ms);
+            }
+        }
+        assert_eq!(
+            app.world().get::<DepthPrepass>(camera).is_some(),
+            name == "river"
+        );
+        let options = scene_render_optimizations::options("sn13");
+        if options.shadows && name == "street" {
+            let world = app.sub_app_mut(bevy::render::RenderApp).world_mut();
+            let mut cache = world.query::<&bevy::pbr::ShadowCacheTarget>();
+            assert!(cache
+                .iter(world)
+                .any(bevy::pbr::ShadowCacheTarget::has_cached_depth));
+        }
+        let hierarchy = app
+            .world()
+            .resource::<GraphicsPacks>()
+            .water()
+            .is_some_and(|water| water.depth_hierarchy());
+        if hierarchy && name == "river" {
+            use crate::plugins::stage_material::water::depth_hierarchy::TEST_DISPATCHES;
+            assert!(TEST_DISPATCHES.load(std::sync::atomic::Ordering::Relaxed) > 60);
+        }
+        if options.occlusion {
+            assert_eq!(
+                app.world()
+                    .get::<bevy::render::occlusion_culling::OcclusionCulling>(camera)
+                    .is_some(),
+                name == "river"
+            );
+        }
+        eprintln!(
+            "SN13 RENDER {name}: serial {}, cpu {}",
+            summarize(&mut serial),
+            summarize(&mut cpu)
+        );
+        let pixels = Arc::new(Mutex::new(Vec::new()));
+        let output_pixels = pixels.clone();
+        let reader = app
+            .world_mut()
+            .spawn(Readback::texture(target.clone()))
+            .observe(move |e: On<ReadbackComplete>| *output_pixels.lock().unwrap() = e.data.clone())
+            .id();
+        let data = capture_size(app, &pixels, width, height);
+        app.world_mut().despawn(reader);
+        Image::new(
+            size,
+            TextureDimension::D2,
+            data,
+            TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::MAIN_WORLD,
+        )
+        .try_into_dynamic()
+        .unwrap()
+        .save(output.join(format!("{name}.png")))
+        .unwrap();
+    }
+}
 fn benchmark(
     app: &mut App,
     camera: Entity,

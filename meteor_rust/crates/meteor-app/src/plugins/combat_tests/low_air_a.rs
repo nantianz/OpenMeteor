@@ -1,4 +1,7 @@
-fn low_air_a_harness_120hz() -> (GameplayHarness, crate::app_state::Keymap) {
+fn low_air_a_harness(
+    tick: std::time::Duration,
+    running: bool,
+) -> (GameplayHarness, crate::app_state::Keymap) {
     let mut h = spawn_gameplay_harness_with_order(DAGGER, true).expect("original P1 assets");
     crate::plugins::install_frame_clock(&mut h.app);
     h.app
@@ -13,13 +16,15 @@ fn low_air_a_harness_120hz() -> (GameplayHarness, crate::app_state::Keymap) {
             .in_set(crate::plugins::FighterFrameSet::SkeletonSample),
     );
     let keys = h.app.world().resource::<crate::app_state::Keymap>().clone();
-    h.press_binding(keys.move_up);
+    if running {
+        h.press_binding(keys.move_up);
+    }
     for _ in 0..30 {
-        h.step_duration(LOW_AIR_A_TICK);
+        h.step_duration(tick);
     }
     h.press_binding(keys.jump);
     for _ in 0..6 {
-        h.step_duration(LOW_AIR_A_TICK);
+        h.step_duration(tick);
     }
     h.release_binding(keys.jump);
     (h, keys)
@@ -39,7 +44,7 @@ fn production_air_a_120hz_uses_the_authored_speed_at_low_and_high_entries() {
         (3, 6.711, 8.628),
         (24, 37.528, 39.444),
     ] {
-        let (mut h, keys) = low_air_a_harness_120hz();
+        let (mut h, keys) = low_air_a_harness(LOW_AIR_A_TICK, true);
         let floor = h.position().y;
         for _ in 0..delay {
             h.step_duration(LOW_AIR_A_TICK);
@@ -86,11 +91,39 @@ fn production_air_a_120hz_uses_the_authored_speed_at_low_and_high_entries() {
 }
 
 #[test]
+fn production_dagger_down_a_on_jump_release_uses_the_attack_mover() {
+    use meteor_physics::jump::AirMotionMode;
+    for fps in [60, 120] {
+        let tick = std::time::Duration::from_nanos(1_000_000_000 / fps);
+        for (running, expected_pose) in [(false, 252), (true, 256)] {
+            let (mut h, keys) = low_air_a_harness(tick, running);
+            if running {
+                h.release_binding(keys.move_up);
+            }
+            h.press_binding(keys.move_down);
+            h.press_binding(keys.attack);
+            h.step_duration(tick);
+            assert_eq!(h.pose_id(), expected_pose, "{fps} FPS");
+            let air = h.app.world().get::<FighterAir>(h.fighter).unwrap();
+            assert_eq!(
+                air.air.motion_mode,
+                AirMotionMode::Curve,
+                "{fps} FPS, Pose {expected_pose}"
+            );
+            let attack = h.app.world().get::<FighterAttackMotion>(h.fighter).unwrap();
+            assert!(
+                !attack.air_step_pending,
+                "the attack mover must consume the first step"
+            );
+        }
+    }
+}
+#[test]
 fn production_air_a_120hz_control_plain_jump_keeps_its_ballistic_arc() {
     use meteor_core::MODEL_SCALE;
     use meteor_physics::jump::AirMotionMode;
 
-    let (mut h, _) = low_air_a_harness_120hz();
+    let (mut h, _) = low_air_a_harness(LOW_AIR_A_TICK, true);
     let floor = h.position().y;
     h.step_duration(LOW_AIR_A_TICK);
     let air = h.app.world().get::<FighterAir>(h.fighter).unwrap();

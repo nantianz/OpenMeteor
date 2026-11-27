@@ -1,8 +1,7 @@
 use super::{config, GraphicsPacks};
 use crate::app_state::{LoadedStageInfo, Settings};
-use bevy::{
-    core_pipeline::prepass::DepthPrepass, prelude::*, render::render_resource::TextureFormat,
-};
+use crate::plugins::effect_plugin::PonEfMaterial;
+use bevy::{ecs::system::SystemParam, prelude::*, render::render_resource::TextureFormat};
 use std::collections::HashMap;
 
 pub(crate) struct ResolvedTrail {
@@ -60,14 +59,6 @@ impl EffectEnhancements {
             })
             .map(|(_, index)| &self.rules[*index])
     }
-
-    pub fn wants_depth_prepass(&self) -> bool {
-        self.enabled
-            && self
-                .rules
-                .iter()
-                .any(|resolved| resolved.rule.soft || resolved.rule.emitters.iter().any(|e| e.soft))
-    }
 }
 
 #[cfg(test)]
@@ -121,7 +112,7 @@ pub(crate) fn effect_stem(effect: &str) -> String {
 
 pub(super) fn install(app: &mut App) {
     app.init_resource::<EffectEnhancements>()
-        .add_systems(Update, (resolve, sync_depth_prepass).chain());
+        .add_systems(Update, resolve);
 }
 
 fn resolve(
@@ -238,30 +229,29 @@ fn resolve(
     }
 }
 
-#[derive(Component)]
-pub(crate) struct EffectDepthOwner;
-
-fn sync_depth_prepass(
-    mut commands: Commands,
-    enhancements: Res<EffectEnhancements>,
-    cameras: Query<
-        (Entity, Has<DepthPrepass>, Has<EffectDepthOwner>),
-        With<crate::plugins::camera_plugin::GameplayCamera>,
+#[derive(SystemParam)]
+pub(crate) struct VisibleSoftEffects<'w, 's> {
+    emitters: Query<'w, 's, (&'static super::fx::FxEmitter, &'static ViewVisibility)>,
+    pon_nodes: Query<
+        'w,
+        's,
+        (
+            &'static MeshMaterial3d<PonEfMaterial>,
+            &'static ViewVisibility,
+        ),
     >,
-) {
-    let wanted = !cfg!(any(target_arch = "wasm32", target_os = "android"))
-        && enhancements.wants_depth_prepass();
-    for (entity, has_depth, owned) in &cameras {
-        if wanted && !has_depth {
-            commands
-                .entity(entity)
-                .insert((DepthPrepass, EffectDepthOwner));
-        } else if !wanted && owned {
-            commands
-                .entity(entity)
-                .remove::<DepthPrepass>()
-                .remove::<EffectDepthOwner>();
-        }
+    pon_materials: Option<Res<'w, Assets<PonEfMaterial>>>,
+}
+impl VisibleSoftEffects<'_, '_> {
+    pub(crate) fn wants_depth_prepass(&self) -> bool {
+        self.emitters
+            .iter()
+            .any(|(emitter, visibility)| emitter.spec.soft && visibility.get())
+            || self.pon_materials.as_ref().is_some_and(|materials| {
+                self.pon_nodes.iter().any(|(handle, visibility)| {
+                    visibility.get() && materials.get(&handle.0).is_some_and(PonEfMaterial::is_soft)
+                })
+            })
     }
 }
 
@@ -368,7 +358,6 @@ mod tests {
             .filter(|t| t.is_some())
             .count()
             == 2));
-        assert!(e.wants_depth_prepass());
         assert!(e.rule("spdup").is_none());
 
         app.world_mut().resource_mut::<Settings>().effect_enhance = false;

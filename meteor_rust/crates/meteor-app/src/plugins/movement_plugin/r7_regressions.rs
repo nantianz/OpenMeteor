@@ -1,16 +1,21 @@
 use super::*;
 use crate::plugins::movement_plugin::FighterAttackMotion;
 
-fn r7_harness(target_fps: u32) -> GameplayHarness {
+fn r7_harness(physics_hz: u32) -> GameplayHarness {
     let mut h = spawn_gameplay_harness_with_order(DAGGER, true).expect("original p1 resources");
-    h.app.world_mut().resource_mut::<Settings>().target_fps = target_fps;
+    let mut settings = h.app.world_mut().resource_mut::<Settings>();
+    if physics_hz == 0 {
+        settings.variable_physics = true;
+    } else {
+        settings.physics_hz = physics_hz;
+    }
     crate::plugins::install_frame_clock(&mut h.app);
     install_guard_test_animation(&mut h);
     h
 }
 
-fn r7_wall_harness(target_fps: u32) -> GameplayHarness {
-    let mut h = r7_harness(target_fps);
+fn r7_wall_harness(physics_hz: u32) -> GameplayHarness {
+    let mut h = r7_harness(physics_hz);
     h.press_binding(crate::app_state::Keymap::default().move_up);
 
     h.step_dt(1.0 / 120.0);
@@ -214,7 +219,7 @@ fn production_r7_low_speed_authored_ascent_keeps_its_scene_owner() {
 
 #[test]
 fn production_r7_wall_deadline_counts_input_only_frames_once_and_keeps_stalls() {
-    for fps in [0, 30, 60, 120, 137] {
+    for fps in [0, 60, 120, 135] {
         let mut h = r7_wall_harness(fps);
         for _ in 0..120 {
             h.step_dt(1.0 / 120.0);
@@ -224,8 +229,14 @@ fn production_r7_wall_deadline_counts_input_only_frames_once_and_keeps_stalls() 
             wall.cling_active,
             "target {fps}: expires before one real second"
         );
+        let clock = h.app.world().resource::<crate::plugins::FrameClock>();
+        let tick_remainder = if clock.sim_dt > 0.0 {
+            clock.pending_wall
+        } else {
+            0.0
+        };
         assert!(
-            (wall.remaining - 0.8).abs() < 0.00001,
+            (wall.remaining - 0.8 - tick_remainder).abs() < 0.00001,
             "target {fps}: remaining={}",
             wall.remaining
         );
@@ -250,14 +261,29 @@ fn production_r7_wall_deadline_counts_input_only_frames_once_and_keeps_stalls() 
 }
 
 #[test]
+fn fixed_120_weak_jump_keeps_wall_entry_armed_on_a_jittered_release_frame() {
+    let mut h = r7_harness(120);
+    let jump = crate::app_state::Keymap::default().jump;
+    h.step_dt(0.00835);
+    let ground_y = h.position().y;
+    h.press_binding(jump);
+    h.step_dt(0.00835);
+    h.release_binding(jump);
+    h.step_dt(0.00835);
+    let air = h.app.world().get::<FighterAir>(h.fighter).unwrap();
+    assert!(air.air.cling_armed);
+    assert!(!air.mover_vertical_contact);
+    assert!(h.position().y - ground_y > meteor_physics::collision::FOOT_PROBE_DOWN);
+}
+#[test]
 fn production_r7_wall_deadline_freezes_offline_and_recording_pause() {
     use bevy::state::app::AppExtStates;
     for replay in [false, true] {
-        let mut h = r7_wall_harness(30);
+        let mut h = r7_wall_harness(60);
         h.app
             .add_plugins(bevy::state::app::StatesPlugin)
             .insert_state(AppState::Playing);
-        h.step_dt(1.0 / 30.0);
+        h.step_dt(3.0 / 120.0);
         let before = h
             .app
             .world()

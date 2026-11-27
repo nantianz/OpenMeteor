@@ -1,5 +1,3 @@
-
-
 mod draw;
 mod draw_state;
 mod rangefinder;
@@ -68,7 +66,6 @@ pub struct BinnedRenderPhase<BPI>
 where
     BPI: BinnedPhaseItem,
 {
-
     pub multidrawable_meshes: IndexMap<BPI::BatchSetKey, RenderMultidrawableBatchSet<BPI>>,
 
     pub batchable_meshes: IndexMap<(BPI::BatchSetKey, BPI::BinKey), RenderBin>,
@@ -86,19 +83,16 @@ where
 
 #[derive(Default)]
 pub struct RenderBin {
-
     entities: IndexMap<MainEntity, InputUniformIndex, EntityHash>,
 }
 
 #[derive(Default)]
 pub struct RenderMultidrawableBin {
-
     pub(crate) entity_to_binned_mesh_instance_index:
         MainEntityHashMap<RenderBinnedMeshInstanceIndex>,
 }
 
 impl RenderMultidrawableBin {
-
     fn new() -> RenderMultidrawableBin {
         RenderMultidrawableBin {
             entity_to_binned_mesh_instance_index: HashMap::default(),
@@ -114,7 +108,6 @@ impl RenderMultidrawableBin {
 pub(crate) struct RenderBinnedMeshInstanceIndex(pub(crate) u32);
 
 pub struct RenderMultidrawableBatchSetGpuBuffers {
-
     pub render_binned_mesh_instance_buffer: RawBufferVec<GpuRenderBinnedMeshInstance>,
 
     pub bin_index_to_indirect_parameters_offset_buffer: RawBufferVec<u32>,
@@ -122,7 +115,6 @@ pub struct RenderMultidrawableBatchSetGpuBuffers {
 
 #[derive(Clone, Copy)]
 pub(crate) struct CpuRenderBinnedMeshInstance {
-
     pub(crate) main_entity: MainEntity,
 
     bin_index: RenderBinIndex,
@@ -138,7 +130,6 @@ impl Default for CpuRenderBinnedMeshInstance {
 }
 
 impl RenderMultidrawableBatchSetGpuBuffers {
-
     fn new() -> RenderMultidrawableBatchSetGpuBuffers {
         let mut render_bin_entry_buffer = RawBufferVec::new(BufferUsages::STORAGE);
         render_bin_entry_buffer.set_label(Some("render bin entry buffer"));
@@ -161,7 +152,6 @@ impl RenderMultidrawableBatchSetGpuBuffers {
         input_uniform_index: InputUniformIndex,
         bin_index: RenderBinIndex,
     ) {
-
         let gpu_render_bin_entry = GpuRenderBinnedMeshInstance {
             input_uniform_index: input_uniform_index.0,
             bin_index: bin_index.0,
@@ -203,7 +193,6 @@ impl RenderMultidrawableBatchSetGpuBuffers {
         cpu_binned_mesh_instance_buffer: &mut Vec<CpuRenderBinnedMeshInstance>,
         entity_to_remove: MainEntity,
     ) -> Option<(RenderBinnedMeshInstanceIndex, CpuRenderBinnedMeshInstance)> {
-
         let old_index = bin
             .entity_to_binned_mesh_instance_index
             .remove(&entity_to_remove)
@@ -232,7 +221,6 @@ pub struct RenderMultidrawableBatchSet<BPI>
 where
     BPI: BinnedPhaseItem,
 {
-
     pub(crate) gpu_buffers: RenderMultidrawableBatchSetGpuBuffers,
 
     pub(crate) bin_key_to_bin_index: HashMap<BPI::BinKey, RenderBinIndex>,
@@ -250,7 +238,6 @@ impl<BPI> RenderMultidrawableBatchSet<BPI>
 where
     BPI: BinnedPhaseItem,
 {
-
     fn new() -> RenderMultidrawableBatchSet<BPI> {
         RenderMultidrawableBatchSet {
             gpu_buffers: RenderMultidrawableBatchSetGpuBuffers::new(),
@@ -290,7 +277,6 @@ where
                 bin_index = *occupied_entry.get();
             }
             Entry::Vacant(vacant_entry) => {
-
                 bin_index = self
                     .bin_free_list
                     .pop()
@@ -319,7 +305,6 @@ where
     }
 
     fn remove(&mut self, main_entity: MainEntity, bin_key: &BPI::BinKey) {
-
         let bin_index = *self
             .bin_key_to_bin_index
             .get(bin_key)
@@ -346,7 +331,6 @@ where
     }
 
     fn allocate_indirect_parameters(&mut self, bin_index: RenderBinIndex) {
-
         let indirect_parameters_offset = self.indirect_parameters_offset_to_bin_index.len() as u32;
         self.indirect_parameters_offset_to_bin_index.push(bin_index);
 
@@ -367,7 +351,6 @@ where
     }
 
     fn remove_bin_if_empty(&mut self, bin_key: &BPI::BinKey, bin_index: RenderBinIndex) {
-
         let bin = self.bins[bin_index.0 as usize].as_mut().unwrap();
         if !bin.is_empty() {
             return;
@@ -411,7 +394,6 @@ where
 #[derive(Clone, Copy, Default, Pod, Zeroable, ShaderType)]
 #[repr(C)]
 pub struct GpuRenderBinnedMeshInstance {
-
     pub(crate) input_uniform_index: u32,
 
     bin_index: u32,
@@ -421,7 +403,6 @@ pub struct CachedBinnedEntity<BPI>
 where
     BPI: BinnedPhaseItem,
 {
-
     pub cached_bin_key: Option<CachedBinKey<BPI>>,
 }
 
@@ -429,7 +410,6 @@ pub struct CachedBinKey<BPI>
 where
     BPI: BinnedPhaseItem,
 {
-
     pub batch_set_key: BPI::BatchSetKey,
 
     pub bin_key: BPI::BinKey,
@@ -473,7 +453,6 @@ where
 }
 
 pub enum BinnedRenderPhaseBatchSets<BK> {
-
     DynamicUniforms(Vec<SmallVec<[BinnedRenderPhaseBatch; 1]>>),
 
     Direct(Vec<BinnedRenderPhaseBatch>),
@@ -482,7 +461,6 @@ pub enum BinnedRenderPhaseBatchSets<BK> {
 }
 
 pub struct BinnedRenderPhaseBatchSet<BK> {
-
     pub(crate) first_batch: BinnedRenderPhaseBatch,
 
     pub(crate) bin_key: BK,
@@ -506,7 +484,6 @@ impl<BK> BinnedRenderPhaseBatchSets<BK> {
 
 #[derive(Debug)]
 pub struct BinnedRenderPhaseBatch {
-
     pub representative_entity: (Entity, MainEntity),
 
     pub instance_range: Range<u32>,
@@ -515,26 +492,22 @@ pub struct BinnedRenderPhaseBatch {
 }
 
 pub struct UnbatchableBinnedEntities {
-
     pub entities: MainEntityHashMap<Entity>,
 
     pub(crate) buffer_indices: UnbatchableBinnedEntityIndexSet,
 }
 
 pub struct NonMeshEntities {
-
     pub entities: MainEntityHashMap<Entity>,
 }
 
 #[derive(Default)]
 
 pub(crate) enum UnbatchableBinnedEntityIndexSet {
-
     #[default]
     NoEntities,
 
     Sparse {
-
         instance_range: Range<u32>,
 
         first_indirect_parameters_index: Option<NonMaxU32>,
@@ -545,7 +518,6 @@ pub(crate) enum UnbatchableBinnedEntityIndexSet {
 
 #[derive(Clone)]
 pub(crate) struct UnbatchableBinnedEntityIndices {
-
     pub(crate) instance_index: u32,
 
     pub(crate) extra_index: PhaseItemExtraIndex,
@@ -553,7 +525,6 @@ pub(crate) struct UnbatchableBinnedEntityIndices {
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum BinnedRenderPhaseType {
-
     MultidrawableMesh,
 
     BatchableMesh,
@@ -610,7 +581,6 @@ impl<BPI> BinnedRenderPhase<BPI>
 where
     BPI: BinnedPhaseItem,
 {
-
     pub fn add(
         &mut self,
         batch_set_key: BPI::BatchSetKey,
@@ -619,7 +589,6 @@ where
         input_uniform_index: InputUniformIndex,
         mut phase_type: BinnedRenderPhaseType,
     ) {
-
         if self.gpu_preprocessing_mode == GpuPreprocessingMode::PreprocessingOnly
             && phase_type == BinnedRenderPhaseType::MultidrawableMesh
         {
@@ -676,7 +645,6 @@ where
             }
 
             BinnedRenderPhaseType::NonMesh => {
-
                 match self
                     .non_mesh_items
                     .entry((batch_set_key.clone(), bin_key.clone()).clone())
@@ -719,16 +687,31 @@ where
         world: &'w World,
         view: Entity,
     ) -> Result<(), DrawError> {
+        self.render_filtered(render_pass, world, view, |_| true)
+    }
+
+    pub fn entity_bins(&self) -> impl Iterator<Item = (MainEntity, &CachedBinKey<BPI>)> {
+        self.cached_entity_bin_keys
+            .iter()
+            .filter_map(|(entity, entry)| entry.cached_bin_key.as_ref().map(|key| (*entity, key)))
+    }
+
+    pub fn render_filtered<'w>(
+        &self,
+        render_pass: &mut TrackedRenderPass<'w>,
+        world: &'w World,
+        view: Entity,
+        include: impl Fn(&BPI::BatchSetKey) -> bool,
+    ) -> Result<(), DrawError> {
         {
             let draw_functions = world.resource::<DrawFunctions<BPI>>();
             let mut draw_functions = draw_functions.write();
             draw_functions.prepare(world);
-
         }
 
-        self.render_batchable_meshes(render_pass, world, view)?;
-        self.render_unbatchable_meshes(render_pass, world, view)?;
-        self.render_non_meshes(render_pass, world, view)?;
+        self.render_batchable_meshes(render_pass, world, view, &include)?;
+        self.render_unbatchable_meshes(render_pass, world, view, &include)?;
+        self.render_non_meshes(render_pass, world, view, &include)?;
 
         Ok(())
     }
@@ -738,6 +721,7 @@ where
         render_pass: &mut TrackedRenderPass<'w>,
         world: &'w World,
         view: Entity,
+        include: &impl Fn(&BPI::BatchSetKey) -> bool,
     ) -> Result<(), DrawError> {
         let draw_functions = world.resource::<DrawFunctions<BPI>>();
         let mut draw_functions = draw_functions.write();
@@ -747,7 +731,6 @@ where
         let multi_draw_indirect_count_supported = render_device
             .features()
             .contains(Features::MULTI_DRAW_INDIRECT_COUNT)
-
             && !matches!(render_adapter_info.backend, wgpu::Backend::Dx12);
 
         match self.batch_sets {
@@ -757,6 +740,9 @@ where
                 for ((batch_set_key, bin_key), batch_set) in
                     self.batchable_meshes.keys().zip(batch_sets.iter())
                 {
+                    if !include(batch_set_key) {
+                        continue;
+                    }
                     for batch in batch_set {
                         let binned_phase_item = BPI::new(
                             batch_set_key.clone(),
@@ -781,6 +767,9 @@ where
                 for (batch, (batch_set_key, bin_key)) in
                     batch_set.iter().zip(self.batchable_meshes.keys())
                 {
+                    if !include(batch_set_key) {
+                        continue;
+                    }
                     let binned_phase_item = BPI::new(
                         batch_set_key.clone(),
                         bin_key.clone(),
@@ -810,6 +799,9 @@ where
                     )
                     .zip(batch_sets.iter())
                 {
+                    if !include(batch_set_key) {
+                        continue;
+                    }
                     let batch = &batch_set.first_batch;
 
                     let batch_set_index = if multi_draw_indirect_count_supported {
@@ -856,17 +848,20 @@ where
         render_pass: &mut TrackedRenderPass<'w>,
         world: &'w World,
         view: Entity,
+        include: &impl Fn(&BPI::BatchSetKey) -> bool,
     ) -> Result<(), DrawError> {
         let draw_functions = world.resource::<DrawFunctions<BPI>>();
         let mut draw_functions = draw_functions.write();
 
         for (batch_set_key, bin_key) in self.unbatchable_meshes.keys() {
+            if !include(batch_set_key) {
+                continue;
+            }
             let unbatchable_entities =
                 &self.unbatchable_meshes[&(batch_set_key.clone(), bin_key.clone())];
             for (entity_index, entity) in unbatchable_entities.entities.iter().enumerate() {
                 let unbatchable_dynamic_offset = match &unbatchable_entities.buffer_indices {
                     UnbatchableBinnedEntityIndexSet::NoEntities => {
-
                         continue;
                     }
                     UnbatchableBinnedEntityIndexSet::Sparse {
@@ -918,13 +913,16 @@ where
         render_pass: &mut TrackedRenderPass<'w>,
         world: &'w World,
         view: Entity,
+        include: &impl Fn(&BPI::BatchSetKey) -> bool,
     ) -> Result<(), DrawError> {
         let draw_functions = world.resource::<DrawFunctions<BPI>>();
         let mut draw_functions = draw_functions.write();
 
         for ((batch_set_key, bin_key), non_mesh_entities) in &self.non_mesh_items {
+            if !include(batch_set_key) {
+                continue;
+            }
             for (main_entity, entity) in non_mesh_entities.entities.iter() {
-
                 let binned_phase_item = BPI::new(
                     batch_set_key.clone(),
                     bin_key.clone(),
@@ -1070,7 +1068,6 @@ where
 }
 
 impl UnbatchableBinnedEntityIndexSet {
-
     fn indices_for_entity_index(
         &self,
         entity_index: u32,
@@ -1116,7 +1113,6 @@ where
     BPI: BinnedPhaseItem,
     GFBD: GetFullBatchData,
 {
-
     pub debug_flags: RenderDebugFlags,
     phantom: PhantomData<(BPI, GFBD)>,
 }
@@ -1203,7 +1199,6 @@ impl<SPI> ViewSortedRenderPhases<SPI>
 where
     SPI: SortedPhaseItem,
 {
-
     pub fn prepare_for_new_frame(&mut self, retained_view_entity: RetainedViewEntity) {
         match self.entry(retained_view_entity) {
             Entry::Occupied(mut entry) => {
@@ -1226,7 +1221,6 @@ where
     SPI: SortedPhaseItem,
     GFBD: GetFullBatchData,
 {
-
     pub debug_flags: RenderDebugFlags,
     phantom: PhantomData<(SPI, GFBD)>,
 }
@@ -1286,36 +1280,30 @@ where
 }
 
 impl UnbatchableBinnedEntityIndexSet {
-
     pub fn add(&mut self, indices: UnbatchableBinnedEntityIndices) {
         match self {
-            UnbatchableBinnedEntityIndexSet::NoEntities => {
-                match indices.extra_index {
-                    PhaseItemExtraIndex::DynamicOffset(_) => {
-
-                        *self = UnbatchableBinnedEntityIndexSet::Dense(vec![indices]);
-                    }
-                    PhaseItemExtraIndex::None => {
-
-                        *self = UnbatchableBinnedEntityIndexSet::Sparse {
-                            instance_range: indices.instance_index..indices.instance_index + 1,
-                            first_indirect_parameters_index: None,
-                        }
-                    }
-                    PhaseItemExtraIndex::IndirectParametersIndex {
-                        range: ref indirect_parameters_index,
-                        ..
-                    } => {
-
-                        *self = UnbatchableBinnedEntityIndexSet::Sparse {
-                            instance_range: indices.instance_index..indices.instance_index + 1,
-                            first_indirect_parameters_index: NonMaxU32::new(
-                                indirect_parameters_index.start,
-                            ),
-                        }
+            UnbatchableBinnedEntityIndexSet::NoEntities => match indices.extra_index {
+                PhaseItemExtraIndex::DynamicOffset(_) => {
+                    *self = UnbatchableBinnedEntityIndexSet::Dense(vec![indices]);
+                }
+                PhaseItemExtraIndex::None => {
+                    *self = UnbatchableBinnedEntityIndexSet::Sparse {
+                        instance_range: indices.instance_index..indices.instance_index + 1,
+                        first_indirect_parameters_index: None,
                     }
                 }
-            }
+                PhaseItemExtraIndex::IndirectParametersIndex {
+                    range: ref indirect_parameters_index,
+                    ..
+                } => {
+                    *self = UnbatchableBinnedEntityIndexSet::Sparse {
+                        instance_range: indices.instance_index..indices.instance_index + 1,
+                        first_indirect_parameters_index: NonMaxU32::new(
+                            indirect_parameters_index.start,
+                        ),
+                    }
+                }
+            },
 
             UnbatchableBinnedEntityIndexSet::Sparse {
                 instance_range,
@@ -1339,12 +1327,10 @@ impl UnbatchableBinnedEntityIndexSet {
                         },
                     )) =>
             {
-
                 instance_range.end += 1;
             }
 
             UnbatchableBinnedEntityIndexSet::Sparse { instance_range, .. } => {
-
                 warn!(
                     "Unbatchable binned entity index set was demoted from sparse to dense. \
                     This is a bug in the renderer. Please report it.",
@@ -1377,7 +1363,6 @@ pub struct SortedRenderPhase<I>
 where
     I: SortedPhaseItem,
 {
-
     pub items: IndexMap<(Entity, MainEntity), I, EntityHash>,
 
     pub transient_items: Vec<(Entity, MainEntity)>,
@@ -1399,7 +1384,6 @@ impl<I> SortedRenderPhase<I>
 where
     I: SortedPhaseItem,
 {
-
     #[inline]
     pub fn add_retained(&mut self, item: I) {
         self.items.insert((item.entity(), item.main_entity()), item);
@@ -1477,7 +1461,6 @@ where
 }
 
 pub trait PhaseItem: Sized + Send + Sync + 'static {
-
     const AUTOMATIC_BATCHING: bool = true;
 
     fn entity(&self) -> Entity;
@@ -1496,13 +1479,11 @@ pub trait PhaseItem: Sized + Send + Sync + 'static {
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum PhaseItemExtraIndex {
-
     None,
 
     DynamicOffset(u32),
 
     IndirectParametersIndex {
-
         range: Range<u32>,
 
         batch_set_index: Option<NonMaxU32>,
@@ -1510,7 +1491,6 @@ pub enum PhaseItemExtraIndex {
 }
 
 impl PhaseItemExtraIndex {
-
     pub fn maybe_indirect_parameters_index(
         indirect_parameters_index: Option<NonMaxU32>,
     ) -> PhaseItemExtraIndex {
@@ -1533,7 +1513,6 @@ impl PhaseItemExtraIndex {
 }
 
 pub trait BinnedPhaseItem: PhaseItem {
-
     type BinKey: Clone + Send + Sync + PartialEq + Eq + Ord + Hash;
 
     type BatchSetKey: PhaseItemBatchSetKey;
@@ -1548,12 +1527,10 @@ pub trait BinnedPhaseItem: PhaseItem {
 }
 
 pub trait PhaseItemBatchSetKey: Clone + Send + Sync + PartialEq + Eq + Ord + Hash {
-
     fn indexed(&self) -> bool;
 }
 
 pub trait SortedPhaseItem: PhaseItem {
-
     type SortKey: Ord;
 
     fn sort_key(&self) -> Self::SortKey;
@@ -1572,7 +1549,6 @@ pub trait SortedPhaseItem: PhaseItem {
 }
 
 pub trait CachedRenderPipelinePhaseItem: PhaseItem {
-
     fn cached_pipeline(&self) -> CachedRenderPipelineId;
 }
 
@@ -1631,7 +1607,6 @@ impl BinnedRenderPhaseType {
 }
 
 impl RenderBin {
-
     fn from_entity(entity: MainEntity, uniform_index: InputUniformIndex) -> RenderBin {
         let mut entities = IndexMap::default();
         entities.insert(entity, uniform_index);
@@ -1742,16 +1717,13 @@ mod tests {
 
         impl PhaseItemBatchSetKey for MockBinnedPhaseItemBatchSetKey {
             fn indexed(&self) -> bool {
-
                 true
             }
         }
 
         #[derive(Arbitrary, Debug)]
         enum RenderMultidrawableBatchSetOperation {
-
             Add {
-
                 #[proptest(strategy = "0..32u32")]
                 entity_id: u32,
 
@@ -1763,21 +1735,18 @@ mod tests {
             },
 
             Remove {
-
                 #[proptest(strategy = "0..32u32")]
                 entity_id: u32,
             },
         }
 
         struct ExpectedMultidrawableBatchSet {
-
             bin_index_to_entities: Vec<MainEntityHashSet>,
 
             entity_to_binned_mesh_instance: MainEntityHashMap<GpuRenderBinnedMeshInstance>,
         }
 
         impl ExpectedMultidrawableBatchSet {
-
             fn insert(
                 &mut self,
                 entity: MainEntity,
@@ -1806,13 +1775,11 @@ mod tests {
         let mut runner = TestRunner::default();
         runner
             .run(
-
                 &collection::vec(
                     proptest::prelude::any::<RenderMultidrawableBatchSetOperation>(),
                     0..1024,
                 ),
                 |ops| {
-
                     let mut batch_set = RenderMultidrawableBatchSet::<MockBinnedPhaseItem>::new();
 
                     let mut expected = ExpectedMultidrawableBatchSet {
@@ -1885,7 +1852,6 @@ mod tests {
             batch_set: &RenderMultidrawableBatchSet<MockBinnedPhaseItem>,
             expected: &ExpectedMultidrawableBatchSet,
         ) {
-
             verify_entity_presence(
                 batch_set,
                 &expected.bin_index_to_entities,

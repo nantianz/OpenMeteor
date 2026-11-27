@@ -18,14 +18,14 @@ from PIL import Image, ImageFilter
 from water_bake_scene import ROOT, RayScene, read_scene, static_triangles
 
 OUT = ROOT / 'asset-tools/generated/water'
-CONFIG = ROOT / 'meteor_rust/config/water-enhancement.json'
+WATER_PACK = ROOT / 'meteor_rust/config/graphics-packs/water'
 GRAPHICS = ROOT / 'meteor_rust/config/graphics-enhancement.json'
 FACE = 64
 TILE = FACE + 2
 
 
 def png(pixels):
-    # Runtime decode_image flips rows. Preserve data-map coordinates after decode.
+
     image = Image.fromarray(np.uint8(np.clip(np.rint(pixels), 0, 255)))
     stream = io.BytesIO()
     image.transpose(Image.Transpose.FLIP_TOP_BOTTOM).save(stream, format='PNG', compress_level=9)
@@ -57,8 +57,8 @@ def water_sky_visibility(water, scene, sky, lo, hi, cells, sectors):
         _, hit, _ = scene.trace(origins, direction)
         return (hit >= 0) & ~sky[np.maximum(hit, 0)]
 
-    # A covered surface can be seen through a bridge arch. Its reflection still
-    # samples the structure immediately overhead, so retain a closed skyline.
+
+
     opened = np.flatnonzero(wet)
     opened = opened[~blocked(origins[opened], [0, 0, 1])]
     origins = origins[opened]
@@ -93,9 +93,9 @@ def water_sky_visibility(water, scene, sky, lo, hi, cells, sectors):
 def normals():
     y, x = np.mgrid[0:128, 0:128] * (2 * np.pi / 128)
     dx, dy = np.zeros_like(x), np.zeros_like(y)
-    # Fixed, non-symmetric Fourier directions avoid the repeated diagonal
-    # diamonds produced by a pair of strong crossing sine waves. Integer
-    # wavevectors keep both texture edges seamless under repeat sampling.
+
+
+
     vectors = [(1, 2), (2, -3), (-3, 1), (4, 1), (-1, 4), (3, 3),
                (-4, 2), (2, 5), (-5, -2), (5, -1), (4, -4), (-3, -5)]
     for i, (kx, ky) in enumerate(vectors):
@@ -167,7 +167,7 @@ class Textures:
     def sample(self, name, uv):
         pixels = self.get(name)
         h, w = pixels.shape[:2]
-        # Original images are top-down; GMDL UV v is bottom-up. Bilinear repeat.
+
         x = (uv[:, 0] % 1) * w - .5
         y = ((1 - uv[:, 1]) % 1) * h - .5
         ix, iy = np.floor(x).astype(int), np.floor(y).astype(int)
@@ -210,8 +210,8 @@ def bake(source, skyline):
     triangles = vertices['p'][faces['i'][np.isin(faces['m'], selected)]].astype(float)
     assert len(triangles) and 'TextureAnimation: 1' in bodies[name]
     if source.get('kind', 1) == 3 or blend_mode == 'src-color-one':
-        # Sloping lava and sn10's additive upper poison layer retain their
-        # authored blend and underlayers. Neither uses a refractive depth map.
+
+
         lo, hi = triangles.reshape(-1, 3).min(0), triangles.reshape(-1, 3).max(0)
         evidence = {**source, 'bounds_model_world_axes': [lo[0]*.12, -hi[1]*.12, (hi[0]-lo[0])*.12, (hi[1]-lo[1])*.12],
                     'vertex_alpha': float(vertices['c'][faces['i'][np.isin(faces['m'], selected)],3].max()/255),
@@ -221,11 +221,11 @@ def bake(source, skyline):
     geometry, uvs, colors, ids, sky = static_triangles(scene, skyline[2] if skyline else ())
     tracer = RayScene(geometry)
     tex = Textures(stage)
-    # Probe above an actual water triangle, not a bounding-box center on an island.
+
     areas = np.linalg.norm(np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]), axis=1)
     candidates = triangles.mean(1) + [0, 0, 2]
     overhead, _, _ = tracer.trace(candidates, np.array([0, 0, 1]))
-    # Avoid placing a whole-river probe directly underneath a bridge.
+
     clearance = np.minimum(overhead, 10000)
     open_water = clearance >= min(100, clearance.max() * .8)
     probe = candidates[np.where(open_water, areas, -1).argmax()]
@@ -246,7 +246,7 @@ def bake(source, skyline):
             pixels[valid, 3] = 255
         tile = np.asarray(Image.fromarray(np.uint8(np.clip(pixels.reshape(tile_size, tile_size, 4), 0, 255))).filter(ImageFilter.GaussianBlur(.65)))
         atlas[(face // 3) * tile_size:(face // 3 + 1) * tile_size, (face % 3) * tile_size:(face % 3 + 1) * tile_size] = tile
-    # Map world X/Z from model X/-Y. 128^2 static depth, 12/6 world-unit range.
+
     lo, hi = triangles.reshape(-1, 3).min(0), triangles.reshape(-1, 3).max(0)
     bounds = [lo[0] * .12, -hi[1] * .12, (hi[0] - lo[0]) * .12, (hi[1] - lo[1]) * .12]
     yy, xx = np.mgrid[0:128, 0:128]
@@ -262,9 +262,9 @@ def bake(source, skyline):
     pixels[:, 0] = np.where(valid, np.minimum(depth * .12 / source['max_depth'], 1), 0) * 255
     pixels[:, 1] = valid * 255
     pixels[:, 2] = valid_water * 255
-    # Alpha was unused in the original depth map. Store shore proximity here so
-    # shallow clear water can reveal its real bed at the edge without showing
-    # high-frequency riverbed texture through the entire constant-depth plane.
+
+
+
     shore = shoreline_distance(triangles, origins)
     pixels[:, 3] = np.where(valid_water, np.minimum(shore * .12 / 12.0, 1.0), 0) * 255
     evidence = {**source, 'probe_model': probe.tolist(), 'bounds_model_world_axes': bounds,
@@ -283,14 +283,13 @@ def main():
     parser.add_argument('--check', action='store_true')
     parser.add_argument('--graphics-config', type=Path, default=GRAPHICS)
     args = parser.parse_args()
-    index = json.loads(args.graphics_config.read_text())
+    index = json.loads(args.graphics_config.read_text(encoding='utf-8'))
     scenes = [scene for pack in index['packs']
-              for scene in json.loads((args.graphics_config.parent / pack).read_text()).get('scenes', [])]
+              for scene in json.loads((args.graphics_config.parent / pack).read_text(encoding='utf-8')).get('scenes', [])]
     expected = {'ripples.png': normals()}
     manifest = {'version': 1, 'algorithm': 'static-opaque-bvh-variable-cube-depth128-shore12-v3', 'surfaces': []}
-    catalog = ['// Generated by asset-tools/tools/generate_water.py. Do not edit.',
-               'const SURFACES: &[WaterSource] = &[']
-    for entry in json.loads(CONFIG.read_text())['surfaces']:
+    catalog = []
+    for entry in json.loads((WATER_PACK / 'water-enhancement.json').read_text(encoding='utf-8'))['surfaces']:
         if not entry.get('enabled', True):
             continue
         source = {key: value for key, value in entry.items() if key != 'enabled'}
@@ -306,21 +305,30 @@ def main():
         if visibility is not None:
             expected[prefix + '-sky-visibility.png'] = visibility
         manifest['surfaces'].append(evidence)
-        bounds = ', '.join(f'{v:.8f}' for v in evidence['bounds_model_world_axes'])
-        reflection_rs = f'include_bytes!("{prefix}-reflection.png")' if reflection is not None else '&[]'
-        depth_rs = f'include_bytes!("{prefix}-depth.png")' if depth is not None else '&[]'
-        visibility_rs = f'include_bytes!("{prefix}-sky-visibility.png")' if visibility is not None else '&[]'
-        cells, sectors, skybox = skyline if visibility is not None else (0, 0, [])
-        skybox_rs = ', '.join('(' + ', '.join(json.dumps(target[k], ensure_ascii=False) for k in ('object', 'texture')) + ')' for target in skybox)
-        catalog.append('    WaterSource { stage: "%s", object: "%s", texture: "%s", kind: %.1f, additive: %s, extinction: %.2f, bounds: [%s], max_depth: %.1f, vertex_alpha: %.8f, reflection: %s, depth: %s, sky_visibility: %s, sky_visibility_layout: [%d, %d], sky_visibility_skybox: &[%s] },' % (source['stage'], source['object'], source['texture'], source['kind'], str(source.get('blend_mode') == 'src-color-one').lower(), source['extinction'], bounds, source['max_depth'], evidence['vertex_alpha'], reflection_rs, depth_rs, visibility_rs, cells, sectors, skybox_rs))
-    catalog.append('];')
-    expected['catalog.rs'] = ('\n'.join(catalog) + '\n').encode()
+        entry = {key: evidence[key] for key in (
+            'stage', 'object', 'texture', 'kind', 'max_depth', 'vertex_alpha')}
+        entry['additive'] = source.get('blend_mode') == 'src-color-one'
+        entry['bounds'] = evidence['bounds_model_world_axes']
+        entry['reflection_face'] = source.get('reflection_face', FACE)
+        if reflection is not None:
+            entry['reflection'] = f'baked/{prefix}-reflection.png'
+            entry['depth'] = f'baked/{prefix}-depth.png'
+        if visibility is not None:
+            cells, sectors, skybox = skyline
+            entry['sky_visibility'] = {
+                'file': f'baked/{prefix}-sky-visibility.png',
+                'layout': [cells, sectors],
+                'skybox': list(skybox),
+            }
+        catalog.append(entry)
+    expected['catalog.json'] = (json.dumps(catalog, indent=2) + '\n').encode()
     manifest['outputs'] = {name: hashlib.sha256(data).hexdigest() for name, data in expected.items()}
-    expected['manifest.json'] = (json.dumps(manifest, indent=2) + '\n').encode()
-    for name, data in expected.items():
-        target = OUT / name
+    outputs = {WATER_PACK / 'baked' / name: data for name, data in expected.items()}
+    outputs[OUT / 'manifest.json'] = (json.dumps(manifest, indent=2) + '\n').encode()
+    for target, data in outputs.items():
         if args.check:
-            assert target.read_bytes() == data, f'Stale water bake: {target}'
+            if target != OUT / 'manifest.json' or target.exists():
+                assert target.read_bytes() == data, f'Stale water bake: {target}'
         else:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)

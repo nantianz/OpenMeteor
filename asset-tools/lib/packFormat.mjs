@@ -134,7 +134,8 @@ export function assertSafePackEntryName(name) {
   const dot = base.lastIndexOf(".");
   const extension = dot >= 0 ? base.slice(dot) : "";
   const clothObj = extension === ".obj" && normalized.startsWith("graphics/");
-  if (!DATA_ENTRY_EXTENSIONS.has(extension) && !clothObj) {
+  const stageText = /^stage\/sn\d{2}\.(?:name\.txt|description\.(?:txt|md))$/.test(normalized);
+  if (!DATA_ENTRY_EXTENSIONS.has(extension) && !clothObj && !stageText) {
     throw new Error(`pack entry is not an allowed data file: ${normalized}`);
   }
   return normalized;

@@ -25,6 +25,14 @@ export function collectGraphicsPack(root) {
     entries.set(key, {name: key, data, mime, source: name});
     return data;
   }
+  function addPng(resource) {
+    const data = add(resource, 'image/png');
+    if (data.length < 24 || !data.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10]))
+        || data.readUInt32BE(16) < 1 || data.readUInt32BE(16) > 4096
+        || data.readUInt32BE(20) < 1 || data.readUInt32BE(20) > 4096) {
+      throw new Error(`Invalid graphics PNG: ${resource}`);
+    }
+  }
   const index = JSON.parse(add('graphics-enhancement.json', 'application/json'));
   if (index.schema_version !== 1 || typeof index.enabled !== 'boolean' || !Array.isArray(index.packs)
       || index.packs.length > 16 || new Set(index.packs).size !== index.packs.length) {
@@ -42,6 +50,25 @@ export function collectGraphicsPack(root) {
       const data = add(path.posix.join(path.posix.dirname(name), resource), 'text/plain');
       if (data.length === 0 || data.length > 1024 * 1024) throw new Error(`Invalid cloth OBJ size: ${resource}`);
     }
+    if (pack.water) {
+      const relative = resource => {
+        const directory = path.posix.dirname(name);
+        if (typeof resource !== 'string') throw new Error(`Invalid water path: ${resource}`);
+        return directory === '.' ? resource : `${directory}/${resource}`;
+      };
+      for (const field of ['config', 'deep', 'shallow']) {
+        JSON.parse(add(relative(pack.water[field]), 'application/json'));
+      }
+      addPng(relative(pack.water.ripples));
+      if (pack.water.baked != null) {
+        const catalog = JSON.parse(add(relative(pack.water.baked), 'application/json'));
+        for (const surface of catalog) {
+          for (const resource of [surface.reflection, surface.depth, surface.sky_visibility?.file]) {
+            if (resource != null) addPng(relative(resource));
+          }
+        }
+      }
+    }
     // Desktop replacement geometry is staged by graphics_packaging.py and
     // loaded on stage entry. Do not force it into the mandatory portable MPK.
     for (const resource of Object.values(pack.resources ?? {})) {
@@ -50,12 +77,7 @@ export function collectGraphicsPack(root) {
           || resource.split('/').some(p => !p || p === '.' || p === '..')) {
         throw new Error(`Invalid graphics resource: ${resource}`);
       }
-      const data = add(path.posix.join(path.posix.dirname(name), resource), 'image/png');
-      if (data.length < 24 || !data.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10]))
-          || data.readUInt32BE(16) < 1 || data.readUInt32BE(16) > 4096
-          || data.readUInt32BE(20) < 1 || data.readUInt32BE(20) > 4096) {
-        throw new Error(`Invalid graphics PNG: ${resource}`);
-      }
+      addPng(path.posix.join(path.posix.dirname(name), resource));
     }
   }
   return [...entries.values()].map(({source, ...entry}) => entry);

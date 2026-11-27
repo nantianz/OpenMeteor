@@ -23,6 +23,8 @@ pub struct Pack {
     #[serde(default)]
     pub resources: BTreeMap<String, String>,
     #[serde(default)]
+    pub(crate) water: Option<WaterFiles>,
+    #[serde(default)]
     pub materials: BTreeMap<String, Pbr>,
     #[serde(default)]
     pub scenes: Vec<Scene>,
@@ -36,6 +38,15 @@ pub struct Pack {
 
     #[serde(default)]
     pub effects: BTreeMap<String, EffectRule>,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WaterFiles {
+    pub config: String,
+    pub deep: String,
+    pub shallow: String,
+    pub ripples: String,
+    pub baked: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -247,6 +258,17 @@ pub struct Scene {
     pub meshlet_replacements: Vec<MeshletReplacement>,
     #[serde(default)]
     pub meshlet_props: Vec<MeshletProp>,
+    #[serde(default)]
+    pub campfires: Option<Vec<Campfire>>,
+}
+pub(super) const MAX_CAMPFIRES: usize = 4;
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Campfire {
+    pub position: [f32; 3],
+    pub yaw_degrees: f32,
+    pub scale: f32,
+    pub banner_color: [f32; 3],
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -569,8 +591,8 @@ impl Grass {
         if !(4..=512).contains(&self.max_visible_tiles) {
             return Err("grass max_visible_tiles must be 4..=512".into());
         }
-        if !(8_000..=180_000).contains(&self.max_triangles) {
-            return Err("grass max_triangles must be 8000..=180000".into());
+        if !(8_000..=320_000).contains(&self.max_triangles) {
+            return Err("grass max_triangles must be 8000..=320000".into());
         }
         range("grass clump radius", self.clump_radius, 0.05, 0.6)?;
         range("grass patch size", self.patch_size, 0.5, 16.0)?;
@@ -1263,7 +1285,7 @@ impl Pack {
         {
             return Err("pack name must be 1..40 and description at most 160 characters".into());
         }
-        if self.resources.len() > 128 || self.materials.len() > 128 || self.scenes.len() > 64 {
+        if self.resources.len() > 256 || self.materials.len() > 256 || self.scenes.len() > 64 {
             return Err("pack exceeds entry budget".into());
         }
         for (id, path) in &self.resources {
@@ -1527,6 +1549,21 @@ impl Pack {
             }
             if let Some(snow) = &s.snow {
                 snow.validate(&s.stage)?;
+            }
+            if let Some(campfires) = &s.campfires {
+                if campfires.len() > MAX_CAMPFIRES {
+                    return Err(format!("{}: too many campfires", s.stage));
+                }
+                for fire in campfires {
+                    for value in fire.position {
+                        range("campfire position", value, -10_000., 10_000.)?;
+                    }
+                    range("campfire yaw_degrees", fire.yaw_degrees, -360., 360.)?;
+                    range("campfire scale", fire.scale, 0.5, 2.0)?;
+                    for value in fire.banner_color {
+                        range("campfire banner_color", value, 0.0, 1.0)?;
+                    }
+                }
             }
             if let Some(e) = &s.environment {
                 color("sky", e.sky)?;

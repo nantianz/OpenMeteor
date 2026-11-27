@@ -407,6 +407,178 @@ mod tests {
         assert_eq!(resolve_preview_pose(10, 1, &assets), 402);
         assert_eq!(resolve_preview_pose(10, 2, &assets), 403);
     }
+    #[test]
+    fn headless_room_preview_renders_p0_and_equipped_weapon() {
+        use bevy::{
+            app::PluginsState,
+            render::{
+                gpu_readback::{Readback, ReadbackComplete},
+                render_resource::TextureUsages,
+                RenderPlugin,
+            },
+            window::WindowPlugin,
+        };
+        use std::{
+            sync::{Arc, Mutex},
+            time::{Duration, Instant},
+        };
+        let Some(output) = std::env::var_os("METEOR_CHARACTER_PREVIEW_CAPTURE") else {
+            return;
+        };
+        if let Some(root) = std::env::var_os("METEOR_CHARACTER_PREVIEW_ORIGINAL_DIR") {
+            use meteor_asset::{original_directory::OriginalDirectory, runtime_assets};
+            let root = PathBuf::from(root);
+            runtime_assets::initialize_original(OriginalDirectory::open(&root, &[]).unwrap())
+                .unwrap();
+        }
+        let mut app = App::new();
+        app.add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: None,
+                    exit_condition: bevy::window::ExitCondition::DontExit,
+                    ..default()
+                })
+                .set(RenderPlugin {
+                    synchronous_pipeline_compilation: true,
+                    ..default()
+                })
+                .disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>()
+                .disable::<bevy::winit::WinitPlugin>()
+                .disable::<bevy::audio::AudioPlugin>(),
+        )
+        .insert_state(AppState::Menu)
+        .insert_resource(MenuScreen::Network)
+        .insert_resource(Settings {
+            new_character_models: true,
+            ..default()
+        })
+        .insert_resource(LaunchRequest {
+            character_id: 0,
+            weapon: 6,
+            ..default()
+        })
+        .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            Duration::ZERO,
+        ))
+        .init_resource::<CharacterLoadFailures>()
+        .init_resource::<CharacterAssetsSet>()
+        .init_resource::<crate::plugins::pak_textures::QualityTextureHandles>()
+        .add_plugins(crate::plugins::stage_material::GmdlMaterialPlugin);
+        super::install(&mut app);
+        if std::env::var_os("METEOR_CHARACTER_PREVIEW_LEGACY_SHADER").is_some() {
+            app.add_systems(
+                Update,
+                (|mut materials: ResMut<Assets<GmdlMaterial>>| {
+                    let specialized: Vec<_> = materials
+                        .iter()
+                        .filter_map(|(id, material)| material.character_surface.then_some(id))
+                        .collect();
+                    for id in specialized {
+                        materials.get_mut(id).unwrap().character_surface = false;
+                    }
+                })
+                .after(sync_preview_actor)
+                .before(tag_preview_layers),
+            );
+        }
+        let renderer_deadline = Instant::now() + Duration::from_secs(60);
+        while app.plugins_state() != PluginsState::Ready {
+            assert!(
+                Instant::now() < renderer_deadline,
+                "preview renderer did not initialize"
+            );
+            bevy::tasks::tick_global_task_pools_on_main_thread();
+        }
+        app.finish();
+        app.cleanup();
+        app.update();
+        let viewport = app
+            .world_mut()
+            .spawn((
+                CharacterPreviewViewport,
+                ComputedNode {
+                    size: Vec2::new(520.0, 440.0),
+                    ..default()
+                },
+            ))
+            .id();
+        let started = Instant::now();
+        app.update();
+        let target = app.world().resource::<PreviewStudio>().image.clone();
+        app.world_mut()
+            .resource_mut::<Assets<Image>>()
+            .get_mut(&target)
+            .unwrap()
+            .texture_descriptor
+            .usage |= TextureUsages::COPY_SRC;
+        let capture = Arc::new(Mutex::new(None));
+        let data = capture.clone();
+        app.world_mut().spawn(Readback::texture(target)).observe(
+            move |event: On<ReadbackComplete>| {
+                if event
+                    .data
+                    .chunks_exact(4)
+                    .filter(|pixel| pixel[3] > 0)
+                    .take(1024)
+                    .count()
+                    == 1024
+                {
+                    *data.lock().unwrap() = Some(event.data.clone());
+                }
+            },
+        );
+        let pixels = loop {
+            assert!(
+                started.elapsed() < Duration::from_secs(300),
+                "preview did not render"
+            );
+            app.world_mut()
+                .get_mut::<ComputedNode>(viewport)
+                .unwrap()
+                .size = Vec2::new(520.0, 440.0);
+            app.update();
+            let _ = app
+                .world()
+                .resource::<bevy::render::renderer::RenderDevice>()
+                .poll(bevy::render::render_resource::PollType::Poll);
+            if let Some(data) = capture.lock().unwrap().take() {
+                break data;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        eprintln!(
+            "P0 equipped preview: first visible frame in {:.3}s",
+            started.elapsed().as_secs_f64()
+        );
+        assert!(app
+            .world_mut()
+            .query::<&FighterSkin>()
+            .iter(app.world())
+            .next()
+            .is_some());
+        assert!(app
+            .world_mut()
+            .query_filtered::<&WeaponModel, With<Mesh3d>>()
+            .iter(app.world())
+            .next()
+            .is_some());
+        Image::new(
+            bevy::render::render_resource::Extent3d {
+                width: PREVIEW_WIDTH,
+                height: PREVIEW_HEIGHT,
+                depth_or_array_layers: 1,
+            },
+            bevy::render::render_resource::TextureDimension::D2,
+            pixels,
+            TextureFormat::Rgba8UnormSrgb,
+            default(),
+        )
+        .try_into_dynamic()
+        .unwrap()
+        .save(output)
+        .unwrap();
+    }
 }
 
 fn tag_preview_layers(

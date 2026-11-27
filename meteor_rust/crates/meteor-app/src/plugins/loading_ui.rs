@@ -25,6 +25,7 @@ pub(crate) struct LoadingPresentation {
     frames: u32,
     scene_frames: u32,
     ready_frames: u32,
+    shadow_wait: f32,
     reveal: f32,
 }
 impl LoadingPresentation {
@@ -124,7 +125,10 @@ pub(crate) fn setup(
             .with_children(|copy| {
                 copy.spawn(theme::title_node(false));
                 copy.spawn((
-                    Text::new(request.stage_name.clone()),
+                    Text::new(super::stage_presentation::display_name(
+                        &request.stage_id,
+                        &request.stage_name,
+                    )),
                     TextFont {
                         font: font.0.clone().into(),
                         font_size: 20.0.into(),
@@ -167,6 +171,7 @@ fn animate(
     mut next: ResMut<NextState<AppState>>,
     info: Option<ResMut<crate::app_state::LoadedStageInfo>>,
     characters: super::character_plugin::CharacterLoadingState,
+    shadow_bake: Option<Res<super::dynamic_shadows_plugin::StageShadowBake>>,
 ) {
     if !state.active {
         return;
@@ -196,7 +201,15 @@ fn animate(
         }
 
         let poses_ready = characters.ready();
-        state.ready_frames = if poses_ready {
+        let mut shadows_ready = shadow_bake.as_deref().is_none_or(|bake| bake.ready());
+        if !shadows_ready && state.shadow_wait < 5.0 {
+            state.shadow_wait += time.delta_secs();
+            if state.shadow_wait >= 5.0 {
+                warn!("Static shadow depth was not ready before the loading deadline");
+            }
+        }
+        shadows_ready |= state.shadow_wait >= 5.0;
+        state.ready_frames = if poses_ready && shadows_ready {
             state.ready_frames + 1
         } else {
             0
@@ -205,10 +218,12 @@ fn animate(
             state.reveal += time.delta_secs().min(0.05) / 0.65;
         }
         for mut caption in &mut captions {
-            caption.0 = if poses_ready {
-                "雾散江湖 · 即将入场"
-            } else {
+            caption.0 = if !poses_ready {
                 "正在准备人物与招式"
+            } else if !shadows_ready {
+                "正在准备场景阴影"
+            } else {
+                "雾散江湖 · 即将入场"
             }
             .into();
         }
@@ -282,6 +297,7 @@ mod tests {
         ))
         .init_state::<AppState>()
         .init_asset::<Shader>()
+        .init_asset::<theme::BackdropMaterial>()
         .init_asset::<Image>()
         .init_asset::<Font>()
         .insert_resource(UiFont(Handle::default()))
@@ -301,10 +317,19 @@ mod tests {
         assert!(!app.world().resource::<LoadingPresentation>().can_enter());
         let world = app.world_mut();
         let curtain = world
-            .query_filtered::<&ImageNode, With<LoadingCurtain>>()
+            .query_filtered::<&MaterialNode<theme::BackdropMaterial>, With<LoadingCurtain>>()
             .single(world)
+            .unwrap()
+            .0
+            .clone();
+        let curtain_mat = world
+            .resource::<Assets<theme::BackdropMaterial>>()
+            .get(&curtain)
             .unwrap();
-        assert_eq!(curtain.image, world.resource::<theme::CinematicArt>().image);
+        assert_eq!(
+            curtain_mat.image,
+            world.resource::<theme::CinematicArt>().image
+        );
         for _ in 0..10 {
             app.update();
         }

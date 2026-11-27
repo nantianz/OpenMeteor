@@ -1,3 +1,4 @@
+use super::scene_actors::{live_actors, SceneActors, BODY_HEIGHT, BODY_RADIUS};
 use super::*;
 use crate::plugins::stage_material::{GmdlMaterial, GmdlMode};
 use bevy::{
@@ -135,10 +136,12 @@ impl<'a> SceneGraphics<'a> {
             .fold(Vec3::splat(f32::NEG_INFINITY), Vec3::max);
         Some(WindMesh {
             center: (min + max) * 0.5,
+            half_extents: (max - min) * 0.5,
             positions: positions.clone(),
             normals,
             tangents,
             profile: w,
+            actor_push: Vec2::ZERO,
             last_wind: None,
         })
     }
@@ -262,11 +265,43 @@ impl<'a> SceneGraphics<'a> {
 #[derive(Component)]
 pub struct WindMesh {
     center: Vec3,
+    half_extents: Vec3,
     pub positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
     tangents: Vec<[f32; 4]>,
     pub profile: config::WindSurface,
+    actor_push: Vec2,
     last_wind: Option<(Vec2, GlobalTransform)>,
+}
+impl WindMesh {
+    fn update_actor_push(&mut self, transform: &GlobalTransform, actors: &SceneActors, dt: f32) {
+        let inverse = transform.affine().inverse();
+        let min = self.center - self.half_extents;
+        let max = self.center + self.half_extents;
+        let middle_height = (self.profile.start_height + self.profile.end_height) * 0.5;
+        let push = live_actors(actors).fold(Vec2::ZERO, |sum, actor| {
+            if actor.feet.y > self.profile.end_height
+                || actor.feet.y + BODY_HEIGHT < self.profile.start_height
+            {
+                return sum;
+            }
+            let y = middle_height.clamp(actor.feet.y, actor.feet.y + BODY_HEIGHT);
+            let sample = actor.feet.with_y(y);
+            let nearest =
+                transform.transform_point(inverse.transform_point3(sample).clamp(min, max));
+            let delta = nearest - sample;
+            let reach = 1.6 * BODY_RADIUS;
+            let influence = (1.0 - delta.length() / reach).max(0.0);
+            let motion = actor.velocity.clamp_length_max(12.0) / 12.0;
+            sum + (delta.xz().normalize_or_zero() * 0.68 + motion * 0.55) * influence
+        });
+        self.actor_push = self
+            .actor_push
+            .lerp(push.clamp_length_max(0.9), 1.0 - (-12.0 * dt).exp());
+        if self.actor_push.length_squared() < 1e-6 {
+            self.actor_push = Vec2::ZERO;
+        }
+    }
 }
 
 pub(super) fn update_wind(
@@ -276,6 +311,7 @@ pub(super) fn update_wind(
     clock: Option<Res<crate::plugins::FrameClock>>,
     frame: Option<Res<crate::plugins::stage_material::FrameUniforms>>,
     time: Res<Time>,
+    actors: SceneActors,
     mut elapsed: Local<f64>,
     mut accumulated: Local<f32>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -293,7 +329,7 @@ pub(super) fn update_wind(
     if *accumulated < 1. / 30. {
         return;
     }
-    *accumulated = 0.;
+    let update_dt = std::mem::take(&mut *accumulated);
     let Some(loaded) = loaded else {
         return;
     };
@@ -306,7 +342,11 @@ pub(super) fn update_wind(
                 frame.as_ref().map_or(*elapsed, |f| f.seconds),
             ) * wind.response.map_or(1.0, |response| response.cloth)
         });
-        let wind_pose = (breeze, *transform);
+        if w.profile.anchor_top {
+            w.update_actor_push(transform, &actors, update_dt);
+        }
+        let displacement = breeze * w.profile.amplitude + w.actor_push;
+        let wind_pose = (displacement, *transform);
         if w.last_wind == Some(wind_pose) {
             continue;
         }
@@ -318,7 +358,7 @@ pub(super) fn update_wind(
         let inverse = matrix.inverse();
 
         let height_axis = matrix.transpose() * Vec3::Y;
-        let direction = inverse * Vec3::new(breeze.x, 0., breeze.y) * w.profile.amplitude;
+        let direction = inverse * Vec3::new(displacement.x, 0., displacement.y);
         let span = w.profile.end_height - w.profile.start_height;
         let bend = |u: f32| if w.profile.anchor_top { 1.0 - u } else { u };
         let slope = |p: [f32; 3]| {

@@ -10,10 +10,13 @@ OpenMeteor 的图形增强包可以按关卡配置 PBR 材质、环境光、风�
 OpenMeteor.exe
 config/
   graphics-enhancement.json
-  water-enhancement.json
-  water-deep.json
-  water-shallow.json
   graphics-packs/
+    water/
+      pack.json
+      water-enhancement.json
+      water-deep.json
+      water-shallow.json
+      baked/
     starter/
       pack.json
       textures/
@@ -34,7 +37,13 @@ config/
 
 发行版包括四方阵山体与草地、长剑 PBR、日月光照，以及桌面支持的 Metal、Vulkan、DX12 后端上的四方阵 HDR 色调。草地接收动态投影，脚步和招式会产生不同的压弯。首次启动默认开启天空、草地、体积雾、动态阴影、环境光和水面增强；已有玩家设置继续保留。布料使用「角色衣物摆动」开关，贴图质量需高于最低档。HDR 的水面和透明特效仍需进一步校准。
 
-将 `enabled` 改回 `false` 并重启即可停用包内配置。水面由独立的 `config/water-enhancement.json` 控制。锐化、动态阴影继续由游戏图形设置控制。
+将 `enabled` 改回 `false` 并重启即可停用包内配置。水面包及其烘焙资产由 `graphics-packs/water/pack.json` 管理，具体表层由 `config/graphics-packs/water/water-enhancement.json` 控制。锐化、动态阴影继续由游戏图形设置控制。
+
+## 新增场景资源
+
+- `graphics-packs/scene-normals/pack.json` 提供场景法线贴图。它应放在增强包索引的前部，让后续关卡材质可以覆盖相关设置。
+- `graphics-packs/sn06-campfires/pack.json` 为四方阵提供营火，随图形增强包启用。
+- `graphics-packs/water/pack.json` 将深浅水预设和烘焙的水体纹理一同加载。
 
 ## 配置入口
 
@@ -422,13 +431,13 @@ P1 的 `physics.surface_collision` 用低模三角形补充人体胶囊接触。
 
 ## 清水预设
 
-水面通过 `config/water-enhancement.json` 的 `surfaces` 选择。每条规则用 `stage`、`object`、`texture` 精确匹配清水表面。省略 `profile` 时使用 `deep`。旧配置的 `legacy` 也按 `deep` 处理。金华城默认使用 `classic`，按河床深度呈现青绿色水面，岸墙倒影会随风浪和脚边波纹扭动。三种预设均支持触水波纹和飞溅。深水与浅水的折射遇到人物或武器前景时回退到原位置采样，清水表面不参与镜头遮挡消隐。配置编辑后重启。
+水面通过 `config/graphics-packs/water/water-enhancement.json` 的 `surfaces` 选择。每条规则用 `stage`、`object`、`texture` 精确匹配清水表面。省略 `profile` 时使用 `deep`。旧配置的 `legacy` 也按 `deep` 处理。金华城默认使用 `classic`，按河床深度呈现青绿色水面，岸墙倒影会随风浪和脚边波纹扭动。三种预设均支持触水波纹和飞溅。深水与浅水的折射遇到人物或武器前景时回退到原位置采样，清水表面不参与镜头遮挡消隐。配置编辑后重启。
 
 | `profile` | 配置文件 | 随包示例 |
 | --- | --- | --- |
 | `classic` | `water-enhancement.json` 中该表层的 `extinction` | `sn13 / Plane02 / sn13w01.jpg` |
-| `deep` | `config/water-deep.json` | `sn06 / Cylinder01 / sn06w.jpg`、`sn09 / Plane37 / sn914.jpg` |
-| `shallow` | `config/water-shallow.json` | 将所选清水表层的 `profile` 改成 `shallow` |
+| `deep` | `config/graphics-packs/water/water-deep.json` | `sn06 / Cylinder01 / sn06w.jpg`、`sn09 / Plane37 / sn914.jpg` |
+| `shallow` | `config/graphics-packs/water/water-shallow.json` | 将所选清水表层的 `profile` 改成 `shallow` |
 
 两份配置的 `optics` 独立控制 `absorption`、`scattering`、`anisotropy`、`ior`、`roughness` 和 `max_path`。`refraction_strength` 设为 0 可关闭屏幕空间折射。浅水另有 `simulation`，用于调整重力、阻尼、模拟水深范围和网格大小。角色触水时，扰动沿河床范围传播。
 

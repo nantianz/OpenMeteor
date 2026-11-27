@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "id": "sn06-hdr-bloom",
+  "name": "四方阵 · HDR 与刀光泛光",
+  "scenes": [
+    {
+      "stage": "sn06",
+      "color_pipeline": {
+        "enabled": true,
+        "exposure_ev": 1.0,
+        "night_exposure_ev": 2.0,
+        "tonemapping": "aces",
+        "bloom": {
+          "intensity": 0.22,
+          "threshold": 1.15,
+          "threshold_softness": 0.6,
+          "low_frequency_boost": 0.5
+        }
+      }
+    }
+  ]
+}

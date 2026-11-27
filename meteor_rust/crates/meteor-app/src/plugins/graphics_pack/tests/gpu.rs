@@ -10,11 +10,11 @@ use bevy::{
     },
 };
 use std::sync::{Arc, Mutex};
-#[cfg(feature = "original-assets")]
-mod sky_benchmark;
+mod color_pipeline;
 #[cfg(feature = "original-assets")]
 mod longsword_preview;
-mod color_pipeline;
+#[cfg(feature = "original-assets")]
+mod sky_benchmark;
 #[cfg(feature = "original-assets")]
 mod sn03_preview;
 #[cfg(feature = "original-assets")]
@@ -57,11 +57,147 @@ fn changed(a: &[u8], b: &[u8]) -> usize {
 }
 
 #[test]
+fn stage_static_shadow_bake_is_ready_and_survives_camera_movement() {
+    use crate::app_state::{AppState, LoadedStageInfo, Settings};
+    use crate::plugins::{
+        camera_plugin::GameplayCamera,
+        dynamic_shadows_plugin::{DynamicShadowsPlugin, StageShadowBake},
+        stage_material::GmdlMaterial,
+    };
+    use bevy::{pbr::StaticShadowCaster, render::view::ExtractedView};
+
+    let mut app = App::new();
+    app.add_plugins(
+        DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: None,
+                exit_condition: bevy::window::ExitCondition::DontExit,
+                ..default()
+            })
+            .set(RenderPlugin {
+                synchronous_pipeline_compilation: true,
+                ..default()
+            })
+            .disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>()
+            .disable::<bevy::winit::WinitPlugin>()
+            .disable::<bevy::audio::AudioPlugin>(),
+    )
+    .init_resource::<Assets<GmdlMaterial>>()
+    .insert_state(AppState::Playing)
+    .insert_resource(Settings {
+        environment_lighting: true,
+        dynamic_shadows: false,
+        shadow_quality: 1,
+        ..default()
+    })
+    .insert_resource(LoadedStageInfo {
+        stage_id: "sn23".into(),
+        ..default()
+    })
+    .add_plugins(DynamicShadowsPlugin);
+
+    let mut image = Image::new_target_texture(128, 128, TextureFormat::Rgba8UnormSrgb, None);
+    image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
+    let target = app.world_mut().resource_mut::<Assets<Image>>().add(image);
+    let camera = app
+        .world_mut()
+        .spawn((
+            GameplayCamera,
+            Camera3d::default(),
+            Msaa::Off,
+            RenderTarget::Image(target.clone().into()),
+            Transform::from_xyz(0.0, 8.0, 12.0).looking_at(Vec3::ZERO, Vec3::Y),
+        ))
+        .id();
+    let mesh = app
+        .world_mut()
+        .resource_mut::<Assets<Mesh>>()
+        .add(Cuboid::new(2.0, 2.0, 2.0));
+    let material = app
+        .world_mut()
+        .resource_mut::<Assets<StandardMaterial>>()
+        .add(Color::WHITE);
+    for x in [0.0, 60.0] {
+        app.world_mut().spawn((
+            StaticShadowCaster,
+            Mesh3d(mesh.clone()),
+            MeshMaterial3d(material.clone()),
+            Transform::from_xyz(x, 1.0, 0.0),
+        ));
+    }
+    app.world_mut().spawn((
+        Mesh3d(mesh),
+        MeshMaterial3d(material.clone()),
+        Transform::from_xyz(4.0, 1.0, 2.0),
+    ));
+    let floor = app
+        .world_mut()
+        .resource_mut::<Assets<Mesh>>()
+        .add(Cuboid::new(145.0, 0.1, 30.0));
+    app.world_mut().spawn((
+        bevy::light::NotShadowCaster,
+        Mesh3d(floor),
+        MeshMaterial3d(material),
+        Transform::from_xyz(30.0, -0.05, 0.0),
+    ));
+    let pixels = Arc::new(Mutex::new(Vec::new()));
+    let readback = pixels.clone();
+    app.world_mut()
+        .spawn(Readback::texture(target))
+        .observe(move |e: On<ReadbackComplete>| *readback.lock().unwrap() = e.data.clone());
+    while app.plugins_state() == PluginsState::Adding {
+        std::thread::yield_now();
+    }
+    app.finish();
+    app.cleanup();
+
+    app.update();
+    let world = app.world_mut();
+    let mut sun = world.query::<&mut DirectionalLight>();
+    sun.single_mut(world).unwrap().illuminance = 10_000.0;
+    let static_only = capture(&mut app, &pixels);
+    assert!(app.world().resource::<StageShadowBake>().ready());
+    let cached_projection = |app: &mut App| {
+        let world = app.sub_app_mut(bevy::render::RenderApp).world_mut();
+        let mut caches = world.query::<(&bevy::pbr::ShadowCacheTarget, &ExtractedView)>();
+        let (cache, view) = caches
+            .iter(world)
+            .find(|(_, view)| view.retained_view_entity.auxiliary_entity == camera.into())
+            .expect("gameplay shadow cache");
+        assert_eq!(cache.cached_caster_count(), 2);
+        view.clip_from_world.unwrap()
+    };
+    let original = cached_projection(&mut app);
+    app.world_mut().resource_mut::<Settings>().dynamic_shadows = true;
+    let both = capture(&mut app, &pixels);
+    assert!(
+        changed(&static_only, &both) > 10,
+        "the moving object should cast with dynamic shadows on"
+    );
+    app.world_mut().resource_mut::<Settings>().dynamic_shadows = false;
+    let back_to_static_only = capture(&mut app, &pixels);
+    assert!(changed(&back_to_static_only, &both) > 10);
+    assert_eq!(cached_projection(&mut app), original);
+    app.world_mut().resource_mut::<Settings>().scene_shadows = false;
+    let no_shadows = capture(&mut app, &pixels);
+    assert!(
+        changed(&back_to_static_only, &no_shadows) > 10,
+        "static depth should still shade the floor"
+    );
+    app.world_mut().resource_mut::<Settings>().scene_shadows = true;
+    *app.world_mut().get_mut::<Transform>(camera).unwrap() =
+        Transform::from_xyz(60.0, 8.0, 12.0).looking_at(Vec3::X * 60.0, Vec3::Y);
+    capture(&mut app, &pixels);
+    assert_eq!(cached_projection(&mut app), original);
+}
+
+#[test]
 fn headless_cloud_sky_renders_and_respects_opaque_depth() {
     use crate::app_state::{AppState, LoadedStageInfo, Settings};
     use crate::plugins::graphics_pack::{config, sky};
 
-    let water_sky: Option<std::path::PathBuf> = std::env::var_os("METEOR_SN13_WATER_SKY_CAPTURE").map(Into::into);
+    let water_sky: Option<std::path::PathBuf> =
+        std::env::var_os("METEOR_SN13_WATER_SKY_CAPTURE").map(Into::into);
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
@@ -79,8 +215,27 @@ fn headless_cloud_sky_renders_and_respects_opaque_depth() {
             .disable::<bevy::audio::AudioPlugin>(),
     );
     sky::install(&mut app);
+    let mut scene_packs = if water_sky.is_some() {
+        load_with_reader(
+            br#"{"schema_version":1,"enabled":true,"packs":["graphics-packs/starter/pack.json","graphics-packs/water/pack.json"]}"#,
+            |name| std::fs::read(config_root().join(name)).map_err(|error| error.to_string()),
+        ).unwrap()
+    } else {
+        starter()
+    };
+    if std::env::var_os("METEOR_SN13_RENDER_BENCH").is_some() {
+        app.add_plugins(crate::plugins::dynamic_shadows_plugin::DynamicShadowsPlugin);
+        super::super::effects::install(&mut app);
+        let mut effects = load_with_reader(
+            br#"{"schema_version":1,"enabled":true,"packs":["graphics-packs/combat-fx/pack.json"]}"#,
+            |name| std::fs::read(config_root().join(name)).map_err(|e| e.to_string()),
+        ).unwrap();
+        scene_packs.packs.append(&mut effects.packs);
+    }
+    app.insert_resource(scene_packs);
     app.insert_resource(Settings {
         environment_lighting: false,
+        water_enhance: water_sky.is_some(),
         water_live_reflections: water_sky.is_some(),
         ..default()
     })
@@ -96,7 +251,6 @@ fn headless_cloud_sky_renders_and_respects_opaque_depth() {
     }
     crate::plugins::frame_work::install(&mut app);
     let mut packs = starter();
-    app.insert_resource(starter());
     let mut image = Image::new_target_texture(128, 128, TextureFormat::Rgba8UnormSrgb, None);
     image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
     let target = app.world_mut().resource_mut::<Assets<Image>>().add(image);
@@ -312,7 +466,28 @@ fn run_sn13(
         stage_plugin::StageScriptRuntime,
     };
 
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
+    let root = if let Some(installed) = std::env::var_os("METEOR_SN13_ORIGINAL_DIR") {
+        use meteor_asset::{original_directory::OriginalDirectory, runtime_assets};
+        let root = std::path::PathBuf::from(installed);
+        runtime_assets::initialize_original(OriginalDirectory::open(&root, &[]).unwrap()).unwrap();
+        if let Some(sky) = app
+            .world_mut()
+            .resource_mut::<GraphicsPacks>()
+            .packs
+            .iter_mut()
+            .flat_map(|pack| &mut pack.config.scenes)
+            .find(|scene| scene.stage == "sn13")
+            .and_then(|scene| scene.sky.as_mut())
+        {
+            sky.fixed_time = None;
+            sky.time = Some(config::SkyTime::Fixed {
+                time: "12:00".into(),
+            });
+        }
+        root
+    } else {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res")
+    };
     let src = root.join("sn13");
     let read = |name: &str| std::fs::read(src.join(name)).unwrap();
     let wp = crate::text_codec::decode_text(&std::fs::read(root.join("Level/sn13.wp")).unwrap());
@@ -376,10 +551,7 @@ fn load_sn13_variant(app: &mut App, enabled: bool) {
     use crate::plugins::render_plugin::{setup_stage_scene, PlayingSceneEntity};
     use bevy::ecs::system::RunSystemOnce;
 
-    app.insert_resource(Settings {
-        sky_enhance: enabled,
-        ..default()
-    });
+    app.world_mut().resource_mut::<Settings>().sky_enhance = enabled;
     let old = app
         .world_mut()
         .query_filtered::<Entity, With<PlayingSceneEntity>>()

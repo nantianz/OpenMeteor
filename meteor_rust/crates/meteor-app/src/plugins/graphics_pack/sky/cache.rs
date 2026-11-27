@@ -17,6 +17,8 @@ const CLOUD_TILE_SIZE: u32 = 16;
 const FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 const MAX_BLEND_SECONDS: f32 = 0.055;
 
+const MAX_REPROJECT_SHIFT: f32 = 1.0;
+const MAX_SHIFT_PER_CLOUD_DISTANCE: f32 = 0.015;
 #[derive(Clone, Copy, Default, ShaderType)]
 pub(crate) struct CacheView {
     origin_time: Vec4,
@@ -77,6 +79,17 @@ fn cloud_rows(layer: Vec4, eye_y: f32) -> std::ops::Range<u32> {
     } else {
         0..HEIGHT
     }
+}
+fn can_reproject(anchor: Vec3, eye: Vec3, wind_delta: Vec2, layer: Vec4) -> bool {
+    let displacement = eye - anchor - Vec3::new(wind_delta.x, 0.0, wind_delta.y);
+    if displacement == Vec3::ZERO {
+        return true;
+    }
+    let below = layer.x - anchor.y.max(eye.y);
+    let above = anchor.y.min(eye.y) - (layer.x + layer.y);
+    let gap = below.max(above).max(0.0);
+    let limit = (gap * MAX_SHIFT_PER_CLOUD_DISTANCE).min(MAX_REPROJECT_SHIFT);
+    displacement.length_squared() <= limit * limit
 }
 
 struct Panorama {
@@ -332,10 +345,13 @@ fn update(
             .published
             .is_some_and(|published| published.elapsed() < interval)
             || (previous.state.x != 0
-                && previous.origin_time.truncate() == source.eye_time.truncate()
                 && gpu.sky.get() == &profile.sky
-                && (previous.origin_time.w == source.eye_time.w
-                    || profile.sky.wind.xy() == Vec2::ZERO))
+                && can_reproject(
+                    previous.origin_time.truncate(),
+                    source.eye_time.truncate(),
+                    travel - previous.drift.zw(),
+                    profile.sky.layer,
+                ))
         {
             return;
         }
@@ -413,4 +429,31 @@ fn update(
         gpu.published = Some(Instant::now());
         gpu.bake = None;
     }
+}
+#[cfg(test)]
+#[test]
+fn reuses_cloud_panorama_for_small_viewer_and_wind_motion_outside_the_layer() {
+    let layer = Vec4::new(100.0, 30.0, 1.0, 1.0);
+    let below = Vec3::new(4.0, 10.0, 2.0);
+    assert!(can_reproject(below, below, Vec2::new(0.4, 0.0), layer));
+    assert!(can_reproject(
+        below,
+        below + Vec3::X,
+        Vec2::new(0.8, 0.0),
+        layer
+    ));
+    assert!(!can_reproject(
+        below,
+        below + Vec3::X * 2.0,
+        Vec2::ZERO,
+        layer
+    ));
+    let near = below.with_y(99.0);
+    let inside = below.with_y(110.0);
+    let above = below.with_y(180.0);
+    assert!(!can_reproject(near, near, Vec2::new(0.4, 0.0), layer));
+    assert!(can_reproject(inside, inside, Vec2::ZERO, layer));
+    assert!(!can_reproject(inside, inside, Vec2::new(0.4, 0.0), layer));
+    assert!(!can_reproject(near, inside, Vec2::ZERO, layer));
+    assert!(can_reproject(above, above, Vec2::new(0.4, 0.0), layer));
 }

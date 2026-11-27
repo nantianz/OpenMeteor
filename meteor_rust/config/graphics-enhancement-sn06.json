@@ -4,6 +4,7 @@
   "packs": [
     "graphics-packs/starter/pack.json",
     "graphics-packs/sn06-moss-valley/pack.json",
+    "graphics-packs/sn06-campfires/pack.json",
     "graphics-packs/combat-fx/pack.json"
   ]
 }

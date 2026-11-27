@@ -152,6 +152,11 @@ pub struct PonEfMaterial {
 
     particle_colors: Option<Box<[Vec4; dynamic_uniforms::PARAMS_PER_PAGE]>>,
 }
+impl PonEfMaterial {
+    pub(crate) fn is_soft(&self) -> bool {
+        self.params.soft > 0.0
+    }
+}
 
 #[cfg(test)]
 impl PonEfMaterial {
@@ -614,6 +619,16 @@ fn pon_ef_cylinder_mesh(radius_start: f32, radius_end: f32, height: f32, shifted
     .with_inserted_indices(Indices::U32(indices))
 }
 
+fn pon_ef_bottom_origin_uv(mut mesh: Mesh) -> Mesh {
+    if let Some(bevy::mesh::VertexAttributeValues::Float32x2(uvs)) =
+        mesh.attribute_mut(Mesh::ATTRIBUTE_UV_0)
+    {
+        for uv in uvs {
+            uv[1] = 1.0 - uv[1];
+        }
+    }
+    mesh
+}
 fn pon_ef_shape_mesh(node: &meteor_asset::pon_ef::PonEfNode) -> Option<Mesh> {
     let meteor_asset::pon_ef::PonEfTail::Floats(values) = &node.tail else {
         return None;
@@ -621,7 +636,9 @@ fn pon_ef_shape_mesh(node: &meteor_asset::pon_ef::PonEfNode) -> Option<Mesh> {
     Some(match node.type_id {
         meteor_asset::pon_ef::TYPE_SPHERE => {
             let radius = pon_ef_shape_value(values, 0, 1.0, 0.01);
-            Mesh::from(Sphere::new(radius))
+            pon_ef_bottom_origin_uv(Sphere::new(radius).mesh().uv(20, 20)).transformed_by(
+                Transform::from_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2)),
+            )
         }
         meteor_asset::pon_ef::TYPE_BOX => {
             let x = pon_ef_shape_value(values, 0, 1.0, 0.01);
@@ -649,15 +666,7 @@ fn pon_ef_shape_mesh(node: &meteor_asset::pon_ef::PonEfNode) -> Option<Mesh> {
         meteor_asset::pon_ef::TYPE_PLANE | meteor_asset::pon_ef::TYPE_BILLBOARD => {
             let width = pon_ef_shape_value(values, 0, 10.0, 0.01);
             let height = pon_ef_shape_value(values, 1, 10.0, 0.01);
-            let mut mesh = Mesh::from(Rectangle::new(width, height));
-
-            if let Some(bevy::mesh::VertexAttributeValues::Float32x2(uvs)) =
-                mesh.attribute_mut(Mesh::ATTRIBUTE_UV_0)
-            {
-                for uv in uvs {
-                    uv[1] = 1.0 - uv[1];
-                }
-            }
+            let mesh = pon_ef_bottom_origin_uv(Mesh::from(Rectangle::new(width, height)));
             if node.type_id == meteor_asset::pon_ef::TYPE_PLANE {
                 mesh.transformed_by(Transform::from_rotation(Quat::from_rotation_x(
                     std::f32::consts::FRAC_PI_2,
@@ -2212,15 +2221,22 @@ pub(crate) fn tick_pon_ef_players(
                 continue;
             };
             let bevy_mat = bevy::math::Mat4::from_cols_array(&world.m);
-            *node_transform = Transform::from_matrix(bevy_mat);
-            if node.type_id == meteor_asset::pon_ef::TYPE_BILLBOARD {
-                if let Some(camera_rotation) = current_camera_rotation {
-                    node_transform.rotation =
-                        camera_facing_local_rotation(&root_global, camera_rotation);
-                }
-            }
-
             let sample = meteor_asset::pon_ef::sample_transform(&node.keyframes, sample_time);
+            let billboard = node.type_id == meteor_asset::pon_ef::TYPE_BILLBOARD;
+            if billboard {
+                let camera_frame = bevy::math::Mat4::from_scale_rotation_translation(
+                    Vec3::splat(meteor_asset::pon_ef::PON_EF_SCALE),
+                    current_camera_rotation.unwrap_or(Quat::IDENTITY),
+                    Vec3::ZERO,
+                );
+                let mut transform = Transform::from_matrix(root_inverse * camera_frame);
+                transform.translation = bevy_mat.w_axis.truncate();
+                transform.scale.x *= sample.scale[0];
+                transform.scale.y *= sample.scale[2];
+                *node_transform = transform;
+            } else {
+                *node_transform = Transform::from_matrix(bevy_mat);
+            }
             let color = [
                 sample.render[0].max(0.0),
                 sample.render[1].max(0.0),
@@ -2242,7 +2258,11 @@ pub(crate) fn tick_pon_ef_players(
                 );
             }
             if let Some(mut visibility) = visibility {
-                let degenerate = node_transform.scale.abs().max_element() <= 1e-4;
+                let degenerate = if billboard {
+                    sample.scale[0] == 0.0 || sample.scale[2] == 0.0
+                } else {
+                    node_transform.scale.abs().max_element() <= 1e-4
+                };
                 let state = meteor_asset::pon_ef::decode_render_state(&node.transform_header);
 
                 visibility.set_if_neq(if degenerate || (state.blend_enabled && opacity <= 0.01) {
@@ -3493,6 +3513,7 @@ mod tests {
             ("pos326", "AttackBall02", Vec2::new(15.0, 10.0)),
             ("DefUPSlf", "Sphere_8", Vec2::new(0.0, 1.0)),
             ("DefUPSlf", "Sphere_7", Vec2::new(0.0, -2.0)),
+            ("defup", "Sphere_7", Vec2::new(0.0, -2.0)),
         ] {
             let mut app = feedback_test_app();
             app.update();
@@ -3576,6 +3597,67 @@ mod tests {
             if effect.starts_with("pos") {
                 assert!(inactive_frames > 20, "must retain UV outside the window");
             }
+        }
+    }
+    #[test]
+    fn original_shield_sphere_v_axis_is_vertical_after_pon_ef_attachment() {
+        use bevy::mesh::VertexAttributeValues;
+        let mut cache = EfCache::default();
+        for (effect, layers) in [("DefUPSlf", 2), ("defup", 1)] {
+            let ef = cache.load(effect).expect("authored shield effect");
+            let mut checked = 0;
+            for node in ef
+                .nodes
+                .iter()
+                .filter(|node| node.texture.eq_ignore_ascii_case("fyl5200.bmp"))
+            {
+                let mesh = pon_ef_shape_mesh(node).unwrap();
+                let Some(VertexAttributeValues::Float32x3(positions)) =
+                    mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+                else {
+                    panic!("shield sphere needs positions");
+                };
+                let Some(VertexAttributeValues::Float32x2(uvs)) =
+                    mesh.attribute(Mesh::ATTRIBUTE_UV_0)
+                else {
+                    panic!("shield sphere needs UVs");
+                };
+                let sample = |u, v| {
+                    positions
+                        .iter()
+                        .zip(uvs)
+                        .find_map(|(p, uv)| (*uv == [u, v]).then_some(Vec3::from_array(*p)))
+                        .expect("original longitude / latitude sample")
+                };
+                assert_eq!(positions.len(), 21 * 21);
+                assert!(sample(0.0, 0.5).normalize().distance(Vec3::Y) < 1e-5);
+                assert!(sample(0.25, 0.5).normalize().distance(-Vec3::X) < 1e-5);
+                let bottom_to_top = sample(0.0, 1.0) - sample(0.0, 0.0);
+                let matrix = meteor_asset::pon_ef::node_world_matrix(
+                    &ef,
+                    node.index,
+                    0.1,
+                    &mut default(),
+                    &mut default(),
+                    &mut |_| Some(scene_effect_source_frame()),
+                )
+                .unwrap();
+                let world = bevy::math::Mat4::from_cols_array(&matrix.m);
+                assert!(
+                    world
+                        .transform_vector3(bottom_to_top)
+                        .normalize()
+                        .distance(Vec3::Y)
+                        < 1e-5,
+                    "{effect}:{} must scroll V from bottom to top",
+                    node.name
+                );
+                checked += 1;
+            }
+            assert_eq!(
+                checked, layers,
+                "all textured shield layers must be covered"
+            );
         }
     }
 
@@ -5941,6 +6023,114 @@ mod tests {
         assert!(world.dot(camera_rotation).abs() > 0.99999);
     }
 
+    #[test]
+    fn original_billboard_projects_authored_xz_scale_onto_camera_axes() {
+        use bevy::mesh::VertexAttributeValues;
+        for (effect, node_name, expected_scales) in [
+            ("pos310", "Board_6", [(1.0, 5.0), (5.0, 1.0)]),
+            ("pos255", "Board_8", [(5.0, 1.0), (0.5, 2.0)]),
+        ] {
+            let mut app = feedback_test_app();
+            app.update();
+            let camera = app
+                .world_mut()
+                .spawn((
+                    crate::plugins::camera_plugin::GameplayCamera,
+                    Transform::IDENTITY,
+                ))
+                .id();
+            app.world_mut().write_message(SceneEffectEvent {
+                effect: effect.into(),
+                position: Vec3::new(2.0, 3.0, 4.0),
+            });
+            app.update();
+            let (root, player) = app
+                .world_mut()
+                .query::<(Entity, &PonEfInstance)>()
+                .single(app.world())
+                .unwrap();
+            let node = player
+                .ef
+                .nodes
+                .iter()
+                .find(|node| node.name == node_name)
+                .unwrap();
+            let node_index = node.index;
+            let times = [node.keyframes[1].time, node.keyframes[2].time];
+            let meteor_asset::pon_ef::PonEfTail::Floats(size) = &node.tail else {
+                panic!("{node_name} needs authored width and height");
+            };
+            let size = Vec2::new(size[0], size[1]) * meteor_asset::pon_ef::PON_EF_SCALE;
+            let parent = app
+                .world_mut()
+                .spawn(
+                    Transform::from_rotation(Quat::from_rotation_y(-0.7))
+                        .with_scale(Vec3::splat(2.0)),
+                )
+                .id();
+            app.world_mut().entity_mut(root).insert(ChildOf(parent));
+            let (entity, mesh) = app
+                .world_mut()
+                .query::<(Entity, &PonEfNodeOwner, &PonEfNodeEntity, &Mesh3d)>()
+                .iter(app.world())
+                .find_map(|(entity, owner, node, mesh)| {
+                    (owner.0 == root && node.0 == node_index).then(|| (entity, mesh.0.clone()))
+                })
+                .unwrap();
+            let mesh = app.world().resource::<Assets<Mesh>>().get(&mesh).unwrap();
+            let VertexAttributeValues::Float32x3(positions) =
+                mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap()
+            else {
+                panic!("billboard positions");
+            };
+            let VertexAttributeValues::Float32x2(uvs) =
+                mesh.attribute(Mesh::ATTRIBUTE_UV_0).unwrap()
+            else {
+                panic!("billboard UVs");
+            };
+            let corner = |uv| {
+                let index = uvs.iter().position(|candidate| *candidate == uv).unwrap();
+                Vec3::from_array(positions[index])
+            };
+            let lower_left = corner([0.0, 0.0]);
+            let right = corner([1.0, 0.0]) - lower_left;
+            let up = corner([0.0, 1.0]) - lower_left;
+            for (frame, (time, (width_scale, height_scale))) in
+                times.into_iter().zip(expected_scales).enumerate()
+            {
+                let rotation =
+                    Quat::from_rotation_y(0.3 + frame as f32) * Quat::from_rotation_x(-0.5);
+                app.world_mut()
+                    .get_mut::<Transform>(camera)
+                    .unwrap()
+                    .rotation = rotation;
+                app.world_mut()
+                    .entity_mut(root)
+                    .insert(PonEfStartTime(time));
+                app.update();
+                let matrix = app
+                    .world()
+                    .get::<GlobalTransform>(entity)
+                    .unwrap()
+                    .to_matrix();
+                let view = rotation.inverse();
+                let u = view * matrix.transform_vector3(right);
+                let v = view * matrix.transform_vector3(up);
+                assert!(
+                    u.distance(Vec3::X * size.x * width_scale) < 1e-4,
+                    "{effect}: {u:?}"
+                );
+                assert!(
+                    v.distance(Vec3::Y * size.y * height_scale) < 1e-4,
+                    "{effect}: {v:?}"
+                );
+                assert_eq!(
+                    app.world().get::<Visibility>(entity),
+                    Some(&Visibility::Visible)
+                );
+            }
+        }
+    }
     #[test]
     fn origin_res_pose_effects_resolve_to_sfx_files() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");

@@ -12,6 +12,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 mod queue_a;
+mod timeline;
+pub(crate) use timeline::MrcTimeline;
 #[cfg(not(target_arch = "wasm32"))]
 mod trace;
 
@@ -76,7 +78,7 @@ pub struct MrcPlayback {
     pub file_name: String,
 
     pub prev_c: i32,
-    pub(crate) pending_hit_locks: Vec<(Entity, u32, f32)>,
+    pub(crate) pending_hit_locks: Vec<MrcHitLock>,
     pub(crate) burst_tracks: HashMap<u16, Vec<MrcRemoteBurst>>,
 
     pub(crate) frame_times: Vec<f32>,
@@ -324,11 +326,7 @@ enum MrcSessionEvent {
         chain: meteor_network::role_state::PoseChain,
         start: bool,
     },
-    Hit {
-        guarded: bool,
-        event: meteor_network::stock_protocol::StockHitReactionEvent,
-        time: f32,
-    },
+    Hit(MrcRecordedHit),
     Property(meteor_network::stock_protocol::StockPropertyEffectEvent),
     World {
         time: f32,
@@ -336,15 +334,23 @@ enum MrcSessionEvent {
     },
 }
 
+#[derive(Debug, Clone, Copy)]
+struct MrcRecordedHit {
+    guarded: bool,
+    event: meteor_network::stock_protocol::StockHitReactionEvent,
+    time: f32,
+}
+pub(crate) struct MrcHitLock {
+    pub(crate) target: Entity,
+    pub(crate) strategy: u32,
+    pub(crate) time: f32,
+}
 #[derive(Resource, Default)]
 struct MrcSessionRuntime {
     pending: Vec<MrcSessionEvent>,
+    post_hit_events: Vec<MrcSessionEvent>,
     pending_actions: Vec<(u16, meteor_network::role_state::PoseChain, bool)>,
-    pending_hits: Vec<(
-        bool,
-        meteor_network::stock_protocol::StockHitReactionEvent,
-        f32,
-    )>,
+    pending_hits: Vec<MrcRecordedHit>,
     pending_properties: Vec<meteor_network::stock_protocol::StockPropertyEffectEvent>,
     character_by_slot: HashMap<u16, u8>,
     equip_by_slot: HashMap<u32, (u8, u8)>,
@@ -393,22 +399,25 @@ impl MrcPlayback {
         } else {
             Vec::new()
         };
+        self.doc = Some(doc);
+        self.rewind();
+        self.active = true;
+        self.paused = false;
+        self.file_name = file_name;
+        Ok(())
+    }
+    fn rewind(&mut self) {
+        self.pending_hit_locks.clear();
         self.frame_cursor = 0;
         self.frame_wall = 0.0;
         self.frame_target = None;
-        self.doc = Some(doc);
         self.index_a = 0;
         self.index_b = 0;
         self.index_c = 0;
         self.index_d = 0;
         self.index_e = 0;
-        self.pending_hit_locks.clear();
         self.elapsed = 0.0;
         self.prev_c = 0;
-        self.active = true;
-        self.paused = false;
-        self.file_name = file_name;
-        Ok(())
     }
 
     fn state_word(&self, index: usize) -> Option<u32> {
@@ -575,11 +584,11 @@ fn route_mrc_session_entry(
                     event.pose_id
                 };
                 if (1..=64).contains(&event.target_actor_id) && pose_id <= 2048 {
-                    runtime.pending.push(MrcSessionEvent::Hit {
+                    runtime.pending.push(MrcSessionEvent::Hit(MrcRecordedHit {
                         guarded: entry.id == 14,
                         event,
                         time: entry.time,
-                    });
+                    }));
                     handled = true;
                 }
             }
@@ -713,18 +722,11 @@ fn tick_mrc_playback(
     lock_targets: Query<(&Transform, Option<&MotionState>), Without<LocalFighter>>,
 ) {
     frame_override.position_applied = false;
-    let step = frame_clock.as_deref().and_then(|clock| clock.substep);
-    if step.is_none_or(|step| step.first) {
-        frame_override.facing_applied = false;
-    }
-    if step.is_some() {
-        keys.clear();
-        mouse.clear();
-    }
-    if seek.0.is_some() {
+    frame_override.facing_applied = false;
+    if seek.0.is_some() && playback.frame_target.is_none() {
         return;
     }
-    if !playback.active || playback.paused {
+    if !playback.active || (playback.paused && playback.frame_target.is_none()) {
         return;
     }
     if let Some(target) = playback.frame_target.take() {
@@ -761,6 +763,7 @@ fn tick_mrc_playback(
                     && (mrc_code_to_synthetic_action(entry.code).is_some()
                         || matches!(entry.code, 0x11 | 0x12))
             })
+            .filter(|_| t < doc.duration())
             .map_or(t, |entry| entry.time);
         let mut i_a = playback.index_a;
         while i_a < doc.queue_a.len() && doc.queue_a[i_a].time <= session_cutoff {
@@ -947,7 +950,6 @@ type MrcRemoteQuery<'w, 's> = Query<
         &'static mut MotionState,
         &'static mut crate::plugins::movement_plugin::FighterAir,
         &'static mut crate::plugins::network_plugin::RemoteTransformTarget,
-        Option<&'static crate::plugins::network_plugin::RemoteHitMotionWindow>,
         &'static mut Transform,
     ),
     (With<MrcRemoteFighter>, Without<LocalFighter>),
@@ -1165,7 +1167,27 @@ fn apply_mrc_session_events(
             }
         }
     }
+    let first_hit = session.pending_hits.len();
     for event in events {
+        let pose_actor = match &event {
+            MrcSessionEvent::Remote { actor_id, .. } | MrcSessionEvent::Action { actor_id, .. } => {
+                Some(*actor_id)
+            }
+            _ => None,
+        };
+        if pose_actor.is_some_and(|actor_id| {
+            local_slot != Some(u32::from(actor_id))
+                && session.pending_hits[first_hit..]
+                    .iter()
+                    .any(|hit| hit.event.target_actor_id == u32::from(actor_id))
+                && (remote_states.contains_key(&actor_id)
+                    || remotes
+                        .iter()
+                        .any(|(_, remote, ..)| remote.actor_id == actor_id))
+        }) {
+            session.post_hit_events.push(event);
+            continue;
+        }
         match event {
             MrcSessionEvent::Identity {
                 actor_id,
@@ -1215,13 +1237,7 @@ fn apply_mrc_session_events(
             } => {
                 actions.push((actor_id, chain, start));
             }
-            MrcSessionEvent::Hit {
-                guarded,
-                event,
-                time: event_time,
-            } => {
-                session.pending_hits.push((guarded, event, event_time));
-            }
+            MrcSessionEvent::Hit(hit) => session.pending_hits.push(hit),
             MrcSessionEvent::Property(event) => session.pending_properties.push(event),
             MrcSessionEvent::World { time, event } => {
                 if let Some(net) = net.as_deref_mut() {
@@ -1344,7 +1360,6 @@ fn apply_mrc_session_events(
                 mut motion,
                 mut air,
                 mut target,
-                hit_window,
                 _transform,
             )) = remotes
                 .iter_mut()
@@ -1383,8 +1398,6 @@ fn apply_mrc_session_events(
                 air.air.airborne = !state.state_words.grounded;
                 air.ground_contact = state.state_words.grounded;
                 if remote.pose_pending
-                    && !(hit_window.is_some_and(|window| window.remaining > 0.0)
-                        && remote.pending_action.is_none())
                     && match remote.pending_action {
                         Some(chain) => apply_mrc_discrete_pose(
                             assets.as_deref(),
@@ -1479,6 +1492,10 @@ fn apply_mrc_session_events(
                 },
                 crate::plugins::network_plugin::RemoteFighter {
                     player_id: actor_key(u32::from(actor_id)),
+                },
+                crate::plugins::network_plugin::RemoteVitalsStatus {
+                    health_known: false,
+                    anger_known: false,
                 },
                 fighter,
                 crate::components::fighter::Health {
@@ -1853,6 +1870,10 @@ fn recorded_reaction_facing(
         .map(|(_, yaw)| yaw)
 }
 
+fn restore_mrc_post_hit_events(mut session: ResMut<MrcSessionRuntime>) {
+    let session = &mut *session;
+    session.pending.append(&mut session.post_hit_events);
+}
 fn apply_mrc_hit_events(
     assets: Option<Res<crate::plugins::character_plugin::CharacterAssetsSet>>,
     mut playback: ResMut<MrcPlayback>,
@@ -1889,7 +1910,12 @@ fn apply_mrc_hit_events(
     >,
 ) {
     let hits = std::mem::take(&mut session.pending_hits);
-    for (guarded, event, event_time) in hits {
+    for hit in hits {
+        let MrcRecordedHit {
+            guarded,
+            event,
+            time,
+        } = hit;
         if session
             .match_projection
             .dead
@@ -1914,7 +1940,7 @@ fn apply_mrc_hit_events(
                 mut placement,
             )) = local.single_mut()
             else {
-                session.pending_hits.push((guarded, event, event_time));
+                session.pending_hits.push(hit);
                 continue;
             };
 
@@ -1956,7 +1982,7 @@ fn apply_mrc_hit_events(
                 .as_deref()
                 .and_then(|assets| assets.0.get(&format!("p{}", fighter.character_id)))
             else {
-                session.pending_hits.push((guarded, event, event_time));
+                session.pending_hits.push(hit);
                 continue;
             };
 
@@ -2088,14 +2114,14 @@ fn apply_mrc_hit_events(
             .iter_mut()
             .find(|(_, remote, ..)| u32::from(remote.actor_id) == event.target_actor_id)
         else {
-            session.pending_hits.push((guarded, event, event_time));
+            session.pending_hits.push(hit);
             continue;
         };
         let Some(character) = assets
             .as_deref()
             .and_then(|assets| assets.0.get(&format!("p{}", fighter.character_id)))
         else {
-            session.pending_hits.push((guarded, event, event_time));
+            session.pending_hits.push(hit);
             continue;
         };
         let selector = event.pose_id & 0xffff;
@@ -2174,15 +2200,18 @@ fn apply_mrc_hit_events(
         );
         window.remaining = 0.4;
         remote.hit_age = 0.0;
+        remote.pose_sequence = remote.pose_sequence.wrapping_add(1);
+        remote.ground_sequence = remote.ground_sequence.wrapping_add(1);
         remote.desired_pose_id = pose_id;
         remote.pose_pending = false;
         remote.pending_action = None;
+        remote.pending_start = false;
         remote.applied_character_id = fighter.character_id;
-        if playback.stock_scene_coordinates() {
-            playback
-                .pending_hit_locks
-                .push((target_entity, event.context, event_time));
-        }
+        playback.pending_hit_locks.push(MrcHitLock {
+            target: target_entity,
+            strategy: event.context,
+            time,
+        });
 
         if let Some(impacts) = impacts.as_deref_mut() {
             if (90..=117).contains(&effect_pose) && event.context < 12 {
@@ -2255,7 +2284,7 @@ fn smooth_mrc_remote_fighters(
         &mut crate::plugins::network_plugin::RemoteTransformTarget,
     )>,
 ) {
-    if !playback.active || playback.paused {
+    if !playback.active || (playback.paused && frame_clock.is_none()) {
         return;
     }
     let dt = crate::plugins::simulation_dt(frame_clock.as_deref(), time.delta_secs());
@@ -2327,13 +2356,10 @@ fn sync_mrc_remote_pose(
         &crate::components::fighter::Fighter,
         &mut crate::components::fighter::PoseRuntime,
         &mut crate::components::fighter::EntryBlend,
-        Option<&crate::plugins::network_plugin::RemoteHitMotionWindow>,
     )>,
 ) {
-    for (mut remote, fighter, mut pose, mut blend, hit_window) in &mut remotes {
+    for (mut remote, fighter, mut pose, mut blend) in &mut remotes {
         if (remote.pose_pending || fighter.character_id != remote.applied_character_id)
-            && !(hit_window.is_some_and(|window| window.remaining > 0.0)
-                && remote.pending_action.is_none())
             && match remote.pending_action {
                 Some(chain) => apply_mrc_discrete_pose(
                     assets.as_deref(),
@@ -2565,7 +2591,11 @@ fn apply_replay_seek(
     mut basis: ResMut<CameraBasis>,
     mut fighters: Query<(&mut Transform, &mut MotionState), With<LocalFighter>>,
     mut local_blends: Query<&mut crate::components::fighter::EntryBlend, With<LocalFighter>>,
+    timeline: Option<Res<MrcTimeline>>,
 ) {
+    if playback.active && timeline.is_some() {
+        return;
+    }
     let Some(target) = request.0.take() else {
         return;
     };
@@ -2581,14 +2611,15 @@ fn apply_replay_seek(
 
     if playback.active {
         let t = target.clamp(0.0, playback.duration());
+        playback.pending_hit_locks.clear();
         playback.frame_cursor = playback.frame_times.partition_point(|frame| *frame <= t);
         playback.frame_wall = f64::from(t);
         playback.frame_target = None;
         let scene_frame = mrc_scene_frame(&playback, waypoints.as_deref());
         session.pending.clear();
+        session.post_hit_events.clear();
         session.pending_actions.clear();
         session.pending_hits.clear();
-        playback.pending_hit_locks.clear();
         session.pending_properties.clear();
         session.character_by_slot.clear();
         session.equip_by_slot.clear();
@@ -2720,52 +2751,19 @@ const REPLAY_MAGIC: &[u8; 5] = b"MREP1";
 
 pub const REPLAY_DIR: &str = "replays";
 
-#[derive(bevy::ecs::schedule::ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash)]
-pub(super) struct MrcSubstep;
-
-#[derive(Resource)]
-pub(super) struct RecordedSubsteps;
-
-pub(super) fn use_recorded_substeps(
-    schedule: Option<Res<RecordedSubsteps>>,
-    installed: Option<Res<super::FrameClockInstalled>>,
-    clock: Option<Res<super::FrameClock>>,
-    playback: Option<Res<MrcPlayback>>,
-) -> bool {
-    schedule.is_some()
-        && installed.is_some()
-        && clock.is_some_and(|clock| clock.sim_dt > 0.0 && !clock.replay_steps.is_empty())
-        && playback.is_some_and(|playback| playback.active && !playback.paused)
-}
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct MrcInitialSessionEvents;
 
 pub struct ReplayPlugin;
 
 impl Plugin for ReplayPlugin {
     fn build(&self, app: &mut App) {
-        use super::input_plugin::{capture_local_command_input, capture_local_hold_inputs};
-        use bevy::ecs::schedule::common_conditions::not;
-        app.insert_resource(RecordedSubsteps)
-            .init_schedule(MrcSubstep)
-            .add_systems(
-                MrcSubstep,
-                (
-                    tick_mrc_playback,
-                    apply_mrc_session_events,
-                    apply_mrc_remote_life,
-                    apply_mrc_target_clears,
-                    apply_mrc_weapon_grants,
-                    apply_mrc_hit_events,
-                    apply_mrc_property_events,
-                    apply_mrc_identities,
-                    smooth_mrc_remote_fighters,
-                    restore_mrc_scene,
-                    capture_mrc_held_input,
-                    capture_local_command_input,
-                    capture_local_hold_inputs,
-                    sync_mrc_remote_pose,
-                )
-                    .chain(),
-            );
+        if app
+            .world()
+            .contains_resource::<super::FrameClockInstalled>()
+        {
+            timeline::install(app);
+        }
         #[cfg(not(target_arch = "wasm32"))]
         trace::install(app);
         app.init_resource::<ReplayRecorder>()
@@ -2802,44 +2800,37 @@ impl Plugin for ReplayPlugin {
                     .after(crate::plugins::camera_plugin::prepare_move_basis)
                     .before(crate::plugins::input_plugin::capture_local_command_input)
                     .run_if(in_state(AppState::Playing))
-                    .run_if(crate::plugins::simulation_frame)
-                    .run_if(not(use_recorded_substeps)),
-            )
-            .add_systems(
-                Update,
-                apply_replay_seek
-                    .in_set(crate::plugins::FighterFrameSet::Movement)
-                    .after(tick_mrc_playback)
-                    .before(apply_mrc_session_events)
-                    .run_if(in_state(AppState::Playing)),
+                    .run_if(crate::plugins::simulation_frame),
             )
             .add_systems(
                 Update,
                 (
-                    apply_mrc_session_events,
+                    apply_replay_seek,
+                    apply_mrc_session_events.in_set(MrcInitialSessionEvents),
                     apply_mrc_remote_life,
                     apply_mrc_target_clears,
                     apply_mrc_weapon_grants,
                     apply_mrc_hit_events,
+                    restore_mrc_post_hit_events,
+                    apply_mrc_session_events
+                        .run_if(|session: Res<MrcSessionRuntime>| !session.pending.is_empty()),
                     apply_mrc_property_events,
                     apply_mrc_identities,
                     smooth_mrc_remote_fighters.run_if(crate::plugins::simulation_frame),
                 )
                     .chain()
                     .in_set(crate::plugins::FighterFrameSet::Movement)
-                    .after(apply_replay_seek)
+                    .after(tick_mrc_playback)
                     .before(crate::plugins::input_plugin::capture_local_command_input)
                     .before(crate::plugins::ai_plugin::drive_npc_ai)
-                    .run_if(in_state(AppState::Playing))
-                    .run_if(not(use_recorded_substeps)),
+                    .run_if(in_state(AppState::Playing)),
             )
             .add_systems(
                 Update,
                 restore_mrc_scene
-                    .after(apply_mrc_session_events)
+                    .after(MrcInitialSessionEvents)
                     .before(super::stage_plugin::tick_stage_script)
-                    .run_if(in_state(AppState::Playing))
-                    .run_if(not(use_recorded_substeps)),
+                    .run_if(in_state(AppState::Playing)),
             )
             .add_systems(
                 Update,
@@ -2858,8 +2849,7 @@ impl Plugin for ReplayPlugin {
                     .after(apply_replay_seek)
                     .after(replay_playback)
                     .before(crate::plugins::input_plugin::capture_local_command_input)
-                    .run_if(in_state(AppState::Playing))
-                    .run_if(not(use_recorded_substeps)),
+                    .run_if(in_state(AppState::Playing)),
             )
             .add_systems(
                 Update,
@@ -2873,8 +2863,7 @@ impl Plugin for ReplayPlugin {
                 sync_mrc_remote_pose
                     .in_set(crate::plugins::FighterFrameSet::PoseDecision)
                     .run_if(in_state(AppState::Playing))
-                    .run_if(crate::plugins::simulation_frame)
-                    .run_if(not(use_recorded_substeps)),
+                    .run_if(crate::plugins::simulation_frame),
             );
     }
 }
@@ -2916,8 +2905,11 @@ fn stop_mrc_playback(
     mut frame_override: ResMut<MrcFrameOverride>,
     session: Res<MrcSessionRuntime>,
     net: Option<ResMut<super::network_plugin::NetState>>,
+    timeline: Option<ResMut<MrcTimeline>>,
+    state: Res<State<AppState>>,
 ) {
     if playback.active {
+        playback.pending_hit_locks.clear();
         if let Some(mut net) = net {
             MatchProjection::clear_net(&mut net);
         }
@@ -2925,9 +2917,18 @@ fn stop_mrc_playback(
             set_replay_input(&mut keys, &mut mouse, binding, false);
         }
     }
-    playback.active = false;
-    playback.paused = false;
-    playback.pending_hit_locks.clear();
+    if let Some(mut timeline) = timeline {
+        if timeline.restarting && *state.get() == AppState::Loading {
+            playback.rewind();
+        } else {
+            *timeline = MrcTimeline::default();
+            playback.active = false;
+            playback.paused = false;
+        }
+    } else {
+        playback.active = false;
+        playback.paused = false;
+    }
     held.bindings.clear();
     frame_override.position_applied = false;
     frame_override.facing_applied = false;
@@ -2945,13 +2946,14 @@ fn stop_mrc_playback(
 fn reset_replay_session(
     mut recorder: ResMut<ReplayRecorder>,
     mut player: ResMut<ReplayPlayer>,
+    playback: Res<MrcPlayback>,
     mut session: ResMut<MrcSessionRuntime>,
     mut held: ResMut<MrcHeldInput>,
     request: Res<crate::app_state::LaunchRequest>,
 ) {
     held.bindings.clear();
 
-    recorder.active = recorder.auto;
+    recorder.active = recorder.auto && !playback.active && !player.active;
     recorder.elapsed = 0.0;
     recorder.events.clear();
     recorder.queue_a.clear();
@@ -3316,90 +3318,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn merged_recorded_frames_sample_each_input_before_the_controller() {
-        use super::super::{fighter_frame, FrameClock, FrameClockInstalled};
-        use meteor_asset::mrc::{MrcDocument, MrcQueueBEntry, MrcQueueDEntry};
-
-        #[derive(Resource, Default)]
-        struct Samples(Vec<(f32, bool)>);
-
-        let mut app = App::new();
-        super::super::configure_fighter_frame_sets(&mut app);
-        fighter_frame::install(&mut app);
-        let mut clock = FrameClock::default();
-        clock.replay_steps = vec![0.01, 0.01];
-        clock.sim_dt = 0.02;
-        app.init_resource::<Time>()
-            .init_resource::<Keymap>()
-            .init_resource::<CameraBasis>()
-            .init_resource::<ReplaySeekRequest>()
-            .init_resource::<MrcFrameOverride>()
-            .init_resource::<MrcSessionRuntime>()
-            .init_resource::<SyntheticInputStream>()
-            .init_resource::<ButtonInput<KeyCode>>()
-            .init_resource::<ButtonInput<MouseButton>>()
-            .init_resource::<Samples>()
-            .insert_resource(clock)
-            .insert_resource(FrameClockInstalled)
-            .insert_resource(RecordedSubsteps)
-            .insert_resource(MrcPlayback {
-                active: true,
-                frame_times: vec![0.01, 0.02, 0.2],
-                frame_cursor: 2,
-                frame_target: Some(0.02),
-                doc: Some(MrcDocument {
-                    magic: meteor_asset::mrc::MRC_MAGIC,
-                    header_size: meteor_asset::mrc::MRC_HEADER_SIZE,
-                    mark0: 9,
-                    mark1: 7,
-                    tail: 0,
-                    state: [0; 20],
-                    meta: [0; 8],
-                    queue_a: vec![],
-                    queue_b: vec![
-                        MrcQueueBEntry {
-                            code: 0x57,
-                            value: 1,
-                            time: 0.005,
-                        },
-                        MrcQueueBEntry {
-                            code: 0x57,
-                            value: 0,
-                            time: 0.015,
-                        },
-                    ],
-                    queue_c: vec![],
-                    queue_d: vec![MrcQueueDEntry {
-                        a: 0,
-                        b: 0,
-                        c: 0,
-                        time: 0.2,
-                    }],
-                    queue_e: vec![],
-                }),
-                ..default()
-            })
-            .init_schedule(MrcSubstep)
-            .add_systems(MrcSubstep, tick_mrc_playback)
-            .add_systems(
-                fighter_frame::FighterStepStart,
-                |playback: Res<MrcPlayback>,
-                 keys: Res<ButtonInput<KeyCode>>,
-                 mut samples: ResMut<Samples>| {
-                    samples
-                        .0
-                        .push((playback.elapsed, keys.pressed(KeyCode::KeyW)));
-                },
-            );
-
-        app.update();
-        assert_eq!(
-            app.world().resource::<Samples>().0,
-            [(0.01, true), (0.02, false)]
-        );
-    }
-
-    #[test]
     fn replay_roundtrip_preserves_events() {
         let events = vec![
             ReplayEvent {
@@ -3460,7 +3378,6 @@ mod tests {
     }
 }
 
-#[cfg(feature = "original-assets")]
 #[cfg(test)]
 mod mrc_tests {
     use super::*;
@@ -3537,7 +3454,7 @@ mod mrc_tests {
         assert!(!mouse.just_released(MouseButton::Left));
     }
 
-    fn empty_mrc_document() -> meteor_asset::mrc::MrcDocument {
+    pub(super) fn empty_mrc_document() -> meteor_asset::mrc::MrcDocument {
         meteor_asset::mrc::MrcDocument {
             magic: meteor_asset::mrc::MRC_MAGIC,
             header_size: meteor_asset::mrc::MRC_HEADER_SIZE,
@@ -3629,6 +3546,7 @@ mod mrc_tests {
         );
     }
 
+    #[cfg(feature = "original-assets")]
     #[test]
     fn original_dagger_jump_remote_opening_has_no_packet_sized_visual_jump() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
@@ -3734,6 +3652,7 @@ mod mrc_tests {
         );
     }
 
+    #[cfg(feature = "original-assets")]
     #[test]
     fn paused_seek_into_dagger_packet_burst_shows_the_reconstructed_position() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
@@ -3782,6 +3701,7 @@ mod mrc_tests {
         );
     }
 
+    #[cfg(feature = "original-assets")]
     #[test]
     fn fist_ultimate_hit_keeps_the_smoothed_opponent_near_the_recorded_local_pose() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
@@ -4488,6 +4408,7 @@ mod mrc_tests {
         assert_eq!(runtime.unhandled_counts.get(&67), Some(&1));
     }
 
+    #[cfg(feature = "original-assets")]
     #[test]
     fn original_mrc_seek_restores_authoritative_death_and_revival() {
         use super::super::network_plugin::NetState;
@@ -4581,6 +4502,7 @@ mod mrc_tests {
         }
     }
 
+    #[cfg(feature = "original-assets")]
     #[test]
     fn stock_mrc_uses_the_loaded_stage_frame_for_local_and_remote_positions() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -4623,6 +4545,7 @@ mod mrc_tests {
         assert_eq!(mrc_scene_pose(local, None), local);
     }
 
+    #[cfg(feature = "original-assets")]
     #[test]
     fn original_event51_applies_remote_action_blend_once_after_actor_entry() {
         use crate::plugins::character_plugin::{load_character_asset_for_test, CharacterAssetsSet};
@@ -4715,6 +4638,7 @@ mod mrc_tests {
         );
     }
 
+    #[cfg(feature = "original-assets")]
     #[test]
     fn original_fist_recording_feeds_full_anger_command_through_production_input() {
         use crate::plugins::input_plugin::{
@@ -4924,6 +4848,7 @@ mod mrc_tests {
         assert_eq!(qi_after_attack, 0.0);
     }
 
+    #[cfg(feature = "original-assets")]
     #[test]
     fn original_hit_and_property_events_update_the_remote_without_repeating_local_hits() {
         use crate::plugins::character_plugin::{load_character_asset_for_test, CharacterAssetsSet};
@@ -4952,6 +4877,8 @@ mod mrc_tests {
             (
                 apply_mrc_session_events,
                 apply_mrc_hit_events,
+                restore_mrc_post_hit_events,
+                apply_mrc_session_events,
                 apply_mrc_property_events,
                 sync_mrc_remote_pose,
             )
@@ -4994,6 +4921,15 @@ mod mrc_tests {
             },
             &mut app.world_mut().resource_mut::<MrcSessionRuntime>(),
         );
+        let mut hit_state = state;
+        hit_state.state_words = meteor_network::role_state::unpack_state_words(0x0800 | 100, 2);
+        app.world_mut()
+            .resource_mut::<MrcSessionRuntime>()
+            .pending
+            .push(MrcSessionEvent::Remote {
+                actor_id: 1,
+                state: hit_state,
+            });
         route_mrc_session_entry(
             &meteor_asset::mrc::MrcQueueAEntry {
                 id: 61,
@@ -5031,6 +4967,11 @@ mod mrc_tests {
                 .remaining,
             0.4
         );
+        let hit_locks = &app.world().resource::<MrcPlayback>().pending_hit_locks;
+        assert_eq!(hit_locks.len(), 1);
+        assert_eq!(hit_locks[0].target, entity);
+        assert_eq!(hit_locks[0].strategy, hit.context);
+        assert_eq!(hit_locks[0].time, 10.44105);
         assert_eq!(
             app.world()
                 .get::<crate::components::fighter::FighterStatusEffects>(entity)
@@ -5039,14 +4980,16 @@ mod mrc_tests {
                 .anger,
             -5
         );
-        let mut later = state;
-        later.state_words.pose_sequence = 2;
+        let remote = app.world().get::<MrcRemoteFighter>(entity).unwrap();
+        assert_eq!((remote.ground_sequence, remote.pose_sequence), (2, 2));
+        let mut stale = state;
+        stale.state_words.pose_sequence = 2;
         app.world_mut()
             .resource_mut::<MrcSessionRuntime>()
             .pending
             .push(MrcSessionEvent::Remote {
                 actor_id: 1,
-                state: later,
+                state: stale,
             });
         app.update();
         assert_eq!(
@@ -5056,20 +4999,39 @@ mod mrc_tests {
                 .pose_id,
             100
         );
+        assert!(
+            !app.world()
+                .get::<MrcRemoteFighter>(entity)
+                .unwrap()
+                .pose_pending
+        );
+        let mut getup = state;
+        getup.state_words = meteor_network::role_state::unpack_state_words(0x0800 | 120, 3);
         app.world_mut()
-            .get_mut::<crate::plugins::network_plugin::RemoteHitMotionWindow>(entity)
-            .unwrap()
-            .remaining = 0.0;
+            .resource_mut::<MrcSessionRuntime>()
+            .pending
+            .push(MrcSessionEvent::Remote {
+                actor_id: 1,
+                state: getup,
+            });
         app.update();
         assert_eq!(
             app.world()
                 .get::<crate::components::fighter::PoseRuntime>(entity)
                 .unwrap()
                 .pose_id,
-            0
+            120
+        );
+        assert_eq!(
+            app.world()
+                .get::<crate::plugins::network_plugin::RemoteHitMotionWindow>(entity)
+                .unwrap()
+                .remaining,
+            0.4
         );
     }
 
+    #[cfg(feature = "original-assets")]
     #[test]
     fn original_ninja_burn_uses_recorded_start_hit_pose_and_vitals() {
         use crate::components::fighter::{
@@ -5203,6 +5165,7 @@ mod mrc_tests {
         assert_eq!(app.world().get::<Health>(local).unwrap().current, 1960.0);
     }
 
+    #[cfg(feature = "original-assets")]
     #[test]
     fn production_mrc_snapshot_does_not_rewind_natural_link_or_restart_same_pose() {
         use crate::components::fighter::{EntryBlend, PoseRuntime};

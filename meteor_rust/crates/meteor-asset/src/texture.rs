@@ -1,4 +1,5 @@
-use image::{ImageBuffer, ImageFormat, RgbaImage};
+use image::{DynamicImage, ImageBuffer, ImageDecoder, ImageFormat, ImageReader, Limits, RgbaImage};
+use std::io::Cursor;
 
 #[derive(Debug, Clone)]
 pub struct DecodedImage {
@@ -9,13 +10,18 @@ pub struct DecodedImage {
 }
 
 pub fn decode_image(bytes: &[u8]) -> Result<DecodedImage, String> {
+    decode_image_with_budget(bytes, usize::MAX)
+}
+pub fn decode_image_with_budget(
+    bytes: &[u8],
+    max_rgba_bytes: usize,
+) -> Result<DecodedImage, String> {
     let mut rgba = if looks_like_tga(bytes) {
-        decode_tga(bytes)?
+        decode_tga(bytes, max_rgba_bytes)?
     } else if looks_like_bmp(bytes) {
-        decode_bmp(bytes)?
+        decode_bmp(bytes, max_rgba_bytes)?
     } else {
-        let image = image::load_from_memory(bytes).map_err(|e| format!("image decode: {e}"))?;
-        image.to_rgba8()
+        decode_with_image_reader(bytes, max_rgba_bytes)?
     };
     let (width, height) = rgba.dimensions();
     image::imageops::flip_vertical_in_place(&mut rgba);
@@ -24,6 +30,41 @@ pub fn decode_image(bytes: &[u8]) -> Result<DecodedImage, String> {
         height,
         rgba: rgba.into_raw(),
     })
+}
+fn decode_with_image_reader(bytes: &[u8], max_rgba_bytes: usize) -> Result<RgbaImage, String> {
+    let decode_error = |error| format!("image decode: {error}");
+    let mut limits = Limits::default();
+    let mut decoder = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|error| format!("image format: {error}"))?
+        .into_decoder()
+        .map_err(decode_error)?;
+    let (width, height) = decoder.dimensions();
+    rgba8_len(width, height, max_rgba_bytes)?;
+    limits
+        .reserve(decoder.total_bytes())
+        .map_err(decode_error)?;
+    decoder.set_limits(limits).map_err(decode_error)?;
+    DynamicImage::from_decoder(decoder)
+        .map(DynamicImage::into_rgba8)
+        .map_err(decode_error)
+}
+fn rgba8_len(width: u32, height: u32, max_rgba_bytes: usize) -> Result<usize, String> {
+    (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .filter(|&len| len > 0 && len <= max_rgba_bytes)
+        .ok_or_else(|| {
+            format!("texture {width}x{height} exceeds the RGBA8 budget or has invalid dimensions")
+        })
+}
+fn allocate_rgba8(len: usize) -> Result<Vec<u8>, String> {
+    let mut pixels = Vec::new();
+    pixels
+        .try_reserve_exact(len)
+        .map_err(|error| format!("cannot allocate {len} bytes for texture pixels: {error}"))?;
+    pixels.resize(len, 0);
+    Ok(pixels)
 }
 
 pub fn probe_image_format(bytes: &[u8]) -> Option<ImageFormat> {
@@ -44,7 +85,7 @@ fn looks_like_tga(bytes: &[u8]) -> bool {
     bytes.len() >= 18 && bytes[1] == 0 && (bytes[2] == 2 || bytes[2] == 10)
 }
 
-fn decode_tga(bytes: &[u8]) -> Result<RgbaImage, String> {
+fn decode_tga(bytes: &[u8], max_rgba_bytes: usize) -> Result<RgbaImage, String> {
     if bytes.len() < 18 {
         return Err("TGA too short".into());
     }
@@ -71,8 +112,9 @@ fn decode_tga(bytes: &[u8]) -> Result<RgbaImage, String> {
 
     let bytes_pp = (bpp / 8) as usize;
     let mut off = 18 + id_len;
-    let total = (width as u64 * height as u64) as usize;
-    let mut pixels = vec![0u8; total * 4];
+    let len = rgba8_len(width, height, max_rgba_bytes)?;
+    let total = len / 4;
+    let mut pixels = allocate_rgba8(len)?;
     let mut out = 0usize;
 
     let mut put_bgra = |src: &[u8], i: usize| -> Result<(), String> {
@@ -125,7 +167,7 @@ fn decode_tga(bytes: &[u8]) -> Result<RgbaImage, String> {
     Ok(rgba)
 }
 
-fn decode_bmp(bytes: &[u8]) -> Result<RgbaImage, String> {
+fn decode_bmp(bytes: &[u8], max_rgba_bytes: usize) -> Result<RgbaImage, String> {
     if bytes.len() < 54 || bytes[0] != b'B' || bytes[1] != b'M' {
         return Err("invalid BMP signature".into());
     }
@@ -150,6 +192,7 @@ fn decode_bmp(bytes: &[u8]) -> Result<RgbaImage, String> {
     }
 
     let width = width as u32;
+    let len = rgba8_len(width, height, max_rgba_bytes)?;
     let bottom_up = signed_height > 0;
     let row_stride = (width as usize * bpp as usize).div_ceil(32) * 4;
     let bytes_pp = (bpp / 8) as usize;
@@ -171,7 +214,7 @@ fn decode_bmp(bytes: &[u8]) -> Result<RgbaImage, String> {
         }
     }
 
-    let mut pixels = vec![0u8; (width * height * 4) as usize];
+    let mut pixels = allocate_rgba8(len)?;
     for y in 0..height as usize {
         let source_y = if bottom_up {
             height as usize - 1 - y
@@ -245,6 +288,26 @@ mod tests {
         assert_eq!(decode_image(&bytes).unwrap().rgba, [255, 0, 0, 255]);
     }
 
+    #[test]
+    fn rgba8_budget_is_checked_for_tga_bmp_and_png() {
+        let image = image::RgbaImage::from_pixel(4, 3, image::Rgba([20, 40, 60, 255]));
+        for format in [ImageFormat::Tga, ImageFormat::Bmp, ImageFormat::Png] {
+            let mut encoded = Cursor::new(Vec::new());
+            if format == ImageFormat::Bmp {
+                DynamicImage::ImageRgba8(image.clone())
+                    .into_rgb8()
+                    .write_to(&mut encoded, format)
+                    .unwrap();
+            } else {
+                image.write_to(&mut encoded, format).unwrap();
+            }
+            let bytes = encoded.into_inner();
+            let error = decode_image_with_budget(&bytes, 47).unwrap_err();
+            assert!(error.contains("4x3") && error.contains("budget"), "{error}");
+            let decoded = decode_image_with_budget(&bytes, 48).unwrap();
+            assert_eq!(decoded.rgba, image.as_raw().as_slice());
+        }
+    }
     #[test]
     fn probe_rejects_garbage() {
         assert!(probe_image_format(b"not an image").is_none());

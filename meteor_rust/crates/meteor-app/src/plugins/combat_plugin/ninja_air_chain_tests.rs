@@ -88,3 +88,212 @@ fn production_ninja_air_chain_returns_to_free_fall() {
         }
     }
 }
+#[test]
+fn production_ninja_air_inputs_follow_the_last_fixed_recovery_step() {
+    use std::time::Duration;
+    for hz in [60, 120, 135] {
+        let mut h = spawn_gameplay_harness_with_order(12, true).unwrap();
+        h.app
+            .world_mut()
+            .resource_mut::<crate::app_state::Settings>()
+            .physics_hz = hz;
+        crate::plugins::install_frame_clock(&mut h.app);
+        let keys = crate::app_state::Keymap::default();
+        let tick = Duration::from_secs_f64(1.0 / f64::from(hz));
+        h.press_binding(keys.jump);
+        for _ in 0..(hz / 5) {
+            h.step_duration(tick);
+        }
+        h.release_binding(keys.jump);
+        h.step_duration(tick);
+        assert!(h.airborne());
+        h.press_binding(keys.move_up);
+        h.step_duration(tick);
+        h.release_binding(keys.move_up);
+        h.step_duration(tick);
+        h.press_binding(keys.move_up);
+        h.press_binding(keys.attack);
+        h.step_duration(tick);
+        assert_eq!(h.pose_id(), 530, "{hz} Hz, first teleport");
+        h.release_binding(keys.move_up);
+        h.release_binding(keys.attack);
+        h.step_duration(tick);
+        {
+            let mut pose = h.app.world_mut().get_mut::<PoseRuntime>(h.fighter).unwrap();
+            pose.frame = pose.end as f32 - 0.01;
+        }
+        h.press_binding(keys.jump);
+        h.press_binding(keys.move_up);
+        h.step_duration(tick + tick / 2);
+        assert_eq!(h.state(), FighterState::Name, "{hz} Hz");
+        assert!(
+            h.app
+                .world()
+                .get::<FighterAir>(h.fighter)
+                .unwrap()
+                .jump_charge_active,
+            "{hz} Hz: key-down must see the completed recovery"
+        );
+        h.release_binding(keys.move_up);
+        h.step_duration(tick);
+        h.press_binding(keys.move_up);
+        h.press_binding(keys.attack);
+        h.step_duration(tick);
+        assert_eq!(h.pose_id(), 530, "{hz} Hz, second teleport");
+        h.release_binding(keys.move_up);
+        h.release_binding(keys.attack);
+        h.app
+            .world_mut()
+            .resource_mut::<crate::app_state::Settings>()
+            .variable_physics = true;
+        for _ in 0..hz {
+            h.step_duration(tick);
+            if h.state() == FighterState::Jump {
+                break;
+            }
+        }
+        assert_eq!(h.state(), FighterState::Jump, "{hz} Hz");
+        assert!(
+            h.app
+                .world()
+                .get::<FighterAir>(h.fighter)
+                .unwrap()
+                .air
+                .vertical_speed
+                > 0.0
+        );
+    }
+}
+#[test]
+fn production_ninja_air_charge_respects_recovery_step_and_key_up_order() {
+    use meteor_physics::jump::JUMP_VERTICAL_SPEED_STRONG;
+    use std::time::Duration;
+    #[derive(Debug, PartialEq, Eq)]
+    enum JumpRelease {
+        Held,
+        DuringAttack,
+        AfterAttack,
+    }
+    let step = Duration::from_nanos(8_333_334);
+    let half_step = step / 2;
+    for (release, insert_zero_step) in [
+        (JumpRelease::Held, false),
+        (JumpRelease::Held, true),
+        (JumpRelease::DuringAttack, false),
+        (JumpRelease::AfterAttack, true),
+    ] {
+        let mut h = spawn_gameplay_harness_with_order(12, true).unwrap();
+        crate::plugins::install_frame_clock(&mut h.app);
+        let keys = crate::app_state::Keymap::default();
+        h.press_binding(keys.jump);
+        for _ in 0..30 {
+            h.step_duration(step);
+        }
+        h.release_binding(keys.jump);
+        h.step_duration(step);
+        assert!(h.airborne());
+        h.press_binding(keys.jump);
+        h.press_binding(keys.move_up);
+        h.step_duration(step);
+        h.release_binding(keys.move_up);
+        h.step_duration(step);
+        h.press_binding(keys.move_up);
+        h.press_binding(keys.attack);
+        h.step_duration(step);
+        assert_eq!(h.pose_id(), 530);
+        h.release_binding(keys.move_up);
+        h.release_binding(keys.attack);
+        if release == JumpRelease::DuringAttack {
+            h.release_binding(keys.jump);
+            h.step_duration(step);
+            assert!(is_attacking_state(h.state()));
+            assert!(
+                !h.app
+                    .world()
+                    .get::<FighterAir>(h.fighter)
+                    .unwrap()
+                    .jump_charge_active
+            );
+        }
+        for _ in 0..120 {
+            if !is_attacking_state(h.state()) {
+                break;
+            }
+            h.step_duration(step);
+        }
+        assert_eq!(h.state(), FighterState::Name);
+        assert!(h.airborne());
+        let start = h.position();
+        if release == JumpRelease::DuringAttack {
+            h.step_duration(step);
+            assert_eq!(h.state(), FighterState::Name);
+            assert!(h.position().y <= start.y);
+            continue;
+        }
+        if release == JumpRelease::AfterAttack {
+            h.release_binding(keys.jump);
+            h.step_duration(half_step);
+            assert_eq!(
+                h.app
+                    .world()
+                    .resource::<crate::plugins::FrameClock>()
+                    .sim_dt,
+                0.0
+            );
+        } else if insert_zero_step {
+            h.step_duration(half_step);
+            assert_eq!(
+                h.app
+                    .world()
+                    .resource::<crate::plugins::FrameClock>()
+                    .sim_dt,
+                0.0
+            );
+            assert_eq!(h.state(), FighterState::Name);
+            assert!(
+                h.app
+                    .world()
+                    .get::<FighterAir>(h.fighter)
+                    .unwrap()
+                    .jump_charge_active
+            );
+            assert_eq!(
+                h.app
+                    .world()
+                    .get::<SmState>(h.fighter)
+                    .unwrap()
+                    .exe_ground_mode_ticks,
+                1
+            );
+            h.step_duration(half_step);
+        } else {
+            h.step_duration(step);
+        }
+        assert_eq!(h.state(), FighterState::Jump, "{release:?}");
+        let air = h.app.world().get::<FighterAir>(h.fighter).unwrap();
+        assert_eq!(
+            air.air.vertical_speed, JUMP_VERTICAL_SPEED_STRONG,
+            "{release:?}"
+        );
+        assert!(!air.jump_charge_active);
+        assert!((h.position() - start).length() < 1e-5, "{release:?}");
+        if release == JumpRelease::Held {
+            h.release_binding(keys.jump);
+        }
+        h.step_duration(if release == JumpRelease::AfterAttack {
+            half_step
+        } else {
+            step
+        });
+        assert!(h.position().y > start.y);
+        assert!(
+            h.app
+                .world()
+                .get::<FighterAir>(h.fighter)
+                .unwrap()
+                .air
+                .vertical_speed
+                < JUMP_VERTICAL_SPEED_STRONG
+        );
+    }
+}

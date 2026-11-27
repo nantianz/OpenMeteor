@@ -286,6 +286,11 @@ const REQUEST_BATTLE_RULES: u16 = 0x7f06;
 const EVENT_BATTLE_RULES: u16 = 0x7f07;
 const ACK_BATTLE_RULES: u16 = 0x7f08;
 const BATTLE_RULES_V7: &[u8; 4] = b"MBR7";
+const REQUEST_ROOM_PHYSICS: u16 = 0x7f0b;
+const EVENT_ROOM_PHYSICS: u16 = 0x7f0c;
+const ACK_ROOM_PHYSICS: u16 = 0x7f0d;
+const ROOM_PHYSICS_V1: &[u8; 4] = b"MPH1";
+pub const STOCK_REJECT_ROOM_PHYSICS: u32 = 0xff07;
 const BATTLE_RULES_TRANSFER_ID: u32 = 1;
 const BATTLE_RULES_ZLIB_KIND: u16 = 2;
 
@@ -353,6 +358,7 @@ pub enum StockGameEvent {
     CarriedItem(stock::StockCarriedItemEvent),
     PoseStart(stock::StockPoseChainEvent),
     BattleRules(meteor_combat::battle_rules::BattleRules),
+    RoomPhysicsHz(u32),
     PlayerName {
         actor_id: u32,
         name: String,
@@ -676,6 +682,12 @@ impl StockGameClient {
                         now_ms,
                     )?;
 
+                    self.transport.send_application(
+                        REQUEST_ROOM_PHYSICS,
+                        ROOM_PHYSICS_V1.to_vec(),
+                        STOCK_DISCRETE_RELIABLE_FLAGS,
+                        now_ms,
+                    )?;
                     self.last_latency_request_ms = Some(now_ms);
                     self.runtime_generation = None;
                     if self.runtime_enabled {
@@ -717,6 +729,27 @@ impl StockGameClient {
                     events.push(StockGameEvent::TransportConnected { peer, transport_id });
                 }
                 StockSessionEvent::Application { peer, packet } => match packet.opcode {
+                    EVENT_ROOM_PHYSICS => {
+                        if self.transport.state()
+                            != crate::stock_session::StockClientState::Connected
+                        {
+                            continue;
+                        }
+                        let Ok(bytes) = <[u8; 4]>::try_from(packet.payload.as_slice()) else {
+                            continue;
+                        };
+                        let hz = u32::from_le_bytes(bytes);
+                        if (meteor_core::PHYSICS_HZ_MIN..=meteor_core::PHYSICS_HZ_MAX).contains(&hz)
+                        {
+                            events.push(StockGameEvent::RoomPhysicsHz(hz));
+                            self.transport.send_application(
+                                ACK_ROOM_PHYSICS,
+                                bytes,
+                                STOCK_DISCRETE_RELIABLE_FLAGS,
+                                now_ms,
+                            )?;
+                        }
+                    }
                     EVENT_BATTLE_RULES => {
                         if self.transport.state()
                             != crate::stock_session::StockClientState::Connected
@@ -2205,9 +2238,14 @@ impl StockEscortState {
     }
 }
 
+struct RoomAdmission {
+    started_ms: u64,
+    physics_confirmed: bool,
+}
 pub struct StockGameServer {
     battle_rules: meteor_combat::battle_rules::BattleRules,
-    rules_waiting: HashMap<SocketAddr, u64>,
+    physics_hz: u32,
+    pending_admission: HashMap<SocketAddr, RoomAdmission>,
     rules_transfers: HashMap<SocketAddr, FileSender<std::io::Cursor<Vec<u8>>>>,
     rules_verified: HashSet<SocketAddr>,
     pending_rule_entry: HashMap<SocketAddr, Vec<u8>>,
@@ -2304,7 +2342,8 @@ impl StockGameServer {
     ) -> Self {
         Self {
             battle_rules: Default::default(),
-            rules_waiting: HashMap::new(),
+            physics_hz: meteor_core::PHYSICS_HZ_DEFAULT,
+            pending_admission: HashMap::new(),
             rules_transfers: HashMap::new(),
             rules_verified: HashSet::new(),
             pending_rule_entry: HashMap::new(),
@@ -2494,10 +2533,18 @@ impl StockGameServer {
 
     pub fn set_battle_rules(&mut self, rules: meteor_combat::battle_rules::BattleRules) {
         assert!(
-            self.roles.is_empty() && self.rules_waiting.is_empty(),
+            self.roles.is_empty() && self.pending_admission.is_empty(),
             "room rules are immutable after admission"
         );
         self.battle_rules = rules;
+    }
+    pub fn set_physics_hz(&mut self, hz: u32) {
+        assert!(
+            self.transport.peer_count() == 0,
+            "room physics is immutable after admission"
+        );
+        assert!((meteor_core::PHYSICS_HZ_MIN..=meteor_core::PHYSICS_HZ_MAX).contains(&hz));
+        self.physics_hz = hz;
     }
 
     pub fn set_item_rules(&mut self, rules: StockRoomItemRules) {
@@ -2596,8 +2643,17 @@ impl StockGameServer {
                     transport_id,
                     identity: _,
                 } => {
-                    if self.battle_rules != meteor_combat::battle_rules::BattleRules::ORIGINAL {
-                        self.rules_waiting.insert(peer, now_ms);
+                    let physics_confirmed = self.physics_hz == meteor_core::PHYSICS_HZ_DEFAULT;
+                    if !physics_confirmed
+                        || self.battle_rules != meteor_combat::battle_rules::BattleRules::ORIGINAL
+                    {
+                        self.pending_admission.insert(
+                            peer,
+                            RoomAdmission {
+                                started_ms: now_ms,
+                                physics_confirmed,
+                            },
+                        );
                     }
                     let elapsed = self
                         .round_started_ms
@@ -2646,14 +2702,23 @@ impl StockGameServer {
             }
         }
         let expired: Vec<_> = self
-            .rules_waiting
+            .pending_admission
             .iter()
-            .filter(|(_, at)| now_ms.saturating_sub(**at) >= 5000)
-            .map(|(peer, _)| *peer)
+            .filter(|(_, admission)| now_ms.saturating_sub(admission.started_ms) >= 5000)
+            .map(|(&peer, admission)| {
+                (
+                    peer,
+                    if admission.physics_confirmed {
+                        0x80
+                    } else {
+                        STOCK_REJECT_ROOM_PHYSICS
+                    },
+                )
+            })
             .collect();
-        for peer in expired {
-            self.transport.disconnect_peer(peer, 0x80)?;
-            self.remove_disconnected_peer(peer, 0x80, now_ms, &mut events)?;
+        for (peer, reason) in expired {
+            self.transport.disconnect_peer(peer, reason)?;
+            self.remove_disconnected_peer(peer, reason, now_ms, &mut events)?;
         }
         if self
             .round_restart_at_ms
@@ -2799,7 +2864,7 @@ impl StockGameServer {
         now_ms: u64,
         events: &mut Vec<StockGameEvent>,
     ) -> Result<(), StockGameError> {
-        self.rules_waiting.remove(&peer);
+        self.pending_admission.remove(&peer);
         self.rules_transfers.remove(&peer);
         self.rules_verified.remove(&peer);
         self.pending_rule_entry.remove(&peer);
@@ -2835,6 +2900,30 @@ impl StockGameServer {
         Ok(())
     }
 
+    fn finish_admission(
+        &mut self,
+        peer: SocketAddr,
+        now_ms: u64,
+        events: &mut Vec<StockGameEvent>,
+    ) -> Result<(), StockGameError> {
+        let physics_confirmed = self
+            .pending_admission
+            .get(&peer)
+            .is_some_and(|admission| admission.physics_confirmed);
+        let rules_confirmed = self.battle_rules
+            == meteor_combat::battle_rules::BattleRules::ORIGINAL
+            || self.rules_verified.contains(&peer);
+        if physics_confirmed && rules_confirmed {
+            self.pending_admission.remove(&peer);
+            if let Some(entry) = self.pending_rule_entry.remove(&peer) {
+                self.handle_application(peer, STOCK_REQUEST_ENTER_ROLE, &entry, now_ms, events)?;
+            }
+            if self.pending_rule_ready.remove(&peer) {
+                self.handle_application(peer, STOCK_REQUEST_READY, &[], now_ms, events)?;
+            }
+        }
+        Ok(())
+    }
     fn handle_application(
         &mut self,
         peer: SocketAddr,
@@ -2860,9 +2949,7 @@ impl StockGameServer {
         {
             return Ok(());
         }
-        if self.battle_rules != meteor_combat::battle_rules::BattleRules::ORIGINAL
-            && !self.rules_verified.contains(&peer)
-        {
+        if self.pending_admission.contains_key(&peer) {
             if opcode == STOCK_REQUEST_ENTER_ROLE {
                 StockEnterRoleRequest::decode(payload)?;
                 self.pending_rule_entry.insert(peer, payload.to_vec());
@@ -2876,6 +2963,27 @@ impl StockGameServer {
             }
         }
         match opcode {
+            REQUEST_ROOM_PHYSICS if payload == ROOM_PHYSICS_V1 => {
+                if self
+                    .pending_admission
+                    .get(&peer)
+                    .is_some_and(|admission| !admission.physics_confirmed)
+                {
+                    self.transport.send_application(
+                        peer,
+                        EVENT_ROOM_PHYSICS,
+                        self.physics_hz.to_le_bytes(),
+                        STOCK_DISCRETE_RELIABLE_FLAGS,
+                        now_ms,
+                    )?;
+                }
+            }
+            ACK_ROOM_PHYSICS if payload == self.physics_hz.to_le_bytes() => {
+                if let Some(admission) = self.pending_admission.get_mut(&peer) {
+                    admission.physics_confirmed = true;
+                    self.finish_admission(peer, now_ms, events)?;
+                }
+            }
             stock::STOCK_REQUEST_CHAT | stock::STOCK_REQUEST_TEAM_CHAT => {
                 let Some(role) = self.roles.get(&peer) else {
                     return Ok(());
@@ -2957,6 +3065,7 @@ impl StockGameServer {
             REQUEST_BATTLE_RULES => {
                 if payload == BATTLE_RULES_V7
                     && self.battle_rules != meteor_combat::battle_rules::BattleRules::ORIGINAL
+                    && !self.rules_verified.contains(&peer)
                 {
                     let transfer = self.rules_transfers.entry(peer).or_insert_with(|| {
                         FileSender::new(
@@ -2996,22 +3105,10 @@ impl StockGameServer {
                         now_ms,
                     )?;
                 }
-                if self.rules_waiting.contains_key(&peer) && complete {
-                    self.rules_waiting.remove(&peer);
+                if complete {
                     self.rules_transfers.remove(&peer);
                     self.rules_verified.insert(peer);
-                    if let Some(entry) = self.pending_rule_entry.remove(&peer) {
-                        self.handle_application(
-                            peer,
-                            STOCK_REQUEST_ENTER_ROLE,
-                            &entry,
-                            now_ms,
-                            events,
-                        )?;
-                    }
-                    if self.pending_rule_ready.remove(&peer) {
-                        self.handle_application(peer, STOCK_REQUEST_READY, &[], now_ms, events)?;
-                    }
+                    self.finish_admission(peer, now_ms, events)?;
                 }
             }
             STOCK_REQUEST_STAGE_CHECKSUM => {
@@ -5596,6 +5693,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_micros(50));
         }
         assert_eq!(requests.remove(0).opcode, REQUEST_BATTLE_RULES);
+        assert_eq!(requests.remove(0).opcode, REQUEST_ROOM_PHYSICS);
         assert_eq!(
             requests.iter().map(|p| p.opcode).collect::<Vec<_>>(),
             [
@@ -7434,8 +7532,93 @@ mod tests {
         assert!(!server.roles.contains_key(&peer));
         assert!(!server.ready_peers.contains(&peer));
         server.tick(7000).unwrap();
-        assert!(!server.rules_waiting.contains_key(&peer));
+        assert!(!server.pending_admission.contains_key(&peer));
         assert!(!server.pending_rule_entry.contains_key(&peer));
+    }
+    #[test]
+    fn custom_room_physics_precedes_role_entry_and_requires_acknowledgment() {
+        for hz in [meteor_core::PHYSICS_HZ_MIN, meteor_core::PHYSICS_HZ_MAX] {
+            let transport =
+                StockServerTransport::bind("127.0.0.1:0", "serverlist", "physics").unwrap();
+            let address = transport.local_addr().unwrap();
+            let mut server = StockGameServer::new(transport, StockHeroCatalog::bundled_revision());
+            server.set_physics_hz(hz);
+            if hz == meteor_core::PHYSICS_HZ_MAX {
+                server.set_battle_rules(meteor_combat::battle_rules::BattleRules::BALANCED);
+            }
+            let transport = || {
+                StockClientTransport::bind(
+                    "127.0.0.1:0",
+                    address,
+                    StockConnectRecord::for_open_room(),
+                )
+                .unwrap()
+            };
+            let connect = || StockGameClient::for_bundled_revision(transport(), 0, 0, 5).unwrap();
+            let mut host = connect();
+            let initial = drive(&mut server, &mut [&mut host], 0, 400);
+            let mut guest = connect();
+            let joined = drive(&mut server, &mut [&mut host, &mut guest], 400, 400);
+            for (client, events) in [(&host, &initial[0]), (&guest, &joined[1])] {
+                let actor = client.actor_id().unwrap();
+                let settings = events
+                    .iter()
+                    .position(|event| {
+                        matches!(event,
+                    StockGameEvent::RoomPhysicsHz(rate) if *rate == hz)
+                    })
+                    .unwrap();
+                let entry = events
+                    .iter()
+                    .position(|event| {
+                        matches!(event,
+                    StockGameEvent::RoleEntered(entered) if entered.actor_id == actor)
+                    })
+                    .unwrap();
+                assert!(settings < entry);
+            }
+            assert_eq!(server.roles.len(), 2);
+            assert!(server.pending_admission.is_empty());
+            let mut unsupported = transport();
+            let peer = unsupported.local_addr().unwrap();
+            for now in 800..1000 {
+                unsupported.tick(now).unwrap();
+                server.tick(now).unwrap();
+            }
+            assert!(server.pending_admission.contains_key(&peer));
+            let entry = StockEnterRoleRequest {
+                hero: 0,
+                camp: 0,
+                hero_checksum: server.heroes.checksum(0).unwrap(),
+            };
+            let mut events = Vec::new();
+            server
+                .handle_application(
+                    peer,
+                    STOCK_REQUEST_ENTER_ROLE,
+                    &entry.encode(),
+                    1000,
+                    &mut events,
+                )
+                .unwrap();
+            server
+                .handle_application(peer, STOCK_REQUEST_READY, &[], 1000, &mut events)
+                .unwrap();
+            server
+                .handle_application(
+                    peer,
+                    ACK_ROOM_PHYSICS,
+                    &120u32.to_le_bytes(),
+                    1000,
+                    &mut events,
+                )
+                .unwrap();
+            assert!(!server.roles.contains_key(&peer));
+            assert!(!server.ready_peers.contains(&peer));
+            assert!(server.tick(6500).unwrap().iter().any(|event| matches!(event,
+                StockGameEvent::PeerDisconnected { peer: rejected, reason: STOCK_REJECT_ROOM_PHYSICS } if *rejected == peer)));
+            assert!(!server.pending_rule_entry.contains_key(&peer));
+        }
     }
 
     #[test]

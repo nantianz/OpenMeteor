@@ -23,10 +23,10 @@ use crate::plugins::launcher_ui::{
     adapt_launcher_layout, adapt_launcher_touch_targets, launcher_touch_scroll, launcher_ui_scroll,
     menu_back_button, menu_navigate_buttons, player_loadout_controls, refresh_stage_tab_visuals,
     reset_menu_screen, responsive_ui_layout, responsive_ui_layout_with_safe_area, scrollable_y,
-    setup_launcher, spawn_full_settings_page, stage_tab_buttons, sync_launcher_screen_visibility,
-    update_stage_selection_labels, update_stage_start_availability, LauncherTouchScrollState,
-    StageSelectionMemory, UiFont, LAUNCHER_CARD, LAUNCHER_CARD_ACTIVE, LAUNCHER_LINE,
-    LAUNCHER_RED_BRIGHT,
+    setup_launcher, spawn_full_settings_page, stage_tab_buttons, sync_create_room_outer_scroll,
+    sync_launcher_screen_visibility, update_stage_selection_labels,
+    update_stage_start_availability, LauncherTouchScrollState, StageSelectionMemory, UiFont,
+    LAUNCHER_CARD, LAUNCHER_CARD_ACTIVE, LAUNCHER_LINE, LAUNCHER_RED_BRIGHT,
 };
 use crate::plugins::mobile_controls_plugin::MobileLayoutEditorState;
 use crate::plugins::settings_ui::{
@@ -181,7 +181,12 @@ impl Plugin for UiPlugin {
             Update,
             (
                 launcher_ui_scroll,
-                super::room_map_preview::update.run_if(in_state(AppState::Menu)),
+                sync_create_room_outer_scroll.after(crate::plugins::UiTouchActionSet),
+                (
+                    super::room_map_preview::update,
+                    super::stage_presentation::update_descriptions,
+                )
+                    .run_if(in_state(AppState::Menu)),
                 adapt_settings_layout,
                 crate::plugins::settings_ui::adapt_settings_navigation,
                 crate::plugins::launcher_ui::adapt_settings_panel,
@@ -195,7 +200,6 @@ impl Plugin for UiPlugin {
             (
                 update_hud_stats,
                 update_mode_hud,
-                update_match_result_banner.after(crate::plugins::FighterFrameSet::PoseResolve),
                 update_escort_flag_hud,
                 update_gun_crosshair,
             ),
@@ -219,7 +223,6 @@ impl Plugin for UiPlugin {
                 room_start_button,
                 room_back_button,
                 update_room_members,
-                replay_pause_button,
                 update_replay_hud,
             )
                 .in_set(crate::plugins::UiTouchActionSet),
@@ -230,7 +233,6 @@ impl Plugin for UiPlugin {
         )
         .init_resource::<super::mrc_file_picker::MrcFilePicker>()
         .add_systems(Update, super::mrc_file_picker::receive_mrc_file)
-        .add_systems(Update, replay_timeline_scrub)
         .add_systems(Update, cycle_radar_range.before(update_radar))
         .add_systems(
             Update,
@@ -252,9 +254,15 @@ impl Plugin for UiPlugin {
                 .run_if(gameplay_hud_visibility::scene_session_active),
         )
         .add_systems(
-            Update,
-            replay_keyboard_controls
-                .before(crate::plugins::FighterFrameSet::Movement)
+            PreUpdate,
+            (
+                replay_timeline_scrub,
+                replay_pause_button,
+                hide_replay_controls_button,
+                replay_keyboard_controls,
+            )
+                .chain()
+                .after(bevy::ui::UiSystems::Focus)
                 .run_if(in_state(AppState::Playing)),
         )
         .add_systems(
@@ -455,6 +463,10 @@ enum RadarMarkerKind {
 struct ReplayPauseButton;
 
 #[derive(Component)]
+struct ReplayControlsRoot;
+#[derive(Component)]
+struct HideReplayControlsButton;
+#[derive(Component)]
 struct ReplayTimelineTrack;
 
 #[derive(Component)]
@@ -511,9 +523,6 @@ impl DialoguePresentation {
 struct ModeObjectiveText;
 
 #[derive(Component)]
-struct MatchResultBanner;
-
-#[derive(Component)]
 struct EscortFlagHudIcon;
 
 #[derive(Component)]
@@ -532,10 +541,12 @@ pub(crate) struct ResponsiveMenuButton;
 struct ResponsiveButtonPalette(Color);
 
 #[derive(Resource, Default)]
-struct ReplayScrubState {
+pub(crate) struct ReplayScrubState {
     active: bool,
     resume_mrc: bool,
     resume_player: bool,
+    preview: Option<f32>,
+    pub(crate) controls_hidden: bool,
 }
 
 fn setup_playing_hud(
@@ -545,6 +556,8 @@ fn setup_playing_hud(
     ui_font: Res<UiFont>,
     player: Res<crate::plugins::replay_plugin::ReplayPlayer>,
     mrc: Res<crate::plugins::replay_plugin::MrcPlayback>,
+    mut scrub: Option<ResMut<ReplayScrubState>>,
+    timeline: Option<Res<crate::plugins::replay_plugin::MrcTimeline>>,
 ) {
     let font = ui_font.0.clone();
     let workdir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
@@ -660,23 +673,26 @@ fn setup_playing_hud(
         .id();
     commands.entity(loadout_row).add_child(spare);
 
-    for (kind, color, height) in [
-        (HudVital::Health, theme::HEALTH, 23.0),
-        (HudVital::Qi, theme::ANGER, 23.0),
+    for (kind, color) in [
+        (HudVital::Health, theme::HEALTH),
+        (HudVital::Qi, theme::ANGER),
     ] {
         let track = commands
             .spawn((
                 Node {
-                    height: Val::Px(height),
+                    height: Val::Px(32.0),
                     width: Val::Percent(100.0),
                     overflow: Overflow::clip(),
                     justify_content: JustifyContent::Center,
                     align_items: AlignItems::Center,
-                    border: UiRect::left(Val::Px(2.0)),
+                    border: UiRect::horizontal(Val::Px(2.0)),
                     border_radius: BorderRadius::ZERO,
                     ..default()
                 },
-                BorderColor::all(color),
+                BorderColor {
+                    left: color,
+                    ..BorderColor::all(Color::NONE)
+                },
                 BackgroundColor(Color::NONE),
                 BackgroundGradient(vec![LinearGradient::new(
                     LinearGradient::TO_RIGHT,
@@ -697,7 +713,7 @@ fn setup_playing_hud(
                     left: Val::ZERO,
                     bottom: Val::ZERO,
                     width: Val::Percent(0.0),
-                    height: Val::Percent(32.0),
+                    height: Val::Percent(36.0),
                     ..default()
                 },
                 BackgroundGradient(vec![LinearGradient::new(
@@ -719,7 +735,7 @@ fn setup_playing_hud(
                 Text::new("—"),
                 TextFont {
                     font: font.clone().into(),
-                    font_size: 13.0.into(),
+                    font_size: 17.0.into(),
                     ..default()
                 },
                 TextColor(theme::TEXT),
@@ -728,7 +744,6 @@ fn setup_playing_hud(
                     color: Color::BLACK,
                 },
                 kind,
-                HudFixedFont(13.0),
             ))
             .id();
         let rail = commands
@@ -738,7 +753,7 @@ fn setup_playing_hud(
                     left: Val::Px(0.0),
                     bottom: Val::ZERO,
                     width: Val::Percent(100.0),
-                    height: Val::Percent(32.0),
+                    height: Val::Percent(36.0),
                     border: UiRect::vertical(Val::Px(1.0)),
                     ..default()
                 },
@@ -759,7 +774,7 @@ fn setup_playing_hud(
                 }),
                 TextFont {
                     font: font.clone().into(),
-                    font_size: 11.0.into(),
+                    font_size: 13.0.into(),
                     ..default()
                 },
                 TextColor(theme::ACCENT_TEXT),
@@ -767,7 +782,7 @@ fn setup_playing_hud(
                     offset: Vec2::ONE,
                     color: Color::BLACK,
                 },
-                HudFixedFont(11.0),
+                HudFixedFont(13.0),
             ))
             .id();
         commands
@@ -799,43 +814,6 @@ fn setup_playing_hud(
         ))
         .id();
     commands.entity(root).add_child(objective);
-
-    commands.spawn((
-        Node {
-            position_type: PositionType::Absolute,
-            top: Val::Percent(25.0),
-            left: Val::Percent(18.0),
-            width: Val::Percent(64.0),
-            padding: UiRect::vertical(Val::Px(13.0)),
-            border: UiRect::vertical(Val::Px(1.0)),
-            display: Display::None,
-            ..default()
-        },
-        BackgroundGradient(vec![LinearGradient::new(
-            LinearGradient::TO_RIGHT,
-            vec![
-                ColorStop::new(Color::NONE, Val::Percent(0.0)),
-                ColorStop::new(theme::HUD_SURFACE.with_alpha(0.88), Val::Percent(50.0)),
-                ColorStop::new(Color::NONE, Val::Percent(100.0)),
-            ],
-        )
-        .into()]),
-        BorderColor::all(theme::METAL.with_alpha(0.30)),
-        Text::new(""),
-        TextFont {
-            font: font.clone().into(),
-            font_size: 28.0.into(),
-            ..default()
-        },
-        TextLayout::new(Justify::Center, LineBreak::WordOrCharacter),
-        TextColor(theme::METAL),
-        bevy::ui::widget::TextShadow {
-            offset: Vec2::splat(2.0),
-            color: Color::BLACK,
-        },
-        PlayingRoot,
-        MatchResultBanner,
-    ));
 
     let dialogue_root = commands
         .spawn((
@@ -1093,78 +1071,109 @@ fn setup_playing_hud(
     }
 
     if player.active || mrc.active {
-        let replay_text = commands
-            .spawn((
-                Text::new("回放中"),
-                TextFont {
-                    font: font.clone().into(),
-                    font_size: 16.0.into(),
-                    ..default()
-                },
-                TextColor(theme::ACCENT_TEXT),
-                ReplayHudText,
-            ))
-            .id();
-        commands.entity(root).add_child(replay_text);
-        let pause = commands
-            .spawn((
-                Button,
-                Node {
-                    width: Val::Px(120.0),
-                    min_height: Val::Px(26.0),
-                    justify_content: JustifyContent::Center,
-                    align_items: AlignItems::Center,
-                    ..default()
-                },
-                BackgroundColor(theme::CARD),
-                Interaction::default(),
-                ReplayPauseButton,
-            ))
-            .id();
-        let label = text(&mut commands, "暂停", 14.0, theme::TEXT, Some(font.clone()));
-        commands.entity(pause).add_child(label);
-        commands.entity(root).add_child(pause);
-        if mrc.active {
-            let track = commands
-                .spawn((
-                    Button,
-                    Node {
-                        width: Val::Px(360.0),
-                        height: Val::Px(16.0),
-                        border: UiRect::all(Val::Px(1.0)),
-                        overflow: Overflow::clip(),
-                        ..default()
-                    },
-                    BorderColor::all(theme::METAL.with_alpha(0.45)),
-                    BackgroundColor(theme::HUD_SURFACE.with_alpha(0.88)),
-                    Interaction::default(),
-                    bevy::ui::RelativeCursorPosition::default(),
-                    ReplayTimelineTrack,
-                ))
-                .id();
-            let fill = commands
-                .spawn((
-                    Node {
-                        width: Val::Percent(0.0),
-                        height: Val::Percent(100.0),
-                        ..default()
-                    },
-                    BackgroundColor(theme::PRIMARY_HOVER.with_alpha(0.92)),
-                    ReplayTimelineFill,
-                ))
-                .id();
-            commands.entity(track).add_child(fill);
-            commands.entity(root).add_child(track);
-            let hint = text(
-                &mut commands,
-                "拖动时间轴跳转 · 空格暂停/继续",
-                12.0,
-                theme::MUTED,
-                Some(font),
-            );
-            commands.entity(root).add_child(hint);
+        if let Some(scrub) = &mut scrub {
+            if timeline.is_none_or(|timeline| !timeline.restarting) {
+                **scrub = ReplayScrubState::default();
+            }
         }
+        spawn_replay_controls(&mut commands, &font, mrc.active);
     }
+}
+fn spawn_replay_controls(commands: &mut Commands, font: &Handle<Font>, mrc: bool) {
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(16.0),
+                right: Val::Px(16.0),
+                bottom: Val::Px(18.0),
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+            GlobalZIndex(90),
+            ReplayControlsRoot,
+            PlayingRoot,
+        ))
+        .with_children(|overlay| {
+            overlay
+                .spawn((
+                    Node {
+                        width: Val::Percent(100.0),
+                        max_width: Val::Px(560.0),
+                        padding: UiRect::all(Val::Px(8.0)),
+                        align_items: AlignItems::Center,
+                        column_gap: Val::Px(8.0),
+                        ..default()
+                    },
+                    BackgroundColor(theme::HUD_SURFACE.with_alpha(0.92)),
+                ))
+                .with_children(|bar| {
+                    let button = Node {
+                        width: Val::Px(60.0),
+                        height: Val::Px(44.0),
+                        flex_shrink: 0.0,
+                        justify_content: JustifyContent::Center,
+                        align_items: AlignItems::Center,
+                        ..default()
+                    };
+                    bar.spawn((
+                        Button,
+                        button.clone(),
+                        BackgroundColor(theme::CARD),
+                        ReplayPauseButton,
+                    ))
+                    .with_child(super::launcher_ui::launcher_text(
+                        "暂停",
+                        14.0,
+                        theme::TEXT,
+                        font,
+                    ));
+                    if mrc {
+                        bar.spawn((
+                            Button,
+                            Node {
+                                flex_grow: 1.0,
+                                flex_basis: Val::Px(0.0),
+                                min_width: Val::Px(0.0),
+                                height: Val::Px(32.0),
+                                border: UiRect::all(Val::Px(1.0)),
+                                overflow: Overflow::clip(),
+                                ..default()
+                            },
+                            BorderColor::all(theme::METAL.with_alpha(0.45)),
+                            BackgroundColor(theme::CARD),
+                            bevy::ui::RelativeCursorPosition::default(),
+                            ReplayTimelineTrack,
+                        ))
+                        .with_child((
+                            Node {
+                                width: Val::Percent(0.0),
+                                height: Val::Percent(100.0),
+                                ..default()
+                            },
+                            BackgroundColor(theme::PRIMARY_HOVER.with_alpha(0.92)),
+                            ReplayTimelineFill,
+                        ));
+                    }
+                    bar.spawn((
+                        super::launcher_ui::launcher_text("", 13.0, theme::TEXT, font),
+                        TextLayout::no_wrap(),
+                        ReplayHudText,
+                    ));
+                    bar.spawn((
+                        Button,
+                        button,
+                        BackgroundColor(theme::CARD),
+                        HideReplayControlsButton,
+                    ))
+                    .with_child(super::launcher_ui::launcher_text(
+                        "隐藏",
+                        14.0,
+                        theme::TEXT,
+                        font,
+                    ));
+                });
+        });
 }
 
 pub(crate) fn load_ui_texture_bytes(workdir: &std::path::Path, name: &str) -> Option<Vec<u8>> {
@@ -2271,31 +2280,6 @@ fn mode_hud_text(
     status.join("  ·  ")
 }
 
-fn update_match_result_banner(
-    end: Res<MatchEnd>,
-    state: Res<State<AppState>>,
-    request: Res<LaunchRequest>,
-    mut banners: Query<(&mut Text, &mut Node), With<MatchResultBanner>>,
-) {
-    let visible = end.settled && *state.get() == AppState::Playing && request.mode != "replay";
-    for (mut text, mut node) in &mut banners {
-        node.display = if visible {
-            Display::Flex
-        } else {
-            Display::None
-        };
-        if visible {
-            let remaining = (super::combat_plugin::MISSION_SETTLE_SECONDS - end.settle_elapsed)
-                .max(0.0)
-                .ceil() as u32;
-            let value = format!("{}\n{remaining} 秒后结算", result_title(end.result));
-            if text.0 != value {
-                text.0 = value;
-            }
-        }
-    }
-}
-
 fn update_mode_hud(
     request: Res<LaunchRequest>,
     net: Res<crate::plugins::network_plugin::NetState>,
@@ -2564,6 +2548,8 @@ fn pause_clock(
 struct PauseSidebar;
 
 #[derive(Component)]
+struct PauseSidebarContent;
+#[derive(Component)]
 struct PauseSidebarButton;
 
 #[derive(Component)]
@@ -2593,25 +2579,36 @@ fn setup_pause_menu(
         .id();
     let surface = commands
         .spawn((
-            scrollable_y(Node {
+            Node {
                 width: Val::Px(360.0),
                 max_width: Val::Percent(100.0),
                 height: Val::Percent(100.0),
-                flex_direction: FlexDirection::Column,
                 flex_shrink: 0.0,
-                row_gap: Val::Px(14.0),
-                padding: UiRect::all(Val::Px(28.0)),
-                border: UiRect::right(Val::Px(1.0)),
+                border: UiRect::right(px(1)),
                 ..default()
-            }),
+            },
             BackgroundColor(theme::SURFACE),
             BorderColor::all(theme::LINE),
             theme::CinematicBackdrop,
-            theme::OrnateFrame,
+            theme::BackdropOpacity(0.52),
             PauseSidebar,
         ))
         .id();
     commands.entity(overlay).add_child(surface);
+    let content = commands
+        .spawn((
+            scrollable_y(Node {
+                width: percent(100),
+                height: percent(100),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(14),
+                padding: UiRect::all(px(28)),
+                ..default()
+            }),
+            PauseSidebarContent,
+        ))
+        .id();
+    commands.entity(surface).add_child(content);
     let online = net.is_some_and(|net| net.status == super::network_plugin::NetStatus::InRoom);
     let title = text(
         &mut commands,
@@ -2621,7 +2618,9 @@ fn setup_pause_menu(
         font.clone(),
     );
     commands.entity(title).insert(PauseSidebarFont(32.0));
-    commands.entity(surface).add_child(title);
+    commands.entity(content).add_child(title);
+    let rule = commands.spawn(theme::heading_rule(px(220))).id();
+    commands.entity(content).add_child(rule);
     let hint = text(
         &mut commands,
         if online {
@@ -2634,7 +2633,7 @@ fn setup_pause_menu(
         font.clone(),
     );
     commands.entity(hint).insert(PauseSidebarFont(14.0));
-    commands.entity(surface).add_child(hint);
+    commands.entity(content).add_child(hint);
     let resume = menu_button(
         &mut commands,
         "继续游戏 (Esc)",
@@ -2645,12 +2644,12 @@ fn setup_pause_menu(
     commands
         .entity(resume)
         .insert((PauseResumeButton, PauseSidebarButton));
-    commands.entity(surface).add_child(resume);
+    commands.entity(content).add_child(resume);
     let settings_btn = menu_button(&mut commands, "设置", 240.0, theme::CARD, font.clone());
     commands
         .entity(settings_btn)
         .insert((PauseSettingsButton, PauseSidebarButton));
-    commands.entity(surface).add_child(settings_btn);
+    commands.entity(content).add_child(settings_btn);
     let back = menu_button(
         &mut commands,
         "返回主菜单",
@@ -2661,20 +2660,28 @@ fn setup_pause_menu(
     commands
         .entity(back)
         .insert((PauseBackToMenuButton, PauseSidebarButton));
-    commands.entity(surface).add_child(back);
+    commands.entity(content).add_child(back);
     let exit = menu_button(&mut commands, "退出游戏", 240.0, theme::CARD, font);
     commands
         .entity(exit)
         .insert((ExitGameButton, PauseSidebarButton));
-    commands.entity(surface).add_child(exit);
+    commands.entity(content).add_child(exit);
 }
 
 fn adapt_pause_sidebar(
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
     scale: Res<super::ui_scale_plugin::EffectiveUiScale>,
     safe: Option<Res<SafeAreaInsets>>,
-    mut panels: Query<&mut Node, (With<PauseSidebar>, Without<PauseSidebarButton>)>,
-    mut buttons: Query<(&mut Node, &Children), (With<PauseSidebarButton>, Without<PauseSidebar>)>,
+    mut panels: Query<
+        &mut Node,
+        (
+            With<PauseSidebar>,
+            Without<PauseSidebarContent>,
+            Without<PauseSidebarButton>,
+        ),
+    >,
+    mut contents: Query<&mut Node, (With<PauseSidebarContent>, Without<PauseSidebarButton>)>,
+    mut buttons: Query<(&mut Node, &Children), With<PauseSidebarButton>>,
     mut fonts: Query<&mut TextFont>,
     labels: Query<(Entity, &PauseSidebarFont)>,
 ) {
@@ -2688,6 +2695,8 @@ fn adapt_pause_sidebar(
         .min(window.width());
     for mut panel in &mut panels {
         panel.width = Val::Px(width / unit);
+    }
+    for mut panel in &mut contents {
         panel.padding = UiRect::new(
             Val::Px((24.0 + safe.left) / unit),
             Val::Px(24.0 / unit),
@@ -3836,19 +3845,33 @@ fn replay_pause_button(
     }
 }
 
+fn hide_replay_controls_button(
+    buttons: Query<&Interaction, (Changed<Interaction>, With<HideReplayControlsButton>)>,
+    mut scrub: ResMut<ReplayScrubState>,
+) {
+    if buttons
+        .iter()
+        .any(|interaction| *interaction == Interaction::Pressed)
+    {
+        scrub.controls_hidden = true;
+    }
+}
 fn replay_timeline_scrub(
     tracks: Query<(&Interaction, &bevy::ui::RelativeCursorPosition), With<ReplayTimelineTrack>>,
     mut scrub: ResMut<ReplayScrubState>,
     mut player: ResMut<crate::plugins::replay_plugin::ReplayPlayer>,
     mut mrc: ResMut<crate::plugins::replay_plugin::MrcPlayback>,
     mut seek: ResMut<crate::plugins::replay_plugin::ReplaySeekRequest>,
+    mut timeline: Option<ResMut<crate::plugins::replay_plugin::MrcTimeline>>,
 ) {
     let Some((interaction, cursor)) = tracks.iter().next() else {
         scrub.active = false;
+        scrub.preview = None;
         return;
     };
-    if !mrc.active {
+    if !mrc.active || scrub.controls_hidden {
         scrub.active = false;
+        scrub.preview = None;
         return;
     }
     let target = cursor
@@ -3857,6 +3880,9 @@ fn replay_timeline_scrub(
     if *interaction == Interaction::Pressed {
         if !scrub.active {
             scrub.active = true;
+            if let Some(timeline) = &mut timeline {
+                timeline.target = None;
+            }
             scrub.resume_mrc = !mrc.paused;
             scrub.resume_player = player.active && !player.paused;
             mrc.paused = true;
@@ -3864,14 +3890,11 @@ fn replay_timeline_scrub(
                 player.paused = true;
             }
         }
-        if let Some(target) = target {
-            seek.0 = Some(target);
-        }
+        scrub.preview = target.or(scrub.preview);
     } else if scrub.active {
-        if let Some(target) = target {
-            seek.0 = Some(target);
-        }
+        seek.0 = target.or(scrub.preview);
         scrub.active = false;
+        scrub.preview = None;
         if scrub.resume_mrc {
             mrc.paused = false;
         }
@@ -3885,11 +3908,12 @@ fn replay_keyboard_controls(
     mut events: MessageReader<bevy::input::keyboard::KeyboardInput>,
     mut keys: ResMut<ButtonInput<KeyCode>>,
     console: Option<Res<crate::plugins::debug_plugin::DebugConsoleState>>,
-    scrub: Res<ReplayScrubState>,
+    mut scrub: ResMut<ReplayScrubState>,
     mut player: ResMut<crate::plugins::replay_plugin::ReplayPlayer>,
     mut mrc: ResMut<crate::plugins::replay_plugin::MrcPlayback>,
     mut seek: ResMut<crate::plugins::replay_plugin::ReplaySeekRequest>,
     mut frame_clock: Option<ResMut<crate::plugins::FrameClock>>,
+    timeline: Option<Res<crate::plugins::replay_plugin::MrcTimeline>>,
 ) {
     if console.is_some_and(|console| console.open) {
         events.clear();
@@ -3904,6 +3928,10 @@ fn replay_keyboard_controls(
             continue;
         }
         match event.key_code {
+            KeyCode::F9 if !event.repeat => {
+                keys.reset(KeyCode::F9);
+                scrub.controls_hidden = !scrub.controls_hidden;
+            }
             KeyCode::Space if !event.repeat => {
                 keys.reset(KeyCode::Space);
                 if mrc.active {
@@ -3920,7 +3948,10 @@ fn replay_keyboard_controls(
                 } else {
                     1.0
                 };
-                let base = seek.0.unwrap_or(mrc.elapsed);
+                let base = seek
+                    .0
+                    .or_else(|| timeline.as_ref().and_then(|timeline| timeline.target))
+                    .unwrap_or(mrc.elapsed);
                 seek.0 = Some((base + direction * step).clamp(0.0, mrc.duration()));
             }
             _ => {}
@@ -3948,20 +3979,35 @@ fn update_replay_hud(
     mut buttons: Query<(&Interaction, &mut BackgroundColor), With<ReplayPauseButton>>,
     children: Query<&Children, With<ReplayPauseButton>>,
     mut button_texts: Query<&mut Text, Without<ReplayHudText>>,
-    mut fills: Query<&mut Node, With<ReplayTimelineFill>>,
+    mut fills: Query<&mut Node, (With<ReplayTimelineFill>, Without<ReplayControlsRoot>)>,
+    mut controls: Query<&mut Node, With<ReplayControlsRoot>>,
+    scrub: Res<ReplayScrubState>,
 ) {
     let (elapsed, duration, paused) = if mrc.active {
-        (mrc.elapsed, mrc.duration(), mrc.paused)
+        (
+            scrub.preview.unwrap_or(mrc.elapsed),
+            mrc.duration(),
+            mrc.paused,
+        )
     } else {
         (player.elapsed, player.duration(), player.paused)
     };
+    let elapsed = elapsed.min(duration);
+    for mut node in &mut controls {
+        let display = if scrub.controls_hidden {
+            Display::None
+        } else {
+            Display::Flex
+        };
+        if node.display != display {
+            node.display = display;
+        }
+    }
     for mut text in &mut texts {
-        text.0 = format!(
-            "回放 {:.1}s / {:.1}s{}",
-            elapsed,
-            duration,
-            if paused { "（暂停）" } else { "" }
-        );
+        let label = replay_time_label(elapsed, duration);
+        if text.0 != label {
+            text.0 = label;
+        }
     }
     for (_, mut background) in &mut buttons {
         background.0 = if paused { theme::SELECTED } else { theme::CARD };
@@ -3981,6 +4027,17 @@ fn update_replay_hud(
     for mut node in &mut fills {
         node.width = Val::Percent(progress * 100.0);
     }
+}
+fn replay_time_label(elapsed: f32, duration: f32) -> String {
+    let elapsed = elapsed as u32;
+    let duration = duration as u32;
+    format!(
+        "{}:{:02} / {}:{:02}",
+        elapsed / 60,
+        elapsed % 60,
+        duration / 60,
+        duration % 60
+    )
 }
 
 fn menu_room_button(
@@ -4116,52 +4173,17 @@ fn key_capture(
 fn update_key_capture_buttons(
     keymap: Res<Keymap>,
     capture: Res<KeyCaptureState>,
-    buttons: Query<(Entity, &KeyCaptureButton, &Children)>,
-    mut texts: Query<&mut Text>,
+    mut texts: Query<(&super::settings_ui::SettingsKeyValue, &mut Text)>,
 ) {
-    for (_, button, children) in &buttons {
-        for child in children {
-            let Ok(mut text) = texts.get_mut(*child) else {
-                continue;
-            };
-
-            let listening = capture.pending == Some(button.0);
-            let binding = button.0.get(&keymap).label();
-            if children.len() >= 2 {
-                continue;
-            }
-            text.0 = if listening {
-                format!("{}: 按下新键… (Esc 取消)", button.0.label())
-            } else {
-                format!("{}: {}", button.0.label(), binding)
-            };
+    for (value, mut text) in &mut texts {
+        let label = if capture.pending == Some(value.0) {
+            "按下新键…".into()
+        } else {
+            value.0.get(&keymap).label()
+        };
+        if text.0 != label {
+            text.0 = label;
         }
-    }
-
-    for (_, button, children) in &buttons {
-        if children.len() < 2 {
-            continue;
-        }
-        let listening = capture.pending == Some(button.0);
-        if let Ok(mut text) = texts.get_mut(children[1]) {
-            text.0 = if listening {
-                "按下新键…".into()
-            } else {
-                button.0.get(&keymap).label()
-            };
-        }
-    }
-}
-
-fn result_title(bits: i32) -> &'static str {
-    if bits & 4 != 0 {
-        "胜利"
-    } else if bits & 2 != 0 {
-        "失败"
-    } else if bits & 1 != 0 {
-        "平局"
-    } else {
-        "战局结束"
     }
 }
 
@@ -4495,6 +4517,8 @@ fn menu_stage_buttons(
                     .map(|stage| stage.name.clone()),
             }
             .unwrap_or_else(|| button.0.clone());
+            request.stage_name =
+                super::stage_presentation::display_name(&request.stage_id, &request.stage_name);
             memory.remember(*tab, &request.stage_id);
         }
     }
@@ -4695,7 +4719,7 @@ fn adapt_runtime_ui_layout(
     mut nodes: ParamSet<(
         Query<&mut Node, With<GameplayHudRoot>>,
         Query<&mut Node, With<RadarRoot>>,
-        Query<&mut Node, With<ReplayTimelineTrack>>,
+        Query<&mut Node, With<ReplayControlsRoot>>,
         Query<&mut Node, With<ResponsiveOverlayRoot>>,
         Query<&mut Node, (With<ResponsiveMenuButton>, Without<PauseSidebarButton>)>,
         Query<&mut Node, With<ResponsiveOverlaySurface>>,
@@ -4721,6 +4745,15 @@ fn adapt_runtime_ui_layout(
         (Without<HudDetailText>, Without<ResponsiveOverlayTitle>),
     >,
     mut detail_fonts: Query<&mut TextFont, With<HudDetailText>>,
+    mut vital_fonts: Query<
+        &mut TextFont,
+        (
+            With<HudVital>,
+            Without<HudFixedFont>,
+            Without<HudDetailText>,
+            Without<ResponsiveOverlayTitle>,
+        ),
+    >,
     mut overlay_title_fonts: Query<
         (&ResponsiveOverlayTitle, &mut TextFont),
         Without<HudDetailText>,
@@ -4797,7 +4830,7 @@ fn adapt_runtime_ui_layout(
             continue;
         }
         if track.is_some() {
-            node.height = Val::Px(if layout.mobile { 22.0 } else { 24.0 } / unit);
+            node.height = Val::Px(hud.vital_height / unit);
         }
         if label.is_some() {
             node.left = Val::Auto;
@@ -4812,6 +4845,11 @@ fn adapt_runtime_ui_layout(
         if icon {
             node.width = Val::Px(16.0 / unit);
             node.height = Val::Px(16.0 / unit);
+        }
+    }
+    for mut font in &mut vital_fonts {
+        if layout_changed || font.is_added() {
+            font.font_size = (if layout.mobile { 15.0 } else { 17.0 } / unit).into();
         }
     }
     for (size, mut font) in &mut fixed_fonts {
@@ -4832,12 +4870,9 @@ fn adapt_runtime_ui_layout(
         if !layout_changed && !node.is_added() {
             continue;
         }
-        node.width = Val::Px(if layout.mobile {
-            (window.width() * 0.46).clamp(220.0, 360.0)
-        } else {
-            360.0
-        });
-        node.height = Val::Px(if layout.mobile { 24.0 } else { 16.0 });
+        node.left = Val::Px(layout.left_gutter / unit);
+        node.right = Val::Px(layout.right_gutter / unit);
+        node.bottom = Val::Px(layout.bottom_gutter / unit);
     }
     for mut node in &mut nodes.p3() {
         if !layout_changed && !node.is_added() {
@@ -5192,6 +5227,14 @@ mod tests {
         app.world_mut().resource_mut::<ReplayScrubState>().active = false;
         app.update();
         assert_eq!(app.world().resource::<ReplaySeekRequest>().0, Some(20.0));
+        for hidden in [true, false] {
+            app.world_mut().write_message(key(KeyCode::F9, false));
+            app.update();
+            assert_eq!(
+                app.world().resource::<ReplayScrubState>().controls_hidden,
+                hidden
+            );
+        }
     }
 
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
@@ -5219,6 +5262,25 @@ mod tests {
                     }
                 }
             }
+        }
+        fn show_entry_dialog(
+            mut dialog: Query<&mut Node, With<crate::app_state::MenuStockLoadoutDialog>>,
+        ) {
+            if let Ok(mut node) = dialog.single_mut() {
+                node.display = Display::Flex;
+            }
+        }
+        fn hover_main_action(
+            mut action: Query<(&crate::app_state::MenuNavigateButton, &mut Interaction)>,
+        ) {
+            for (action, mut interaction) in &mut action {
+                if action.0 == MenuScreen::Stages {
+                    *interaction = Interaction::Hovered;
+                }
+            }
+        }
+        fn pause_mode() -> bool {
+            std::env::var("METEOR_UI_CAPTURE").is_ok_and(|v| v.starts_with("pause"))
         }
         #[derive(Resource)]
         struct CaptureTarget(Handle<Image>);
@@ -5260,10 +5322,13 @@ mod tests {
                 RenderTarget::Image(target.clone().into()),
                 IsDefaultUiCamera,
             ));
-            commands.spawn(Window {
-                resolution: (width, height).into(),
-                ..default()
-            });
+            commands.spawn((
+                Window {
+                    resolution: (width, height).into(),
+                    ..default()
+                },
+                bevy::window::PrimaryWindow,
+            ));
             commands.insert_resource(CaptureTarget(target));
             let bytes = std::fs::read(
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/fonts/ui.ttf"),
@@ -5680,6 +5745,8 @@ mod tests {
                 MenuScreen::Network
             } else if std::env::var("METEOR_UI_CAPTURE").is_ok_and(|v| v.starts_with("campaign")) {
                 MenuScreen::Stages
+            } else if std::env::var("METEOR_UI_CAPTURE").is_ok_and(|v| v.starts_with("settings")) {
+                MenuScreen::Settings
             } else {
                 MenuScreen::Main
             },
@@ -5699,7 +5766,10 @@ mod tests {
             Startup,
             (
                 prepare,
-                setup_menu.run_if(|| !hud_mode() && !fog_mode() && !lobby_mode() && !result_mode()),
+                setup_menu.run_if(|| {
+                    !hud_mode() && !fog_mode() && !lobby_mode() && !result_mode() && !pause_mode()
+                }),
+                setup_pause_menu.run_if(pause_mode),
                 lobby_fixture.run_if(lobby_mode),
                 result_fixture.run_if(|| result_mode() && !pst_key_door_mode()),
                 setup_net_room_panel.run_if(lobby_mode),
@@ -5731,6 +5801,9 @@ mod tests {
             (
                 sync_launcher_screen_visibility,
                 adapt_launcher_layout,
+                super::super::launcher_ui::adapt_settings_panel,
+                super::super::settings_ui::adapt_settings_layout,
+                super::super::settings_ui::adapt_settings_navigation,
                 capture,
             )
                 .chain(),
@@ -5749,6 +5822,21 @@ mod tests {
                         .run_if(in_state(AppState::Result))
                         .after(super::super::battle_result::timing::CaptureSettlementTime),
                 );
+        }
+        if pause_mode() {
+            app.add_systems(
+                Update,
+                (adapt_pause_sidebar, update_responsive_button_visuals).chain(),
+            );
+        }
+        if std::env::var("METEOR_UI_CAPTURE").as_deref() == Ok("network-entry") {
+            app.add_systems(Update, show_entry_dialog);
+        }
+        if std::env::var("METEOR_UI_CAPTURE").as_deref() == Ok("home-hover") {
+            app.add_systems(
+                Update,
+                hover_main_action.before(super::super::launcher_ui::hero_nav_feedback),
+            );
         }
         if lobby_mode() {
             app.add_systems(
@@ -6221,9 +6309,13 @@ mod tests {
             .single(world)
             .unwrap();
         assert_eq!(sidebar.width, Val::Px(320.0 * 0.78 / 1.5));
-        assert_eq!(sidebar.padding.left, Val::Px(32.0));
-        assert_eq!(sidebar.padding.top, Val::Px(80.0 / 1.5));
-        assert_eq!(sidebar.overflow.y, bevy::ui::OverflowAxis::Scroll);
+        let content = world
+            .query_filtered::<&Node, With<PauseSidebarContent>>()
+            .single(world)
+            .unwrap();
+        assert_eq!(content.padding.left, Val::Px(32.0));
+        assert_eq!(content.padding.top, Val::Px(80.0 / 1.5));
+        assert_eq!(content.overflow.y, bevy::ui::OverflowAxis::Scroll);
         for button in world
             .query_filtered::<&Node, With<PauseSidebarButton>>()
             .iter(world)
@@ -6716,74 +6808,85 @@ mod tests {
     }
 
     #[test]
-    fn result_title_maps_bits() {
-        assert_eq!(result_title(4), "胜利");
-        assert_eq!(result_title(2), "失败");
-        assert_eq!(result_title(1), "平局");
-        assert_eq!(result_title(4 | 2), "胜利");
-        assert_eq!(result_title(0), "战局结束");
-    }
-
-    #[test]
-    fn match_result_banner_announces_single_player_result_before_settlement() {
-        let mut app = App::new();
-        app.init_resource::<MatchEnd>()
-            .init_resource::<LaunchRequest>()
-            .insert_resource(State::new(AppState::Playing))
-            .add_systems(Update, update_match_result_banner);
-        let banner = app
-            .world_mut()
-            .spawn((Text::new(""), Node::default(), MatchResultBanner))
-            .id();
-        app.update();
-        assert_eq!(
-            app.world().get::<Node>(banner).unwrap().display,
-            Display::None
-        );
-        for (result, title) in [(4, "胜利"), (2, "失败"), (1, "平局")] {
-            *app.world_mut().resource_mut::<MatchEnd>() = MatchEnd {
-                result,
-                settled: true,
-                ..default()
-            };
+    fn solo_settlement_countdown_stays_above_scrollable_scoreboard() {
+        use super::super::{
+            battle_result::{OfflineScores, ScoreRow},
+            launcher_ui::LauncherScrollArea,
+            network_plugin::NetState,
+            scoreboard::ScoreboardPlugin,
+        };
+        for (width, height) in [(1280, 720), (872, 393), (412, 915)] {
+            let (mut app, font) = hud_text_layout_app(width, height);
+            app.add_plugins(ScoreboardPlugin)
+                .insert_resource(State::new(AppState::Playing))
+                .insert_resource(UiFont(font))
+                .init_resource::<NetState>()
+                .init_resource::<LaunchRequest>()
+                .init_resource::<KillScore>()
+                .init_resource::<ButtonInput<KeyCode>>()
+                .insert_resource(MatchEnd {
+                    result: 4,
+                    settled: true,
+                    ..default()
+                });
+            let mut scores = app.world_mut().resource_mut::<OfflineScores>();
+            for n in 1..=32 {
+                let id = format!("npc:{n}");
+                scores.roster.insert(
+                    id.clone(),
+                    ScoreRow {
+                        id,
+                        name: format!("守卫 {n}"),
+                        team: 2,
+                        kills: 0,
+                        deaths: 1,
+                    },
+                );
+            }
             app.update();
+            app.update();
+            let world = app.world_mut();
+            let (heading_entity, heading, heading_transform) = world
+                .query::<(Entity, &Text, &ComputedNode, &UiGlobalTransform)>()
+                .iter(world)
+                .find_map(|(entity, text, node, transform)| {
+                    (text.0 == "胜利 · 10 秒后结算").then_some((entity, *node, *transform))
+                })
+                .unwrap();
+            let (roster_entity, roster, roster_transform) = world
+                .query_filtered::<(Entity, &ComputedNode, &UiGlobalTransform), With<LauncherScrollArea>>()
+                .single(world)
+                .unwrap();
+            let heading_bottom = heading_transform.translation.y + heading.size().y / 2.0;
+            let roster_top = roster_transform.translation.y - roster.size().y / 2.0;
+            let roster_bottom = roster_transform.translation.y + roster.size().y / 2.0;
+            assert!(heading.size().y > 0.0 && heading_bottom <= roster_top);
+            assert!(roster_bottom <= height as f32 && roster.content_size().y > roster.size().y);
+            world.get_mut::<ScrollPosition>(roster_entity).unwrap().y = 80.0;
+            world.resource_mut::<MatchEnd>().settle_elapsed = 9.5;
+            app.update();
+            let world = app.world();
             assert_eq!(
-                app.world().get::<Node>(banner).unwrap().display,
-                Display::Flex
+                world.get::<Text>(heading_entity).unwrap().0,
+                "胜利 · 1 秒后结算"
             );
             assert_eq!(
-                app.world().get::<Text>(banner).unwrap().0,
-                format!("{title}\n10 秒后结算")
+                world
+                    .get::<UiGlobalTransform>(heading_entity)
+                    .unwrap()
+                    .translation
+                    .y,
+                heading_transform.translation.y
+            );
+            assert!(
+                world
+                    .get::<ComputedNode>(roster_entity)
+                    .unwrap()
+                    .scroll_position
+                    .y
+                    > 0.0
             );
         }
-        app.world_mut().resource_mut::<MatchEnd>().settle_elapsed = 9.5;
-        app.update();
-        assert_eq!(
-            app.world().get::<Text>(banner).unwrap().0,
-            "平局\n1 秒后结算"
-        );
-        app.world_mut()
-            .insert_resource(State::new(AppState::Paused));
-        app.update();
-        assert_eq!(
-            app.world().get::<Node>(banner).unwrap().display,
-            Display::None
-        );
-        app.world_mut()
-            .insert_resource(State::new(AppState::Playing));
-        app.world_mut().resource_mut::<LaunchRequest>().mode = "replay".into();
-        app.update();
-        assert_eq!(
-            app.world().get::<Node>(banner).unwrap().display,
-            Display::None
-        );
-        app.world_mut().resource_mut::<LaunchRequest>().mode = "single".into();
-        *app.world_mut().resource_mut::<MatchEnd>() = MatchEnd::default();
-        app.update();
-        assert_eq!(
-            app.world().get::<Node>(banner).unwrap().display,
-            Display::None
-        );
     }
 
     #[test]
@@ -7315,6 +7418,47 @@ mod tests {
         (app, font)
     }
 
+    #[test]
+    fn replay_controls_are_centered_at_the_bottom_and_hide_as_one_group() {
+        use crate::plugins::replay_plugin::{MrcPlayback, ReplayPlayer};
+        for (width, height) in [(1133, 578), (412, 915)] {
+            let (mut app, font) = hud_text_layout_app(width, height);
+            app.insert_resource(UiFont(font))
+                .init_resource::<MrcPlayback>()
+                .init_resource::<ReplayPlayer>()
+                .init_resource::<ReplayScrubState>()
+                .add_systems(Startup, |mut commands: Commands, font: Res<UiFont>| {
+                    spawn_replay_controls(&mut commands, &font.0, true);
+                })
+                .add_systems(Update, update_replay_hud);
+            for _ in 0..3 {
+                app.update();
+            }
+            let world = app.world_mut();
+            let root = world
+                .query_filtered::<Entity, With<ReplayControlsRoot>>()
+                .single(world)
+                .unwrap();
+            let (track, computed, transform) = world
+                .query_filtered::<(Entity, &ComputedNode, &UiGlobalTransform), With<ReplayTimelineTrack>>()
+                .single(world).unwrap();
+            assert!(computed.size().x > 80.0);
+            assert!(transform.translation.y > height as f32 - 72.0);
+            let bar = world.get::<ChildOf>(track).unwrap().parent();
+            let bar_center = world.get::<UiGlobalTransform>(bar).unwrap().translation.x;
+            assert!((bar_center - width as f32 / 2.0).abs() <= 1.0);
+            for hidden in [true, false] {
+                app.world_mut()
+                    .resource_mut::<ReplayScrubState>()
+                    .controls_hidden = hidden;
+                app.update();
+                assert_eq!(
+                    app.world().get::<Node>(root).unwrap().display == Display::None,
+                    hidden
+                );
+            }
+        }
+    }
     #[cfg(not(target_arch = "wasm32"))]
     pub(in crate::plugins) fn press_pst_panel_button(
         panel: meteor_scene::pst_ui::UiPanel,
@@ -7392,6 +7536,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn cinematic_frontend_keeps_real_desktop_and_mobile_actions_bounded() {
+        use super::super::launcher_ui::{LauncherCreateLayout, LauncherOuterScrollArea};
         for (width, height, screen) in [
             (1920, 1080, MenuScreen::Settings),
             (1280, 720, MenuScreen::Settings),
@@ -7401,6 +7546,7 @@ mod tests {
             (2560, 1440, MenuScreen::Network),
             (1920, 1080, MenuScreen::Network),
             (1280, 720, MenuScreen::Network),
+            (1133, 578, MenuScreen::Network),
             (872, 393, MenuScreen::Network),
             (412, 915, MenuScreen::Network),
             (1920, 1080, MenuScreen::Stages),
@@ -7432,6 +7578,14 @@ mod tests {
                         crate::plugins::settings_ui::adapt_settings_navigation,
                     )
                         .chain(),
+                )
+                .add_systems(
+                    Update,
+                    sync_create_room_outer_scroll.after(crate::plugins::UiTouchActionSet),
+                )
+                .add_systems(
+                    PostUpdate,
+                    bevy::ui::update::update_clipping_system.after(bevy::ui::ui_layout_system),
                 );
             app.world_mut().spawn(Window {
                 resolution: (width, height).into(),
@@ -7568,6 +7722,19 @@ mod tests {
                 );
                 assert!(computed.size().y >= 44.0);
             } else if screen == MenuScreen::Network {
+                let world = app.world_mut();
+                for mut scroll in world
+                    .query_filtered::<&mut ScrollPosition, With<LauncherOuterScrollArea>>()
+                    .iter_mut(world)
+                {
+                    scroll.0.y = 80.0;
+                }
+                for mut status in world
+                    .query_filtered::<&mut Text, With<crate::app_state::MenuNetStatusText>>()
+                    .iter_mut(world)
+                {
+                    status.0 = "局域网：0 个房间 · 自动搜索中 · Web：已连接 · 0 个房间\nwss://example.invalid/ws · 点击房间加入；刷新同时更新局域网和 Web 列表".into();
+                }
                 let button = app
                     .world_mut()
                     .query::<(&Text, &ChildOf)>()
@@ -7621,8 +7788,8 @@ mod tests {
                     .expect("create form needs a visible map preview");
                 assert!(preview.x > 100.0 && preview.y > 55.0);
                 assert!(visible_previews.next().is_none());
-                let (computed, transform) = app.world_mut()
-                    .query_filtered::<(&ComputedNode, &UiGlobalTransform), With<crate::app_state::MenuStockHostButton>>()
+                let (host, computed, transform, clip) = app.world_mut()
+                    .query_filtered::<(Entity, &ComputedNode, &UiGlobalTransform, &CalculatedClip), With<crate::app_state::MenuStockHostButton>>()
                     .single(app.world()).unwrap();
                 let rect = Rect::from_center_size(transform.translation, computed.size());
                 assert!(
@@ -7632,25 +7799,50 @@ mod tests {
                         && rect.max.y <= height as f32,
                     "create action must stay on screen at {width}x{height}: {rect:?}"
                 );
-                for (part, computed) in app
-                    .world_mut()
-                    .query::<(
-                        &super::super::launcher_ui::LauncherCreateLayout,
-                        &ComputedNode,
-                    )>()
-                    .iter(app.world())
+                assert_eq!(
+                    rect.intersect(clip.clip),
+                    rect,
+                    "create action clipped by an ancestor at {width}x{height}: {:?}",
+                    clip.clip
+                );
+                let world = app.world_mut();
+                let (body, computed) = world
+                    .query::<(Entity, &LauncherCreateLayout, &ComputedNode)>()
+                    .iter(world)
+                    .find_map(|(entity, part, computed)| {
+                        matches!(part, LauncherCreateLayout::Body).then_some((entity, computed))
+                    })
+                    .unwrap();
+                assert!(
+                    computed.size().y > 100.0,
+                    "create form needs a usable viewport"
+                );
+                assert!(
+                    computed.content_size().x <= computed.size().x + 1.0,
+                    "create form overflows horizontally at {width}x{height}"
+                );
+                let body_overflows = computed.content_size().y > computed.size().y + 1.0;
+                for (node, scroll) in world
+                    .query_filtered::<(&Node, &ScrollPosition), With<LauncherOuterScrollArea>>()
+                    .iter(world)
                 {
-                    if matches!(part, super::super::launcher_ui::LauncherCreateLayout::Body) {
-                        assert!(
-                            computed.size().y > 100.0,
-                            "create form needs a usable viewport"
-                        );
-                        assert!(
-                            computed.content_size().x <= computed.size().x + 1.0,
-                            "create form overflows horizontally at {width}x{height}"
-                        );
-                    }
+                    assert_eq!(node.overflow, Overflow::clip());
+                    assert_eq!(scroll.0, Vec2::ZERO);
                 }
+                world.get_mut::<ScrollPosition>(body).unwrap().0.y = 1000.0;
+                app.update();
+                let world = app.world();
+                if body_overflows {
+                    assert!(world.get::<ComputedNode>(body).unwrap().scroll_position.y > 0.0);
+                }
+                assert_eq!(
+                    world.get::<UiGlobalTransform>(host).unwrap().translation,
+                    rect.center()
+                );
+                assert_eq!(
+                    rect.intersect(world.get::<CalculatedClip>(host).unwrap().clip),
+                    rect
+                );
             } else {
                 let mut count = 0;
                 for (node, children, gradient) in app
@@ -7860,7 +8052,10 @@ mod tests {
                 for (label, track) in labels {
                     let label_rect = bounds(label);
                     let track_rect = bounds(track);
-                    assert!(label_rect.center().abs_diff_eq(track_rect.center(), 1.0));
+                    assert!(
+                        label_rect.center().abs_diff_eq(track_rect.center(), 1.0),
+                        "vital label {label_rect:?} is off-center in {track_rect:?} at {width}x{height} scale={unit}",
+                    );
                     assert!(
                         label_rect.min.x >= track_rect.min.x - 1.0
                             && label_rect.max.x <= track_rect.max.x + 1.0
@@ -8599,6 +8794,10 @@ mod tests {
             app.world()
                 .resource::<crate::plugins::replay_plugin::ReplaySeekRequest>()
                 .0,
+            None
+        );
+        assert_eq!(
+            app.world().resource::<ReplayScrubState>().preview,
             Some(5.0)
         );
         assert!(app.world().resource::<ReplayScrubState>().active);

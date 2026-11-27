@@ -85,6 +85,8 @@ struct Board;
 #[derive(Component)]
 struct PingHud;
 
+#[derive(Component)]
+struct SettlementHeading;
 pub struct ScoreboardPlugin;
 impl Plugin for ScoreboardPlugin {
     fn build(&self, app: &mut App) {
@@ -112,6 +114,24 @@ fn scoreboard_mode<'a>(net: &'a NetState, request: &'a LaunchRequest) -> &'a str
 
 fn auto_show_scoreboard(end: &MatchEnd, net: &NetState) -> bool {
     end.settled && net.battle_result.is_none()
+}
+fn settlement_heading(end: &MatchEnd) -> String {
+    use meteor_network::modes::{
+        ROUND_RESULT_TEAM1_WIPED, ROUND_RESULT_TEAM2_WIPED, ROUND_RESULT_TIMEOUT,
+    };
+    let title = if end.result & ROUND_RESULT_TEAM2_WIPED != 0 {
+        "胜利"
+    } else if end.result & ROUND_RESULT_TEAM1_WIPED != 0 {
+        "失败"
+    } else if end.result & ROUND_RESULT_TIMEOUT != 0 {
+        "平局"
+    } else {
+        "战局结束"
+    };
+    let remaining = (super::combat_plugin::MISSION_SETTLE_SECONDS - end.settle_elapsed)
+        .max(0.0)
+        .ceil() as u32;
+    format!("{title} · {remaining} 秒后结算")
 }
 
 pub(super) fn capture_offline_roster(
@@ -173,6 +193,7 @@ fn update(
     offline: Option<Res<OfflineScores>>,
     boards: Query<Entity, With<Board>>,
     mut hud: Query<(Entity, &mut Text), With<PingHud>>,
+    mut headings: Query<&mut Text, (With<SettlementHeading>, Without<PingHud>)>,
     mut previous: Local<String>,
 ) {
     let playing = *state.get() == AppState::Playing;
@@ -251,8 +272,15 @@ fn update(
     } else {
         "TAB  松开收起"
     };
-    let signature = format!("{label}{footer}{groups:?}{pings:?}");
+    let show_heading = auto && request.mode != "replay";
+    let signature = format!("{label}{footer}{show_heading}{groups:?}{pings:?}");
     if *previous == signature && !boards.is_empty() {
+        if let Ok(mut text) = headings.single_mut() {
+            let heading = settlement_heading(&end);
+            if text.0 != heading {
+                text.0 = heading;
+            }
+        }
         return;
     }
     *previous = signature;
@@ -269,12 +297,37 @@ fn update(
                 top: Val::Percent(14.0),
                 width: Val::Percent(100.0),
                 max_height: Val::Percent(76.0),
-                justify_content: JustifyContent::Center,
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                row_gap: Val::Px(8.0),
                 ..default()
             },
         ))
         .with_children(|root| {
-            spawn_panel(root, &font, &net, &label, footer, groups);
+            if show_heading {
+                root.spawn((
+                    SettlementHeading,
+                    Text::new(settlement_heading(&end)),
+                    label_font(&font, 18.0),
+                    TextLayout::new(Justify::Center, LineBreak::WordOrCharacter),
+                    TextColor(super::ui_theme::METAL),
+                    BackgroundColor(super::ui_theme::HUD_SURFACE),
+                    Node {
+                        max_width: Val::Percent(90.0),
+                        padding: UiRect::axes(Val::Px(16.0), Val::Px(6.0)),
+                        flex_shrink: 0.0,
+                        ..default()
+                    },
+                ));
+            }
+            spawn_panel(
+                root,
+                &font,
+                &net,
+                &label,
+                (!show_heading).then_some(footer),
+                groups,
+            );
         });
 }
 
@@ -291,7 +344,7 @@ fn spawn_panel(
     font: &UiFont,
     net: &NetState,
     label: &str,
-    footer: &str,
+    footer: Option<&str>,
     groups: Vec<(&str, Vec<ScoreRow>)>,
 ) {
     use super::ui_theme as theme;
@@ -443,15 +496,17 @@ fn spawn_panel(
                         });
                 }
             });
-        panel.spawn((
-            Text::new(footer),
-            label_font(font, 10.0),
-            TextColor(theme::MUTED),
-            Node {
-                align_self: AlignSelf::End,
-                ..default()
-            },
-        ));
+        if let Some(footer) = footer {
+            panel.spawn((
+                Text::new(footer),
+                label_font(font, 10.0),
+                TextColor(theme::MUTED),
+                Node {
+                    align_self: AlignSelf::End,
+                    ..default()
+                },
+            ));
+        }
     });
 }
 
@@ -701,7 +756,11 @@ mod tests {
                 .count(),
             0
         );
-        app.world_mut().resource_mut::<MatchEnd>().settled = true;
+        *app.world_mut().resource_mut::<MatchEnd>() = MatchEnd {
+            result: meteor_network::modes::ROUND_RESULT_TEAM2_WIPED,
+            settled: true,
+            ..default()
+        };
         app.update();
         assert_eq!(
             app.world_mut()
@@ -715,12 +774,45 @@ mod tests {
             .world_mut()
             .query::<&Text>()
             .iter(app.world())
-            .any(|text| text.0.contains("战局已结束")));
+            .any(|text| text.0 == "胜利 · 10 秒后结算"));
         assert!(app
             .world_mut()
             .query::<&Text>()
             .iter(app.world())
             .any(|text| text.0.contains("剑客")));
+        app.insert_resource(State::new(AppState::Paused));
+        app.update();
+        assert!(app
+            .world_mut()
+            .query_filtered::<Entity, With<Board>>()
+            .iter(app.world())
+            .next()
+            .is_none());
+        app.insert_resource(State::new(AppState::Playing));
+        app.world_mut().resource_mut::<LaunchRequest>().mode = "replay".into();
+        app.update();
+        assert!(app
+            .world_mut()
+            .query_filtered::<Entity, With<SettlementHeading>>()
+            .iter(app.world())
+            .next()
+            .is_none());
+    }
+    #[test]
+    fn settlement_heading_maps_result_bits() {
+        for (result, title) in [
+            (4, "胜利"),
+            (2, "失败"),
+            (1, "平局"),
+            (6, "胜利"),
+            (0, "战局结束"),
+        ] {
+            let end = MatchEnd {
+                result,
+                ..default()
+            };
+            assert_eq!(settlement_heading(&end), format!("{title} · 10 秒后结算"));
+        }
     }
 
     #[test]

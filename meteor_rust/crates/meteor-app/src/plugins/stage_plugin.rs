@@ -699,6 +699,7 @@ struct PreparedStage {
     waypoints: WaypointGraph,
     escort: super::escort_assets::LoadedEscort,
     graphics: Option<super::graphics_pack::GraphicsPacks>,
+    prebuilt_geometry: Option<super::render_plugin::PrebuiltStageGeometry>,
     #[cfg(target_os = "android")]
     android: crate::android_assets::AndroidAssetLoader,
 }
@@ -771,6 +772,12 @@ fn begin_stage_load(
             }
         }
         let info = world.remove_resource::<LoadedStageInfo>().unwrap();
+        let assets: LoadedStageAssets = world.remove_resource().unwrap();
+        let prebuilt_geometry = if info.ready {
+            super::render_plugin::prebuild_stage_geometry(&info, &assets)
+        } else {
+            None
+        };
         if let Some(graphics) = graphics.as_mut().filter(|_| info.ready) {
             graphics.prepare_stage(&info.stage_id);
         }
@@ -778,7 +785,7 @@ fn begin_stage_load(
             characters: world.remove_resource(),
             common: world.remove_resource(),
             info,
-            assets: world.remove_resource().unwrap(),
+            assets,
             script: world.remove_resource().unwrap(),
             mission: world.remove_resource().unwrap(),
             script_music: world.remove_resource(),
@@ -786,6 +793,7 @@ fn begin_stage_load(
             waypoints: world.remove_resource().unwrap_or_default(),
             escort: world.remove_resource().unwrap_or_default(),
             graphics,
+            prebuilt_geometry,
             #[cfg(target_os = "android")]
             android: world.remove_resource().unwrap(),
         }
@@ -823,6 +831,11 @@ fn poll_stage_load(
     }
     if let Some(graphics) = stage.graphics {
         commands.insert_resource(graphics);
+    }
+    if let Some(prebuilt) = stage.prebuilt_geometry {
+        commands.insert_resource(prebuilt);
+    } else {
+        commands.remove_resource::<super::render_plugin::PrebuiltStageGeometry>();
     }
     if stage.info.ready {
         meteor_asset::runtime_assets::retain_stage(&stage.info.stage_id);

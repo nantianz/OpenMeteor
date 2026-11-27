@@ -235,6 +235,59 @@ fn production_jump_four_directions_keep_morph_while_physics_takes_off() {
 }
 
 #[test]
+fn production_clock_keeps_original_short_ascent_floor_probe() {
+    for (fps, physics_hz) in [(120, 0), (150, 150), (240, 0)] {
+        for held in [false, true] {
+            let mut h = jump_pose_render_harness(1);
+            {
+                let mut settings = h
+                    .app
+                    .world_mut()
+                    .resource_mut::<crate::app_state::Settings>();
+                if physics_hz == 0 {
+                    settings.variable_physics = true;
+                } else {
+                    settings.physics_hz = physics_hz;
+                }
+            }
+            crate::plugins::install_frame_clock(&mut h.app);
+            let dt = 1.0 / fps as f32;
+            let jump = h.app.world().resource::<crate::app_state::Keymap>().jump;
+            let floor = h.position().y;
+            h.press_binding(jump);
+            h.step_dt(dt);
+            if !held {
+                h.release_binding(jump);
+            }
+            let mut peak = floor;
+            let mut upward_probe = false;
+            let mut took_off = false;
+            for _ in 0..fps {
+                h.step_dt(dt);
+                let air = h.app.world().get::<FighterAir>(h.fighter).unwrap();
+                took_off |= air.air.airborne && air.air.vertical_speed > 0.0;
+                upward_probe |= air.air.vertical_speed > 0.0 && air.mover_vertical_contact;
+                peak = peak.max(h.position().y);
+            }
+            assert!(
+                took_off,
+                "{fps} Hz, held={held}: jump impulse must be installed"
+            );
+            if fps == 240 || (physics_hz == 150 && !held) {
+                assert!(
+                    upward_probe && (peak - floor).abs() < 0.01,
+                    "{fps} Hz, held={held}: preserve the original floor snap, peak {peak}"
+                );
+            } else {
+                assert!(
+                    peak - floor > 0.24,
+                    "{fps} Hz, held={held}: rise above the probe"
+                );
+            }
+        }
+    }
+}
+#[test]
 fn production_jump_wall_entries_keep_source_morph_and_kick_mapping() {
     for fps in [30, 60, 120] {
         for (side, cling, kick) in [(0, 161, 157), (1, 162, 159), (-1, 163, 160)] {

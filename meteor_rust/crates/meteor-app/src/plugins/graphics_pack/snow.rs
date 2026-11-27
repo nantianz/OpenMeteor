@@ -1,6 +1,8 @@
+mod combat;
 mod field;
 mod terrain;
 
+pub(crate) use combat::SnowCombat;
 use std::collections::{HashMap, VecDeque};
 
 use bevy::asset::RenderAssetUsages;
@@ -28,7 +30,7 @@ const UPDATE_INTERVAL: f32 = 1.0 / 30.0;
 const MAX_SURFACE_TRIANGLES: usize = 4096;
 const MAX_PUFFS: usize = 96;
 const MAX_ACTORS: usize = 12;
-const MAX_CONTACTS: usize = 32;
+const MAX_CONTACTS: usize = 48;
 const CONTACT_RANGE: f32 = 42.0;
 const CONTACT_TOLERANCE: f32 = 0.32;
 const PUFF_LIFE: f32 = 0.64;
@@ -452,7 +454,7 @@ impl PowderMesh {
 pub(super) fn install(app: &mut App) {
     terrain::install(app);
     field::install(app);
-    app.add_systems(
+    app.init_resource::<SnowCombat>().add_systems(
         PostUpdate,
         update
             .after(bevy::transform::TransformSystems::Propagate)
@@ -460,6 +462,7 @@ pub(super) fn install(app: &mut App) {
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update(
     state: Res<State<AppState>>,
     time: Res<Time>,
@@ -480,23 +483,27 @@ fn update(
     mut meshes: ResMut<Assets<Mesh>>,
     mut contacts: Local<Vec<Contact>>,
     mut upload: ResMut<SnowUpload>,
+    mut combat: ResMut<SnowCombat>,
 ) {
     let Ok((mut field, handle)) = fields.single_mut() else {
         if upload.is_bound() {
             *upload = SnowUpload::default();
         }
+        combat.set_eye(None);
         return;
     };
     if *state.get() != AppState::Playing {
         if !field.trails.is_empty() {
             field.trails.clear();
         }
+        combat.set_eye(None);
         return;
     }
     let ground = collider
         .as_deref()
         .and_then(|collider| collider.mesh.as_ref());
     let (Ok(camera), Some(ground)) = (cameras.single(), ground) else {
+        combat.set_eye(None);
         return;
     };
     let dt = time.delta_secs().min(0.1);
@@ -510,6 +517,7 @@ fn update(
     field.clock += field.pending;
     field.pending = 0.0;
     let eye = camera.translation();
+    combat.set_eye(Some(eye.xz()));
     let mut nearby: Vec<_> = fighters
         .iter()
         .filter_map(|(id, transform, motion, health, conceal)| {
@@ -537,6 +545,8 @@ fn update(
             .or_insert_with(|| Trail::new(position, motion.movement_mode))
             .advance(position, motion.movement_mode, motion.facing, &mut contacts);
     }
+    let layout = field.coverage.layout;
+    combat.drain_contacts(layout.floor, layout.thickness, &mut contacts);
     contacts.truncate(MAX_CONTACTS);
     let had_puffs = !field.puffs.is_empty();
     for contact in contacts.drain(..) {

@@ -6,12 +6,8 @@ pub const ASSETS: &[(&str, &[u8])] = &[
         include_bytes!("../assets/ui/cinematic-title-reborn-matte.png"),
     ),
     (
-        "ui/cinematic-fortress.png",
-        include_bytes!("../assets/ui/cinematic-fortress.png"),
-    ),
-    (
-        "ui/campaign-map.png",
-        include_bytes!("../assets/ui/campaign-map.png"),
+        "ui/mountain-pass-background.jpg",
+        include_bytes!("../assets/ui/mountain-pass-background.jpg"),
     ),
     (
         "ui/campaign-halo.png",

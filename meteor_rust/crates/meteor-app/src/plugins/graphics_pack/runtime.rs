@@ -30,6 +30,7 @@ pub struct GraphicsFrame {
     pub fx_lights: [Vec4; 8],
 
     pub fx_light_colors: [Vec4; 8],
+    pub(crate) stage_render: crate::plugins::render_plugin::legacy_stage_render::StageRenderFrame,
 }
 
 const FX_LUMEN_SCALE: f32 = 1.0 / 100_000.0;
@@ -96,13 +97,30 @@ pub(super) fn update_frame(
             With<super::color_pipeline::UnifiedColorPipeline>,
         ),
     >,
-    fx_lights: Query<(&GlobalTransform, &PointLight, &Visibility), With<super::fx::FxLight>>,
+    fx_lights: Query<
+        (&GlobalTransform, &PointLight, &Visibility),
+        Or<(
+            With<super::fx::FxLight>,
+            With<super::campfires::CampfireLight>,
+        )>,
+    >,
+    render_profile: Option<
+        Res<crate::plugins::render_plugin::legacy_stage_render::SceneRenderProfile>,
+    >,
+    stage_script: Option<Res<crate::plugins::stage_plugin::StageScriptRuntime>>,
     mut frame: Option<ResMut<FrameUniforms>>,
 ) {
     let Some(frame) = frame.as_deref_mut() else {
         return;
     };
-    frame.graphics = GraphicsFrame::default();
+    frame.graphics = GraphicsFrame {
+        stage_render: render_profile
+            .as_ref()
+            .map_or_else(Default::default, |profile| {
+                profile.frame_at(stage_script.as_ref().and_then(|runtime| runtime.script()))
+            }),
+        ..GraphicsFrame::default()
+    };
     if state.is_none_or(|s| !matches!(s.get(), AppState::Playing | AppState::Paused)) {
         return;
     }
@@ -196,6 +214,9 @@ pub(super) fn update_frame(
         frame.graphics.sun = light.sun;
         frame.graphics.sun_color = light.sun_color.extend(0.0);
         frame.graphics.counts.w = 1.0;
+        if fog.is_some() {
+            frame.graphics.stage_render.fog_color.w = 0.0;
+        }
     }
     if let Some(fog) = fog.filter(|_| settings.as_ref().is_none_or(|s| s.volumetric_fog)) {
         frame.graphics.counts.x = fog.len() as f32;

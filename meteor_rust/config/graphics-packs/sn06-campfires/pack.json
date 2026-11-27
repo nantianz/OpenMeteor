@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "id": "sn06-campfires",
+  "name": "四方阵 · 风旗篝火",
+  "description": "庭院四周的风中旗帜、篝火、飘散的烟和火星，以及照亮周围的火光。",
+  "scenes": [
+    {
+      "stage": "sn06",
+      "campfires": [
+        { "position": [-32.5, -2.8, -28.0], "yaw_degrees": -51, "scale": 1.0, "banner_color": [0.45, 0.105, 0.075] },
+        { "position": [31.0, -2.8, -28.0], "yaw_degrees": 229, "scale": 1.04, "banner_color": [0.15, 0.27, 0.30] },
+        { "position": [-31.0, -2.8, 30.0], "yaw_degrees": 49, "scale": 0.98, "banner_color": [0.15, 0.27, 0.30] },
+        { "position": [33.0, -2.8, 29.0], "yaw_degrees": 131, "scale": 1.06, "banner_color": [0.45, 0.105, 0.075] }
+      ]
+    }
+  ]
+}

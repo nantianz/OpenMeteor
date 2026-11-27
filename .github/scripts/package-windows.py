@@ -13,9 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 UI_IMAGES = (
     "studio-logo.png",
     "cinematic-title-reborn-matte.png",
-    "cinematic-fortress.png",
-    "ink-wash-background.png",
-    "campaign-map.png",
+    "mountain-pass-background.jpg",
     "campaign-halo.png",
 )
 INSTRUCTIONS = """OpenMeteor Windows
@@ -49,9 +47,13 @@ def verify_embedded_ui(binary):
         if not path.is_file() or path.is_symlink():
             raise ValueError(f"missing or invalid UI image: {name}")
         image = path.read_bytes()
-        if (len(image) < 33 or image[:8] != b"\x89PNG\r\n\x1a\n"
-                or image[12:16] != b"IHDR"
-                or min(struct.unpack_from(">II", image, 16)) <= 1):
+        if name.endswith(".jpg"):
+            valid = len(image) >= 33 and image.startswith(b"\xff\xd8") and image.endswith(b"\xff\xd9")
+        else:
+            valid = (len(image) >= 33 and image[:8] == b"\x89PNG\r\n\x1a\n"
+                     and image[12:16] == b"IHDR"
+                     and min(struct.unpack_from(">II", image, 16)) > 1)
+        if not valid:
             raise ValueError(f"invalid or placeholder UI image: {name}")
         if image not in data:
             raise ValueError(f"UI image is not embedded in the executable: {name}")
@@ -79,20 +81,35 @@ def graphics_files():
         "graphics-packs/longsword/pack.json",
         "graphics-packs/sn06-color-pipeline/pack.json",
         "graphics-packs/combat-fx/pack.json",
+        "graphics-packs/scene-normals/pack.json",
+        "graphics-packs/sn06-campfires/pack.json",
+        "graphics-packs/water/pack.json",
     }
     if index.get("enabled") is not True or not required.issubset(index.get("packs", [])):
         raise ValueError("default graphics enhancements are disabled or incomplete")
-    for preset in ("water-deep.json", "water-shallow.json"):
-        json.loads(add(preset).read_text(encoding="utf-8"))
     demo = "graphics-packs/meshlet-demo/pack.json"
     optional_packs = []
     for preset in ("graphics-enhancement-sn03.json", "graphics-enhancement-sn06.json",
                    "graphics-enhancement-sn06-nextgen.json", "graphics-enhancement-sn06-color-pipeline.json",
-                   "graphics-enhancement-longsword-preview.json", "graphics-enhancement-sn06-waterfall-experiment.json"):
+                   "graphics-enhancement-longsword-preview.json",
+                   "graphics-enhancement-sn06-waterfall-experiment.json", "graphics-enhancement-all.json"):
         optional_packs.extend(json.loads(add(preset).read_text(encoding="utf-8"))["packs"])
     for name in dict.fromkeys([*index["packs"], demo, *optional_packs]):
         manifest = json.loads(add(name).read_text(encoding="utf-8"))
         parent = PurePosixPath(name).parent
+        water = manifest.get("water")
+        if water is not None:
+            for field in ("config", "deep", "shallow"):
+                json.loads(add(water[field], parent).read_text(encoding="utf-8"))
+            add(water["ripples"], parent)
+            if water.get("baked") is not None:
+                catalog = json.loads(add(water["baked"], parent).read_text(encoding="utf-8"))
+                for surface in catalog:
+                    for field in ("reflection", "depth"):
+                        if surface.get(field) is not None:
+                            add(surface[field], parent)
+                    if surface.get("sky_visibility") is not None:
+                        add(surface["sky_visibility"]["file"], parent)
         for resource in manifest.get("cloth_meshes", {}).values():
             source = add(resource, parent)
             if source.suffix.lower() != ".obj" or not 0 < source.stat().st_size <= 1024 * 1024:
@@ -133,10 +150,9 @@ def package(binary, architecture, version, commit, font, output):
         "THIRD_PARTY_NOTICES.md": ROOT / "THIRD_PARTY_NOTICES.md",
         "fonts/ui.ttf": font,
     }
-    for name in ("balance-rules.json", "water-enhancement.json"):
-        path = ROOT / "meteor_rust/config" / name
-        json.loads(path.read_text(encoding="utf-8"))
-        files["config/" + name] = path
+    balance_rules = ROOT / "meteor_rust/config/balance-rules.json"
+    json.loads(balance_rules.read_text(encoding="utf-8"))
+    files["config/balance-rules.json"] = balance_rules
     files.update(graphics_files())
     for path in sorted((ROOT / "licenses").rglob("*")):
         if path.is_file():

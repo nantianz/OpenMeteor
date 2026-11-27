@@ -48,6 +48,7 @@ pub struct LaunchRequest {
 
     pub stock_life_adjust_percent: u32,
 
+    pub stock_physics_hz: u32,
     pub stock_hide_item: bool,
     pub stock_health_item: bool,
     pub stock_update_item: bool,
@@ -77,6 +78,7 @@ impl Default for LaunchRequest {
             stock_game_num: 999,
             stock_game_time_minutes: 999,
             stock_life_adjust_percent: 200,
+            stock_physics_hz: meteor_core::PHYSICS_HZ_DEFAULT,
             stock_hide_item: true,
             stock_health_item: true,
             stock_update_item: true,
@@ -154,18 +156,20 @@ pub struct Settings {
 
     pub effect_enhance: bool,
 
-    pub graphics_packs: Option<bool>,
-
-    pub graphics_pack_choices: std::collections::BTreeMap<String, bool>,
     pub target_fps: u32,
+    pub physics_hz: u32,
+    pub variable_physics: bool,
     pub brightness: f32,
     pub contrast: f32,
 
     pub sharpness: f32,
     pub gamma: f32,
 
+    pub scene_shadows: bool,
     pub dynamic_shadows: bool,
 
+    pub anti_aliasing: bool,
+    pub shadow_quality: u8,
     pub scene_normal_maps: bool,
 
     pub hd_scene: bool,
@@ -219,17 +223,20 @@ impl Default for Settings {
             sky_enhance: true,
             grass_enhance: true,
             effect_enhance: true,
-            graphics_packs: None,
-            graphics_pack_choices: Default::default(),
-            target_fps: 0,
+            target_fps: 60,
+            physics_hz: Self::PHYSICS_HZ_DEFAULT,
+            variable_physics: false,
             brightness: 94.0,
             contrast: 94.0,
             sharpness: 0.3,
             gamma: 49.0,
+            scene_shadows: true,
             dynamic_shadows: true,
+            anti_aliasing: true,
+            shadow_quality: 0,
             scene_normal_maps: true,
             hd_scene: true,
-            water_enhance: true,
+            water_enhance: false,
             water_live_reflections: false,
             environment_lighting: true,
 
@@ -253,6 +260,9 @@ impl Default for Settings {
 }
 
 impl Settings {
+    pub(crate) const PHYSICS_HZ_DEFAULT: u32 = meteor_core::PHYSICS_HZ_DEFAULT;
+    pub(crate) const PHYSICS_HZ_MIN: u32 = meteor_core::PHYSICS_HZ_MIN;
+    pub(crate) const PHYSICS_HZ_MAX: u32 = meteor_core::PHYSICS_HZ_MAX;
     pub const CAMERA_FOV_DEFAULT: f32 = 60.0;
     pub const CAMERA_FOV_MIN: f32 = 40.0;
     pub const CAMERA_FOV_MAX: f32 = 100.0;
@@ -813,15 +823,18 @@ sky_enhance={}
 grass_enhance={}
 effect_enhance={}
 target_fps={}
+physics_hz={}
+variable_physics={}
 brightness={}
 contrast={}
 sharpness={}
 gamma={}
+scene_shadows={}
 dynamic_shadows={}
+anti_aliasing={}
+shadow_quality={}
 scene_normal_maps={}
 hd_scene={}
-water_enhance={}
-water_live_reflections={}
 environment_lighting={}
 dlss5_neural_rendering={}
 music_enabled={}
@@ -851,15 +864,18 @@ touch_controls={}
         u8::from(settings.grass_enhance),
         u8::from(settings.effect_enhance),
         settings.target_fps,
+        settings.physics_hz,
+        u8::from(settings.variable_physics),
         settings.brightness,
         settings.contrast,
         settings.sharpness,
         settings.gamma,
+        u8::from(settings.scene_shadows),
         u8::from(settings.dynamic_shadows),
+        u8::from(settings.anti_aliasing),
+        settings.shadow_quality,
         u8::from(settings.scene_normal_maps),
         u8::from(settings.hd_scene),
-        u8::from(settings.water_enhance),
-        u8::from(settings.water_live_reflections),
         u8::from(settings.environment_lighting),
         u8::from(settings.dlss5_neural_rendering),
         u8::from(settings.music_enabled),
@@ -876,14 +892,6 @@ touch_controls={}
         settings.ui_scale,
         settings.touch_controls,
     );
-    if let Some(enabled) = settings.graphics_packs {
-        text.push_str(&format!("graphics_packs={}\n", u8::from(enabled)));
-    }
-    for (id, enabled) in &settings.graphics_pack_choices {
-        if crate::plugins::graphics_pack::config::valid_pack_id(id) {
-            text.push_str(&format!("graphics_pack.{id}={}\n", u8::from(*enabled)));
-        }
-    }
     text.push_str(&format!(
         "graphics_adapter={}\ngraphics_backend={}\n",
         settings.graphics_adapter.replace(['\r', '\n'], ""),
@@ -971,6 +979,8 @@ fn parse_settings(text: &str) -> (Settings, Keymap) {
     let mut settings = Settings::default();
     let mut keymap = Keymap::default();
     let mut loaded_chat = [false; KeyField::STOCK_CHAT_ACTIONS.len()];
+    let mut legacy_variable_physics = false;
+    let mut variable_physics = None;
     let has_hd_scene = text.lines().any(|line| {
         line.split_once('=')
             .is_some_and(|(key, _)| key.trim() == "hd_scene")
@@ -1004,21 +1014,34 @@ fn parse_settings(text: &str) -> (Settings, Keymap) {
             "sky_enhance" => settings.sky_enhance = parse_bool(value),
             "grass_enhance" => settings.grass_enhance = parse_bool(value),
             "effect_enhance" => settings.effect_enhance = parse_bool(value),
-            "graphics_packs" => settings.graphics_packs = Some(parse_bool(value)),
             "target_fps" => settings.target_fps = value.parse().unwrap_or(settings.target_fps),
+            "physics_hz" => match value.parse() {
+                Ok(hz @ Settings::PHYSICS_HZ_MIN..=Settings::PHYSICS_HZ_MAX) => {
+                    settings.physics_hz = hz;
+                    legacy_variable_physics = false;
+                }
+                Ok(0) => legacy_variable_physics = true,
+                _ => {}
+            },
+            "variable_physics" => variable_physics = Some(parse_bool(value)),
             "brightness" => settings.brightness = value.parse().unwrap_or(settings.brightness),
             "contrast" => settings.contrast = value.parse().unwrap_or(settings.contrast),
             "sharpness" => {
                 settings.sharpness = value.parse().unwrap_or(settings.sharpness).clamp(0.0, 1.0);
             }
             "gamma" => settings.gamma = value.parse().unwrap_or(settings.gamma),
+            "scene_shadows" => settings.scene_shadows = parse_bool(value),
             "dynamic_shadows" => settings.dynamic_shadows = parse_bool(value),
+            "anti_aliasing" => settings.anti_aliasing = parse_bool(value),
+            "shadow_quality" => {
+                if let Ok(quality @ 0..=3) = value.parse() {
+                    settings.shadow_quality = quality;
+                }
+            }
             "scene_normal_maps" => settings.scene_normal_maps = parse_bool(value),
             "hd_scene" => settings.hd_scene = parse_bool(value),
 
             "sn06_remastered_textures" if !has_hd_scene => settings.hd_scene = parse_bool(value),
-            "water_enhance" => settings.water_enhance = parse_bool(value),
-            "water_live_reflections" => settings.water_live_reflections = parse_bool(value),
             "environment_lighting" => settings.environment_lighting = parse_bool(value),
             "dlss5_neural_rendering" => settings.dlss5_neural_rendering = parse_bool(value),
             "music_enabled" => settings.music_enabled = parse_bool(value),
@@ -1088,14 +1111,6 @@ fn parse_settings(text: &str) -> (Settings, Keymap) {
             "radar" => apply_binding_value(&mut keymap, KeyField::Radar, value),
             "debug_panel" => apply_binding_value(&mut keymap, KeyField::DebugPanel, value),
             "dodge" => apply_binding_value(&mut keymap, KeyField::Dodge, value),
-            other if other.starts_with("graphics_pack.") => {
-                let id = &other["graphics_pack.".len()..];
-                if crate::plugins::graphics_pack::config::valid_pack_id(id) {
-                    settings
-                        .graphics_pack_choices
-                        .insert(id.to_owned(), parse_bool(value));
-                }
-            }
             other => {
                 if let Some(index) = KeyField::STOCK_CHAT_ACTIONS
                     .iter()
@@ -1118,21 +1133,16 @@ fn parse_settings(text: &str) -> (Settings, Keymap) {
             field.set_binding(&mut keymap, InputBinding::Unbound);
         }
     }
+    settings.variable_physics = variable_physics.unwrap_or(legacy_variable_physics);
     (settings, keymap)
 }
 
-#[cfg(test)]
-pub(crate) fn parse_settings_for_test(text: &str) -> (Settings, Keymap) {
-    parse_settings(text)
-}
-
-#[cfg(test)]
-pub(crate) fn settings_text_for_test(settings: &Settings) -> String {
-    settings_text(settings, &Keymap::default())
-}
-
 pub fn reset_settings_defaults(settings: &mut Settings, keymap: &mut Keymap) {
-    *settings = Settings::default();
+    *settings = Settings {
+        water_enhance: settings.water_enhance,
+        water_live_reflections: settings.water_live_reflections,
+        ..Settings::default()
+    };
     *keymap = read_default_keymap().unwrap_or_default();
     let _ = save_settings(settings, keymap);
 }
@@ -1168,17 +1178,15 @@ pub enum SettingsBoolField {
     HitStop,
     HitShake,
     HitSway,
-    CharacterMotion,
-    NewCharacterModels,
     VolumetricFog,
     SkyEnhance,
     GrassEnhance,
     EffectEnhance,
+    SceneShadows,
     DynamicShadows,
+    AntiAliasing,
     SceneNormalMaps,
     HdScene,
-    WaterEnhance,
-    WaterLiveReflections,
     EnvironmentLighting,
     Dlss5NeuralRendering,
     MusicEnabled,
@@ -1188,6 +1196,7 @@ pub enum SettingsBoolField {
     ShowNames,
     ReverseMouse,
     DragMouse,
+    VariablePhysics,
 }
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
@@ -1197,6 +1206,7 @@ pub enum SettingsSelectField {
     GraphicsBackend,
     RenderScale,
     TextureQuality,
+    ShadowQuality,
     TargetFps,
 
     UiScale,
@@ -1214,6 +1224,7 @@ pub enum SettingsRangeField {
     AudioVolume,
     MouseSpeed,
     CameraFov,
+    PhysicsHz,
 }
 
 #[derive(Component, Debug, Clone, Copy)]
@@ -1590,6 +1601,60 @@ quick_chat_all=Mouse1
 #[cfg(test)]
 mod graphics_settings_persistence_tests {
     #[test]
+    fn antialiasing_and_shadow_quality_are_independent_persisted_settings() {
+        let legacy = super::parse_settings("dynamic_shadows=0\n").0;
+        assert!(legacy.anti_aliasing && legacy.scene_shadows && !legacy.dynamic_shadows);
+        assert_eq!(legacy.shadow_quality, 0);
+        let settings = super::Settings {
+            anti_aliasing: false,
+            scene_shadows: false,
+            dynamic_shadows: true,
+            shadow_quality: 3,
+            ..Default::default()
+        };
+        let loaded =
+            super::parse_settings(&super::settings_text(&settings, &super::Keymap::default())).0;
+        assert!(!loaded.anti_aliasing && !loaded.scene_shadows && loaded.dynamic_shadows);
+        assert_eq!(loaded.shadow_quality, 3);
+        assert_eq!(
+            super::parse_settings("shadow_quality=9\n").0.shadow_quality,
+            0
+        );
+    }
+    #[test]
+    fn render_cap_and_physics_frequency_persist_independently() {
+        let (legacy, _) = super::parse_settings("target_fps=30");
+        assert_eq!((legacy.target_fps, legacy.physics_hz), (30, 120));
+        for hz in [30, 60, 120, 135, 150, 173, 200] {
+            for variable_physics in [false, true] {
+                let settings = super::Settings {
+                    target_fps: 60,
+                    physics_hz: hz,
+                    variable_physics,
+                    ..Default::default()
+                };
+                let text = super::settings_text(&settings, &super::Keymap::default());
+                let (loaded, _) = super::parse_settings(&text);
+                assert_eq!(
+                    (
+                        loaded.target_fps,
+                        loaded.physics_hz,
+                        loaded.variable_physics
+                    ),
+                    (60, hz, variable_physics)
+                );
+            }
+        }
+        let (legacy_variable, _) = super::parse_settings("physics_hz=0");
+        assert_eq!(legacy_variable.physics_hz, 120);
+        assert!(legacy_variable.variable_physics);
+        for invalid in ["29", "201", "999"] {
+            let (loaded, _) = super::parse_settings(&format!("physics_hz={invalid}"));
+            assert_eq!(loaded.physics_hz, 120);
+            assert!(!loaded.variable_physics);
+        }
+    }
+    #[test]
     fn camera_fov_defaults_round_trips_and_rejects_invalid_projection_angles() {
         assert_eq!(super::parse_settings("auto_camera=1\n").0.camera_fov, 60.0);
         for degrees in [40.0, 60.0, 85.0, 100.0] {
@@ -1663,25 +1728,14 @@ mod graphics_settings_persistence_tests {
     }
 
     #[test]
-    fn water_enhance_default_on_live_reflection_opt_in_and_round_trip() {
-        assert!(super::parse_settings("music_volume=10\n").0.water_enhance);
-        assert!(
-            !super::parse_settings("music_volume=10\n")
-                .0
-                .water_live_reflections
-        );
-        for enabled in [false, true] {
-            let settings = super::Settings {
-                water_enhance: enabled,
-                water_live_reflections: enabled,
-                ..Default::default()
-            };
-            let loaded =
-                super::parse_settings(&super::settings_text(&settings, &super::Keymap::default()))
-                    .0;
-            assert_eq!(loaded.water_enhance, enabled);
-            assert_eq!(loaded.water_live_reflections, enabled);
-        }
+    fn legacy_water_settings_do_not_override_graphics_packs() {
+        let (settings, keymap) =
+            super::parse_settings("water_enhance=1\nwater_live_reflections=1\n");
+        assert!(!settings.water_enhance);
+        assert!(!settings.water_live_reflections);
+        let saved = super::settings_text(&settings, &keymap);
+        assert!(!saved.contains("water_enhance="));
+        assert!(!saved.contains("water_live_reflections="));
     }
 
     #[test]

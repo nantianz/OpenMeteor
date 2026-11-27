@@ -125,6 +125,19 @@ pub fn entry_name_for_legacy_path(path: &str) -> Option<String> {
                 && stage[2..].chars().all(|c| c.is_ascii_digit()) =>
         {
             let basename = tail.rsplit('/').next()?;
+            if matches!(
+                tail.as_str(),
+                "render.json"
+                    | "name.txt"
+                    | "description.txt"
+                    | "description.md"
+                    | "preview.png"
+                    | "preview.jpg"
+                    | "preview.jpeg"
+                    | "preview.generated.jpg"
+            ) {
+                return Some(format!("stage/{stage}.{tail}"));
+            }
             Some(format!("stage/{basename}"))
         }
         stage
@@ -160,6 +173,25 @@ mod tests {
             entry_name_for_legacy_path("sn01/sn01.GMB").as_deref(),
             Some("stage/sn01.gmb")
         );
+        assert_eq!(
+            entry_name_for_legacy_path("SN95/render.json").as_deref(),
+            Some("stage/sn95.render.json")
+        );
+        assert_eq!(
+            entry_name_for_legacy_path(r"SN01\Description.txt").as_deref(),
+            Some("stage/sn01.description.txt")
+        );
+        for file in [
+            "name.txt",
+            "description.md",
+            "preview.png",
+            "preview.generated.jpg",
+        ] {
+            assert_eq!(
+                entry_name_for_legacy_path(&format!("sn23/{file}")),
+                Some(format!("stage/sn23.{file}"))
+            );
+        }
         assert_eq!(
             entry_name_for_legacy_path(r"Level\sn01_.pst").as_deref(),
             Some("level/sn01_.pst")
@@ -262,6 +294,10 @@ pub fn original_stage_preview_revision(stage: &str) -> Option<String> {
     ORIGINAL_DIRECTORY
         .get()
         .map(|source| source.stage_preview_revision(stage))
+}
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+pub fn original_stage_directory(stage: &str) -> Option<&std::path::Path> {
+    ORIGINAL_DIRECTORY.get()?.stage_directory(stage)
 }
 
 pub fn runtime_texture_source_active() -> bool {

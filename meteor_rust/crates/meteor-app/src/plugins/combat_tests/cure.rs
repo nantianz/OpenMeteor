@@ -1,5 +1,7 @@
 fn cure_harness(network: bool) -> (GameplayHarness, Entity) {
-    let mut h = recovery_timing_harness(true);
+    attach_cure_fixture(recovery_timing_harness(true), network)
+}
+fn attach_cure_fixture(mut h: GameplayHarness, network: bool) -> (GameplayHarness, Entity) {
     let (level, _) = crate::plugins::stage_plugin::solo_identity_tests::sn13();
     h.app
         .insert_resource(crate::app_state::LaunchRequest::default())
@@ -27,6 +29,108 @@ fn cure_harness(network: bool) -> (GameplayHarness, Entity) {
     let position = h.position() + Vec3::X;
     let ally = offline_cure::tests::dead_npc(&mut h.app, 1, 1, position, true);
     (h, ally)
+}
+#[test]
+fn production_assassin_cure_pressed_during_ledge_fall_keeps_movement() {
+    for (physics_hz, raw_key) in [(120, true), (173, false)] {
+        let (mut h, _) = attach_cure_fixture(dagger_ledge_harness(true, true), true);
+        crate::plugins::install_frame_clock(&mut h.app);
+        {
+            let mut net = h.app.world_mut().resource_mut::<NetState>();
+            net.address = "udp-host://127.0.0.1:5230".into();
+            net.stock_physics_hz = physics_hz;
+        }
+        let dt = 1.0 / 60.0;
+        h.step_dt(dt);
+        h.press_key(KeyCode::KeyW);
+        for _ in 0..120 {
+            h.step_dt(dt);
+            if h.airborne() && h.position().y < 29.99 {
+                break;
+            }
+        }
+        let air = h.app.world().get::<FighterAir>(h.fighter).unwrap();
+        assert!(air.air.airborne && air.air.vertical_speed < 0.0);
+        assert_eq!(air.recovery_ground_mode, Some(false));
+        assert_eq!(
+            h.state(),
+            FighterState::Name,
+            "walk-off ledge retains the combat state"
+        );
+        if raw_key {
+            h.press_key(KeyCode::KeyT);
+        } else {
+            h.app
+                .world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .press(KeyCode::KeyT);
+        }
+        h.step_dt(dt);
+        let cast_in_air = h.state() == FighterState::Cure;
+        for _ in 0..180 {
+            h.step_dt(dt);
+        }
+        h.release_key(KeyCode::KeyT);
+        assert!(!h.airborne());
+        assert_eq!(
+            h.state(),
+            FighterState::Name,
+            "stuck at pose {} after landing, physics_hz={physics_hz}, cast_in_air={cast_in_air}",
+            h.pose_id()
+        );
+        assert!(!cast_in_air);
+        assert!(h
+            .app
+            .world_mut()
+            .resource_mut::<PendingNetActions>()
+            .take()
+            .is_empty());
+        let landed = h.position();
+        for _ in 0..12 {
+            h.step_dt(dt);
+        }
+        assert!(h.position().distance(landed) > 0.5);
+        h.release_key(KeyCode::KeyW);
+        let cure_dt = 1.0 / physics_hz as f32;
+        start_cure(&mut h, cure_dt);
+        finish_cure(&mut h, cure_dt, physics_hz as usize);
+        assert_eq!(
+            h.app.world_mut().resource_mut::<PendingNetActions>().take(),
+            ["cure"]
+        );
+    }
+}
+#[test]
+fn production_cure_keeps_its_pose_when_ground_mode_has_no_walkable_support() {
+    let (mut h, _) = cure_harness(true);
+    crate::plugins::install_frame_clock(&mut h.app);
+    let dt = 1.0 / 120.0;
+    h.step_dt(dt);
+    h.app
+        .world_mut()
+        .get_mut::<Transform>(h.fighter)
+        .unwrap()
+        .translation
+        .y = 6.0;
+    {
+        let mut air = h.app.world_mut().get_mut::<FighterAir>(h.fighter).unwrap();
+        air.air.start_fall(0.0, 0.0);
+        air.air.vertical_speed = -8.0;
+        air.ground_contact = false;
+        air.recovery_ground_mode = Some(true);
+    }
+    let cast_position = h.position();
+    start_cure(&mut h, dt);
+    for _ in 0..12 {
+        h.step_dt(dt);
+        assert_eq!(h.pose_id(), 22);
+        assert_eq!(h.position(), cast_position);
+    }
+    finish_cure(&mut h, dt, 120);
+    assert_eq!(
+        h.app.world_mut().resource_mut::<PendingNetActions>().take(),
+        ["cure"]
+    );
 }
 
 fn start_cure(h: &mut GameplayHarness, dt: f32) {

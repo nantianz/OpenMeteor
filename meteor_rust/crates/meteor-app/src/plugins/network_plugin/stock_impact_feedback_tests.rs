@@ -2,7 +2,7 @@
 #[test]
 fn production_stock_impact_feedback_uses_authoritative_guard_once() {
     use crate::plugins::impact_fx_plugin::{CombatImpactEvent, CombatImpactKind};
-    for guarded in [false, true] {
+    for (guarded, local) in [(false, false), (true, false), (true, true)] {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../origin_res");
         let character =
             crate::plugins::character_plugin::load_character_asset_for_test(&[root], "p0")
@@ -24,11 +24,11 @@ fn production_stock_impact_feedback_uses_authoritative_guard_once() {
             StockGameEvent::HitReaction {
                 guarded,
                 event: meteor_network::stock_protocol::StockHitReactionEvent {
-                    pose_id: if guarded { 93 << 16 } else { 93 },
+                    pose_id: if guarded { 98 << 16 } else { 93 },
                     move_hundred: 100,
                     value_hundred: 30,
-                    context: 4,
-                    target_actor_id: 2,
+                    context: if guarded { 1 } else { 4 },
+                    target_actor_id: if local { 1 } else { 2 },
                 },
             },
         );
@@ -38,38 +38,46 @@ fn production_stock_impact_feedback_uses_authoritative_guard_once() {
                 std::collections::HashMap::from([("p0".into(), character)]),
             ))
             .add_message::<CombatImpactEvent>()
-            .add_systems(Update, net_handle_remote_hits);
-        let target = app
-            .world_mut()
-            .spawn((
-                RemoteFighter {
-                    player_id: "stock-2".into(),
-                },
-                Fighter {
-                    character_id: 0,
-                    player_slot: 1,
-                    weapon: 6,
-                    weapon_slots: [6, 5],
-                    weapon_slot: 0,
-                    weapon_slot_variants: [0, 0],
-                    weapon_variant: 0,
-                },
-                Transform::from_xyz(0.0, 0.0, 3.0),
-                MotionState {
-                    movement_mode: meteor_core::MovementMode::Idle,
-                    velocity: Vec3::ZERO,
-                    facing: 0.0,
-                },
-                Health::default(),
-                PoseRuntime::idle(),
-                EntryBlend::default(),
-                CombatState::default(),
-                DeathRespawn::default(),
-                FighterAir::default(),
-                RemoteHitMotionWindow::default(),
-                RemoteAuthorityGeneration::default(),
-            ))
-            .id();
+            .add_systems(Update, (net_handle_hit, net_handle_remote_hits).chain());
+        let mut target = app.world_mut().spawn((
+            Fighter {
+                character_id: 0,
+                player_slot: 1,
+                weapon: 5,
+                weapon_slots: [5, 6],
+                weapon_slot: 0,
+                weapon_slot_variants: [0, 0],
+                weapon_variant: 0,
+            },
+            Transform::from_xyz(0.0, 0.0, 3.0),
+            MotionState {
+                movement_mode: meteor_core::MovementMode::Idle,
+                velocity: Vec3::ZERO,
+                facing: 0.0,
+            },
+            Health::default(),
+            PoseRuntime::idle(),
+            EntryBlend::default(),
+            CombatState::default(),
+            DeathRespawn::default(),
+            FighterAir::default(),
+            RemoteHitMotionWindow::default(),
+            RemoteAuthorityGeneration::default(),
+        ));
+        if local {
+            target.insert((
+                LocalFighter,
+                Qi::default(),
+                SmState::default(),
+                FighterHitReaction::default(),
+                FighterAttackMotion::default(),
+            ));
+        } else {
+            target.insert(RemoteFighter {
+                player_id: "stock-2".into(),
+            });
+        }
+        let target = target.id();
         let mut cursor = bevy::ecs::message::MessageCursor::<CombatImpactEvent>::default();
         app.update();
         let messages = app
@@ -86,15 +94,20 @@ fn production_stock_impact_feedback_uses_authoritative_guard_once() {
             }
         );
         assert_eq!(events[0].defender, target);
-        assert_eq!(events[0].effect_strategy, Some(4));
+        assert_eq!(events[0].effect_strategy, Some(if guarded { 1 } else { 4 }));
+        assert_eq!(events[0].reaction_pose, local.then_some(98));
+        let reaction = app
+            .world()
+            .get::<FighterHitReaction>(target)
+            .unwrap()
+            .current
+            .as_ref()
+            .expect("authoritative reaction");
+        if local {
+            assert!(matches!(reaction.pose_id, Some(56..=59)));
+        }
         assert_eq!(
-            app.world()
-                .get::<FighterHitReaction>(target)
-                .unwrap()
-                .current
-                .as_ref()
-                .expect("authoritative reaction")
-                .kind,
+            reaction.kind,
             if guarded {
                 meteor_combat::hit_reaction::HitReactKind::Guard
             } else {

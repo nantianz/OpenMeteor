@@ -232,12 +232,15 @@ pub(super) fn install(app: &mut App) {
             (
                 begin_render.before(RenderSystems::ExtractCommands),
                 count_prepared_draws
+                    .in_set(crate::plugins::render_pacing::DrawFrame)
                     .after(RenderSystems::Prepare)
                     .before(RenderSystems::Render),
                 begin_submit
+                    .in_set(crate::plugins::render_pacing::DrawFrame)
                     .after(RenderSystems::Prepare)
                     .before(RenderSystems::Render),
                 end_submit
+                    .in_set(crate::plugins::render_pacing::DrawFrame)
                     .after(RenderSystems::Render)
                     .before(RenderSystems::Cleanup),
                 end_render.after(RenderSystems::PostCleanup),

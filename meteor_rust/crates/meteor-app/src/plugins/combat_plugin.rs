@@ -59,7 +59,7 @@ use meteor_combat::qi_burst::{
 };
 use meteor_combat::ranged_weapons::{
     bypasses_melee_hitboxes, ranged_attack_profile, ranged_target_box, segment_hits_box_distance,
-    Point3 as RangedPoint3, RangedKind, RangedMode, DART_SPAWN_HEIGHT, DART_SPEED,
+    Point3 as RangedPoint3, RangedKind, RangedMode, DART_SPAWN_HEIGHT, DART_SPEED, GUN_RANGE,
     GUN_SPAWN_HEIGHT, WHEEL_SPAWN_HEIGHT,
 };
 use meteor_combat::state_machine::{
@@ -1568,6 +1568,11 @@ impl FighterView for CombatView<'_> {
     fn is_airborne(&self) -> bool {
         self.air.air.airborne
     }
+    fn in_ground_movement_mode(&self) -> bool {
+        self.air
+            .recovery_ground_mode
+            .unwrap_or(!self.air.air.airborne)
+    }
     fn ground_contact(&self) -> Option<bool> {
         Some(!self.air.air.airborne || self.air.ground_contact)
     }
@@ -2291,6 +2296,7 @@ impl HitGeometryQueries<'_, '_> {
 pub(crate) struct HitFeedback<'w> {
     water: Option<ResMut<'w, super::stage_material::water::combat::WaterCombat>>,
     grass: Option<ResMut<'w, super::graphics_pack::grass::GrassCombat>>,
+    snow: Option<ResMut<'w, super::graphics_pack::snow::SnowCombat>>,
     effects: Option<Res<'w, crate::plugins::effect_plugin::EffectAssets>>,
     impacts: MessageWriter<'w, crate::plugins::impact_fx_plugin::CombatImpactEvent>,
     settings: Res<'w, Settings>,
@@ -5329,116 +5335,97 @@ fn attack_windows(
     };
 
     if let Some(playback) = mrc_playback.as_mut().filter(|playback| playback.active) {
-        let active_is_non_local = active_fighter
-            .as_deref()
-            .and_then(|active| active.0)
-            .is_some_and(|entity| {
-                let attackers = queries.p0();
-                attackers
-                    .get(entity)
-                    .is_ok_and(|(_, _, _, _, _, _, _, _, _, _, _, local, _, _, _)| local.is_none())
-            });
-        if active_is_non_local {
+        let elapsed = playback.elapsed;
+        let pending = &mut playback.pending_hit_locks;
+        if !feedback.settings.auto_camera || lock.system.is_locked() {
+            pending.clear();
             return;
         }
-        let mut pending = std::mem::take(&mut playback.pending_hit_locks);
-        if pending.is_empty() || !feedback.settings.auto_camera || lock.system.is_locked() {
+        pending.retain(|hit| elapsed - hit.time <= 0.1);
+        if pending.is_empty() {
             return;
         }
-        let mut local_attacks = Vec::new();
-        {
-            let mut attackers = queries.p0();
-            for (
-                attacker_entity,
+        let (strategy, attack_boxes, effect_boxes, effect_origin) = {
+            let attackers = queries.p0();
+            let Some((
+                entity,
                 fighter,
                 pose,
                 blend,
-                _motion,
-                _atk_pos,
-                sm_state,
+                _,
+                _,
+                state,
                 health,
                 death,
                 reaction,
-                mission_npc,
-                local,
-                remote,
-                _ranged_gate,
-                (weapon_form, _ai_intent),
-            ) in &mut attackers
+                _,
+                _,
+                _,
+                _,
+                (form, _),
+            )) = attackers
+                .iter()
+                .find(|(entity, _, _, _, _, _, _, _, _, _, _, local, _, _, _)| {
+                    local.is_some()
+                        && super::fighter_frame::accepts(active_fighter.as_deref(), *entity)
+                })
+            else {
+                return;
+            };
+            if !attack_window_owner_active_for_scope(
+                health.current,
+                death.active,
+                state.current,
+                reaction.current.is_some(),
+                false,
+            ) {
+                return;
+            }
+            let strategy = weapon_to_strategy(fighter.weapon);
+            if !pending
+                .iter()
+                .any(|hit| hit.time <= elapsed && hit.strategy == u32::from(strategy))
             {
-                if local.is_none()
-                    || fighter.player_slot != 0
-                    || !super::fighter_frame::accepts(active_fighter.as_deref(), attacker_entity)
-                    || !attack_window_owner_active_for_scope(
-                        health.current,
-                        death.active,
-                        sm_state.current,
-                        reaction.current.is_some(),
-                        false,
-                    )
-                {
-                    continue;
-                }
-                let strategy_id = weapon_to_strategy(fighter.weapon);
-                let Some(character_assets) = assets.0.get(&format!("p{}", fighter.character_id))
-                else {
-                    continue;
-                };
-                let Some((_, window)) = sampled_attack_window(character_assets, pose, blend) else {
-                    continue;
-                };
-                let attack_obbs = geometry.attack_obbs(
-                    attacker_entity,
-                    fighter,
-                    weapon_form,
-                    pose.pose_id,
-                    character_assets,
-                    &window.bones,
-                );
-                let effect_obbs = if window
-                    .bones
-                    .iter()
-                    .any(|name| name.eq_ignore_ascii_case("effect"))
-                {
-                    geometry.live_effect_obbs(
-                        attacker_entity,
-                        fighter,
-                        weapon_form,
-                        pose.pose_id,
-                        character_assets,
-                    )
-                } else {
-                    Vec::new()
-                };
-                let effect_origin = if effect_obbs.is_empty() {
-                    None
-                } else {
-                    fighter_whole_body_obb(attacker_entity, character_assets, &geometry)
-                };
-                local_attacks.push((
-                    strategy_id,
-                    fighter_combat_team(&net, true, remote, mission_npc),
-                    attack_obbs,
-                    effect_obbs,
-                    effect_origin,
-                ));
+                return;
             }
-        }
-        pending.retain(|&(_, _, time)| playback.elapsed - time <= 0.1);
-        if local_attacks.is_empty() {
-            playback.pending_hit_locks = pending;
-            return;
-        }
-        let mut retry = Vec::new();
-        let mut defenders = queries.p1();
-        for (target_entity, event_context, event_time) in pending.drain(..) {
-            let age = playback.elapsed - event_time;
-            if age > 0.1 {
-                continue;
+            let Some(character) = assets.0.get(&format!("p{}", fighter.character_id)) else {
+                return;
+            };
+            let Some((_, window)) = sampled_attack_window(character, pose, blend) else {
+                return;
+            };
+            let attack_boxes = geometry.attack_obbs(
+                entity,
+                fighter,
+                form,
+                pose.pose_id,
+                character,
+                &window.bones,
+            );
+            let effect_boxes = if window
+                .bones
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case("effect"))
+            {
+                geometry.live_effect_obbs(entity, fighter, form, pose.pose_id, character)
+            } else {
+                Vec::new()
+            };
+            let effect_origin = if effect_boxes.is_empty() {
+                None
+            } else {
+                fighter_whole_body_obb(entity, character, &geometry)
+            };
+            (strategy, attack_boxes, effect_boxes, effect_origin)
+        };
+        let attacker_team = fighter_combat_team(&net, true, None, None);
+        let defenders = queries.p1();
+        pending.retain(|hit| {
+            if lock.system.is_locked() {
+                return false;
             }
-            if age < 0.0 {
-                retry.push((target_entity, event_context, event_time));
-                continue;
+            if hit.time > elapsed || hit.strategy != u32::from(strategy) {
+                return true;
             }
             let Ok((
                 _,
@@ -5451,82 +5438,61 @@ fn attack_windows(
                 _,
                 death,
                 _,
-                defender,
-                def_pos,
-                defender_remote,
-                defender_mission_npc,
-                (defender_local, _, defender_visibility, _, _, _, _),
-            )) = defenders.get_mut(target_entity)
+                target,
+                transform,
+                remote,
+                mission,
+                (local, _, visibility, ..),
+            )) = defenders.get(hit.target)
             else {
-                retry.push((target_entity, event_context, event_time));
-                continue;
+                return true;
             };
-            if defender_local.is_some()
-                || defender_remote.is_none()
+            let team = fighter_combat_team(&net, false, remote, mission);
+            if local.is_some()
+                || remote.is_none()
                 || health.current <= 0.0
                 || death.active
-                || defender_visibility.is_some_and(|visibility| *visibility == Visibility::Hidden)
+                || visibility.is_some_and(|visibility| *visibility == Visibility::Hidden)
+                || !teams_are_hostile(attacker_team, team)
             {
-                continue;
+                return false;
             }
-            let defender_team =
-                fighter_combat_team(&net, false, defender_remote, defender_mission_npc);
-            let Some(defender_assets) = assets.0.get(&format!("p{}", defender.character_id)) else {
-                retry.push((target_entity, event_context, event_time));
-                continue;
+            let Some(character) = assets.0.get(&format!("p{}", target.character_id)) else {
+                return true;
             };
-            let hurt_obbs = geometry.hurt_obbs(target_entity, defender_assets);
-            let target_whole_body = local_attacks
+            let hurt_boxes = geometry.hurt_obbs(hit.target, character);
+            let melee_hit = attack_boxes
                 .iter()
-                .any(|(_, _, _, effect_obbs, _)| !effect_obbs.is_empty())
-                .then(|| fighter_whole_body_obb(target_entity, defender_assets, &geometry))
-                .flatten();
-            let strategy_id = local_attacks.iter().find_map(
-                |(strategy_id, attacker_team, attack_obbs, effect_obbs, effect_origin)| {
-                    let effect_hit = target_whole_body.as_ref().is_some_and(|target_body| {
-                        effect_obbs
-                            .iter()
-                            .any(|attack| obbs_intersect(attack, target_body))
-                            && !effect_body_occluded(
-                                geometry.stage.as_deref(),
-                                effect_origin.as_ref(),
-                                target_body,
-                            )
-                    });
-                    recorded_mrc_hit_matches_local_attack(
-                        event_context,
-                        *strategy_id,
-                        *attacker_team,
-                        defender_team,
-                        attack_obbs,
-                        &hurt_obbs,
-                        effect_hit,
-                    )
-                    .then_some(*strategy_id)
-                },
-            );
-            let Some(strategy_id) = strategy_id else {
-                retry.push((target_entity, event_context, event_time));
-                continue;
-            };
-            let candidate = LockCandidate {
-                id: target_entity.to_bits(),
-                x: def_pos.translation.x,
-                y: def_pos.translation.y,
-                z: def_pos.translation.z,
-                team: defender_team,
-            };
-            if lock.system.acquire_hit_target(
-                feedback.settings.auto_camera,
-                strategy_id,
-                target_entity.to_bits(),
-                &[candidate],
-            ) {
-                lock.lock_entity = Some(target_entity);
-                return;
+                .any(|attack| hurt_boxes.iter().any(|hurt| obbs_intersect(attack, hurt)));
+            let effect_hit = !effect_boxes.is_empty()
+                && fighter_whole_body_obb(hit.target, character, &geometry).is_some_and(|body| {
+                    effect_boxes
+                        .iter()
+                        .any(|attack| obbs_intersect(attack, &body))
+                        && !effect_body_occluded(
+                            geometry.stage.as_deref(),
+                            effect_origin.as_ref(),
+                            &body,
+                        )
+                });
+            if !melee_hit && !effect_hit {
+                return true;
             }
-        }
-        playback.pending_hit_locks = retry;
+            let candidate = LockCandidate {
+                id: hit.target.to_bits(),
+                x: transform.translation.x,
+                y: transform.translation.y,
+                z: transform.translation.z,
+                team,
+            };
+            if lock
+                .system
+                .acquire_hit_target(true, strategy, candidate.id, &[candidate])
+            {
+                lock.lock_entity = Some(hit.target);
+            }
+            false
+        });
         return;
     }
     let now_seconds =
@@ -5647,15 +5613,24 @@ fn attack_windows(
                     forward
                 };
                 if profile.kind == RangedKind::Gun {
+                    spawn_origin.y += GUN_SPAWN_HEIGHT;
                     if local.is_some() {
-                        if let Ok(camera) = ranged.camera.single() {
-                            spawn_origin = camera.translation();
-                            shot_forward = camera.forward().into();
-                        } else {
-                            spawn_origin.y += GUN_SPAWN_HEIGHT;
+                        if let Some((entity, _, propagated)) =
+                            geometry.weapon_endpoints.iter().find(|(_, endpoint, _)| {
+                                endpoint.fighter == attacker_entity
+                                    && endpoint.name == "d_wpnrs"
+                                    && endpoint.is_active_for(fighter, weapon_form_state.current)
+                            })
+                        {
+                            spawn_origin =
+                                current_global_transform(entity, propagated, &geometry.transforms)
+                                    .translation();
                         }
-                    } else {
-                        spawn_origin.y += GUN_SPAWN_HEIGHT;
+                        if let Ok(camera) = ranged.camera.single() {
+                            let camera_forward = *camera.forward();
+                            let aim_point = camera.translation() + camera_forward * GUN_RANGE;
+                            shot_forward = (aim_point - spawn_origin).normalize_or(camera_forward);
+                        }
                     }
                 } else if profile.kind == RangedKind::Dart {
                     spawn_origin.y += DART_SPAWN_HEIGHT;
@@ -5768,6 +5743,16 @@ fn attack_windows(
                                 &effect_obbs,
                             );
                         }
+                        if let Some(snow) = feedback.snow.as_deref_mut() {
+                            snow.record_boxes(
+                                attacker_entity,
+                                pose.pose_instance_id,
+                                index,
+                                now_seconds,
+                                true,
+                                &effect_obbs,
+                            );
+                        }
                         if feedback.settings.water_enhance {
                             if let Some(water) = feedback.water.as_deref_mut() {
                                 water.record_boxes(
@@ -5858,6 +5843,24 @@ fn attack_windows(
                     &effect_obbs,
                 );
             }
+            if let Some(snow) = feedback.snow.as_deref_mut() {
+                snow.record_boxes(
+                    attacker_entity,
+                    pose.pose_instance_id,
+                    index,
+                    now_seconds,
+                    false,
+                    &attack_obbs,
+                );
+                snow.record_boxes(
+                    attacker_entity,
+                    pose.pose_instance_id,
+                    index | (1 << 31),
+                    now_seconds,
+                    true,
+                    &effect_obbs,
+                );
+            }
             if feedback.settings.water_enhance {
                 if let Some(water) = feedback.water.as_deref_mut() {
                     water.record_boxes(
@@ -5913,13 +5916,16 @@ fn attack_windows(
         }
     }
     for hit in ranged.pending.0.drain(..) {
+        let width = if hit.kind == ProjectileKind::FlyingWheel {
+            0.22
+        } else {
+            0.075
+        };
         if let Some(grass) = feedback.grass.as_deref_mut() {
-            let width = if hit.kind == ProjectileKind::FlyingWheel {
-                0.22
-            } else {
-                0.075
-            };
             grass.record_segment(hit.start, hit.end, width);
+        }
+        if let Some(snow) = feedback.snow.as_deref_mut() {
+            snow.record_segment(hit.start, hit.end, width);
         }
         if feedback.settings.water_enhance {
             if let Some(water) = feedback.water.as_deref_mut() {
@@ -16107,6 +16113,72 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
+    fn production_local_gun_ray_starts_at_muzzle_and_ignores_wall_behind_it() {
+        use bevy::ecs::system::RunSystemOnce;
+        let (mut h, _, _) = spawn_local_stock_hit_harness(3);
+        h.app
+            .add_message::<crate::plugins::effect_plugin::SceneEffectEvent>();
+        let world = h.app.world_mut();
+        world.resource_scope(|world, assets: Mut<CharacterAssetsSet>| {
+            let character = &assets.0["p1"];
+            let mut pose = world.get_mut::<PoseRuntime>(h.fighter).unwrap();
+            character.apply_pose(&mut pose, 206, true);
+            pose.frame = character.poses[&206].attacks[0].start as f32;
+        });
+        world.get_mut::<SmState>(h.fighter).unwrap().current = FighterState::Attack1;
+        world.get_mut::<CombatState>(h.fighter).unwrap().state = FighterState::Attack1;
+        crate::plugins::character_plugin::drive_fighter_animation_for_test(world);
+        let fighter = h.fighter;
+        let muzzle = world
+            .run_system_once(
+                move |endpoints: WeaponEndpointWorldQuery, transforms: TransformHelper| {
+                    let (entity, _, _) = endpoints
+                        .iter()
+                        .find(|(_, endpoint, _)| {
+                            endpoint.fighter == fighter && endpoint.name == "d_wpnrs"
+                        })
+                        .expect("stock firearm muzzle");
+                    transforms
+                        .compute_global_transform(entity)
+                        .unwrap()
+                        .translation()
+                },
+            )
+            .unwrap();
+        let eye = muzzle + Vec3::new(0.0, 2.0, -12.0);
+        let aim = Vec3::new(0.0, -0.1, 1.0).normalize();
+        world.spawn((
+            GameplayCamera,
+            GlobalTransform::from(Transform::from_translation(eye).looking_to(aim, Vec3::Y)),
+        ));
+        let mut mesh = crate::plugins::stage_collider::StageMeshCollider::default();
+        for z in [muzzle.z - 1.0, muzzle.z + 12.0] {
+            mesh.append_world_triangles(
+                &[
+                    [muzzle.x - 6.0, muzzle.y - 6.0, z],
+                    [muzzle.x + 6.0, muzzle.y - 6.0, z],
+                    [muzzle.x, muzzle.y + 6.0, z],
+                ],
+                &[0, 1, 2],
+            );
+        }
+        world.resource_mut::<StageCollider>().mesh = Some(mesh);
+        world.run_system_once(attack_windows).unwrap();
+        world
+            .run_system_once(crate::plugins::ranged_plugin::update_projectiles)
+            .unwrap();
+        let hits = &world.resource::<PendingRangedHits>().0;
+        assert_eq!(hits.len(), 1);
+        let hit = &hits[0];
+        assert_eq!(hit.kind, ProjectileKind::GunRay);
+        assert_eq!(hit.start, muzzle);
+        assert!((hit.end.z - (muzzle.z + 12.0)).abs() < 1e-5);
+        let expected_direction = (eye + aim * GUN_RANGE - muzzle).normalize();
+        assert!(((hit.end - hit.start).normalize() - expected_direction).length() < 1e-5);
+        assert_eq!(hit.source.attack_origin, hit.start);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
     fn production_stock_ray_and_wheel_send_base_reactions_from_behind() {
         use bevy::ecs::system::RunSystemOnce;
 
@@ -17706,6 +17778,7 @@ mod tests {
                 .translation = Vec3::splat(100.0);
             crate::plugins::character_plugin::refresh_collision_fixture(h.app.world_mut(), target);
             let hp = h.app.world().get::<Health>(target).unwrap().current;
+            h.app.world_mut().resource_mut::<Settings>().water_enhance = true;
             h.app.init_resource::<WaterCombat>();
             let surface = LiquidSurface::test_pool(3.0);
             let water = Entity::from_bits(991);
@@ -18114,7 +18187,6 @@ mod tests {
             let (mut h, _target, _hits) = spawn_local_stock_hit_harness_with_order(7, true);
             h.app.insert_resource(State::new(AppState::Playing));
             if mode == "mrc-full-clock" || slow {
-                h.app.world_mut().resource_mut::<Settings>().target_fps = 60;
                 crate::plugins::install_frame_clock(&mut h.app);
             }
             let models: Vec<_> = h
@@ -18631,7 +18703,6 @@ mod tests {
         }
 
         if host_clock {
-            h.app.world_mut().resource_mut::<Settings>().target_fps = fps;
             crate::plugins::install_frame_clock(&mut h.app);
         }
 
@@ -18995,17 +19066,20 @@ mod tests {
     }
 
     #[test]
-    fn mrc_playback_does_not_resolve_a_second_melee_hit() {
+    fn mrc_playback_locks_after_recorded_local_contact_without_a_second_hit() {
+        use crate::plugins::replay_plugin::{MrcHitLock, MrcPlayback};
         use bevy::ecs::system::RunSystemOnce;
         let (mut h, target, take_hits) = spawn_local_stock_hit_harness(6);
         let original_hp = h.app.world().get::<Health>(target).unwrap().current;
-        h.app
-            .insert_resource(crate::plugins::replay_plugin::MrcPlayback {
-                active: true,
-                ..default()
-            });
+        h.app.world_mut().entity_mut(target).insert(RemoteFighter {
+            player_id: "stock-2".into(),
+        });
+        h.app.insert_resource(MrcPlayback {
+            active: true,
+            ..default()
+        });
         h.press_mouse(MouseButton::Left);
-        let mut sampled_window = false;
+        let mut recorded_hit = false;
         for tick in 0..150 {
             h.step();
             if tick == 0 {
@@ -19020,16 +19094,55 @@ mod tests {
             let pose = h.app.world().get::<PoseRuntime>(h.fighter).unwrap();
             let blend = h.app.world().get::<EntryBlend>(h.fighter).unwrap();
             let assets = h.app.world().resource::<CharacterAssetsSet>();
-            sampled_window |= sampled_attack_window(&assets.0["p1"], pose, blend).is_some();
+            let sampled_window = sampled_attack_window(&assets.0["p1"], pose, blend).is_some();
+            let elapsed = tick as f32 * HARNESS_DT;
+            h.app.world_mut().resource_mut::<MrcPlayback>().elapsed = elapsed;
+            if sampled_window && !recorded_hit {
+                clear_lock_targets(&mut h.app.world_mut().resource_mut::<LockOnController>());
+                let strategy = u32::from(weapon_to_strategy(6));
+                h.app
+                    .world_mut()
+                    .resource_mut::<MrcPlayback>()
+                    .pending_hit_locks
+                    .push(MrcHitLock {
+                        target,
+                        strategy: strategy + 1,
+                        time: elapsed,
+                    });
+                h.app.world_mut().run_system_once(attack_windows).unwrap();
+                assert_eq!(
+                    h.app.world().resource::<LockOnController>().lock_entity,
+                    None
+                );
+                h.app
+                    .world_mut()
+                    .resource_mut::<MrcPlayback>()
+                    .pending_hit_locks
+                    .push(MrcHitLock {
+                        target,
+                        strategy,
+                        time: elapsed,
+                    });
+                recorded_hit = true;
+            }
             h.app.world_mut().run_system_once(attack_windows).unwrap();
             assert!(
                 take_hits().is_empty(),
                 "MRC must not invent a second hit at tick {tick}"
             );
+            if recorded_hit
+                && h.app.world().resource::<LockOnController>().lock_entity == Some(target)
+            {
+                break;
+            }
         }
         assert!(
-            sampled_window,
-            "the recorded attack must still animate through its hit window"
+            recorded_hit,
+            "the recorded attack must animate through its hit window"
+        );
+        assert_eq!(
+            h.app.world().resource::<LockOnController>().lock_entity,
+            Some(target)
         );
         assert_eq!(
             h.app.world().get::<Health>(target).unwrap().current,
@@ -22184,8 +22297,7 @@ mod tests {
         }
         let mut h = spawn_gameplay_harness_with_order(DAGGER, true).unwrap();
         install_catchup_input_trace(&mut h);
-        h.app.world_mut().resource_mut::<Settings>().target_fps = 30;
-        let display_dt = 1.0 / 120.0;
+        let display_dt = 0.001;
         h.step_dt(display_dt);
         h.step_dt(display_dt);
         h.press_binding(crate::app_state::Keymap::default().attack);
@@ -22222,15 +22334,11 @@ mod tests {
             record_judge.in_set(crate::plugins::FighterFrameSet::HitJudge),
         );
         h.release_binding(crate::app_state::Keymap::default().attack);
-        h.step_dt(display_dt);
+        h.step_dt(1.0 / 120.0 - 3.0 * display_dt);
         let trace = &h.app.world().resource::<CatchupInputTrace>().0;
-        assert_eq!(trace.len(), 4);
+        assert_eq!(trace.len(), 1);
         assert!(
-            trace[..3].iter().all(|sample| sample.pose_frame == start),
-            "{trace:?}"
-        );
-        assert!(
-            (trace[3].pose_frame - start - meteor_core::ANIM_FPS / 120.0).abs() < 1e-4,
+            (trace[0].pose_frame - start - meteor_core::ANIM_FPS / 120.0).abs() < 1e-4,
             "{trace:?}"
         );
         let judged = &h.app.world().resource::<JudgeTimes>().0;
@@ -22270,8 +22378,7 @@ mod tests {
         for recorded_time in [0.0, 1000.0] {
             let mut h = spawn_gameplay_harness_with_order(DAGGER, true).unwrap();
             install_catchup_input_trace(&mut h);
-            h.app.world_mut().resource_mut::<Settings>().target_fps = 30;
-            let dt = 1.0 / 120.0;
+            let dt = 0.001;
             h.step_dt(dt);
             h.step_dt(dt);
             h.app
@@ -22295,7 +22402,7 @@ mod tests {
                     open: true,
                     panel_open: false,
                 });
-            h.step_dt(dt);
+            h.step_dt(1.0 / 120.0 - 3.0 * dt);
             let pose = h.app.world().get::<PoseRuntime>(h.fighter).unwrap();
             assert!(
                 (pose.frame - start - meteor_core::ANIM_FPS / 120.0).abs() < 1e-4,
@@ -22310,9 +22417,7 @@ mod tests {
                 None
             );
             let first_frame = pose.frame;
-            for _ in 0..4 {
-                h.step_dt(dt);
-            }
+            h.step_dt(1.0 / 120.0);
             assert!(
                 h.app.world().get::<PoseRuntime>(h.fighter).unwrap().frame > first_frame,
                 "accepted action keeps running while input collection is suspended"

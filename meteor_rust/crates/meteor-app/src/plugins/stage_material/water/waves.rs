@@ -1,7 +1,9 @@
 use crate::app_state::{AppState, Settings};
 use crate::plugins::graphics_pack::{config::Wind, wind_at};
+use crate::plugins::render_plugin::SceneDeform;
 use crate::plugins::stage_material::FrameUniforms;
-use bevy::asset::RenderAssetUsages;
+use bevy::asset::{AssetEventSystems, RenderAssetUsages};
+use bevy::camera::{primitives::Frustum, visibility::VisibilitySystems};
 use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
 use meteor_core::constants::MODEL_SCALE;
@@ -9,6 +11,7 @@ use std::collections::BTreeMap;
 
 use super::config::{self, WindWave as Wave, MAX_WAVES};
 
+use super::interaction::LiquidSurface;
 #[derive(Clone, Copy, Default)]
 struct Basis {
     sine: f32,
@@ -36,7 +39,8 @@ pub(crate) struct WaterWaveMesh {
     shoreline: Vec<(Vec2, Vec2)>,
     scratch: Vec<WaveSample>,
     last_seconds: Option<f64>,
-    active: bool,
+    mesh_seconds: Option<f64>,
+    distant_since: Option<f64>,
     physics: super::physics::WaveField,
     dynamics: Option<Handle<Image>>,
     weather: Option<WeatherWaves>,
@@ -369,7 +373,8 @@ impl WaterWaveMesh {
                 shoreline,
                 scratch,
                 last_seconds: None,
-                active: false,
+                mesh_seconds: None,
+                distant_since: None,
                 physics,
                 dynamics: None,
                 weather,
@@ -387,7 +392,16 @@ impl WaterWaveMesh {
             &self.wind_coefficients(seconds)[..spectrum.len()],
         )
         .height
-            + self.physics.sample(point).0 * shore
+            + self.physics.height_at(point) * shore
+    }
+    pub(super) fn max_displacement(&self) -> Option<f32> {
+        let physics = self.physics.max_displacement()?;
+        let wind: f32 = self
+            .spectrum()
+            .iter()
+            .map(|wave| wave.amplitude.abs())
+            .sum();
+        Some(physics + wind)
     }
 
     fn spectrum(&self) -> &[Wave] {
@@ -436,7 +450,7 @@ pub(super) fn update(
     mut uploads: Option<ResMut<super::dynamics::WaterUploads>>,
     mut images: Option<ResMut<Assets<Image>>>,
     mut materials: Option<ResMut<Assets<super::GmdlMaterial>>>,
-    mut meshes: ResMut<Assets<Mesh>>,
+    meshes: Res<Assets<Mesh>>,
     mut waves: Query<(
         Entity,
         &Mesh3d,
@@ -447,39 +461,32 @@ pub(super) fn update(
 ) {
     let enabled =
         settings.water_enhance && matches!(state.get(), AppState::Playing | AppState::Paused);
-    if enabled && *state.get() == AppState::Paused {
-        return;
-    }
     if let Some(uploads) = uploads.as_deref_mut() {
         uploads.textures.clear();
         uploads.epoch = uploads.epoch.wrapping_add(1);
     }
 
+    if enabled && *state.get() == AppState::Paused {
+        return;
+    }
     let impulses = std::mem::take(&mut interactions.impulses);
     for (entity, handle, transform, material, mut wave) in &mut waves {
-        let Some(mut mesh) = meshes.get_mut(&handle.0) else {
+        if !meshes.contains(&handle.0) {
             continue;
-        };
+        }
         if !enabled {
-            if wave.active {
-                if let Some(VertexAttributeValues::Float32x3(positions)) =
-                    mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION)
-                {
-                    for (position, seed) in positions.iter_mut().zip(&wave.vertices) {
-                        *position = seed.position;
-                    }
-                }
-                if let Some(VertexAttributeValues::Float32x3(normals)) =
-                    mesh.attribute_mut(Mesh::ATTRIBUTE_NORMAL)
-                {
-                    for (normal, seed) in normals.iter_mut().zip(&wave.vertices) {
-                        *normal = seed.normal;
-                    }
-                }
+            if wave.last_seconds.take().is_some() {
                 wave.physics.clear();
-                wave.active = false;
-                wave.last_seconds = None;
             }
+            wave.distant_since = None;
+            continue;
+        }
+        if wave
+            .distant_since
+            .is_some_and(|since| frame.seconds - since >= CONTACT_SLEEP_DELAY)
+        {
+            wave.physics.sleep();
+            wave.last_seconds = Some(frame.seconds);
             continue;
         }
         for impulse in impulses.iter().filter(|i| i.surface == entity) {
@@ -533,29 +540,98 @@ pub(super) fn update(
                 }
                 wave.dynamics = Some(image);
                 wave.physics.dirty = false;
-            } else if wave.physics.dirty {
-                if let Some(uploads) = uploads.as_deref_mut() {
-                    let (width, height, _) = wave.physics.layout();
-                    uploads.textures.push(super::dynamics::Upload {
-                        image: wave.dynamics.as_ref().unwrap().clone(),
-                        width,
-                        height,
-                        pixels: std::sync::Arc::new(wave.physics.pixels()),
-                    });
-                    wave.physics.dirty = false;
-                }
             }
         }
-
-        let time = wave.wind_coefficients(frame.seconds);
+        wave.last_seconds = Some(frame.seconds);
+    }
+}
+const MESH_UPDATE_INTERVAL: f64 = 1.0 / 30.0;
+const CONTACT_SLEEP_DELAY: f64 = 1.0;
+fn update_visible_meshes(
+    cameras: Query<(&Camera, &GlobalTransform, Option<&Frustum>), With<Camera3d>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut uploads: Option<ResMut<super::dynamics::WaterUploads>>,
+    mut waves: Query<(
+        &Mesh3d,
+        Option<&LiquidSurface>,
+        Has<SceneDeform>,
+        &mut WaterWaveMesh,
+    )>,
+) {
+    for (handle, surface, deformed, mut wave) in &mut waves {
+        if let (Some(seconds), Some(surface)) = (wave.last_seconds, surface) {
+            let max_distance = config::get().interaction.max_distance;
+            if deformed
+                || cameras.iter().any(|(camera, transform, _)| {
+                    camera.is_active && surface.near_camera(transform.translation(), max_distance)
+                })
+            {
+                wave.distant_since = None;
+            } else {
+                wave.distant_since.get_or_insert(seconds);
+            }
+        }
+        if wave.mesh_seconds == wave.last_seconds {
+            continue;
+        }
+        if let (Some(previous), Some(current)) = (wave.mesh_seconds, wave.last_seconds) {
+            if (current - previous).abs() + 1e-9 < MESH_UPDATE_INTERVAL {
+                continue;
+            }
+        }
+        if wave.last_seconds.is_some()
+            && surface.is_some_and(|surface| {
+                !cameras.iter().any(|(camera, _, frustum)| {
+                    camera.is_active && surface.may_be_visible(frustum, Some(&wave), deformed)
+                })
+            })
+        {
+            continue;
+        }
+        let Some(mut mesh) = meshes.get_mut(&handle.0) else {
+            continue;
+        };
+        let Some(seconds) = wave.last_seconds else {
+            if let Some(VertexAttributeValues::Float32x3(positions)) =
+                mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION)
+            {
+                for (position, seed) in positions.iter_mut().zip(&wave.vertices) {
+                    *position = seed.position;
+                }
+            }
+            if let Some(VertexAttributeValues::Float32x3(normals)) =
+                mesh.attribute_mut(Mesh::ATTRIBUTE_NORMAL)
+            {
+                for (normal, seed) in normals.iter_mut().zip(&wave.vertices) {
+                    *normal = seed.normal;
+                }
+            }
+            wave.mesh_seconds = None;
+            continue;
+        };
+        if wave.physics.dirty {
+            if let (Some(uploads), Some(image)) = (uploads.as_deref_mut(), &wave.dynamics) {
+                let (width, height, _) = wave.physics.layout();
+                uploads.textures.push(super::dynamics::Upload {
+                    image: image.clone(),
+                    width,
+                    height,
+                    pixels: std::sync::Arc::new(wave.physics.pixels()),
+                });
+                wave.physics.dirty = false;
+            }
+        }
+        let time = wave.wind_coefficients(seconds);
         let time = &time[..wave.spectrum().len()];
         for i in 0..wave.vertices.len() {
             let seed = wave.vertices[i];
             let mut sample = sample_basis(&seed.basis, seed.shore, time);
             let point = Vec2::new(seed.position[0], -seed.position[1]) * MODEL_SCALE;
-            let (height, gradient) = wave.physics.sample(point);
-            sample.height += height * seed.shore;
-            if wave.dynamics.is_none() {
+            if wave.dynamics.is_some() {
+                sample.height += wave.physics.height_at(point) * seed.shore;
+            } else {
+                let (height, gradient) = wave.physics.sample(point);
+                sample.height += height * seed.shore;
                 sample.gradient += gradient * seed.shore;
             }
             wave.scratch[i] = sample;
@@ -582,8 +658,7 @@ pub(super) fn update(
                     .to_array();
             }
         }
-        wave.active = true;
-        wave.last_seconds = Some(frame.seconds);
+        wave.mesh_seconds = Some(seconds);
     }
 }
 
@@ -592,6 +667,12 @@ pub(super) fn install(app: &mut App) {
     app.add_systems(
         Update,
         update.after(crate::plugins::render_plugin::update_uv_scroll),
+    )
+    .add_systems(
+        PostUpdate,
+        update_visible_meshes
+            .after(VisibilitySystems::UpdateFrusta)
+            .before(AssetEventSystems),
     );
 }
 
@@ -702,7 +783,8 @@ mod tests {
             .init_resource::<FrameUniforms>()
             .init_resource::<LiquidInteractions>()
             .init_resource::<Assets<Mesh>>()
-            .add_systems(Update, update);
+            .add_systems(Update, update)
+            .add_systems(PostUpdate, update_visible_meshes);
         let transform =
             Transform::from_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2))
                 .with_scale(Vec3::splat(MODEL_SCALE))
@@ -779,6 +861,126 @@ mod tests {
                 .zip(&wave.vertices)
                 .all(|(p, v)| *p == v.position));
             assert_eq!(wave.physics.sample(Vec2::new(6.0, -6.0)).0, 0.0);
+        }
+    }
+    #[test]
+    fn repeated_returns_retire_distant_waves_and_bound_texture_uploads() {
+        use super::super::dynamics::WaterUploads;
+        use super::super::interaction::{LiquidInteractions, SurfaceImpulse};
+        use crate::plugins::stage_material::{GmdlMaterial, GmdlMaterialParams, GmdlMode};
+        let mut app = App::new();
+        app.insert_resource(State::new(AppState::Playing))
+            .insert_resource(Settings {
+                water_enhance: true,
+                ..default()
+            })
+            .init_resource::<Time>()
+            .init_resource::<FrameUniforms>()
+            .init_resource::<LiquidInteractions>()
+            .init_resource::<WaterUploads>()
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<Image>>()
+            .init_resource::<Assets<GmdlMaterial>>()
+            .add_systems(Update, update)
+            .add_systems(PostUpdate, update_visible_meshes);
+        let mut mesh = Triangle3d::new(Vec3::ZERO, Vec3::X * 100.0, Vec3::Y * 100.0)
+            .mesh()
+            .build();
+        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[1.0; 4]; mesh.count_vertices()]);
+        let (mesh, wave) = WaterWaveMesh::refine(&mesh, &[0, 1, 2]).unwrap();
+        let mesh = app.world_mut().resource_mut::<Assets<Mesh>>().add(mesh);
+        let material =
+            app.world_mut()
+                .resource_mut::<Assets<GmdlMaterial>>()
+                .add(GmdlMaterial::new(
+                    GmdlMaterialParams {
+                        opacity: 1.0,
+                        alpha_cutoff: 0.0,
+                        mode: GmdlMode::Blend.as_u32(),
+                        has_texture: 0,
+                        uv_offset: Vec2::ZERO,
+                    },
+                    None,
+                    true,
+                    GmdlMode::Blend,
+                ));
+        let transform =
+            Transform::from_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2))
+                .with_scale(Vec3::splat(MODEL_SCALE));
+        let pool = app
+            .world_mut()
+            .spawn((
+                Mesh3d(mesh),
+                MeshMaterial3d(material),
+                transform,
+                wave,
+                LiquidSurface::test_pool(0.0),
+            ))
+            .id();
+        let camera = app
+            .world_mut()
+            .spawn((Camera::default(), GlobalTransform::IDENTITY))
+            .id();
+        app.world_mut()
+            .entity_mut(camera)
+            .insert(Camera3d::default())
+            .remove::<Frustum>();
+        let calm = app
+            .world()
+            .get::<WaterWaveMesh>(pool)
+            .unwrap()
+            .physics
+            .pixels();
+        let mut tick = 0_u32;
+        let mut advance = |app: &mut App| {
+            tick += 1;
+            app.world_mut().resource_mut::<FrameUniforms>().seconds = f64::from(tick) / 120.0;
+            app.update();
+        };
+        for _ in 0..3 {
+            *app.world_mut().get_mut::<GlobalTransform>(camera).unwrap() =
+                GlobalTransform::IDENTITY;
+            advance(&mut app);
+            let mut upload_count = 0;
+            for i in 0..24 {
+                if i % 6 == 0 {
+                    app.world_mut()
+                        .resource_mut::<LiquidInteractions>()
+                        .impulses
+                        .push(SurfaceImpulse {
+                            surface: pool,
+                            point: Vec3::new(3.0, 0.0, -3.0),
+                            strength: 1.0,
+                            radius: 1.0,
+                            direction: Vec2::X,
+                        });
+                }
+                advance(&mut app);
+                upload_count += app.world().resource::<WaterUploads>().textures.len();
+            }
+            assert_eq!(upload_count, 6, "120 Hz simulation should publish at 30 Hz");
+            assert_ne!(
+                app.world()
+                    .get::<WaterWaveMesh>(pool)
+                    .unwrap()
+                    .physics
+                    .pixels(),
+                calm
+            );
+            *app.world_mut().get_mut::<GlobalTransform>(camera).unwrap() =
+                GlobalTransform::from_translation(Vec3::X * 200.0);
+            for _ in 0..132 {
+                advance(&mut app);
+            }
+            assert_eq!(
+                app.world()
+                    .get::<WaterWaveMesh>(pool)
+                    .unwrap()
+                    .physics
+                    .pixels(),
+                calm
+            );
+            assert!(app.world().resource::<WaterUploads>().textures.is_empty());
         }
     }
 }

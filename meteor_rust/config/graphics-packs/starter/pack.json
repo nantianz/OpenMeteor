@@ -174,7 +174,7 @@
         "height": [0.43, 1.15], "width": [0.048, 0.122],
         "root_color": [0.023, 0.044, 0.013], "tip_color": [0.135, 0.191, 0.050],
         "near_distance": 18.0, "mid_distance": 40.0, "max_distance": 180.0,
-        "max_visible_tiles": 512, "max_triangles": 168000,
+        "max_visible_tiles": 512, "max_triangles": 300000,
         "clump_radius": 0.29, "patch_size": 4.6, "patch_variation": 0.90, "ground_cover": 1.0,
         "species": {"grass": 0.79, "plumes": 0.075, "broadleaf": 0.135}
       }
@@ -193,8 +193,8 @@
         "near_distance": 16.0,
         "mid_distance": 31.0,
         "max_distance": 105.0,
-        "max_visible_tiles": 96,
-        "max_triangles": 104000,
+        "max_visible_tiles": 128,
+        "max_triangles": 220000,
         "clump_radius": 0.29,
         "patch_size": 3.1,
         "patch_variation": 0.78,
@@ -206,19 +206,6 @@
     },
     {
       "stage": "sn13",
-      "water_sky_reflections": [
-        {
-          "surface": {"object": "Plane02", "texture": "sn13w01.jpg"},
-          "enabled": true,
-          "visibility_resolution": 48,
-          "visibility_directions": 16,
-          "wave_distortion": 0.16,
-          "refraction_damping": 0.55,
-          "grazing_boost": 0.64,
-          "grazing_range": [0.15, 0.73],
-          "horizon_fade": [0.012, 0.063]
-        }
-      ],
       "wind": {
         "direction": [1.0, 0.38], "strength": 0.7, "gust": 0.25,
         "response": {"cloud": 2.0, "water": 1.0, "grass": 1.5, "cloth": 1.0}

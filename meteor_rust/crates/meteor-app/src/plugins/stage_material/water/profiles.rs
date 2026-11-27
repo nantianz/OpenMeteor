@@ -1,9 +1,12 @@
 use serde::{Deserialize, Serialize};
 
-pub(super) const DEEP_FILE: &str = "water-deep.json";
-pub(super) const SHALLOW_FILE: &str = "water-shallow.json";
-const DEEP: &str = include_str!("../../../../../../config/water-deep.json");
-const SHALLOW: &str = include_str!("../../../../../../config/water-shallow.json");
+const DEEP_FILE: &str = "water-deep.json";
+const SHALLOW_FILE: &str = "water-shallow.json";
+#[cfg(test)]
+const DEEP: &str = include_str!("../../../../../../config/graphics-packs/water/water-deep.json");
+#[cfg(test)]
+const SHALLOW: &str =
+    include_str!("../../../../../../config/graphics-packs/water/water-shallow.json");
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -74,11 +77,12 @@ impl Optics {
 }
 
 impl Profiles {
-    pub fn bundled() -> Self {
+    #[cfg(test)]
+    fn bundled() -> Self {
         Self::parse(DEEP, SHALLOW).expect("bundled water profiles")
     }
 
-    fn parse(deep: &str, shallow: &str) -> Result<Self, String> {
+    pub(super) fn parse(deep: &str, shallow: &str) -> Result<Self, String> {
         let deep: ProfileFile =
             serde_json::from_str(deep).map_err(|e| format!("{DEEP_FILE}: {e}"))?;
         let shallow: ProfileFile =
@@ -109,24 +113,6 @@ impl Profiles {
             shallow_optics: shallow.optics,
             shallow: s,
         })
-    }
-
-    #[cfg(all(not(test), not(any(target_arch = "wasm32", target_os = "android"))))]
-    pub fn load(directory: &std::path::Path) -> Result<Self, String> {
-        use std::io::{ErrorKind, Read};
-        let read = |name: &str, bundled: &str| -> Result<String, String> {
-            let path = directory.join(name);
-            let mut content = String::new();
-            match std::fs::File::open(&path)
-                .and_then(|f| f.take(16385).read_to_string(&mut content))
-            {
-                Ok(n) if n <= 16384 => Ok(content),
-                Ok(_) => Err(format!("{} exceeds 16 KiB", path.display())),
-                Err(e) if e.kind() == ErrorKind::NotFound => Ok(bundled.to_owned()),
-                Err(e) => Err(format!("{}: {e}", path.display())),
-            }
-        };
-        Self::parse(&read(DEEP_FILE, DEEP)?, &read(SHALLOW_FILE, SHALLOW)?)
     }
 }
 

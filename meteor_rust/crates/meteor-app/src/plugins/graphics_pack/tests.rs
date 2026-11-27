@@ -19,6 +19,40 @@ pub(super) fn starter() -> GraphicsPacks {
     }
     packs
 }
+#[test]
+fn all_graphics_preset_loads_each_stage_and_preserves_sn06_bloom() {
+    let base = config_root();
+    let index = std::fs::read(base.join("graphics-enhancement-all.json")).unwrap();
+    let mut packs = super::loader::load_catalog_with_reader(&index, |name| {
+        super::loader::read_bounded(&base, name)
+    })
+    .unwrap()
+    .with_test_loose_root(base);
+    assert!(packs.water().is_some());
+    for number in 1..=22 {
+        let stage = format!("sn{number:02}");
+        packs.prepare_stage(&stage);
+        assert!(packs.error.is_none(), "{stage}: {:?}", packs.error);
+    }
+    packs.prepare_stage("sn06");
+    let pipeline = packs
+        .scenes("sn06")
+        .filter_map(|(_, scene)| scene.color_pipeline.as_ref())
+        .last()
+        .unwrap();
+    assert_eq!(pipeline.tonemapping, config::ToneMapper::Aces);
+    assert_eq!(
+        (pipeline.exposure_ev, pipeline.night_exposure_ev),
+        (1.0, 2.0)
+    );
+    assert_eq!(pipeline.bloom.as_ref().unwrap().intensity, 0.22);
+    let grass = packs
+        .scenes("sn06")
+        .filter_map(|(_, scene)| scene.grass.as_ref())
+        .last()
+        .unwrap();
+    assert_eq!(grass.max_triangles, 320_000);
+}
 
 #[test]
 fn sn06_nextgen_sample_loads_stage_and_longsword_resources() {
@@ -190,26 +224,11 @@ fn plain() -> GmdlMaterial {
 fn disabled_never_reads_assets_and_invalid_schema_is_diagnostic() {
     let p = load_with_reader(
         br#"{"schema_version":1,"enabled":false,"packs":["missing.json","ok.json"]}"#,
-        |name| match name {
-            "ok.json" => Ok(br#"{"schema_version":1,"id":"ok","name":"Ok","resources":{"a":"a.png"},"scenes":[{"stage":"sn03"}]}"#.to_vec()),
-            name if name.ends_with(".json") => Err("missing".into()),
-            _ => panic!("disabled must not load resources: {name}"),
-        },
+        |name| panic!("disabled must not read manifests or assets: {name}"),
     )
     .unwrap();
     assert!(p.packs.is_empty());
-    let listing = p.listing();
-    assert!(!listing.master_active);
-    assert_eq!(listing.entries.len(), 2);
-    assert!(listing.entries[0].error.is_some());
-    assert_eq!(
-        (
-            listing.entries[1].name.as_str(),
-            listing.entries[1].stages.clone()
-        ),
-        ("Ok", vec!["sn03".to_owned()])
-    );
-    assert!(!listing.entries[1].active);
+    assert!(p.error.is_none());
     for v in [
         json!({"schema_version":2,"enabled":false,"packs":[]}),
         json!({"schema_version":1,"enabled":true,"packs":["../bad"]}),
@@ -682,7 +701,7 @@ fn sn18_cloth_stays_anchored_and_reverses_with_level_wind() {
     let reversed = capture(&mut app);
     let mut anchored = 0;
     let mut bent = 0;
-    for vertex in faces.into_iter().map(|i| i as usize) {
+    for vertex in faces.iter().map(|&i| i as usize) {
         let original = Vec3::from_array(baseline[vertex]);
         let first = Vec3::from_array(blown[vertex]) - original;
         let second = Vec3::from_array(reversed[vertex]) - original;
@@ -702,6 +721,32 @@ fn sn18_cloth_stays_anchored_and_reverses_with_level_wind() {
         .as_mut()
         .unwrap()
         .strength = 0.0;
+    assert_eq!(capture(&mut app), baseline);
+    let free = faces
+        .iter()
+        .copied()
+        .map(|i| transform.transform_point(Vec3::from_array(baseline[i as usize])))
+        .min_by(|a, b| a.y.total_cmp(&b.y))
+        .unwrap();
+    let feet = free - Vec3::Y * 0.8;
+    let actor = app
+        .world_mut()
+        .spawn(super::scene_actors::test_actor(feet, Vec3::X * 12.0))
+        .id();
+    let contacted = capture(&mut app);
+    assert!(faces
+        .iter()
+        .any(|&i| contacted[i as usize] != baseline[i as usize]));
+    for &i in &faces {
+        let original = baseline[i as usize];
+        if transform.transform_point(Vec3::from_array(original)).y >= 36.65 {
+            assert_eq!(contacted[i as usize], original);
+        }
+    }
+    app.world_mut().despawn(actor);
+    for _ in 0..25 {
+        capture(&mut app);
+    }
     assert_eq!(capture(&mut app), baseline);
 }
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
@@ -948,80 +993,4 @@ fn cloth_config_accepts_xpbd_and_rejects_unstable_values_and_legacy_springs() {
         .unwrap();
     assert_eq!(config.iterations, 4);
     assert_eq!(config.density, 0.25);
-}
-
-#[test]
-fn settings_select_packs_at_startup_and_an_explicit_index_wins() {
-    use super::loader::{load_catalog_with_selection, PackSelection};
-    let index = br#"{"schema_version":1,"enabled":false,"packs":["a.json","b.json"]}"#;
-    let read = |name: &str| -> Result<Vec<u8>, String> {
-        let id = name.trim_end_matches(".json");
-        Ok(
-            format!(r#"{{"schema_version":1,"id":"{id}","scenes":[{{"stage":"*"}}]}}"#)
-                .into_bytes(),
-        )
-    };
-    let ids = |p: &GraphicsPacks| -> Vec<String> {
-        p.listing()
-            .entries
-            .iter()
-            .filter(|e| e.active)
-            .map(|e| e.id.clone())
-            .collect()
-    };
-
-    let p = load_catalog_with_selection(index, read, &PackSelection::default()).unwrap();
-    assert!(ids(&p).is_empty());
-
-    let mut selection = PackSelection {
-        master: Some(true),
-        ..default()
-    };
-    selection.choices.insert("b".into(), false);
-    let p = load_catalog_with_selection(index, read, &selection).unwrap();
-    assert_eq!(ids(&p), vec!["a".to_owned()]);
-    let mut settings = crate::app_state::Settings {
-        graphics_packs: Some(true),
-        ..default()
-    };
-    settings.graphics_pack_choices.insert("b".into(), false);
-    assert!(!p.listing().restart_pending(&settings));
-    settings.graphics_pack_choices.insert("b".into(), true);
-    assert!(p.listing().restart_pending(&settings));
-
-    let enabled = br#"{"schema_version":1,"enabled":true,"packs":["a.json","b.json"]}"#;
-    selection.master = Some(false);
-    selection.index_authoritative = true;
-    let p = load_catalog_with_selection(enabled, read, &selection).unwrap();
-    assert_eq!(ids(&p), vec!["a".to_owned(), "b".to_owned()]);
-    assert!(!p
-        .listing()
-        .restart_pending(&crate::app_state::Settings::default()));
-}
-
-#[test]
-fn pack_choices_round_trip_through_settings_text() {
-    let mut settings = crate::app_state::Settings {
-        graphics_packs: Some(false),
-        ..default()
-    };
-    settings
-        .graphics_pack_choices
-        .insert("combat-fx-sample".into(), false);
-    settings.graphics_pack_choices.insert("bad=id".into(), true);
-    let (parsed, _) = crate::app_state::parse_settings_for_test(
-        &crate::app_state::settings_text_for_test(&settings),
-    );
-    assert_eq!(parsed.graphics_packs, Some(false));
-    assert_eq!(
-        parsed.graphics_pack_choices.len(),
-        1,
-        "unsafe ids are not written"
-    );
-    assert_eq!(
-        parsed.graphics_pack_choices.get("combat-fx-sample"),
-        Some(&false)
-    );
-    let (fresh, _) = crate::app_state::parse_settings_for_test("");
-    assert_eq!(fresh.graphics_packs, None, "absent key follows the index");
 }

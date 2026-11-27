@@ -4,6 +4,7 @@ use std::sync::{Arc, OnceLock};
 mod cape;
 mod cloth;
 mod cloth_runtime;
+pub(in crate::plugins) use cloth::{Capsule as SceneClothCapsule, SceneCloth};
 use cloth_runtime::update;
 
 #[derive(Deserialize)]
@@ -80,7 +81,7 @@ impl VisualAssets {
                 handle
             })
             .clone();
-        materials.add(GmdlMaterial::new(
+        materials.add(GmdlMaterial::new_character(
             GmdlMaterialParams {
                 opacity: 1.0,
                 alpha_cutoff: 0.0,

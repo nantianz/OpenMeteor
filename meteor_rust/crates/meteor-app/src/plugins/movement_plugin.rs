@@ -289,6 +289,7 @@ fn update_jump_charge(
     can_pay_buffered_jump: bool,
     observed_hold_seconds: Option<f32>,
     wall_dt: f32,
+    simulation_step: bool,
 ) -> JumpChargeRequest {
     if pressed_edge {
         *hold_seconds = 0.0;
@@ -303,9 +304,6 @@ fn update_jump_charge(
         }
     }
 
-    let had_ground_mode_window = *ground_mode_ticks > 0;
-    *ground_mode_ticks = ground_mode_ticks.saturating_sub(1);
-
     if released_edge {
         let request = if *active {
             JumpChargeRequest::Released
@@ -317,8 +315,13 @@ fn update_jump_charge(
         return request;
     }
 
+    if !simulation_step {
+        return JumpChargeRequest::None;
+    }
+    let had_ground_mode_window = *ground_mode_ticks > 0;
+    *ground_mode_ticks = ground_mode_ticks.saturating_sub(1);
     if had_ground_mode_window && *active && held {
-        if *hold_seconds >= STRONG_JUMP_HOLD {
+        if *hold_seconds > STRONG_JUMP_HOLD {
             *active = false;
             *ground_mode_ticks = 0;
             return if can_pay_buffered_jump {
@@ -2050,6 +2053,7 @@ type LocalBallisticAirQuery<'w, 's> = Query<
             Option<&'static RangedFireGate>,
             &'static crate::components::fighter::FighterStatusEffects,
             Option<&'static FighterAttackMotion>,
+            &'static GunAimState,
         ),
     ),
     With<LocalFighter>,
@@ -2098,7 +2102,7 @@ fn local_ballistic_air_root_motion(
         mut combat,
         hit_reaction,
         weapon_switch,
-        (ranged_gate, status_effects, authored_motion),
+        (ranged_gate, status_effects, authored_motion, gun_aim),
     ) in &mut query
     {
         if air.held_jump_mover_deferred {
@@ -2111,7 +2115,7 @@ fn local_ballistic_air_root_motion(
         {
             continue;
         }
-        if sm.current == FighterState::Guard {
+        if matches!(sm.current, FighterState::Guard | FighterState::Cure) {
             continue;
         }
         if !air.air.airborne && air.recovery_ground_mode.is_none() {
@@ -2150,10 +2154,17 @@ fn local_ballistic_air_root_motion(
         } else {
             Vec3::ZERO
         };
-        let loco = compose_loco_axes(input.x, input.z, FORWARD_STRAFE_SCALE);
         let crouching = ordinary_locomotion_allowed(&sm, weapon_switch.is_some())
             && crouch_input.held_for_step(frame_clock.as_deref());
-        let running = ordinary_locomotion && !crouching && loco.running;
+        let ground_mode = air.recovery_ground_mode == Some(true);
+        let crouch_drive = crouching || (ground_mode && ordinary_locomotion && gun_aim.aiming);
+        let strafe_scale = if ground_mode && crouch_drive {
+            1.0
+        } else {
+            FORWARD_STRAFE_SCALE
+        };
+        let loco = compose_loco_axes(input.x, input.z, strafe_scale);
+        let running = ordinary_locomotion && !crouch_drive && loco.running;
         let facing = Vec3::new(motion.facing.sin(), 0.0, motion.facing.cos());
         let attacking = is_attacking_state(sm.current);
         let tick_start = transform.translation;
@@ -2206,7 +2217,6 @@ fn local_ballistic_air_root_motion(
         air.jump_prev_pose_id = pose.pose_id;
         let vertical_speed_before = air.air.vertical_speed;
         let recovery_mode = air.recovery_ground_mode;
-        let ground_mode = recovery_mode == Some(true);
         air.locomotion_pose_sample = Some((ground_mode, vertical_speed_before));
         if recovery_mode.is_some() {
             air.attack_ground_pose_pending = ground_mode;
@@ -2220,7 +2230,7 @@ fn local_ballistic_air_root_motion(
                     buffs.speed_factor,
                     Some(status_effects),
                 ),
-                forward: input.z > 0.0 && !crouching,
+                forward: input.z > 0.0 && !crouch_drive,
                 ground_support: air.ground_contact,
                 air_mode0: !ground_mode,
                 action_vetoed: ranged_gate.is_some_and(|gate| gate.wheel_out),
@@ -2516,6 +2526,7 @@ fn air_curve_root_motion(
         if !air.air.airborne
             || air.dodge_owns_motion_tick
             || hit_reaction.current.is_some()
+            || sm.current == FighterState::Cure
             || attack_motion
                 .as_deref()
                 .is_some_and(|m| m.ground_step_consumed)
@@ -3340,6 +3351,7 @@ pub(crate) fn move_local_fighter(
             can_pay_buffered_jump,
             observed_jump_hold,
             jump_wall_dt,
+            dt > 0.0,
         );
         if input_step
             && aux_input
@@ -3480,6 +3492,9 @@ pub(crate) fn move_local_fighter(
             air.air.airborne || hit_reaction.airborne,
         );
 
+        if sm.current == FighterState::Cure {
+            continue;
+        }
         if !ordinary_locomotion
             && dodge.state.active
             && !matches!(sm.current, FighterState::Dodge | FighterState::Burst)
@@ -3555,11 +3570,10 @@ pub(crate) fn move_local_fighter(
         {
             let preserve_post_jump_action =
                 preserve_post_jump_action(jump_action_accepted, sm.current);
-            let dagger_air_attack_on_release = jump_request == JumpChargeRequest::Released
+            let air_attack_on_release = jump_request == JumpChargeRequest::Released
                 && !air.air.airborne
                 && preserve_post_jump_action
-                && is_attacking_state(sm.current)
-                && pose.pose_id == DAGGER_AIR_LIGHT_POSE;
+                && is_attacking_state(sm.current);
             let strong = air.jump_hold >= STRONG_JUMP_HOLD;
             let jump_pose = meteor_physics::locomotion::jump_pose_for_input(input.x, input.z);
 
@@ -3569,7 +3583,7 @@ pub(crate) fn move_local_fighter(
             });
             air.recovery_ground_mode = None;
             start_jump_with_velocity_transfer(&mut air.air, &mut motion, strong, impulse);
-            if dagger_air_attack_on_release {
+            if air_attack_on_release {
                 air.air.start_curve(false, pose.pose_id);
             }
             took_off_this_tick = true;
@@ -3614,6 +3628,7 @@ pub(crate) fn move_local_fighter(
             air.jump_hold = 0.0;
             air.jump_charge_active = false;
             if buffered_ground_jump {
+                air.held_jump_mover_deferred = true;
                 if let Some(jump) = aux_input.jump_input.as_deref_mut() {
                     jump.consume_charge(frame_clock.as_deref());
                 }
@@ -4934,6 +4949,7 @@ mod tests {
                 let mut velocities = Vec::new();
                 for stance in 0..3 {
                     let mut app = App::new();
+                    crate::plugins::configure_fighter_frame_sets(&mut app);
                     app.init_resource::<Time>()
                         .init_resource::<ButtonInput<KeyCode>>()
                         .init_resource::<ButtonInput<MouseButton>>()
@@ -4941,6 +4957,7 @@ mod tests {
                         .init_resource::<LockOnController>()
                         .init_resource::<crate::plugins::item_plugin::ItemBuffs>()
                         .init_resource::<LocalCrouchInput>()
+                        .init_resource::<LocalGuardInput>()
                         .init_resource::<crate::app_state::Keymap>()
                         .insert_resource(StageCollider {
                             mesh: Some({
@@ -4958,7 +4975,7 @@ mod tests {
                                 mesh
                             }),
                         })
-                        .add_systems(Update, move_local_fighter);
+                        .add_plugins(MovementPlugin);
                     let entity = app
                         .world_mut()
                         .spawn((
@@ -5581,6 +5598,7 @@ mod tests {
                 false,
                 None,
                 0.04,
+                true,
             ),
             JumpChargeRequest::None
         );
@@ -5597,6 +5615,7 @@ mod tests {
                 false,
                 None,
                 0.08,
+                true,
             ),
             JumpChargeRequest::None
         );
@@ -5611,8 +5630,27 @@ mod tests {
                 false,
                 true,
                 true,
-                None,
+                Some(STRONG_JUMP_HOLD),
                 0.0,
+                true,
+            ),
+            JumpChargeRequest::None
+        );
+        assert!(active);
+        assert_eq!(ticks, 1);
+        assert_eq!(
+            update_jump_charge(
+                &mut hold,
+                &mut active,
+                &mut ticks,
+                false,
+                true,
+                false,
+                true,
+                true,
+                None,
+                0.001,
+                true,
             ),
             JumpChargeRequest::BufferedGroundMode
         );
@@ -5638,6 +5676,7 @@ mod tests {
                 true,
                 None,
                 0.2,
+                true,
             ),
             JumpChargeRequest::None
         );
@@ -5662,6 +5701,7 @@ mod tests {
                 true,
                 None,
                 0.0,
+                false,
             ),
             JumpChargeRequest::Released
         );
@@ -5687,6 +5727,7 @@ mod tests {
                 false,
                 Some(0.0),
                 0.3,
+                false,
             ),
             JumpChargeRequest::Released
         );

@@ -13,10 +13,11 @@ crate-type = ["cdylib"]
 
 [dependencies]
 meteor-app = { path = "../meteor-app" }
-bevy = { workspace = true, features = ["android-game-activity"] }
+bevy.workspace = true
 
 [features]
 original-assets = []
 
 [target.'cfg(target_os = "android")'.dependencies]
+bevy = { workspace = true, features = ["android-game-activity"] }
 jni = "0.21"

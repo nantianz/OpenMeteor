@@ -192,6 +192,16 @@ fn external_shared_font_is_read_from_the_selected_installation() {
 }
 
 #[test]
+fn external_menu_background_is_read_from_the_selected_installation() {
+    let fixture = Fixture::complete();
+    fixture.write("UI/Mountain-Pass-Background.JPG", b"external backdrop");
+    let source = OriginalDirectory::open(&fixture.0, &[]).unwrap();
+    assert_eq!(
+        source.read("ui/mountain-pass-background.jpg").unwrap(),
+        b"external backdrop"
+    );
+}
+#[test]
 fn missing_and_corrupt_resources_report_the_source_path() {
     let fixture = Fixture::new();
     let error = OriginalDirectory::open(&fixture.0, &[]).err().unwrap();
@@ -251,6 +261,45 @@ fn reopening_recomputes_metadata_from_the_selected_installation() {
     assert_eq!(
         fs::read(fixture.0.join("PMODEL/P0.POS")).unwrap(),
         b"different\n"
+    );
+}
+#[test]
+fn original_stage_slot_loads_loose_tga_with_or_without_a_stage_pak() {
+    let fixture = Fixture::complete();
+    let mut leaves = vec![0; 18];
+    leaves[2] = 2;
+    leaves[12] = 2;
+    leaves[14] = 1;
+    leaves[16] = 32;
+    leaves[17] = 8;
+    leaves.extend([16, 128, 32, 0, 16, 128, 32, 255]);
+    fixture.write("SN06/Leaves.TGA", &leaves);
+    fixture.write(
+        "SN06/render.json",
+        br#"{"global":{"enableHollowEffect":true,"hollowThreshold":0.3}}"#,
+    );
+    let source = OriginalDirectory::open(&fixture.0, &[]).unwrap();
+    assert!(source.stage_ids().contains(&"sn06".into()));
+    assert!(!fixture.0.join("SN06.PAK").exists());
+    let texture_name = "texture/sn06/leaves.tga";
+    let loaded = source.read(texture_name).unwrap();
+    assert_eq!(loaded, leaves);
+    let image = meteor_asset::texture::decode_image(&loaded).unwrap();
+    assert_eq!(image.rgba, [32, 128, 16, 0, 32, 128, 16, 255]);
+    assert!(source.read("texture/sn07/leaves.tga").is_err());
+    assert!(source.read("sn06/render.json").is_ok());
+    fixture.pak(
+        "SN06.PAK",
+        &[
+            ("SN06/Leaves.TGA", b"old texture"),
+            ("wall.jpg", b"archive wall"),
+        ],
+    );
+    let source = OriginalDirectory::open(&fixture.0, &[]).unwrap();
+    assert_eq!(source.read(texture_name).unwrap(), leaves);
+    assert_eq!(
+        source.read("texture/sn06/wall.jpg").unwrap(),
+        b"archive wall"
     );
 }
 

@@ -140,7 +140,7 @@ fn grid(profile: &CharacterCloth) -> (Topology, Mesh) {
         colors,
         triangles.iter().flatten().map(|&i| i as u16).collect(),
     );
-    (topology(points, freedom, triangles), mesh)
+    (Topology::from_triangles(points, freedom, triangles), mesh)
 }
 
 fn cloth_mesh(
@@ -161,23 +161,6 @@ fn cloth_mesh(
     mesh
 }
 
-fn topology(points: Vec<Vec3>, freedom: Vec<f32>, triangles: Vec<[usize; 3]>) -> Topology {
-    let mut result = Topology {
-        area: vec![0.; points.len()],
-        points,
-        freedom,
-        triangles,
-        skin_vertices: Vec::new(),
-        edges: Vec::new(),
-        bends: Vec::new(),
-        bindings: Vec::new(),
-        normal_vertices: Vec::new(),
-        normal_triangles: Vec::new(),
-    };
-    result.constraints();
-    result
-}
-
 fn obj_render_mesh(obj: &ClothObj) -> Mesh {
     cloth_mesh(
         obj.vertices
@@ -192,7 +175,7 @@ fn obj_render_mesh(obj: &ClothObj) -> Mesh {
 
 fn obj_mesh(sim: &ClothObj, obj: &ClothObj, freedom: Vec<f32>) -> (Topology, Mesh, Vec<usize>) {
     (
-        topology(sim.points.clone(), freedom, sim.triangles.clone()),
+        Topology::from_triangles(sim.points.clone(), freedom, sim.triangles.clone()),
         obj_render_mesh(obj),
         obj.vertices.iter().map(|(point, _)| *point).collect(),
     )

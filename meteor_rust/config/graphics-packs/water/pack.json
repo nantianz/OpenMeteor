@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "water",
+  "name": "水面增强",
+  "water": {
+    "config": "water-enhancement.json",
+    "deep": "water-deep.json",
+    "shallow": "water-shallow.json",
+    "ripples": "baked/ripples.png",
+    "baked": "baked/catalog.json"
+  },
+  "scenes": [
+    {
+      "stage": "sn13",
+      "water_sky_reflections": [
+        {
+          "surface": {"object": "Plane02", "texture": "sn13w01.jpg"},
+          "enabled": true,
+          "visibility_resolution": 48,
+          "visibility_directions": 16,
+          "wave_distortion": 0.16,
+          "refraction_damping": 0.55,
+          "grazing_boost": 0.64,
+          "grazing_range": [0.15, 0.73],
+          "horizon_fade": [0.012, 0.063]
+        }
+      ]
+    }
+  ]
+}

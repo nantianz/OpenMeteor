@@ -185,7 +185,7 @@ impl Plugin for DisplaySettingsPlugin {
             ExtractComponentPlugin::<RenderScaleResolution>::default(),
             ExtractComponentPlugin::<GameplayCamera>::default(),
         ))
-        .add_systems(PostUpdate, sync_display_settings);
+        .add_systems(PostUpdate, (sync_display_settings, sync_antialiasing));
 
         let actual_resolution = ActualRenderResolution::default();
         app.insert_resource(actual_resolution.clone());
@@ -204,6 +204,7 @@ impl Plugin for DisplaySettingsPlugin {
                         .before(RenderSystems::PrepareViews),
                     prepare_display_output.in_set(RenderSystems::PrepareResources),
                     capture_scene_attachment_sizes
+                        .in_set(super::render_pacing::DrawFrame)
                         .after(RenderSystems::Prepare)
                         .before(RenderSystems::Render),
                 ),
@@ -228,6 +229,53 @@ type DisplayCameraQuery<'w, 's> = Query<
     With<GameplayCamera>,
 >;
 
+fn sync_antialiasing(
+    settings: Res<Settings>,
+    mut cameras: Query<(Entity, &mut Msaa), With<GameplayCamera>>,
+    #[cfg(all(
+        feature = "dlss5",
+        target_os = "windows",
+        target_arch = "x86_64",
+        target_env = "msvc"
+    ))]
+    taa_cameras: Query<(), With<bevy::anti_alias::taa::TemporalAntiAliasing>>,
+) {
+    let wanted = if settings.anti_aliasing {
+        Msaa::Sample4
+    } else {
+        Msaa::Off
+    };
+    for (_entity, mut msaa) in &mut cameras {
+        #[cfg(all(
+            feature = "dlss5",
+            target_os = "windows",
+            target_arch = "x86_64",
+            target_env = "msvc"
+        ))]
+        let wanted = if taa_cameras.contains(_entity) {
+            Msaa::Off
+        } else {
+            wanted
+        };
+        msaa.set_if_neq(wanted);
+    }
+}
+#[cfg(test)]
+#[test]
+fn antialiasing_switch_changes_only_the_gameplay_camera() {
+    let mut app = App::new();
+    app.init_resource::<Settings>()
+        .add_systems(Update, sync_antialiasing);
+    let gameplay = app.world_mut().spawn((GameplayCamera, Msaa::Sample4)).id();
+    let ui = app.world_mut().spawn(Msaa::Off).id();
+    app.world_mut().resource_mut::<Settings>().anti_aliasing = false;
+    app.update();
+    assert_eq!(app.world().get::<Msaa>(gameplay), Some(&Msaa::Off));
+    app.world_mut().resource_mut::<Settings>().anti_aliasing = true;
+    app.update();
+    assert_eq!(app.world().get::<Msaa>(gameplay), Some(&Msaa::Sample4));
+    assert_eq!(app.world().get::<Msaa>(ui), Some(&Msaa::Off));
+}
 fn sync_display_settings(
     settings: Res<Settings>,
     state: Res<State<AppState>>,

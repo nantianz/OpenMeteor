@@ -1,5 +1,6 @@
 use bevy::prelude::*;
 
+use std::ops::Range;
 const STEP: f32 = 1.0 / 120.0;
 
 pub(super) struct WaveField {
@@ -15,8 +16,8 @@ pub(super) struct WaveField {
     remainder: f32,
     awake: bool,
     foam: Vec<f32>,
-    active_lo: UVec2,
-    active_hi: UVec2,
+    active_rows: Vec<Range<usize>>,
+    next_active_rows: Vec<Range<usize>>,
     pub(super) dirty: bool,
     shallow: Option<super::shallow::ShallowFlow>,
 }
@@ -34,6 +35,10 @@ fn contains(p: Vec2, [a, b, c]: [Vec2; 3]) -> bool {
 }
 
 impl WaveField {
+    const MAX_DISPLACEMENT: f32 = 0.8;
+    pub(super) fn max_displacement(&self) -> Option<f32> {
+        self.shallow.is_none().then_some(Self::MAX_DISPLACEMENT)
+    }
     pub(super) fn new(triangles: &[[Vec2; 3]]) -> Self {
         Self::grid(triangles, None)
     }
@@ -76,8 +81,8 @@ impl WaveField {
             remainder: 0.0,
             awake: false,
             foam: vec![0.0; width * height],
-            active_lo: UVec2::new(width as u32, height as u32),
-            active_hi: UVec2::ZERO,
+            active_rows: vec![0..0; height],
+            next_active_rows: vec![0..0; height],
             dirty: true,
             shallow: None,
         }
@@ -114,11 +119,34 @@ impl WaveField {
         self.remainder = 0.0;
         self.awake = false;
         self.foam.fill(0.0);
-        self.active_lo = UVec2::new(self.width as u32, self.height as u32);
-        self.active_hi = UVec2::ZERO;
+        self.active_rows.fill(0..0);
         self.dirty = true;
         if let Some(flow) = &mut self.shallow {
             flow.clear();
+        }
+    }
+    fn touched_columns(&self, y: usize) -> Range<usize> {
+        let row = &self.active_rows[y];
+        let mut span = if row.is_empty() {
+            0..0
+        } else {
+            row.start - 1..row.end + 1
+        };
+        for neighbor in [y.checked_sub(1), Some(y + 1)].into_iter().flatten() {
+            if let Some(row) = self.active_rows.get(neighbor).filter(|row| !row.is_empty()) {
+                if span.is_empty() {
+                    span = row.clone();
+                } else {
+                    span.start = span.start.min(row.start);
+                    span.end = span.end.max(row.end);
+                }
+            }
+        }
+        span
+    }
+    pub(super) fn sleep(&mut self) {
+        if self.awake {
+            self.clear();
         }
     }
 
@@ -167,8 +195,14 @@ impl WaveField {
                 }
                 let d = self.origin + Vec2::new(x as f32, y as f32) * self.spacing - point;
                 let q = (d.length_squared() - 0.45 * d.dot(along).powi(2)) / (radius * radius);
-                self.active_lo = self.active_lo.min(UVec2::new(x as u32, y as u32));
-                self.active_hi = self.active_hi.max(UVec2::new(x as u32, y as u32));
+                let row = &mut self.active_rows[y as usize];
+                let x = x as usize;
+                if row.start == row.end {
+                    row.start = x;
+                } else {
+                    row.start = row.start.min(x);
+                }
+                row.end = row.end.max(x + 1);
                 self.foam[i] = (self.foam[i]
                     + strength * (-q * 1.4).exp() * super::config::get().simulation.foam_gain)
                     .min(1.0);
@@ -183,6 +217,7 @@ impl WaveField {
         }
 
         self.awake |= !footprint.is_empty();
+        self.dirty |= !footprint.is_empty();
         let mean = footprint.iter().map(|(_, v)| v).sum::<f32>() / footprint.len().max(1) as f32;
         if let Some(flow) = &self.shallow {
             for (_, v) in &mut footprint {
@@ -202,6 +237,9 @@ impl WaveField {
         }
 
         self.remainder += dt.clamp(0.0, 0.1);
+        if self.remainder + 1e-7 < STEP {
+            return;
+        }
         self.dirty = true;
         let config = &super::config::get().simulation;
         if let Some(flow) = &mut self.shallow {
@@ -230,14 +268,12 @@ impl WaveField {
         while self.remainder + 1e-7 >= STEP {
             self.remainder = (self.remainder - STEP).max(0.0);
             let mut peak = 0.0_f32;
-            let lo = (self.active_lo.max(UVec2::ONE) - UVec2::ONE).max(UVec2::ONE);
-            let hi = (self.active_hi + UVec2::ONE)
-                .min(UVec2::new(self.width as u32 - 2, self.height as u32 - 2));
-            self.active_lo = UVec2::new(self.width as u32, self.height as u32);
-            self.active_hi = UVec2::ZERO;
             self.next.fill(0.0);
-            for y in lo.y as usize..=hi.y as usize {
-                for x in lo.x as usize..=hi.x as usize {
+            self.next_active_rows.fill(0..0);
+            for y in 1..self.height - 1 {
+                let span = self.touched_columns(y);
+                let row = &mut self.next_active_rows[y];
+                for x in span.start.max(1)..span.end.min(self.width - 1) {
                     let i = y * self.width + x;
                     if !self.wet[i] {
                         continue;
@@ -255,7 +291,7 @@ impl WaveField {
                         (self.velocity[i] + STEP * k * laplacian) / (1.0 + config.damping * STEP);
                     let h_next = h + STEP * self.velocity[i];
                     peak = peak.max(h_next.abs()).max(self.velocity[i].abs());
-                    self.next[i] = h_next.clamp(-0.8, 0.8);
+                    self.next[i] = h_next.clamp(-Self::MAX_DISPLACEMENT, Self::MAX_DISPLACEMENT);
                     self.foam[i] *= 1.0 - STEP * config.foam_decay;
                     let energy = self.next[i]
                         .abs()
@@ -263,8 +299,10 @@ impl WaveField {
                         .max(self.foam[i]);
                     peak = peak.max(energy);
                     if energy > 1e-5 {
-                        self.active_lo = self.active_lo.min(UVec2::new(x as u32, y as u32));
-                        self.active_hi = self.active_hi.max(UVec2::new(x as u32, y as u32));
+                        if row.start == row.end {
+                            row.start = x;
+                        }
+                        row.end = x + 1;
                     } else {
                         self.next[i] = 0.0;
                         self.velocity[i] = 0.0;
@@ -276,6 +314,7 @@ impl WaveField {
                 }
             }
             std::mem::swap(&mut self.displacement, &mut self.next);
+            std::mem::swap(&mut self.active_rows, &mut self.next_active_rows);
             if peak < 1e-4 {
                 self.clear();
                 break;
@@ -301,17 +340,13 @@ impl WaveField {
         if !self.awake {
             return out;
         }
-        let last = UVec2::new(self.width as u32 - 1, self.height as u32 - 1);
-        let (lo, hi) = if self.shallow.is_some() {
-            (UVec2::ZERO, last)
-        } else {
-            (
-                self.active_lo.max(UVec2::ONE) - UVec2::ONE,
-                (self.active_hi + UVec2::ONE).min(last),
-            )
-        };
-        for y in lo.y as usize..=hi.y as usize {
-            for x in lo.x as usize..=hi.x as usize {
+        for y in 0..self.height {
+            let columns = if self.shallow.is_some() {
+                0..self.width
+            } else {
+                self.touched_columns(y)
+            };
+            for x in columns {
                 let i = y * self.width + x;
                 let h = |nx: usize, ny: usize| {
                     let j = ny * self.width + nx;
@@ -333,7 +368,10 @@ impl WaveField {
         out
     }
 
-    fn height_at(&self, point: Vec2) -> f32 {
+    pub(super) fn height_at(&self, point: Vec2) -> f32 {
+        if !self.awake {
+            return 0.0;
+        }
         let p = (point - self.origin) / self.spacing;
         if p.x < 0.0
             || p.y < 0.0
@@ -352,6 +390,9 @@ impl WaveField {
     }
 
     pub(super) fn sample(&self, point: Vec2) -> (f32, Vec2) {
+        if !self.awake {
+            return (0.0, Vec2::ZERO);
+        }
         let dx = Vec2::X * self.spacing;
         let dy = Vec2::Y * self.spacing;
         (

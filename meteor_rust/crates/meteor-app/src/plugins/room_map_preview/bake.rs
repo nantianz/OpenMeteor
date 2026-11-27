@@ -111,6 +111,9 @@ pub(crate) fn bake() -> Result<(), String> {
     app.finish();
     app.cleanup();
 
+    app.world_mut()
+        .run_system_once(crate::plugins::pak_textures::update_texture_device_limit)
+        .unwrap();
     let device = app.world().resource::<RenderDevice>().clone();
     let queue = app.world().resource::<RenderQueue>().clone();
     let readback = device.create_buffer(&BufferDescriptor {
@@ -255,6 +258,7 @@ pub(crate) fn bake() -> Result<(), String> {
                 let _ = std::fs::remove_file(&temp);
                 return Err(error);
             }
+            super::desktop::publish_source_preview(&stage, &output);
             println!("baked map preview {stage}");
         } else {
             failed.push(stage);

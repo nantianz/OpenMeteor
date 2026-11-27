@@ -34,6 +34,7 @@ use meteor_physics::collision::{GroundHit, MeshCollider, Point3};
 use meteor_physics::jump::AirMotionMode;
 use meteor_physics::wall_run;
 
+mod render_stats;
 const TELEPORT_LIFT: f32 = 2.0;
 
 const GROUND_FALLBACK: f32 = -64.0;
@@ -46,6 +47,9 @@ struct DebugSpawnedNpcs(Vec<Entity>);
 #[derive(Resource, Default)]
 struct DebugFpsSample {
     ema_dt: f32,
+    controller_steps: u32,
+    controller_elapsed: f32,
+    controller_hz: Option<f32>,
 }
 
 #[derive(Resource)]
@@ -206,6 +210,7 @@ pub struct DebugPlugin;
 
 impl Plugin for DebugPlugin {
     fn build(&self, app: &mut App) {
+        render_stats::install(app);
         app.init_resource::<DebugSpawnedNpcs>()
             .init_resource::<DebugFpsSample>()
             .init_resource::<DebugStatsVisibleFlag>()
@@ -248,7 +253,7 @@ impl Plugin for DebugPlugin {
                     update_console_text,
                     refresh_debug_panel,
                     debug_panel_button_visuals,
-                    update_debug_stats,
+                    update_debug_stats.after(super::fighter_frame::SerialFighterSet),
                     adapt_debug_stats_layout,
                     adapt_debug_panel_layout,
                 )
@@ -476,13 +481,13 @@ enum DebugPanelAction {
     TogglePanel,
     ClosePanel,
     SelectTab(DebugPanelTab),
-    Character(i8),
-    Weapon(i8),
+    Character(u8),
+    Weapon(u8),
     Command(&'static str),
     Speed(i8),
     OpenConsole,
-    NpcModel(i8),
-    NpcWeapon(i8),
+    NpcModel(u8),
+    NpcWeapon(u8),
     NpcTeam(i8),
     NpcBehavior(i8),
     AddNpc,
@@ -491,16 +496,12 @@ enum DebugPanelAction {
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 enum DebugPanelTextKind {
-    Character,
-    Weapon,
     Cheat,
     Hitbox,
     Motion,
     Freecam,
     Shows,
     Speed,
-    NpcModel,
-    NpcWeapon,
     NpcTeam,
     NpcBehavior,
     NpcHint,
@@ -514,8 +515,7 @@ fn adapt_debug_stats_layout(
     window: Query<&Window>,
     safe_area: Option<Res<SafeAreaInsets>>,
     ui_scale: Option<Res<crate::plugins::ui_scale_plugin::EffectiveUiScale>>,
-    resolved: Option<Res<super::mobile_controls_plugin::ResolvedMobileLayout>>,
-    mut previous: Local<Option<(Vec2, SafeAreaInsets, f32, Vec2, f32)>>,
+    mut previous: Local<Option<(Vec2, SafeAreaInsets, f32)>>,
     mut roots: Query<&mut Node, With<DebugStatsRootNode>>,
 
     mut fonts: Query<&mut TextFont, (With<DebugStatsText>, Without<DebugPanelRuntimeText>)>,
@@ -525,15 +525,7 @@ fn adapt_debug_stats_layout(
     };
     let safe = safe_area.as_deref().copied().unwrap_or_default();
     let unit = ui_scale.as_ref().map_or(1.0, |scale| scale.0.max(0.05));
-    let (map_center, map_diameter) =
-        super::ui_plugin::radar_screen_geometry(window, safe, resolved.as_deref());
-    let key = (
-        Vec2::new(window.width(), window.height()),
-        safe,
-        unit,
-        map_center,
-        map_diameter,
-    );
+    let key = (Vec2::new(window.width(), window.height()), safe, unit);
     let changed = previous.as_ref() != Some(&key);
     *previous = Some(key);
     let layout = crate::plugins::launcher_ui::responsive_ui_layout_with_safe_area(
@@ -552,15 +544,8 @@ fn adapt_debug_stats_layout(
         if !changed && !node.is_added() {
             continue;
         }
-        let top = (map_center.y + map_diameter * 0.5 + 12.0).max(hud.stats_origin.y + 132.0);
-        node.left = Val::Px((safe.left + 12.0) / unit);
-        node.top = Val::Px(
-            if layout.mobile {
-                top.max(window.height() * 0.48)
-            } else {
-                safe.top + 48.0
-            } / unit,
-        );
+        node.left = Val::Px(hud.stats_origin.x / unit);
+        node.bottom = Val::Px(hud.debug_bottom / unit);
     }
     for mut font in &mut fonts {
         let size = if layout.mobile { 10.0 } else { 13.0 }.into();
@@ -603,30 +588,31 @@ fn adapt_debug_panel_layout(
         cfg!(target_os = "android"),
         safe_area.as_deref().copied().unwrap_or_default(),
     );
-    let (base_gutter, base_top, base_width, _) =
-        debug_panel_geometry(window.width(), window.height(), layout.mobile);
-    let gutter = base_gutter.max(layout.right_gutter);
-    let top = base_top.max(layout.top_gutter + if layout.mobile { 46.0 } else { 0.0 });
-    let available_width = (window.width() - layout.left_gutter - gutter).max(180.0);
-    let width = base_width.min(available_width);
-    let max_height = (window.height() - top - layout.bottom_gutter).max(120.0);
-    for mut node in &mut nodes.p0() {
-        if !changed && !node.is_added() {
-            continue;
-        }
-        node.top = Val::Px(top);
-        node.right = Val::Px(gutter);
-        node.width = Val::Px(width);
-        node.max_height = Val::Px(max_height);
-        node.row_gap = Val::Px(if layout.mobile { 5.0 } else { 8.0 });
-        node.padding = UiRect::all(Val::Px(if layout.mobile { 7.0 } else { 10.0 }));
-    }
     let hud = super::combat_hud_layout::CombatHudLayout::new(
         window.width(),
         window.height(),
         safe_area.as_deref().copied().unwrap_or_default(),
         layout.mobile,
     );
+    let top = if layout.mobile {
+        hud.stats_origin.y + 132.0
+    } else {
+        layout.top_gutter + 40.0
+    };
+    let width =
+        ((window.width() - hud.stats_origin.x - layout.right_gutter) / unit).clamp(1.0, 390.0);
+    let max_height = (window.height() - top - hud.debug_bottom).max(1.0) / unit;
+    for mut node in &mut nodes.p0() {
+        if !changed && !node.is_added() {
+            continue;
+        }
+        node.left = Val::Px(hud.stats_origin.x / unit);
+        node.bottom = Val::Px(hud.debug_bottom / unit);
+        node.width = Val::Px(width);
+        node.max_height = Val::Px(max_height);
+        node.row_gap = Val::Px(if layout.mobile { 5.0 } else { 8.0 });
+        node.padding = UiRect::all(Val::Px(if layout.mobile { 7.0 } else { 10.0 }));
+    }
     for mut node in &mut nodes.p1() {
         if !changed && !node.is_added() {
             continue;
@@ -657,17 +643,6 @@ fn adapt_debug_panel_layout(
     }
 }
 
-fn debug_panel_geometry(width: f32, height: f32, mobile: bool) -> (f32, f32, f32, f32) {
-    let gutter = if mobile { 8.0 } else { 12.0 };
-    let top = if mobile { 54.0 } else { 64.0 };
-    (
-        gutter,
-        top,
-        (width - gutter * 2.0).clamp(260.0, 390.0),
-        (height - top - gutter).max(180.0),
-    )
-}
-
 fn debug_panel_font_size(base: f32, mobile: bool) -> f32 {
     if mobile {
         (base * 0.82).clamp(9.0, 14.0)
@@ -683,8 +658,8 @@ fn setup_debug_ui(mut commands: Commands, ui_font: Res<crate::plugins::launcher_
         .spawn((
             Node {
                 position_type: PositionType::Absolute,
-                top: Val::Px(96.0),
                 left: Val::Px(12.0),
+                bottom: Val::Px(140.0),
                 flex_direction: FlexDirection::Column,
                 padding: UiRect::all(Val::Px(6.0)),
                 ..default()
@@ -783,8 +758,8 @@ fn setup_debug_ui(mut commands: Commands, ui_font: Res<crate::plugins::launcher_
         .spawn((
             Node {
                 position_type: PositionType::Absolute,
-                top: Val::Px(64.0),
-                right: Val::Px(12.0),
+                left: Val::Px(12.0),
+                bottom: Val::Px(140.0),
                 width: Val::Px(390.0),
                 max_width: Val::Percent(94.0),
                 max_height: Val::Percent(82.0),
@@ -913,29 +888,19 @@ fn setup_debug_ui(mut commands: Commands, ui_font: Res<crate::plugins::launcher_
                 DebugPanelTabRoot(DebugPanelTab::Loadout),
             ))
             .with_children(|page| {
-                spawn_debug_label(
+                spawn_debug_choices(
                     page,
                     &font,
-                    "与 Web 选择器一致，切换后立即应用",
-                    12.0,
-                    theme::MUTED,
-                    None,
+                    "人物",
+                    debug_character_choices(),
+                    DebugPanelAction::Character,
                 );
-                spawn_debug_value_row(
-                    page,
-                    &font,
-                    "模型",
-                    DebugPanelAction::Character(-1),
-                    DebugPanelAction::Character(1),
-                    DebugPanelTextKind::Character,
-                );
-                spawn_debug_value_row(
+                spawn_debug_choices(
                     page,
                     &font,
                     "兵器",
-                    DebugPanelAction::Weapon(-1),
-                    DebugPanelAction::Weapon(1),
-                    DebugPanelTextKind::Weapon,
+                    debug_weapon_choices(),
+                    DebugPanelAction::Weapon,
                 );
             });
 
@@ -1040,22 +1005,6 @@ fn setup_debug_ui(mut commands: Commands, ui_font: Res<crate::plugins::launcher_
                 spawn_debug_value_row(
                     page,
                     &font,
-                    "模型",
-                    DebugPanelAction::NpcModel(-1),
-                    DebugPanelAction::NpcModel(1),
-                    DebugPanelTextKind::NpcModel,
-                );
-                spawn_debug_value_row(
-                    page,
-                    &font,
-                    "兵器",
-                    DebugPanelAction::NpcWeapon(-1),
-                    DebugPanelAction::NpcWeapon(1),
-                    DebugPanelTextKind::NpcWeapon,
-                );
-                spawn_debug_value_row(
-                    page,
-                    &font,
                     "阵营",
                     DebugPanelAction::NpcTeam(-1),
                     DebugPanelAction::NpcTeam(1),
@@ -1110,6 +1059,20 @@ fn setup_debug_ui(mut commands: Commands, ui_font: Res<crate::plugins::launcher_
                     12.0,
                     theme::MUTED,
                     Some(DebugPanelTextKind::NpcHint),
+                );
+                spawn_debug_choices(
+                    page,
+                    &font,
+                    "人物",
+                    debug_character_choices(),
+                    DebugPanelAction::NpcModel,
+                );
+                spawn_debug_choices(
+                    page,
+                    &font,
+                    "兵器",
+                    debug_weapon_choices(),
+                    DebugPanelAction::NpcWeapon,
                 );
             });
         spawn_debug_label(
@@ -1313,6 +1276,38 @@ fn spawn_debug_button_with_node(
     });
     button.id()
 }
+fn debug_character_choices() -> impl Iterator<Item = (u8, String)> {
+    (0..super::launcher_ui::CHARACTER_NAMES.len() as u8).map(|id| (id, char_label(id)))
+}
+fn debug_weapon_choices() -> impl Iterator<Item = (u8, String)> {
+    (0..=12).map(|id| (id, super::ui_plugin::hud_weapon_name(id).to_owned()))
+}
+fn spawn_debug_choices(
+    parent: &mut ChildSpawnerCommands,
+    font: &Handle<Font>,
+    title: &str,
+    choices: impl Iterator<Item = (u8, String)>,
+    action: fn(u8) -> DebugPanelAction,
+) {
+    spawn_debug_label(parent, font, title, 12.0, theme::MUTED, None);
+    parent
+        .spawn(Node {
+            width: Val::Percent(100.0),
+            flex_wrap: FlexWrap::Wrap,
+            flex_shrink: 0.0,
+            column_gap: Val::Percent(2.0),
+            row_gap: Val::Px(4.0),
+            ..default()
+        })
+        .with_children(|grid| {
+            for (id, name) in choices {
+                let mut node = debug_compact_button_node(0.0);
+                node.width = Val::Percent(31.5);
+                node.flex_grow = 0.0;
+                spawn_debug_button_with_node(grid, font, &name, action(id), None, node);
+            }
+        });
+}
 
 fn spawn_debug_value_row(
     parent: &mut ChildSpawnerCommands,
@@ -1515,17 +1510,7 @@ fn debug_console_typing(
     }
 }
 
-const DEBUG_NPC_MODELS: &[u8] = &[0, 1, 2, 8, 19];
-const DEBUG_NPC_WEAPONS: &[u8] = &[6, 8, 1, 2, 3, 4, 5, 7, 9, 0];
 const DEBUG_SPEED_STEPS: &[f32] = &[0.1, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
-
-fn cycle_u8(value: u8, values: &[u8], delta: i8) -> u8 {
-    let index = values
-        .iter()
-        .position(|candidate| *candidate == value)
-        .unwrap_or(0) as i8;
-    values[(index + delta).rem_euclid(values.len() as i8) as usize]
-}
 
 #[allow(clippy::too_many_arguments)]
 fn debug_panel_buttons(
@@ -1565,15 +1550,13 @@ fn debug_panel_buttons(
                 capture.panel_open = false;
             }
             DebugPanelAction::SelectTab(tab) => panel.tab = tab,
-            DebugPanelAction::Character(delta) => {
-                panel.character = (panel.character as i16 + i16::from(delta)).rem_euclid(20) as u8;
-                queue.0.push(format!("loadch {}", panel.character));
-                status.0 = format!("正在切换到 {}", char_label(panel.character));
+            DebugPanelAction::Character(id) => {
+                queue.0.push(format!("loadch {id}"));
+                status.0 = format!("正在切换到 {}", char_label(id));
             }
-            DebugPanelAction::Weapon(delta) => {
-                panel.weapon = (panel.weapon as i16 + i16::from(delta)).rem_euclid(13) as u8;
-                queue.0.push(format!("weapon {}", panel.weapon));
-                status.0 = format!("正在装备 {}", weapon_label(panel.weapon));
+            DebugPanelAction::Weapon(id) => {
+                queue.0.push(format!("weapon {id}"));
+                status.0 = format!("正在装备 {}", weapon_label(id));
             }
             DebugPanelAction::Command(command) => {
                 queue.0.push(command.to_string());
@@ -1598,11 +1581,11 @@ fn debug_panel_buttons(
                 panel.open = false;
                 capture.panel_open = false;
             }
-            DebugPanelAction::NpcModel(delta) => {
-                panel.npc_model = cycle_u8(panel.npc_model, DEBUG_NPC_MODELS, delta);
+            DebugPanelAction::NpcModel(id) => {
+                panel.npc_model = id;
             }
-            DebugPanelAction::NpcWeapon(delta) => {
-                panel.npc_weapon = cycle_u8(panel.npc_weapon, DEBUG_NPC_WEAPONS, delta);
+            DebugPanelAction::NpcWeapon(id) => {
+                panel.npc_weapon = id;
             }
             DebugPanelAction::NpcTeam(delta) => {
                 panel.npc_team = (panel.npc_team as i8 + delta).rem_euclid(3) as u8;
@@ -1703,8 +1686,6 @@ fn refresh_debug_panel(
         .is_some_and(|(_, cheat)| cheat.is_some());
     for (marker, mut text) in &mut texts {
         let value = match marker.0 {
-            DebugPanelTextKind::Character => char_label(panel.character),
-            DebugPanelTextKind::Weapon => weapon_label(panel.weapon).to_string(),
             DebugPanelTextKind::Cheat => format!("无敌模式：{}", on_off(cheat)),
             DebugPanelTextKind::Hitbox => {
                 format!("碰撞盒可视化：{}", on_off(hitbox.0))
@@ -1719,8 +1700,6 @@ fn refresh_debug_panel(
                 format!("显示调试运行信息：{}", on_off(stats.0))
             }
             DebugPanelTextKind::Speed => format!("{}×", fmt_f(sim.time_scale)),
-            DebugPanelTextKind::NpcModel => char_label(panel.npc_model),
-            DebugPanelTextKind::NpcWeapon => weapon_label(panel.npc_weapon).to_string(),
             DebugPanelTextKind::NpcTeam => match panel.npc_team {
                 1 => "友方 (1)".into(),
                 2 => "中立 (2)".into(),
@@ -1771,18 +1750,26 @@ fn debug_panel_button_visuals(
     >,
 ) {
     for (interaction, action, mut color, mut border) in &mut buttons {
-        let active_tab = matches!(action, DebugPanelAction::SelectTab(tab) if *tab == panel.tab);
-        color.0 = match interaction {
+        let selected = match *action {
+            DebugPanelAction::SelectTab(tab) => tab == panel.tab,
+            DebugPanelAction::Character(id) => id == panel.character,
+            DebugPanelAction::Weapon(id) => id == panel.weapon,
+            DebugPanelAction::NpcModel(id) => id == panel.npc_model,
+            DebugPanelAction::NpcWeapon(id) => id == panel.npc_weapon,
+            _ => false,
+        };
+        let fill = match interaction {
             Interaction::Pressed => theme::PRIMARY_PRESSED,
             Interaction::Hovered => theme::HOVER,
-            Interaction::None if active_tab => theme::SELECTED,
+            Interaction::None if selected => theme::SELECTED,
             Interaction::None => theme::CARD,
         };
-        border.set_all(if active_tab {
+        color.set_if_neq(BackgroundColor(fill));
+        border.set_if_neq(BorderColor::all(if selected {
             theme::ACCENT.with_alpha(0.78)
         } else {
             theme::LINE
-        });
+        }));
     }
 }
 
@@ -1828,7 +1815,7 @@ fn update_console_text(
         }
     }
     for mut node in &mut nodes.p1() {
-        let display = if stats_visible.0 {
+        let display = if stats_visible.0 && !console.captures_input() {
             Display::Flex
         } else {
             Display::None
@@ -2103,7 +2090,7 @@ fn debug_exec_queue(
             "fps" => match args.first().and_then(|raw| raw.parse::<u32>().ok()) {
                 None => env.log.print(
                     format!(
-                        "帧率上限：{}（运行时改动，未写盘）",
+                        "渲染上限：{}（运行时改动，未写盘）",
                         fps_value_label(env.settings.target_fps)
                     ),
                     ConsoleTone::Info,
@@ -2111,7 +2098,7 @@ fn debug_exec_queue(
                 Some(v) => {
                     env.settings.target_fps = v.clamp(0, 240);
                     env.log.print(
-                        format!("帧率上限：{}", fps_value_label(env.settings.target_fps)),
+                        format!("渲染上限：{}", fps_value_label(env.settings.target_fps)),
                         ConsoleTone::Ok,
                     );
                 }
@@ -2901,17 +2888,7 @@ fn remove_debug_npcs(all: bool, spawned: &mut DebugSpawnedNpcs, commands: &mut C
 }
 
 fn char_label(character_id: u8) -> String {
-    let known = match character_id {
-        0 => Some("孟星魂"),
-        1 => Some("冷燕"),
-        2 => Some("大刀装"),
-        3 => Some("夜猫子"),
-        8 => Some("守卫"),
-        9 => Some("哨兵长"),
-        19 => Some("轻剑装"),
-        _ => None,
-    };
-    match known {
+    match super::launcher_ui::CHARACTER_NAMES.get(usize::from(character_id)) {
         Some(name) => format!("P{character_id} {name}"),
         None => format!("P{character_id}"),
     }
@@ -3429,7 +3406,9 @@ fn update_debug_stats(
     display: (
         Res<Settings>,
         Option<Res<super::display_settings_plugin::ActualRenderResolution>>,
+        Res<render_stats::RenderGeometryStats>,
         Query<&Window, With<bevy::window::PrimaryWindow>>,
+        Option<Res<super::FrameClock>>,
     ),
     sim: Res<DebugSimControl>,
     keymap: Res<Keymap>,
@@ -3443,7 +3422,7 @@ fn update_debug_stats(
     mut throttle: Local<f32>,
     mut texts: DebugStatsTextQuery<'_, '_>,
 ) {
-    let (settings, actual_resolution, windows) = display;
+    let (settings, actual_resolution, render_geometry, windows, clock) = display;
     let raw_dt = time.delta_secs();
     if raw_dt > 0.0 {
         fps.ema_dt = if fps.ema_dt <= 0.0 {
@@ -3451,8 +3430,18 @@ fn update_debug_stats(
         } else {
             fps.ema_dt + (raw_dt - fps.ema_dt) * 0.1
         };
+        if let Some(clock) = clock {
+            fps.controller_steps += clock.completed_controller_steps;
+            fps.controller_elapsed += raw_dt;
+            if fps.controller_elapsed >= STATS_INTERVAL_SECS {
+                fps.controller_hz = Some(fps.controller_steps as f32 / fps.controller_elapsed);
+                fps.controller_steps = 0;
+                fps.controller_elapsed = 0.0;
+            }
+        }
     }
     let panel_visible = panel.open && panel.tab == DebugPanelTab::Stats;
+    render_geometry.set_enabled(visible.0 || panel_visible);
     if !visible.0 && !panel_visible {
         *throttle = STATS_INTERVAL_SECS;
         return;
@@ -3472,6 +3461,7 @@ fn update_debug_stats(
             window.physical_height()
         ));
     }
+    let geometry = render_geometry.label();
     let held_keys = [
         ("W", keymap.move_up.pressed(&keys, &mouse)),
         ("A", keymap.move_left.pressed(&keys, &mouse)),
@@ -3488,6 +3478,7 @@ fn update_debug_stats(
     } else {
         0.0
     };
+    let frame_ms = fps.ema_dt * 1000.0;
     let sim_note = if sim.paused {
         " [paused]".to_string()
     } else if (sim.time_scale - 1.0).abs() > 1e-3 {
@@ -3496,6 +3487,13 @@ fn update_debug_stats(
         String::new()
     };
 
+    let controller_rate = fps
+        .controller_hz
+        .map_or_else(|| "—".into(), |hz| format!("{hz:.1} Hz"));
+    let timing = format!(
+        "更新 FPS {fps_now:.0} / 渲染上限 {}{sim_note}\n实测判定频率 {controller_rate}\n更新间隔：{frame_ms:.1} ms",
+        fps_value_label(settings.target_fps),
+    );
     let Ok((
         _,
         fighter,
@@ -3512,9 +3510,7 @@ fn update_debug_stats(
     )) = local.single_mut()
     else {
         let body = format!(
-            "FPS {:.0} / 目标 {}{sim_note}\n{resolution}\n角色状态尚未就绪\nNPC 数量 {}\n",
-            fps_now,
-            fps_value_label(settings.target_fps),
+            "{timing}\n{resolution}\n{geometry}\n角色状态尚未就绪\nNPC 数量 {}\n",
             npcs.iter().count()
         );
         for (mut text, panel_copy) in &mut texts {
@@ -3541,9 +3537,7 @@ fn update_debug_stats(
         .map(|ca| ca.poses.len().to_string())
         .unwrap_or_else(|| "-".into());
     let body = format!(
-        "FPS {:.0} / 目标 {}{sim_note}\n{resolution}\n位置 {:7.1} {:7.1} {:7.1}\n速度 {:6.1} {:6.1} {:6.1} 朝向 {:.2}\n状态 {:?}{combat_note} 阶段 {}\n动作 {} 帧 {:.1}/{}/{}{}\n气血 {:.0}/{:.0}{}  怒气 {:.0}/{:.0}\n武器 {}\n按键 {}  NPC {}  动作库 {}\n锁定={}  跟踪={}\n",
-        fps_now,
-        fps_value_label(settings.target_fps),
+        "{timing}\n{resolution}\n{geometry}\n位置 {:7.1} {:7.1} {:7.1}\n速度 {:6.1} {:6.1} {:6.1} 朝向 {:.2}\n状态 {:?}{combat_note} 阶段 {}\n动作 {} 帧 {:.1}/{}/{}{}\n气血 {:.0}/{:.0}{}  怒气 {:.0}/{:.0}\n武器 {}\n按键 {}  NPC {}  动作库 {}\n锁定={}  跟踪={}\n",
         transform.translation.x,
         transform.translation.y,
         transform.translation.z,
@@ -4151,6 +4145,7 @@ mod tests {
             .init_resource::<CameraRecentreRequest>()
             .init_resource::<LockOnController>()
             .init_resource::<Writes>()
+            .init_resource::<super::super::FrameClock>()
             .add_plugins(DebugPlugin)
             .add_systems(
                 Capture,
@@ -4185,6 +4180,9 @@ mod tests {
             app.world_mut()
                 .resource_mut::<Time<Real>>()
                 .advance_by(std::time::Duration::from_millis(50));
+            app.world_mut()
+                .resource_mut::<super::super::FrameClock>()
+                .completed_controller_steps = 8;
             step(&mut app);
             let writes = app.world().resource::<Writes>();
             assert_eq!(
@@ -4239,6 +4237,7 @@ mod tests {
             body.0.contains("FPS"),
             "reopened stats must refresh immediately"
         );
+        assert!(body.0.contains("实测判定频率 160.0 Hz"), "{}", body.0);
         app.world_mut()
             .get_mut::<Window>(window)
             .unwrap()
@@ -4367,7 +4366,18 @@ mod tests {
             .query_filtered::<Entity, With<DebugPanelAction>>()
             .iter(world)
             .collect::<Vec<_>>();
+        let mut player_models = Vec::new();
+        let mut npc_models = Vec::new();
+        let mut player_weapons = Vec::new();
+        let mut npc_weapons = Vec::new();
         for entity in action_entities {
+            match *world.get::<DebugPanelAction>(entity).unwrap() {
+                DebugPanelAction::Character(id) => player_models.push(id),
+                DebugPanelAction::NpcModel(id) => npc_models.push(id),
+                DebugPanelAction::Weapon(id) => player_weapons.push(id),
+                DebugPanelAction::NpcWeapon(id) => npc_weapons.push(id),
+                _ => {}
+            }
             let has_visible_label = world.get::<Children>(entity).is_some_and(|children| {
                 children.iter().any(|child| {
                     world
@@ -4380,15 +4390,19 @@ mod tests {
                 "debug action {entity:?} must own a label"
             );
         }
+        player_models.sort_unstable();
+        npc_models.sort_unstable();
+        player_weapons.sort_unstable();
+        npc_weapons.sort_unstable();
+        assert_eq!(player_models, (0..20).collect::<Vec<_>>());
+        assert_eq!(npc_models, player_models);
+        assert_eq!(player_weapons, (0..=12).collect::<Vec<_>>());
+        assert_eq!(npc_weapons, player_weapons);
         assert_eq!(DebugPanelState::default().tab, DebugPanelTab::Stats);
     }
 
     #[test]
-    fn short_landscape_debug_panel_uses_full_safe_height_and_compact_fonts() {
-        assert_eq!(
-            debug_panel_geometry(872.0, 393.0, true),
-            (8.0, 54.0, 390.0, 331.0)
-        );
+    fn short_landscape_debug_panel_uses_compact_fonts() {
         assert_eq!(debug_panel_font_size(18.0, true), 14.0);
         assert!((debug_panel_font_size(13.0, true) - 10.66).abs() < 1e-5);
         assert_eq!(debug_panel_font_size(10.0, true), 9.0);

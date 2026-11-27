@@ -1013,7 +1013,7 @@
         "mid_distance": 34.0,
         "max_distance": 112.0,
         "max_visible_tiles": 120,
-        "max_triangles": 106000,
+        "max_triangles": 190000,
         "clump_radius": 0.36,
         "patch_size": 8.9,
         "patch_variation": 1.0,

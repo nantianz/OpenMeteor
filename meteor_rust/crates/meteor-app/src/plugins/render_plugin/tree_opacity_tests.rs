@@ -135,6 +135,80 @@ fn production_sn03_tree_meshes_keep_opaque_bark_and_alpha_tested_canopy() {
 
 #[cfg(feature = "original-assets")]
 #[test]
+fn custom_map_hollow_setting_consumes_tga_alpha_from_runtime_pack() {
+    let config = br#"{"global":{"enabled":true,"enableHollowEffect":true,"hollowThreshold":0.3}}"#;
+    let mut leaf_tga = vec![0; 18];
+    leaf_tga[2] = 2;
+    leaf_tga[12] = 2;
+    leaf_tga[14] = 1;
+    leaf_tga[16] = 32;
+    leaf_tga[17] = 8;
+    leaf_tga.extend([16, 128, 32, 0, 16, 128, 32, 255]);
+    let mut leaf_png = std::io::Cursor::new(Vec::new());
+    image::RgbaImage::from_raw(2, 1, vec![32, 128, 16, 0, 32, 128, 16, 255])
+        .unwrap()
+        .write_to(&mut leaf_png, image::ImageFormat::Png)
+        .unwrap();
+    let mut solid_tga = leaf_tga.clone();
+    solid_tga[21] = 255;
+    register_texture_fixture(
+        "test-sn95-hollow",
+        [
+            ("stage/sn95.render.json", config.to_vec()),
+            ("texture/sn95/hollow-leaves.tga", leaf_tga),
+            ("texture/sn95/hollow-converted.tga", leaf_png.into_inner()),
+            ("texture/sn95/solid-trunk.tga", solid_tga),
+        ],
+    );
+    let model = GmdlMesh {
+        textures: [
+            "Hollow-Leaves.TGA",
+            "hollow-converted.tga",
+            "solid-trunk.tga",
+            "missing.tga",
+        ]
+        .map(|name| meteor_asset::gmdl::GmdlTexture { name: name.into() })
+        .to_vec(),
+        materials: [
+            (0, "DISABLE 1 0"),
+            (1, "DISABLE 1 0"),
+            (2, "DISABLE 1 0"),
+            (0, "ENABLE sa 1-sa"),
+            (3, "DISABLE 1 0"),
+        ]
+        .map(|(tex_index, state)| RawGmdlMaterial {
+            tex_index,
+            blend: "NORMAL".into(),
+            two_side: true,
+            state: state.into(),
+            alpha: 1.0,
+        })
+        .to_vec(),
+        objects: Vec::new(),
+    };
+    let cutoff = legacy_stage_render::StageRenderConfig::load("sn95")
+        .unwrap()
+        .hollow_cutoff()
+        .unwrap();
+    assert_eq!(cutoff, 0.3);
+    assert!(legacy_stage_render::StageRenderConfig::load("sn03").is_none());
+    assert_eq!(
+        hollow_gmdl_materials(
+            &model,
+            cutoff,
+            &mut Assets::default(),
+            &mut HashMap::new(),
+            &mut PakCache::default(),
+            std::path::Path::new("."),
+            "sn95",
+            2,
+            &SceneTexturePack::default(),
+        ),
+        HashSet::from([0, 1])
+    );
+}
+#[cfg(feature = "original-assets")]
+#[test]
 fn runtime_pack_sn03_bark_ignores_obsolete_mask_metadata() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let path = std::fs::read_dir(root.join("asset-tools/packs"))
@@ -156,32 +230,17 @@ fn runtime_pack_sn03_bark_ignores_obsolete_mask_metadata() {
         "runtime BMP entry was converted to PNG"
     );
 
-    let entries = [
-        ("texture/sn97/sn3tr-opacity-regression.JPG", color.clone()),
-        ("texture/sn97/ksn3tr-opacity-regression.bmp", mask),
-        (
-            "texture-masks/sn97.json",
-            br#"{"masks":["sn3tr-opacity-regression"]}"#.to_vec(),
-        ),
-    ];
-    let mut payload = Vec::new();
-    let mut manifest_entries = Vec::new();
-    for (name, data) in entries {
-        manifest_entries.push(serde_json::json!({
-            "name": name, "off": payload.len(), "len": data.len(), "mime": ""
-        }));
-        payload.extend(data);
-    }
-    let manifest = serde_json::to_vec(&serde_json::json!({
-        "formatVersion": 1, "kind": "test", "packId": "test-sn03-tree-opacity",
-        "entries": manifest_entries
-    }))
-    .unwrap();
-    let mut bytes = b"MPK1".to_vec();
-    bytes.extend_from_slice(&(manifest.len() as u32).to_le_bytes());
-    bytes.extend(manifest);
-    bytes.extend(payload);
-    meteor_asset::runtime_assets::register_mpk1(&bytes).unwrap();
+    register_texture_fixture(
+        "test-sn03-tree-opacity",
+        [
+            ("texture/sn97/sn3tr-opacity-regression.JPG", color.clone()),
+            ("texture/sn97/ksn3tr-opacity-regression.bmp", mask),
+            (
+                "texture-masks/sn97.json",
+                br#"{"masks":["sn3tr-opacity-regression"]}"#.to_vec(),
+            ),
+        ],
+    );
     let mut images = Assets::<Image>::default();
     let loaded = load_or_cache_texture(
         &mut images,
@@ -205,4 +264,27 @@ fn runtime_pack_sn03_bark_ignores_obsolete_mask_metadata() {
         data.chunks_exact(4).all(|pixel| pixel[3] == 255),
         "packed bark and all mip levels must stay opaque"
     );
+}
+fn register_texture_fixture(
+    pack_id: &str,
+    entries: impl IntoIterator<Item = (&'static str, Vec<u8>)>,
+) {
+    let mut payload = Vec::new();
+    let mut manifest_entries = Vec::new();
+    for (name, data) in entries {
+        manifest_entries.push(serde_json::json!({
+            "name": name, "off": payload.len(), "len": data.len(), "mime": ""
+        }));
+        payload.extend(data);
+    }
+    let manifest = serde_json::to_vec(&serde_json::json!({
+        "formatVersion": 1, "kind": "test", "packId": pack_id,
+        "entries": manifest_entries
+    }))
+    .unwrap();
+    let mut bytes = b"MPK1".to_vec();
+    bytes.extend_from_slice(&(manifest.len() as u32).to_le_bytes());
+    bytes.extend(manifest);
+    bytes.extend(payload);
+    meteor_asset::runtime_assets::register_mpk1(&bytes).unwrap();
 }

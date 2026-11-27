@@ -116,9 +116,6 @@ pub(crate) struct LauncherShell;
 pub(crate) struct LauncherHeader;
 
 #[derive(Component)]
-pub(crate) struct LauncherVersion;
-
-#[derive(Component)]
 pub(crate) struct LauncherPageHeading;
 
 #[derive(Component)]
@@ -196,7 +193,7 @@ pub(crate) struct RoomMapPickerPage;
 pub(crate) struct LauncherMobileStartButton;
 
 #[derive(Component)]
-pub(crate) struct LauncherScreensViewport;
+pub(crate) struct LauncherOuterScrollArea;
 
 #[derive(Component)]
 pub(crate) struct LauncherScrollArea;
@@ -265,9 +262,6 @@ const NAV_HOVER: Color = theme::SELECTED;
 const STAGE_CARD: Color = LAUNCHER_CARD;
 const STAGE_CARD_ACTIVE: Color = LAUNCHER_CARD_ACTIVE;
 const ACTION_RED: Color = theme::PRIMARY;
-const INK_WASH_TEXT: Color = Color::srgb(0.16, 0.14, 0.12);
-const INK_WASH_MUTED: Color = Color::srgb(0.38, 0.34, 0.29);
-const INK_WASH_RED: Color = Color::srgb(0.58, 0.19, 0.14);
 
 const NETWORK_PAGE_STACK: UiPageStack = UiPageStack(1);
 const NETWORK_BROWSER_PAGE: UiPageId = UiPageId(0);
@@ -279,6 +273,15 @@ const ROOM_ADVANCED_MODAL: UiModalId = UiModalId(4);
 #[derive(Component)]
 struct RoomAdvancedDialog;
 
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Component)]
+pub(super) struct RoomPhysicsSlider;
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Component)]
+pub(super) struct RoomPhysicsLabel;
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Component)]
+pub(super) struct RoomPhysicsSection;
 #[derive(Resource, Clone)]
 pub struct UiFont(pub Handle<Font>);
 
@@ -410,13 +413,15 @@ fn spawn_shell(
                             ..default()
                         })
                         .with_children(|left| {
-                            left.spawn(launcher_text("流星再世", 9.0, theme::MUTED, font));
-                            left.spawn((theme::title_node(true), LauncherCreateLayout::Brand));
+                            left.spawn((
+                                launcher_text("流星再世", 24.0, theme::TEXT, font),
+                                Node {
+                                    flex_shrink: 0.0,
+                                    ..default()
+                                },
+                                LauncherCreateLayout::Brand,
+                            ));
                         });
-                    header.spawn((
-                        launcher_text("刀光一瞬 · 江湖再会", 9.0, theme::MUTED, font),
-                        LauncherVersion,
-                    ));
                 });
 
             shell
@@ -431,7 +436,7 @@ fn spawn_shell(
                         ..default()
                     },
                     ScrollPosition::default(),
-                    LauncherScreensViewport,
+                    LauncherOuterScrollArea,
                     LauncherScrollArea,
                     Interaction::default(),
                 ))
@@ -470,6 +475,10 @@ fn spawn_shell(
                     font,
                 ),
                 TextLayout::justify(Justify::Center),
+                bevy::ui::widget::TextShadow {
+                    offset: Vec2::new(1.0, 1.0),
+                    color: theme::SCRIM,
+                },
                 Node {
                     margin: UiRect::top(px(10)),
                     flex_shrink: 0.0,
@@ -504,60 +513,34 @@ fn spawn_main_screen(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, act
             visibility,
         ))
         .with_children(|screen| {
-            screen
-                .spawn((
-                    Node {
-                        width: Val::Percent(100.0),
-                        min_height: Val::Px(48.0),
-                        display: Display::None,
-                        flex_direction: FlexDirection::Row,
-                        justify_content: JustifyContent::SpaceBetween,
-                        align_items: AlignItems::Center,
-                        padding: UiRect::horizontal(Val::Px(4.0)),
-                        ..default()
+            for (size, compact) in [(60.0, false), (34.0, true)] {
+                let mut heading = screen.spawn(Node {
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::FlexStart,
+                    row_gap: px(if compact { 6 } else { 12 }),
+                    flex_shrink: 0.0,
+                    display: if compact {
+                        Display::None
+                    } else {
+                        Display::Flex
                     },
-                    LauncherMobileHero,
-                ))
-                .with_children(|hero| {
-                    hero.spawn(Node {
-                        flex_direction: FlexDirection::Column,
-                        row_gap: Val::Px(1.0),
-                        ..default()
-                    })
-                    .with_children(|brand| {
-                        brand.spawn(launcher_text("流星再世", 30.0, INK_WASH_TEXT, font));
-                        brand.spawn(launcher_text(
-                            "METEOR 2003 RESTORATION",
-                            9.0,
-                            INK_WASH_MUTED,
-                            font,
-                        ));
-                    });
+                    ..default()
                 });
-
-            screen
-                .spawn((
-                    Node {
-                        flex_direction: FlexDirection::Column,
-                        max_width: Val::Px(400.0),
-                        ..default()
-                    },
-                    LauncherMainCopy,
-                ))
-                .with_children(|copy| {
-                    copy.spawn(launcher_text("流星再世", 52.0, INK_WASH_TEXT, font));
-                    copy.spawn(launcher_text(
-                        "人 在 江 湖    ·    身 不 由 己",
-                        13.0,
-                        INK_WASH_MUTED,
-                        font,
-                    ));
+                if compact {
+                    heading.insert(LauncherMobileHero);
+                } else {
+                    heading.insert(LauncherMainCopy);
+                }
+                heading.with_children(|heading| {
+                    heading.spawn(launcher_text("流星再世", size, theme::TEXT, font));
+                    heading.spawn(theme::heading_rule(px(if compact { 142 } else { 300 })));
                 });
+            }
 
             screen
                 .spawn((Node {
                     flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(6.0),
+                    row_gap: Val::Px(4.0),
                     width: Val::Percent(100.0),
                     max_width: Val::Px(320.0),
                     align_self: AlignSelf::FlexStart,
@@ -568,37 +551,27 @@ fn spawn_main_screen(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, act
                         nav,
                         font,
                         "单人闯关",
-                        true,
                         MenuNavigateButton(MenuScreen::Stages),
                     );
                     spawn_hero_nav_button(
                         nav,
                         font,
                         "网络对战",
-                        false,
                         MenuNavigateButton(MenuScreen::Network),
                     );
                     spawn_hero_nav_button(
                         nav,
                         font,
                         "MRC 回放",
-                        false,
                         MenuNavigateButton(MenuScreen::Replay),
                     );
                     spawn_hero_nav_button(
                         nav,
                         font,
                         "设置",
-                        false,
                         MenuNavigateButton(MenuScreen::Settings),
                     );
-                    spawn_hero_nav_button(
-                        nav,
-                        font,
-                        "退出游戏",
-                        false,
-                        super::ui_plugin::ExitGameButton,
-                    );
+                    spawn_hero_nav_button(nav, font, "退出游戏", super::ui_plugin::ExitGameButton);
                 });
         });
 }
@@ -815,6 +788,7 @@ fn spawn_network_screen(
                 ..default()
             }),
             LauncherScreenMarker(MenuScreen::Network),
+            LauncherOuterScrollArea,
             visibility,
         ))
         .with_children(|screen| {
@@ -1175,7 +1149,9 @@ fn spawn_network_screen(
                                     flex_shrink: 0.0,
                                     align_items: AlignItems::Center,
                                     justify_content: JustifyContent::SpaceBetween,
+                                    flex_wrap: FlexWrap::Wrap,
                                     column_gap: Val::Px(12.0),
+                                    row_gap: Val::Px(6.0),
                                     padding: UiRect::top(Val::Px(8.0)),
                                     border: UiRect::top(Val::Px(1.0)),
                                     ..default()
@@ -1421,6 +1397,20 @@ fn spawn_room_map_picker(
                 });
         });
     parent
+        .spawn(scrollable_y(Node {
+            width: Val::Percent(100.0),
+            max_height: Val::Px(112.0),
+            flex_direction: FlexDirection::Column,
+            flex_shrink: 0.0,
+            ..default()
+        }))
+        .with_children(|description| {
+            description.spawn((
+                launcher_text("", 13.0, theme::TEXT, font),
+                super::stage_presentation::StageDescription::default(),
+            ));
+        });
+    parent
         .spawn((
             scrollable_y(Node {
                 width: Val::Percent(100.0),
@@ -1593,6 +1583,7 @@ pub(crate) fn available_room_stages(
                     true
                 }
             })
+            .map(with_stage_display_name)
             .collect();
     }
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
@@ -1600,16 +1591,23 @@ pub(crate) fn available_room_stages(
         return ids
             .iter()
             .map(|id| meteor_scene::stage_registry::get_stage(id, &custom.stages))
+            .map(with_stage_display_name)
             .collect();
     }
     #[cfg(test)]
     {
-        candidates.collect()
+        candidates.map(with_stage_display_name).collect()
     }
     #[cfg(not(test))]
     {
         Vec::new()
     }
+}
+fn with_stage_display_name(
+    mut stage: meteor_scene::stage_registry::StageInfo,
+) -> meteor_scene::stage_registry::StageInfo {
+    stage.name = super::stage_presentation::display_name(&stage.id, &stage.name);
+    stage
 }
 
 fn stage_has_required_entries(manifest: &serde_json::Value, id: &str) -> bool {
@@ -1666,6 +1664,8 @@ fn spawn_room_advanced_dialog(
                             );
                         });
                     }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    spawn_room_physics_slider(settings, font, request);
                     settings.spawn(stock_form_section_bundle()).with_children(|timing| {
                         for (field, label, options) in [
                             (StockConfigField::GameNum, "局数", &[(1, "1 局"), (3, "3 局"), (5, "5 局"), (10, "10 局"), (999, "999 局"), (9_999, "无限局")][..]),
@@ -1710,6 +1710,86 @@ fn spawn_room_advanced_dialog(
                 });
             });
     });
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_room_physics_slider(
+    parent: &mut ChildSpawnerCommands,
+    font: &Handle<Font>,
+    request: &LaunchRequest,
+) {
+    use super::ui_components::slider::{spawn_slider, UiSlider};
+    parent
+        .spawn((
+            Node {
+                display: if request.public_battle {
+                    Display::None
+                } else {
+                    Display::Flex
+                },
+                width: Val::Percent(100.0),
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(12.0),
+                ..default()
+            },
+            RoomPhysicsSection,
+        ))
+        .with_children(|row| {
+            row.spawn(launcher_text("局域网判定频率", 13.0, PAPER, font));
+            spawn_slider(
+                row,
+                UiSlider {
+                    min: meteor_core::PHYSICS_HZ_MIN as f32,
+                    max: meteor_core::PHYSICS_HZ_MAX as f32,
+                    step: 1.0,
+                    value: request.stock_physics_hz as f32,
+                },
+                RoomPhysicsSlider,
+            );
+            row.spawn((
+                launcher_text(
+                    &format!("{} Hz", request.stock_physics_hz),
+                    13.0,
+                    theme::ACCENT_TEXT,
+                    font,
+                ),
+                Node {
+                    width: Val::Px(54.0),
+                    flex_shrink: 0.0,
+                    ..default()
+                },
+                RoomPhysicsLabel,
+            ));
+        });
+}
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn room_physics_slider_changes(
+    mut changes: MessageReader<super::ui_components::slider::UiSliderChanged>,
+    sliders: Query<(), With<RoomPhysicsSlider>>,
+    mut labels: Query<&mut Text, With<RoomPhysicsLabel>>,
+    mut sections: Query<&mut Node, With<RoomPhysicsSection>>,
+    mut request: ResMut<LaunchRequest>,
+) {
+    for change in changes.read() {
+        if !request.public_battle && sliders.contains(change.entity) {
+            request.stock_physics_hz = (change.value.round() as u32)
+                .clamp(meteor_core::PHYSICS_HZ_MIN, meteor_core::PHYSICS_HZ_MAX);
+        }
+    }
+    if request.is_changed() {
+        for mut node in &mut sections {
+            node.display = if request.public_battle {
+                Display::None
+            } else {
+                Display::Flex
+            };
+        }
+        let value = format!("{} Hz", request.stock_physics_hz);
+        for mut text in &mut labels {
+            if text.0 != value {
+                text.0.clone_from(&value);
+            }
+        }
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1799,15 +1879,6 @@ fn spawn_stock_loadout_dialog(
                                             ..default()
                                         },
                                         ZIndex(0),
-                                    ));
-                                    stage.spawn((
-                                        launcher_text(
-                                            "实时持武姿态预览",
-                                            11.0,
-                                            theme::METAL,
-                                            font,
-                                        ),
-                                        ZIndex(2),
                                     ));
                                 });
 
@@ -2150,11 +2221,12 @@ pub(crate) fn spawn_full_settings_page(
         .spawn((
             Node {
                 width: Val::Percent(100.0),
+                max_width: Val::Px(1056.0),
                 flex_grow: 1.0,
                 min_height: Val::Px(0.0),
                 flex_direction: FlexDirection::Column,
                 padding: UiRect::new(Val::Px(28.0), Val::Px(28.0), Val::Px(14.0), Val::Px(10.0)),
-                border: UiRect::vertical(Val::Px(1.0)),
+                border: UiRect::all(Val::Px(1.0)),
                 ..default()
             },
             BackgroundGradient(vec![LinearGradient::new(
@@ -2166,7 +2238,7 @@ pub(crate) fn spawn_full_settings_page(
                 ],
             )
             .into()]),
-            BorderColor::all(theme::LINE.with_alpha(0.16)),
+            BorderColor::all(theme::LINE),
             LauncherSettingsPanel,
         ))
         .with_children(|panel| {
@@ -2201,7 +2273,7 @@ pub(crate) fn spawn_full_settings_page(
                     ..default()
                 })
                 .with_children(|form| {
-                    page::spawn_web_settings_form(form, font, settings, keymap, in_game);
+                    page::spawn_web_settings_form(form, font, settings, keymap);
                 });
             page::spawn_settings_footer(panel, font, |actions| {
                 spawn_settings_secondary_button(actions, font, "恢复默认设置");
@@ -2500,14 +2572,11 @@ fn spawn_replay_screen(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, a
                 launcher_text("", 13.0, theme::MUTED, font),
                 super::mrc_file_picker::MrcFileStatus,
             ));
-            spawn_nav_button(
+            spawn_hero_nav_button(
                 screen,
                 font,
-                "M",
                 "选择 MRC 文件",
-                "选择录像文件并播放",
-                false,
-                MenuMrcButton,
+                (LauncherNavButton, MenuMrcButton),
             );
         });
 }
@@ -2516,7 +2585,6 @@ fn spawn_hero_nav_button<M: Bundle>(
     parent: &mut ChildSpawnerCommands,
     font: &Handle<Font>,
     label: &str,
-    _primary: bool,
     marker: M,
 ) {
     parent
@@ -2543,49 +2611,33 @@ fn spawn_hero_nav_button<M: Bundle>(
             marker,
         ))
         .with_children(|button| {
-            button.spawn(launcher_text(label, 20.0, INK_WASH_TEXT, font));
+            button.spawn(launcher_text(label, 20.0, theme::TEXT, font));
             button.spawn((
                 Node {
                     position_type: PositionType::Absolute,
                     left: Val::Px(0.0),
-                    top: Val::Percent(18.0),
+                    top: Val::Px(0.0),
                     width: Val::Px(2.0),
-                    height: Val::Percent(64.0),
+                    height: Val::Percent(100.0),
                     ..default()
                 },
                 BackgroundColor(Color::NONE),
                 HeroNavAccent,
             ));
-            for (y, angle) in [
-                (-3.0, std::f32::consts::FRAC_PI_4),
-                (3.0, -std::f32::consts::FRAC_PI_4),
-            ] {
-                button.spawn((
-                    Node {
-                        position_type: PositionType::Absolute,
-                        right: Val::Px(28.0),
-                        top: Val::Percent(50.0),
-                        margin: UiRect::top(Val::Px(y)),
-                        width: Val::Px(8.0),
-                        height: Val::Px(1.2),
-                        ..default()
-                    },
-                    UiTransform::from_rotation(Rot2::radians(angle)),
-                    BackgroundColor(INK_WASH_TEXT),
-                ));
-            }
         });
 }
 
 pub(crate) fn hero_nav_feedback(
-    mut buttons: Query<(
-        &HeroNavButton,
-        &Interaction,
-        &Children,
-        &mut BackgroundGradient,
-        &mut BorderColor,
-        &mut Node,
-    )>,
+    mut buttons: Query<
+        (
+            &Interaction,
+            &Children,
+            &mut BackgroundGradient,
+            &mut BorderColor,
+            &mut Node,
+        ),
+        With<HeroNavButton>,
+    >,
     mut accents: Query<&mut BackgroundColor, With<HeroNavAccent>>,
     mut layouts: Query<&mut Node, (With<HeroMenuLayout>, Without<HeroNavButton>)>,
     windows: Query<&Window>,
@@ -2596,60 +2648,41 @@ pub(crate) fn hero_nav_feedback(
         responsive_ui_layout(w.width(), w.height(), cfg!(target_os = "android")).mobile
     });
     for mut node in &mut layouts {
+        node.justify_content = if mobile {
+            JustifyContent::Center
+        } else {
+            JustifyContent::FlexStart
+        };
+        node.padding.top = if mobile { px(8) } else { Val::Vh(7.0) };
         node.padding.left = if mobile {
-            Val::Px(12.0 / unit)
+            Val::Px(2.0 / unit)
         } else {
-            Val::Percent(17.0)
+            Val::Percent(1.5)
         };
-        node.row_gap = Val::Px(if mobile { 16.0 / unit } else { 48.0 });
+        node.row_gap = Val::Px(if mobile { 12.0 / unit } else { 32.0 });
     }
-    for (_button, state, children, mut gradient, mut border, mut node) in &mut buttons {
+    for (state, children, mut gradient, mut border, mut node) in &mut buttons {
         let selected = *state != Interaction::None;
-        *gradient = if selected {
-            BackgroundGradient(vec![LinearGradient::new(
-                LinearGradient::TO_RIGHT,
-                vec![
-                    ColorStop::new(
-                        INK_WASH_RED.with_alpha(if *state == Interaction::Pressed {
-                            0.42
-                        } else {
-                            0.28
-                        }),
-                        Val::Percent(0.0),
-                    ),
-                    ColorStop::new(Color::NONE, Val::Percent(100.0)),
-                ],
-            )
-            .into()])
-        } else {
-            BackgroundGradient::default()
-        };
+        let pressed = *state == Interaction::Pressed;
+        *gradient = theme::hero_gradient(selected, pressed);
         border.set_all(if selected {
-            INK_WASH_RED.with_alpha(0.65)
+            theme::ACCENT.with_alpha(0.72)
         } else {
-            INK_WASH_MUTED.with_alpha(0.25)
+            theme::LINE
         });
         node.height = Val::Px(if mobile { 48.0 / unit } else { 48.0 });
         node.min_height = node.height;
         node.max_height = node.height;
         for child in children.iter() {
             if let Ok(mut accent) = accents.get_mut(child) {
-                accent.0 = if selected { INK_WASH_RED } else { Color::NONE };
+                accent.0 = if selected {
+                    theme::CRIMSON_BRIGHT
+                } else {
+                    Color::NONE
+                };
             }
         }
     }
-}
-
-fn spawn_nav_button<M: Bundle>(
-    parent: &mut ChildSpawnerCommands,
-    font: &Handle<Font>,
-    _index: &str,
-    title: &str,
-    _subtitle: &str,
-    primary: bool,
-    marker: M,
-) {
-    spawn_hero_nav_button(parent, font, title, primary, (LauncherNavButton, marker));
 }
 
 fn spawn_back_button(parent: &mut ChildSpawnerCommands, font: &Handle<Font>) {
@@ -2788,7 +2821,7 @@ pub(crate) fn character_name(id: u8) -> &'static str {
     CHARACTER_NAMES.get(id as usize).copied().unwrap_or("侠客")
 }
 
-const CHARACTER_NAMES: [&str; 20] = [
+pub(crate) const CHARACTER_NAMES: [&str; 20] = [
     "孟星魂",
     "冷燕",
     "铁胡子",
@@ -2929,6 +2962,7 @@ fn stage_name_for_tab(
             .find(|stage| stage.id == stage_id && super::campaign_ui::mission(stage_id).is_some())
             .map(|stage| stage.name.clone()),
     }
+    .map(|name| super::stage_presentation::display_name(stage_id, &name))
 }
 
 fn first_stage_for_tab(
@@ -2966,8 +3000,8 @@ fn select_stage_for_tab(
         .or_else(|| first_stage_for_tab(tab, custom));
 
     if let Some((stage_id, stage_name)) = selected {
+        request.stage_name = super::stage_presentation::display_name(&stage_id, &stage_name);
         request.stage_id = stage_id;
-        request.stage_name = stage_name;
         memory.remember(tab, &request.stage_id);
     }
 }
@@ -3004,7 +3038,7 @@ pub(crate) fn refresh_stage_tab_visuals(
     }
 }
 
-pub fn sync_launcher_screen_visibility(
+pub(crate) fn sync_launcher_screen_visibility(
     screen: Res<MenuScreen>,
     tab: Res<StageListTab>,
     mut sets: ParamSet<(
@@ -3115,6 +3149,30 @@ pub(crate) fn reset_menu_screen(
     select_stage_for_tab(StageListTab::Official, &custom, &mut request, &mut memory);
 }
 
+pub(crate) fn sync_create_room_outer_scroll(
+    screen: Res<MenuScreen>,
+    pages: Query<&Node, With<RoomMapPickerPage>>,
+    mut outer: Query<
+        (&mut Node, &mut ScrollPosition),
+        (With<LauncherOuterScrollArea>, Without<RoomMapPickerPage>),
+    >,
+) {
+    let fixed =
+        *screen == MenuScreen::Network && pages.iter().any(|page| page.display != Display::None);
+    let overflow = if fixed {
+        Overflow::clip()
+    } else {
+        Overflow::scroll_y()
+    };
+    for (mut node, mut scroll) in &mut outer {
+        if node.overflow != overflow {
+            node.overflow = overflow;
+        }
+        if fixed && scroll.0 != Vec2::ZERO {
+            scroll.0 = Vec2::ZERO;
+        }
+    }
+}
 pub(crate) fn launcher_ui_scroll(
     mut mouse_wheel_events: MessageReader<MouseWheel>,
     windows: Query<&Window>,
@@ -3160,7 +3218,7 @@ pub(crate) fn launcher_ui_scroll(
         for (entity, node, computed, transform, inherited, clip, stack, scroll, select_area) in
             &mut areas
         {
-            if select_open && select_area.is_none() {
+            if node.overflow.y != OverflowAxis::Scroll || (select_open && select_area.is_none()) {
                 continue;
             }
             let extent =
@@ -3288,14 +3346,16 @@ pub(crate) fn launcher_touch_scroll(
                     .max();
                 let mut best: Option<(Entity, u32, f32)> = None;
                 for (entity, node, computed, transform, inherited, clip, stack, _) in &mut areas {
-                    if !ui_node_contains(
-                        node,
-                        computed,
-                        transform,
-                        inherited,
-                        clip,
-                        physical_position,
-                    ) {
+                    if node.overflow.y != OverflowAxis::Scroll
+                        || !ui_node_contains(
+                            node,
+                            computed,
+                            transform,
+                            inherited,
+                            clip,
+                            physical_position,
+                        )
+                    {
                         continue;
                     }
                     let size = computed.size();
@@ -3428,7 +3488,6 @@ pub(crate) fn adapt_launcher_layout(
                 Option<&LauncherStageAsideStartButton>,
                 Option<&LauncherShell>,
                 Option<&LauncherHeader>,
-                Option<&LauncherVersion>,
                 Option<&LauncherPageHeading>,
                 Option<&LauncherMobileHero>,
                 Option<&NetworkBrowserHeading>,
@@ -3442,7 +3501,6 @@ pub(crate) fn adapt_launcher_layout(
                 With<LauncherStageAsideStartButton>,
                 With<LauncherShell>,
                 With<LauncherHeader>,
-                With<LauncherVersion>,
                 With<LauncherPageHeading>,
                 With<LauncherMobileHero>,
             )>,
@@ -3491,7 +3549,10 @@ pub(crate) fn adapt_launcher_layout(
     let unit = ui_scale.as_ref().map_or(1.0, |scale| scale.0.max(0.05));
     let viewport_w = window.width() / unit;
     let viewport_h = window.height() / unit;
-    let full_bleed_screen = matches!(*screen, MenuScreen::Stages | MenuScreen::Network);
+    let full_bleed_screen = matches!(
+        *screen,
+        MenuScreen::Main | MenuScreen::Stages | MenuScreen::Network
+    );
     let shell_w = if full_bleed_screen {
         viewport_w
     } else {
@@ -3508,9 +3569,9 @@ pub(crate) fn adapt_launcher_layout(
     for (mut node, part) in &mut sets.p7() {
         match part {
             LauncherCreateLayout::Page => {
-                node.height = Val::Percent(100.0);
                 node.min_height = Val::Px(0.0);
-                node.position_type = PositionType::Absolute;
+                node.flex_grow = 1.0;
+                node.flex_basis = Val::Px(0.0);
                 node.overflow = Overflow::clip();
                 node.row_gap = Val::Px(10.0);
             }
@@ -3578,7 +3639,6 @@ pub(crate) fn adapt_launcher_layout(
         aside_start,
         shell,
         header,
-        version,
         heading,
         mobile_hero,
         network_heading,
@@ -3647,8 +3707,6 @@ pub(crate) fn adapt_launcher_layout(
         if shell.is_some() {
             node.max_width = if full_bleed_screen {
                 Val::Auto
-            } else if *screen == MenuScreen::Main {
-                Val::Px(1240.0)
             } else {
                 Val::Px(1360.0)
             };
@@ -3667,24 +3725,20 @@ pub(crate) fn adapt_launcher_layout(
             );
         }
         if header.is_some() {
-            node.display =
-                if layout.mobile || matches!(*screen, MenuScreen::Main | MenuScreen::Stages) {
-                    Display::None
-                } else {
-                    Display::Flex
-                };
+            node.display = if layout.mobile
+                || matches!(
+                    *screen,
+                    MenuScreen::Main | MenuScreen::Stages | MenuScreen::Settings
+                ) {
+                Display::None
+            } else {
+                Display::Flex
+            };
             node.padding.bottom = Val::Px(if *screen == MenuScreen::Network {
                 8.0
             } else {
                 18.0
             });
-        }
-        if version.is_some() {
-            node.display = if layout.mobile {
-                Display::None
-            } else {
-                Display::Flex
-            };
         }
         if heading.is_some() {
             node.height = Val::Px(if layout.mobile { 46.0 } else { 72.0 });
@@ -4004,8 +4058,15 @@ mod font_tests {
                         if app.world().get::<HeroNavAccent>(child).is_some() {
                             assert_eq!(
                                 app.world().get::<BackgroundColor>(child).unwrap().0,
-                                if active { INK_WASH_RED } else { Color::NONE }
+                                if active {
+                                    theme::CRIMSON_BRIGHT
+                                } else {
+                                    Color::NONE
+                                }
                             );
+                        }
+                        if app.world().get::<Text>(child).is_some() {
+                            assert_eq!(app.world().get::<TextColor>(child).unwrap().0, theme::TEXT);
                         }
                     }
                 }
@@ -4136,6 +4197,40 @@ mod font_tests {
         let expected = cfg!(not(target_arch = "wasm32"))
             && !super::super::network_plugin::default_web_address().is_empty();
         assert_eq!(public_switches, usize::from(expected));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use crate::plugins::ui_components::slider::{UiSlider, UiSliderChanged};
+            use bevy::ecs::system::RunSystemOnce;
+            let (slider, bounds) = world
+                .query_filtered::<(Entity, &UiSlider), With<RoomPhysicsSlider>>()
+                .single(world)
+                .unwrap();
+            assert_eq!(
+                (bounds.min, bounds.max, bounds.step, bounds.value),
+                (30.0, 200.0, 1.0, 120.0)
+            );
+            let section = world.get::<ChildOf>(slider).unwrap().parent();
+            assert_eq!(world.get::<Node>(section).unwrap().display, Display::None);
+            app.add_message::<UiSliderChanged>();
+            let world = app.world_mut();
+            world.resource_mut::<LaunchRequest>().public_battle = false;
+            world.write_message(UiSliderChanged {
+                entity: slider,
+                value: 173.0,
+                finished: true,
+            });
+            world.run_system_once(room_physics_slider_changes).unwrap();
+            assert_eq!(world.resource::<LaunchRequest>().stock_physics_hz, 173);
+            assert_eq!(world.get::<Node>(section).unwrap().display, Display::Flex);
+            assert_eq!(
+                world
+                    .query_filtered::<&Text, With<RoomPhysicsLabel>>()
+                    .single(world)
+                    .unwrap()
+                    .0,
+                "173 Hz"
+            );
+        }
     }
 
     #[test]
@@ -4867,7 +4962,10 @@ mod font_tests {
         let area = app
             .world_mut()
             .spawn((
-                Node::default(),
+                Node {
+                    overflow: Overflow::scroll_y(),
+                    ..default()
+                },
                 ComputedNode {
                     size: Vec2::new(200.0, 160.0),
                     ..default()

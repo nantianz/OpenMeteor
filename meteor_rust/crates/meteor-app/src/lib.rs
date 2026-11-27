@@ -164,7 +164,7 @@ pub fn build_app() -> App {
     #[cfg(target_os = "android")]
     android_assets::bootstrap().expect("required startup MPK");
 
-    let (settings, keymap) = app_state::load_settings();
+    let (mut settings, keymap) = app_state::load_settings();
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     let graphics_settings = graphics_settings::renderer_settings(&settings);
     let mut app = App::new();
@@ -176,8 +176,11 @@ pub fn build_app() -> App {
     ))]
     let graphics_settings =
         neural_rendering::install(&mut app, graphics_settings, settings.dlss5_neural_rendering);
-    let graphics_packs = plugins::graphics_pack::GraphicsPacks::load(&settings);
-    app.insert_resource(graphics_packs.listing().clone());
+    let graphics_packs = plugins::graphics_pack::GraphicsPacks::load();
+    if let Some(water) = graphics_packs.water() {
+        settings.water_enhance = water.enabled();
+        settings.water_live_reflections = water.live_reflections();
+    }
 
     app.insert_resource(app_state::StartupSettings(settings.clone()));
     app.insert_resource(settings).insert_resource(keymap);
@@ -229,6 +232,7 @@ pub fn build_app() -> App {
     #[cfg(target_os = "android")]
     app.add_systems(Startup, log_android_skinning_buffer_mode);
     app.add_plugins(MeteorPlugin);
+    plugins::install_render_pacing(&mut app);
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     plugins::stage_material::water::startup::install(&mut app);
     app.add_systems(Update, graphics_settings::update_current_renderer);

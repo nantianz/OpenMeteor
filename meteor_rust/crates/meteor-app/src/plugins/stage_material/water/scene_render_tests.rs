@@ -2,7 +2,7 @@ use super::render_tests::capture;
 use super::*;
 use crate::app_state::{AppState, Settings};
 use crate::plugins::stage_material::{
-    scene_normals, CameraOcclusionParams, FrameUniforms, GmdlMaterialParams, GmdlMaterialPlugin,
+    CameraOcclusionParams, FrameUniforms, GmdlMaterialParams, GmdlMaterialPlugin,
 };
 use crate::plugins::{pak_textures, render_plugin};
 use bevy::render::{
@@ -97,7 +97,6 @@ fn render_original_liquid(stage: &str, eye: Vec3, aim: Vec3, live_reflection: bo
     let des = meteor_asset::des::parse_stage_description(&des_text);
     let mut paks = pak_textures::PakCache::default();
     let mut texture_cache = HashMap::new();
-    let mut normal_cache = HashMap::new();
     let mut water_cache = WaterCache::default();
     let mut water_count = 0;
     for object in &model.objects {
@@ -163,17 +162,6 @@ fn render_original_liquid(stage: &str, eye: Vec3, aim: Vec3, live_reflection: bo
             );
             let (mut mesh, transform) =
                 render_plugin::build_scene_mesh(object, &indices, [0.0; 3], description);
-            if let Some(normal) = scene_normals::load_scene_normal(
-                stage,
-                name,
-                &mut app.world_mut().resource_mut::<Assets<Image>>(),
-                &mut normal_cache,
-                0,
-            ) {
-                if mesh.generate_tangents().is_ok() {
-                    material.normal_texture = Some(normal);
-                }
-            }
             if is_water {
                 let anim = &description.unwrap().texture_animation;
                 material.uv_scroll = Vec4::new(anim.u, anim.v, 0.0, 0.0);
@@ -618,7 +606,7 @@ fn bridge_benchmark(app: &mut App, camera: Entity, target: Handle<Image>) {
             let mut assets = app.world_mut().resource_mut::<Assets<GmdlMaterial>>();
             let (_, mut water) = assets.iter_mut().find(|(_, m)| m.water.x == 1.0).unwrap();
             let vertex_alpha = water.water.z;
-            configure_optics(&mut water, &settings, vertex_alpha);
+            configure_optics(&mut water, &settings, config::profiles(), vertex_alpha);
         }
         app.world_mut().resource_mut::<Settings>().water_enhance = true;
         for tick in 0..48 {

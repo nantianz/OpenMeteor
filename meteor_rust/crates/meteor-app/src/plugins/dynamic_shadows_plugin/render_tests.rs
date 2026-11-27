@@ -78,6 +78,7 @@ fn headless_gmdl_casts_shadows_and_lighting_changes_pixels() {
     )
     .insert_state(AppState::Playing)
     .insert_resource(Settings {
+        scene_shadows: false,
         dynamic_shadows: true,
         ..default()
     })

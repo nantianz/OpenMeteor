@@ -37,7 +37,7 @@
         "mid_distance": 18.0,
         "max_distance": 110.0,
         "max_visible_tiles": 512,
-        "max_triangles": 180000,
+        "max_triangles": 320000,
         "clump_radius": 0.56,
         "patch_size": 4.8,
         "ground_cover": 1.0,

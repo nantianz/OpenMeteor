@@ -133,6 +133,7 @@ fn native_stage_handoff_preserves_the_script_panel_and_music_channel() {
         waypoints: default(),
         escort: default(),
         graphics: None,
+        prebuilt_geometry: None,
     };
     let pool = bevy::tasks::AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
     world.insert_resource(PendingStageLoad(pool.spawn(async move { stage })));

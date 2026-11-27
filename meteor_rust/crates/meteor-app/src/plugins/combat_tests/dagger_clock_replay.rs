@@ -139,7 +139,6 @@ fn check_dagger_captured_clock(substeps: bool) {
             if substeps {
                 crate::plugins::install_frame_clock(&mut h.app);
                 h.app.add_plugins(crate::plugins::CharacterContactPlugin);
-                h.app.world_mut().resource_mut::<Settings>().target_fps = 120;
                 if stock {
                     let mut net = h.app.world_mut().resource_mut::<NetState>();
                     net.stock_npc_ready.clear();

@@ -229,14 +229,7 @@ version = "0.3"
 
 [dependencies.wgpu]
 version = "29.0.3"
-features = [
-    "wgsl",
-    "dx12",
-    "metal",
-    "vulkan",
-    "naga-ir",
-    "fragile-send-sync-non-atomic-wasm",
-]
+features = ["wgsl", "naga-ir"]
 default-features = false
 
 [dependencies.wgpu-types]
@@ -252,6 +245,22 @@ version = "0.2"
 [dev-dependencies.wgpu]
 version = "29.0.3"
 features = ["noop"]
+default-features = false
+[target.'cfg(windows)'.dependencies.wgpu]
+version = "29.0.3"
+features = ["dx12"]
+default-features = false
+[target.'cfg(any(windows, target_os = "linux", target_os = "android", target_os = "freebsd"))'.dependencies.wgpu]
+version = "29.0.3"
+features = ["vulkan"]
+default-features = false
+[target.'cfg(target_vendor = "apple")'.dependencies.wgpu]
+version = "29.0.3"
+features = ["metal"]
+default-features = false
+[target.'cfg(target_arch = "wasm32")'.dependencies.wgpu]
+version = "29.0.3"
+features = ["fragile-send-sync-non-atomic-wasm"]
 default-features = false
 
 [target.'cfg(all(target_arch = "wasm32", target_feature = "atomics"))'.dependencies.send_wrapper]

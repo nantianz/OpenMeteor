@@ -103,9 +103,16 @@ fn production_npc_planar_accelerates_and_brakes_with_full_controller_substeps() 
         let (mut app, npc) = npc_planar_app();
         let dt = 1.0 / fps as f32;
         npc_planar_step(&mut app, dt);
+        let first_tick_update = if fps > 120 {
+            assert_eq!(app.world().get::<MotionState>(npc).unwrap().velocity.z, 0.0);
+            npc_planar_step(&mut app, dt);
+            2
+        } else {
+            1
+        };
         let first = app.world().get::<MotionState>(npc).unwrap().velocity.z;
         assert!(first > 0.0 && first < 5.0, "fps={fps}, first={first}");
-        for _ in 1..fps * 2 {
+        for _ in first_tick_update..fps * 2 {
             npc_planar_step(&mut app, dt);
         }
         let steady = app.world().get::<MotionState>(npc).unwrap().velocity.z;

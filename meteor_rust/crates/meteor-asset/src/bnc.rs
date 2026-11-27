@@ -45,10 +45,10 @@ pub fn parse_bones(text: &str) -> BoneData {
             };
 
             let parent = extract_field(body, "parent").filter(|s| *s != "NULL");
-            let pivot = extract_vec3(body, "pivot")
+            let pivot = extract_components::<3>(body, "pivot")
                 .map(|v| Vec3::new(v[0], v[1], v[2]))
                 .unwrap_or(Vec3::ZERO);
-            let quat = extract_vec4(body, "quaternion")
+            let quat = extract_components::<4>(body, "quaternion")
                 .map(|q| Quat {
                     x: q[1],
                     y: q[2],
@@ -108,40 +108,21 @@ fn extract_field<'a>(body: &'a str, key: &str) -> Option<&'a str> {
     None
 }
 
-fn extract_vec3(body: &str, key: &str) -> Option<[f32; 3]> {
-    let vals: Vec<f32> = extract_numbers(body, key);
-    if vals.len() >= 3 {
-        Some([vals[0], vals[1], vals[2]])
-    } else {
-        None
+fn extract_components<const N: usize>(body: &str, key: &str) -> Option<[f32; N]> {
+    let mut tokens = body
+        .split(|c: char| c.is_whitespace() || matches!(c, ',' | '(' | ')' | '[' | ']'))
+        .filter(|token| !token.is_empty());
+    tokens.find(|token| *token == key)?;
+    let mut components = [0.0; N];
+    for component in &mut components {
+        let value: f32 = tokens.next()?.parse().ok()?;
+        if !value.is_finite() {
+            return None;
+        }
+        *component = value;
     }
-}
 
-fn extract_vec4(body: &str, key: &str) -> Option<[f32; 4]> {
-    let vals: Vec<f32> = extract_numbers(body, key);
-    if vals.len() >= 4 {
-        Some([vals[0], vals[1], vals[2], vals[3]])
-    } else {
-        None
-    }
-}
-
-fn extract_numbers(body: &str, key: &str) -> Vec<f32> {
-    if let Some(pos) = body.find(key) {
-        let rest = &body[pos + key.len()..];
-        return rest
-            .split(|c: char| !c.is_ascii_digit() && c != '.' && c != '-')
-            .filter_map(|s| {
-                let s = s.trim();
-                if s.is_empty() {
-                    None
-                } else {
-                    s.parse().ok()
-                }
-            })
-            .collect();
-    }
-    vec![]
+    Some(components)
 }
 
 fn resolve_alias<'a>(
@@ -195,5 +176,24 @@ mod tests {
         assert!((b.quat.y - 0.0).abs() < 0.01);
         assert!((b.quat.z - 0.707).abs() < 0.01);
         assert!((b.quat.w - 0.707).abs() < 0.01);
+    }
+    #[test]
+    fn parses_exponents_in_bind_pose() {
+        let data = parse_bones(
+            "bone bau_Spine {
+                parent bad_Pelvis
+                pivot 0.869238 0.780284 -9.50824e-007
+                quaternion -1.0 2.08047e-006 6.85453e-007 -0.000398159
+                children 3
+}
+            Dummey d_wpnL { parent NULL pivot 9.53674e-007 0.0 0.0 quaternion 1.0 0.0 0.0 0.0 }",
+        );
+        let spine = &data.bones[0];
+        assert_eq!(spine.pivot, Vec3::new(0.869238, 0.780284, -9.50824e-7));
+        assert_eq!(spine.quat.x, 2.08047e-6);
+        assert_eq!(spine.quat.y, 6.85453e-7);
+        assert_eq!(spine.quat.z, -0.000398159);
+        assert_eq!(spine.quat.w, -1.0);
+        assert_eq!(data.dummies[0].pivot, Vec3::new(9.53674e-7, 0.0, 0.0));
     }
 }

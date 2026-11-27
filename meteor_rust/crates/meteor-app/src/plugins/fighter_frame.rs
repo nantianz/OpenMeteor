@@ -145,6 +145,76 @@ fn run_fighters(world: &mut World) {
         |time| time.elapsed_secs_f64(),
     );
 
+    let clock = world.resource::<super::FrameClock>();
+    if let Some(steps) = clock.fixed_steps {
+        let remainder = clock.pending_wall;
+        let input_after_ticks = remainder > 1e-6 && has_fresh_local_input(world, now);
+        for index in 0..steps.count {
+            let remaining_steps = steps.count - index - 1;
+            let remaining_wall = remainder + f64::from(remaining_steps) * steps.wall_dt;
+            run_timed_controller_step(
+                world,
+                steps.sim_dt,
+                steps.wall_dt as f32,
+                super::ControllerSubstep {
+                    now_seconds: now - remaining_wall,
+                    first: index == 0,
+                    last: remaining_steps == 0 && !input_after_ticks,
+                    remaining_wall_seconds: remaining_wall,
+                },
+            );
+        }
+        if input_after_ticks {
+            run_timed_controller_step(
+                world,
+                0.0,
+                0.0,
+                super::ControllerSubstep {
+                    now_seconds: now,
+                    first: false,
+                    last: true,
+                    remaining_wall_seconds: 0.0,
+                },
+            );
+        }
+    } else {
+        run_variable_steps(world, now, total_dt, wall_step, measured_wall_step);
+    }
+    let mut clock = world.resource_mut::<super::FrameClock>();
+    clock.sim_dt = total_dt;
+    clock.wall_dt = wall_dt;
+    clock.wall_step = wall_step;
+    clock.substep = None;
+}
+fn has_fresh_local_input(world: &World, now: f64) -> bool {
+    use super::input_plugin::LocalCombatInput;
+    let Some(input) = world
+        .get_resource::<LocalCombatInput>()
+        .filter(|input| input.captured_real_at_seconds == Some(now))
+    else {
+        return false;
+    };
+    !input.edges.is_empty()
+        || world
+            .get_resource::<ButtonInput<KeyCode>>()
+            .is_some_and(|keys| {
+                keys.get_just_pressed().next().is_some()
+                    || keys.get_just_released().next().is_some()
+            })
+        || world
+            .get_resource::<ButtonInput<MouseButton>>()
+            .is_some_and(|buttons| {
+                buttons.get_just_pressed().next().is_some()
+                    || buttons.get_just_released().next().is_some()
+            })
+}
+fn run_variable_steps(
+    world: &mut World,
+    now: f64,
+    total_dt: f32,
+    wall_step: f32,
+    measured_wall_step: f64,
+) {
     let max_step = f64::from(1.0_f32 / 120.0);
     let total = f64::from(total_dt);
     let rounding_tolerance = total * f64::from(f32::EPSILON) * 2.0;
@@ -163,25 +233,6 @@ fn run_fighters(world: &mut World) {
         .map(|clock| clock.replay_steps.clone())
         .filter(|steps| !steps.is_empty())
         .map(|steps| steps.into_iter());
-    let mut recorded_targets = replay_steps.as_ref().and_then(|steps| {
-        world
-            .get_resource::<super::replay_plugin::MrcPlayback>()
-            .filter(|playback| {
-                world.contains_resource::<super::replay_plugin::RecordedSubsteps>()
-                    && playback.active
-                    && !playback.paused
-            })
-            .and_then(|playback| {
-                let start = playback.frame_cursor.checked_sub(steps.len())?;
-                Some(
-                    playback
-                        .frame_times
-                        .get(start..playback.frame_cursor)?
-                        .to_vec()
-                        .into_iter(),
-                )
-            })
-    });
     while consumed < total {
         let remaining = total - consumed;
 
@@ -206,37 +257,37 @@ fn run_fighters(world: &mut World) {
         } else {
             now - wall_span * (1.0 - consumed / total)
         };
-        {
-            let mut clock = world.resource_mut::<super::FrameClock>();
-            clock.sim_dt = step as f32;
-            clock.wall_dt = step_wall as f32;
-            clock.wall_step = step_wall as f32;
-            clock.substep = Some(super::ControllerSubstep {
+        run_timed_controller_step(
+            world,
+            step as f32,
+            step_wall as f32,
+            super::ControllerSubstep {
                 now_seconds: step_now,
                 first,
                 last: consumed == total,
                 remaining_wall_seconds: (now - step_now).max(0.0),
-            });
-        }
-        if let Some(recorded_time) = recorded_targets.as_mut().and_then(Iterator::next) {
-            world
-                .resource_mut::<super::replay_plugin::MrcPlayback>()
-                .frame_target = Some(recorded_time);
-            world.run_schedule(super::replay_plugin::MrcSubstep);
-        }
-        run_controller_step(world);
-        if recorded_targets.is_some()
-            && world.resource::<super::replay_plugin::MrcPlayback>().paused
-        {
-            break;
-        }
+            },
+        );
         first = false;
     }
-    let mut clock = world.resource_mut::<super::FrameClock>();
-    clock.sim_dt = total_dt;
-    clock.wall_dt = wall_dt;
-    clock.wall_step = wall_step;
-    clock.substep = None;
+}
+fn run_timed_controller_step(
+    world: &mut World,
+    dt: f32,
+    wall_dt: f32,
+    step: super::ControllerSubstep,
+) {
+    {
+        let mut clock = world.resource_mut::<super::FrameClock>();
+        clock.sim_dt = dt;
+        clock.wall_dt = wall_dt;
+        clock.wall_step = wall_dt;
+        clock.substep = Some(step);
+        if dt > 0.0 {
+            clock.completed_controller_steps += 1;
+        }
+    }
+    run_controller_step(world);
 }
 
 fn local_attack_step_predates_input(world: &mut World, entity: Entity) -> bool {
@@ -246,6 +297,7 @@ fn local_attack_step_predates_input(world: &mut World, entity: Entity) -> bool {
     }
     let Some(step) = world
         .get_resource::<super::FrameClock>()
+        .filter(|clock| clock.sim_dt > 0.0)
         .and_then(|clock| clock.substep)
     else {
         return false;
@@ -326,6 +378,9 @@ mod tests {
                 .init_resource::<Time<bevy::time::Real>>()
                 .init_resource::<crate::app_state::Settings>()
                 .init_resource::<StepSamples>();
+            app.world_mut()
+                .resource_mut::<crate::app_state::Settings>()
+                .variable_physics = true;
             super::super::install_frame_clock(&mut app);
             app.add_systems(FighterStepStart, |mut samples: ResMut<StepSamples>| {
                 samples.starts += 1
@@ -411,6 +466,9 @@ mod tests {
             .init_resource::<Time<bevy::time::Real>>()
             .init_resource::<crate::app_state::Settings>()
             .init_resource::<StepSamples>();
+        app.world_mut()
+            .resource_mut::<crate::app_state::Settings>()
+            .variable_physics = true;
         super::super::install_frame_clock(&mut app);
         app.add_systems(
             FighterUpdate,

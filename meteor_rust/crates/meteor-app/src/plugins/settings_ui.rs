@@ -12,6 +12,7 @@ use crate::plugins::mobile_controls_plugin::{
     mobile_layout_editor_available, OpenMobileLayoutEditorButton,
 };
 use bevy::prelude::*;
+use bevy::text::LineBreak;
 use bevy::ui::FocusPolicy;
 
 pub(crate) const GOLD: Color = theme::METAL;
@@ -24,6 +25,8 @@ const CONTENT_MAX_W: f32 = 960.0;
 #[derive(Component)]
 pub(crate) struct SettingsKeyRow;
 
+#[derive(Component)]
+pub(crate) struct SettingsKeyValue(pub KeyField);
 #[derive(Component)]
 pub(crate) struct SettingsStepButton;
 
@@ -48,18 +51,6 @@ pub(crate) struct SettingsCycle {
     field: SettingsSelectField,
     step: i8,
 }
-
-#[derive(Component, Clone, PartialEq, Eq, Debug)]
-pub(crate) enum PackToggle {
-    Master,
-    Pack(String),
-}
-
-#[derive(Component, Clone)]
-pub(crate) struct SettingsPackValue(PackToggle);
-
-#[derive(Component)]
-pub(crate) struct SettingsPackList;
 
 #[derive(Component)]
 pub(crate) struct SettingsHintText;
@@ -176,8 +167,6 @@ impl Plugin for SettingsUiPlugin {
             Update,
             (
                 settings_cycle_buttons,
-                settings_pack_buttons,
-                fill_pack_lists,
                 settings_row_feedback,
                 settings_nav_feedback,
                 settings_hints,
@@ -194,7 +183,6 @@ pub fn spawn_web_settings_form(
     font: &Handle<Font>,
     settings: &Settings,
     keymap: &Keymap,
-    in_game: bool,
 ) {
     let mut form = parent.spawn((
         Node {
@@ -239,10 +227,16 @@ pub fn spawn_web_settings_form(
                         align_items: AlignItems::Center,
                         justify_content: JustifyContent::Center,
                         padding: UiRect::horizontal(Val::Px(12.0)),
+                        border: UiRect {
+                            left: px(2),
+                            bottom: px(1),
+                            ..default()
+                        },
                         ..default()
                     },
                     BackgroundColor(Color::NONE),
-                    nav_gradient(selected, false),
+                    settings_tab_border(selected),
+                    theme::hero_gradient(selected, false),
                     LauncherStyledButton,
                     SettingsCategoryButton {
                         root,
@@ -313,7 +307,7 @@ pub fn spawn_web_settings_form(
                             ))
                             .with_children(|page| match category {
                                 SettingsCategory::Graphics => {
-                                    spawn_graphics_page(page, font, settings, in_game)
+                                    spawn_graphics_page(page, font, settings)
                                 }
                                 SettingsCategory::Enhance => {
                                     spawn_enhance_page(page, font, settings)
@@ -361,21 +355,16 @@ pub fn spawn_web_settings_form(
     });
 }
 
-fn nav_gradient(selected: bool, hovered: bool) -> BackgroundGradient {
-    let peak = match (selected, hovered) {
-        (true, _) => GOLD.with_alpha(0.20),
-        (false, true) => GOLD.with_alpha(0.08),
-        (false, false) => return BackgroundGradient::default(),
-    };
-    BackgroundGradient(vec![LinearGradient::new(
-        LinearGradient::TO_RIGHT,
-        vec![
-            ColorStop::new(Color::NONE, Val::Percent(0.0)),
-            ColorStop::new(peak, Val::Percent(50.0)),
-            ColorStop::new(Color::NONE, Val::Percent(100.0)),
-        ],
-    )
-    .into()])
+fn settings_tab_border(active: bool) -> BorderColor {
+    BorderColor {
+        left: if active {
+            theme::CRIMSON_BRIGHT
+        } else {
+            Color::NONE
+        },
+        bottom: theme::LINE,
+        ..BorderColor::all(Color::NONE)
+    }
 }
 
 fn row_gradient(active: bool) -> BackgroundGradient {
@@ -434,14 +423,19 @@ fn settings_nav_feedback(
             &Interaction,
             &Children,
             &mut BackgroundGradient,
+            &mut BorderColor,
         ),
         Or<(Changed<Interaction>, Changed<SettingsCategoryButton>)>,
     >,
     mut labels: Query<(&mut TextColor, &mut TextFont), With<SettingsCategoryLabel>>,
 ) {
-    for (tab, interaction, children, mut gradient) in &mut tabs {
+    for (tab, interaction, children, mut gradient, mut border) in &mut tabs {
         let hovered = *interaction != Interaction::None;
-        *gradient = nav_gradient(tab.selected, hovered);
+        *gradient = theme::hero_gradient(
+            tab.selected || hovered,
+            *interaction == Interaction::Pressed,
+        );
+        *border = settings_tab_border(tab.selected || hovered);
         for child in children {
             if let Ok((mut color, mut font)) = labels.get_mut(*child) {
                 color.0 = if tab.selected {
@@ -492,28 +486,24 @@ fn settings_hints(
     }
 }
 
-pub(crate) fn restart_pending(
+fn restart_pending(
     settings: &Settings,
     startup: Option<&crate::app_state::StartupSettings>,
-    catalog: Option<&crate::plugins::graphics_pack::GraphicsPackCatalog>,
 ) -> bool {
-    catalog.is_some_and(|catalog| catalog.restart_pending(settings))
-        || startup.is_some_and(|startup| {
-            let start = &startup.0;
-            start.graphics_adapter != settings.graphics_adapter
-                || start.graphics_backend != settings.graphics_backend
-                || start.water_live_reflections != settings.water_live_reflections
-                || start.dlss5_neural_rendering != settings.dlss5_neural_rendering
-        })
+    startup.is_some_and(|startup| {
+        let start = &startup.0;
+        start.graphics_adapter != settings.graphics_adapter
+            || start.graphics_backend != settings.graphics_backend
+            || start.dlss5_neural_rendering != settings.dlss5_neural_rendering
+    })
 }
 
 fn settings_restart_notice(
     settings: Res<Settings>,
     startup: Option<Res<crate::app_state::StartupSettings>>,
-    catalog: Option<Res<crate::plugins::graphics_pack::GraphicsPackCatalog>>,
     mut notices: Query<&mut Node, With<SettingsRestartNotice>>,
 ) {
-    let pending = restart_pending(&settings, startup.as_deref(), catalog.as_deref());
+    let pending = restart_pending(&settings, startup.as_deref());
     let display = if pending {
         Display::Flex
     } else {
@@ -562,12 +552,7 @@ fn settings_scrollbars(
     }
 }
 
-fn spawn_graphics_page(
-    page: &mut ChildSpawnerCommands,
-    font: &Handle<Font>,
-    settings: &Settings,
-    in_game: bool,
-) {
+fn spawn_graphics_page(page: &mut ChildSpawnerCommands, font: &Handle<Font>, settings: &Settings) {
     spawn_section(page, font, "画质与性能", None);
     spawn_select_row(
         page,
@@ -590,10 +575,27 @@ fn spawn_graphics_page(
     spawn_select_row(
         page,
         font,
-        "帧率上限",
+        "渲染上限",
         SettingsSelectField::TargetFps,
         target_fps_label(settings.target_fps),
         "限制最高帧率以降低功耗与发热。",
+        false,
+    );
+    spawn_range_row(
+        page,
+        font,
+        "判定频率",
+        SettingsRangeField::PhysicsHz,
+        settings.physics_hz as f32,
+        "调整单机固定判定频率。局域网由房主设置。",
+    );
+    spawn_check_row(
+        page,
+        font,
+        "可变判定步长",
+        SettingsBoolField::VariablePhysics,
+        settings.variable_physics,
+        "开启后，单机判定使用实际经过的时间。",
         false,
     );
     spawn_check_row(
@@ -608,10 +610,37 @@ fn spawn_graphics_page(
     spawn_check_row(
         page,
         font,
+        "场景阴影",
+        SettingsBoolField::SceneShadows,
+        settings.scene_shadows,
+        "显示地形、建筑等固定物件的投影。",
+        false,
+    );
+    spawn_check_row(
+        page,
+        font,
         "动态阴影",
         SettingsBoolField::DynamicShadows,
         settings.dynamic_shadows,
-        "人物与场景投射实时阴影。",
+        "显示角色和活动道具的实时投影。",
+        false,
+    );
+    spawn_select_row(
+        page,
+        font,
+        "阴影等级",
+        SettingsSelectField::ShadowQuality,
+        &select_label(settings, SettingsSelectField::ShadowQuality),
+        "",
+        false,
+    );
+    spawn_check_row(
+        page,
+        font,
+        "抗锯齿（4× MSAA）",
+        SettingsBoolField::AntiAliasing,
+        settings.anti_aliasing,
+        "",
         false,
     );
     #[cfg(all(
@@ -652,46 +681,15 @@ fn spawn_graphics_page(
     spawn_check_row(
         page,
         font,
-        "墙面与地面凹凸",
+        "高清场景凹凸",
         SettingsBoolField::SceneNormalMaps,
         settings.scene_normal_maps,
-        "为墙面与地面加入法线细节。",
+        "",
         false,
     );
-    spawn_check_row(
-        page,
-        font,
-        "水面增强",
-        SettingsBoolField::WaterEnhance,
-        settings.water_enhance,
-        "水面反光、折射，以及人物走过时的涟漪。",
-        false,
-    );
-    if !in_game && !cfg!(any(target_arch = "wasm32", target_os = "android")) {
-        spawn_check_row(
-            page,
-            font,
-            "水面实时倒影",
-            SettingsBoolField::WaterLiveReflections,
-            settings.water_live_reflections,
-            "水面实时映出人物和场景，帧耗较高。",
-            true,
-        );
-    }
 }
 
 fn spawn_enhance_page(page: &mut ChildSpawnerCommands, font: &Handle<Font>, settings: &Settings) {
-    spawn_section(page, font, "图形增强包", Some("重启后生效"));
-    page.spawn((
-        Node {
-            width: Val::Percent(100.0),
-            flex_direction: FlexDirection::Column,
-            flex_shrink: 0.0,
-            ..default()
-        },
-        SettingsPackList,
-    ));
-
     spawn_section(page, font, "场景与特效", None);
     if !cfg!(any(target_arch = "wasm32", target_os = "android")) {
         spawn_check_row(
@@ -775,26 +773,6 @@ fn spawn_enhance_page(page: &mut ChildSpawnerCommands, font: &Handle<Font>, sett
         SettingsBoolField::HitSway,
         settings.hit_sway,
         "受击时身体轻微晃动，不影响判定。",
-        false,
-    );
-
-    spawn_section(page, font, "人物", None);
-    spawn_check_row(
-        page,
-        font,
-        "使用新人物模型",
-        SettingsBoolField::NewCharacterModels,
-        settings.new_character_models,
-        "使用重制的人物外观，战斗骨骼不变。",
-        false,
-    );
-    spawn_check_row(
-        page,
-        font,
-        "角色衣物摆动",
-        SettingsBoolField::CharacterMotion,
-        settings.character_motion,
-        "衣物与头发随动作和风摆动。",
         false,
     );
 }
@@ -1315,29 +1293,6 @@ fn spawn_check_row(
         });
 }
 
-fn spawn_pack_row(
-    parent: &mut ChildSpawnerCommands,
-    font: &Handle<Font>,
-    label: &str,
-    toggle: PackToggle,
-    checked: bool,
-    hint: &str,
-) {
-    parent
-        .spawn((row_bundle(hint), toggle.clone()))
-        .with_children(|row| {
-            spawn_row_label(row, font, label, false);
-            row.spawn(value_column()).with_children(|value| {
-                spawn_arrow_glyph(value, false);
-                value.spawn((
-                    value_text(font, bool_label(checked)),
-                    SettingsPackValue(toggle),
-                ));
-                spawn_arrow_glyph(value, true);
-            });
-        });
-}
-
 #[derive(Component, Clone, Copy)]
 pub(crate) struct SettingsBoolValue(SettingsBoolField);
 
@@ -1419,7 +1374,11 @@ fn spawn_range_row(
                     ),
                     TextLayout::justify(Justify::Right),
                     Node {
-                        width: Val::Px(40.0),
+                        width: Val::Px(if field == SettingsRangeField::PhysicsHz {
+                            60.0
+                        } else {
+                            40.0
+                        }),
                         flex_shrink: 0.0,
                         ..default()
                     },
@@ -1455,165 +1414,28 @@ fn spawn_keybinding_row(
             },
         ));
         row.spawn((
-            launcher_text(&binding, 13.0, theme::ACCENT_TEXT, font),
-            TextLayout::justify(Justify::Center),
             Node {
                 min_width: Val::Px(64.0),
                 padding: UiRect::axes(Val::Px(10.0), Val::Px(3.0)),
                 border: UiRect::all(Val::Px(1.0)),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
                 flex_shrink: 0.0,
                 ..default()
             },
             BackgroundColor(theme::METAL.with_alpha(0.10)),
             BorderColor::all(GOLD.with_alpha(0.35)),
             FocusPolicy::Pass,
-        ));
-    });
-}
-
-fn pack_stage_label(stages: &[String]) -> String {
-    if stages.iter().any(|stage| stage == "*") {
-        return "适用全部关卡".into();
-    }
-    let official = meteor_scene::stage_registry::official_stages();
-    let names: Vec<_> = stages
-        .iter()
-        .map(|stage| {
-            official
-                .iter()
-                .find(|info| info.id.eq_ignore_ascii_case(stage))
-                .map_or_else(|| stage.clone(), |info| info.name.clone())
-        })
-        .collect();
-    format!("适用：{}", names.join("、"))
-}
-
-fn fill_pack_lists(
-    mut commands: Commands,
-    lists: Query<Entity, Added<SettingsPackList>>,
-    catalog: Option<Res<crate::plugins::graphics_pack::GraphicsPackCatalog>>,
-    settings: Res<Settings>,
-    font: Option<Res<crate::plugins::launcher_ui::UiFont>>,
-) {
-    if lists.is_empty() {
-        return;
-    }
-    let font = font.map(|font| font.0.clone()).unwrap_or_default();
-    let empty = crate::plugins::graphics_pack::GraphicsPackCatalog::default();
-    let catalog = catalog.as_deref().unwrap_or(&empty);
-    for list in &lists {
-        commands.entity(list).with_children(|list| {
-            if catalog.index_authoritative {
-                list.spawn(launcher_text(
-                    "当前由 METEOR_GRAPHICS_CONFIG 指定的配置控制，此处修改不生效。",
-                    13.0,
-                    theme::MUTED,
-                    &font,
-                ));
-            }
-            spawn_pack_row(
-                list,
-                &font,
-                "启用图形增强包",
-                PackToggle::Master,
-                catalog.master_wanted(&settings),
-                "总开关。关闭后使用原版画面，下面的单项设置保留。",
-            );
-            if catalog.entries.is_empty() {
-                list.spawn((
-                    launcher_text("未找到图形增强包。", 13.0, theme::MUTED, &font),
-                    Node {
-                        margin: UiRect::new(Val::Px(16.0), Val::ZERO, Val::Px(8.0), Val::ZERO),
-                        ..default()
-                    },
-                ));
-            }
-            for entry in &catalog.entries {
-                let mut hint = entry.description.clone();
-                if !entry.stages.is_empty() {
-                    if !hint.is_empty() {
-                        hint.push('　');
-                    }
-                    hint.push_str(&pack_stage_label(&entry.stages));
-                }
-                if entry.error.is_some() {
-                    hint = "配置文件有误，已跳过。".into();
-                }
-                spawn_pack_row(
-                    list,
-                    &font,
-                    &entry.name,
-                    PackToggle::Pack(entry.id.clone()),
-                    catalog.pack_wanted(&settings, &entry.id),
-                    &hint,
-                );
-            }
+        ))
+        .with_children(|badge| {
+            badge.spawn((
+                launcher_text(&binding, 13.0, theme::ACCENT_TEXT, font),
+                TextLayout::linebreak(LineBreak::NoWrap),
+                FocusPolicy::Pass,
+                SettingsKeyValue(field),
+            ));
         });
-    }
-}
-
-fn settings_pack_buttons(
-    rows: Query<(&Interaction, &PackToggle), (Changed<Interaction>, With<Button>)>,
-    added: Query<(), Added<PackToggle>>,
-    catalog: Option<Res<crate::plugins::graphics_pack::GraphicsPackCatalog>>,
-    keymap: Res<Keymap>,
-    mut settings: ResMut<Settings>,
-    mut values: Query<(&SettingsPackValue, &mut Text)>,
-    labels: Query<(&PackToggle, &Children)>,
-    mut colors: Query<&mut TextColor>,
-    children: Query<&Children>,
-) {
-    let Some(catalog) = catalog else {
-        return;
-    };
-
-    if !catalog.index_authoritative {
-        for (interaction, toggle) in &rows {
-            if *interaction != Interaction::Pressed {
-                continue;
-            }
-            match toggle {
-                PackToggle::Master => {
-                    settings.graphics_packs = Some(!catalog.master_wanted(&settings));
-                }
-                PackToggle::Pack(id) => {
-                    let next = !catalog.pack_wanted(&settings, id);
-                    settings.graphics_pack_choices.insert(id.clone(), next);
-                }
-            }
-            let _ = save_settings(&settings, &keymap);
-        }
-    }
-    if !settings.is_changed() && added.is_empty() {
-        return;
-    }
-    let master = catalog.master_wanted(&settings);
-    for (value, mut text) in &mut values {
-        let on = match &value.0 {
-            PackToggle::Master => master,
-            PackToggle::Pack(id) => catalog.pack_wanted(&settings, id),
-        };
-        let label = bool_label(on);
-        if text.0 != label {
-            text.0 = label.into();
-        }
-    }
-
-    for (toggle, row_children) in &labels {
-        if *toggle == PackToggle::Master {
-            continue;
-        }
-        let alpha = if master { 1.0 } else { 0.45 };
-        let mut stack: Vec<Entity> = row_children.iter().collect();
-        while let Some(entity) = stack.pop() {
-            if let Ok(mut color) = colors.get_mut(entity) {
-                color.0 = color.0.with_alpha(alpha);
-            }
-            if let Ok(grand) = children.get(entity) {
-                stack.extend(grand.iter());
-            }
-        }
-    }
+    });
 }
 
 fn settings_cycle_buttons(
@@ -1660,6 +1482,7 @@ fn write_select(settings: &mut Settings, field: SettingsSelectField, value: f32)
         }
         SettingsSelectField::RenderScale => settings.render_scale = value,
         SettingsSelectField::TextureQuality => settings.texture_quality = value as u8,
+        SettingsSelectField::ShadowQuality => settings.shadow_quality = value as u8,
         SettingsSelectField::TargetFps => settings.target_fps = value as u32,
         SettingsSelectField::UiScale => settings.ui_scale = value,
         SettingsSelectField::TouchControls => settings.touch_controls = value as i8,
@@ -1875,19 +1698,10 @@ pub(crate) fn adapt_settings_layout(
 }
 
 pub(crate) fn spawn_settings_title(parent: &mut ChildSpawnerCommands, font: &Handle<Font>) {
-    parent
-        .spawn(Node {
-            flex_direction: FlexDirection::Column,
-            row_gap: Val::Px(2.0),
-            ..default()
-        })
-        .with_children(|titles| {
-            titles.spawn(launcher_text("SETTINGS", 11.0, GOLD, font));
-            titles.spawn((
-                launcher_text("设置", 30.0, theme::TEXT, font),
-                SettingsTitle,
-            ));
-        });
+    parent.spawn((
+        launcher_text("设置", 30.0, theme::TEXT, font),
+        SettingsTitle,
+    ));
 }
 
 pub(crate) fn settings_header_bundle() -> impl Bundle {
@@ -1907,24 +1721,14 @@ pub(crate) fn settings_header_bundle() -> impl Bundle {
 }
 
 pub(crate) fn spawn_settings_rule(parent: &mut ChildSpawnerCommands) {
-    parent.spawn((
-        Node {
-            width: Val::Percent(100.0),
-            height: Val::Px(1.0),
-            flex_shrink: 0.0,
-            margin: UiRect::bottom(Val::Px(10.0)),
+    parent
+        .spawn(Node {
+            margin: UiRect::bottom(px(10)),
             ..default()
-        },
-        BackgroundGradient(vec![LinearGradient::new(
-            LinearGradient::TO_RIGHT,
-            vec![
-                ColorStop::new(GOLD.with_alpha(0.55), Val::Percent(0.0)),
-                ColorStop::new(GOLD.with_alpha(0.18), Val::Percent(45.0)),
-                ColorStop::new(Color::NONE, Val::Percent(100.0)),
-            ],
-        )
-        .into()]),
-    ));
+        })
+        .with_children(|rule| {
+            rule.spawn(theme::heading_rule(px(260)));
+        });
 }
 
 pub(crate) fn spawn_settings_footer(
@@ -2077,6 +1881,7 @@ fn format_range_value(field: SettingsRangeField, value: f32) -> String {
         }
         SettingsRangeField::MouseSpeed => format!("{}", value.round() as i32),
         SettingsRangeField::CameraFov => format!("{:.0}°", value.round()),
+        SettingsRangeField::PhysicsHz => format!("{value:.0} Hz"),
         _ => format!("{}", value.round() as i32),
     }
 }
@@ -2092,6 +1897,11 @@ fn range_bounds(field: SettingsRangeField) -> (f32, f32, f32) {
             (Settings::MOUSE_SPEED_MIN, Settings::MOUSE_SPEED_MAX, 1.0)
         }
         SettingsRangeField::CameraFov => (Settings::CAMERA_FOV_MIN, Settings::CAMERA_FOV_MAX, 1.0),
+        SettingsRangeField::PhysicsHz => (
+            Settings::PHYSICS_HZ_MIN as f32,
+            Settings::PHYSICS_HZ_MAX as f32,
+            1.0,
+        ),
     }
 }
 
@@ -2105,6 +1915,7 @@ fn read_range(settings: &Settings, field: SettingsRangeField) -> f32 {
         SettingsRangeField::AudioVolume => settings.audio_volume,
         SettingsRangeField::MouseSpeed => settings.mouse_speed,
         SettingsRangeField::CameraFov => settings.camera_fov_degrees(),
+        SettingsRangeField::PhysicsHz => settings.physics_hz as f32,
     }
 }
 
@@ -2120,6 +1931,10 @@ fn write_range(settings: &mut Settings, field: SettingsRangeField, value: f32) {
         SettingsRangeField::AudioVolume => settings.audio_volume = v,
         SettingsRangeField::MouseSpeed => settings.mouse_speed = v,
         SettingsRangeField::CameraFov => settings.camera_fov = v,
+        SettingsRangeField::PhysicsHz => {
+            settings.physics_hz = v.round() as u32;
+            settings.variable_physics = false;
+        }
     }
 }
 
@@ -2131,17 +1946,15 @@ fn read_bool(settings: &Settings, field: SettingsBoolField) -> bool {
         SettingsBoolField::HitStop => settings.hit_stop,
         SettingsBoolField::HitShake => settings.hit_shake,
         SettingsBoolField::HitSway => settings.hit_sway,
-        SettingsBoolField::CharacterMotion => settings.character_motion,
-        SettingsBoolField::NewCharacterModels => settings.new_character_models,
         SettingsBoolField::VolumetricFog => settings.volumetric_fog,
         SettingsBoolField::SkyEnhance => settings.sky_enhance,
         SettingsBoolField::GrassEnhance => settings.grass_enhance,
         SettingsBoolField::EffectEnhance => settings.effect_enhance,
+        SettingsBoolField::SceneShadows => settings.scene_shadows,
         SettingsBoolField::DynamicShadows => settings.dynamic_shadows,
+        SettingsBoolField::AntiAliasing => settings.anti_aliasing,
         SettingsBoolField::SceneNormalMaps => settings.scene_normal_maps,
         SettingsBoolField::HdScene => settings.hd_scene,
-        SettingsBoolField::WaterEnhance => settings.water_enhance,
-        SettingsBoolField::WaterLiveReflections => settings.water_live_reflections,
         SettingsBoolField::EnvironmentLighting => settings.environment_lighting,
         SettingsBoolField::Dlss5NeuralRendering => settings.dlss5_neural_rendering,
         SettingsBoolField::MusicEnabled => settings.music_enabled,
@@ -2151,6 +1964,7 @@ fn read_bool(settings: &Settings, field: SettingsBoolField) -> bool {
         SettingsBoolField::ShowNames => settings.show_names,
         SettingsBoolField::ReverseMouse => settings.reverse_mouse,
         SettingsBoolField::DragMouse => settings.drag_mouse,
+        SettingsBoolField::VariablePhysics => settings.variable_physics,
     }
 }
 
@@ -2162,17 +1976,15 @@ fn write_bool(settings: &mut Settings, field: SettingsBoolField, value: bool) {
         SettingsBoolField::HitStop => settings.hit_stop = value,
         SettingsBoolField::HitShake => settings.hit_shake = value,
         SettingsBoolField::HitSway => settings.hit_sway = value,
-        SettingsBoolField::CharacterMotion => settings.character_motion = value,
-        SettingsBoolField::NewCharacterModels => settings.new_character_models = value,
         SettingsBoolField::VolumetricFog => settings.volumetric_fog = value,
         SettingsBoolField::SkyEnhance => settings.sky_enhance = value,
         SettingsBoolField::GrassEnhance => settings.grass_enhance = value,
         SettingsBoolField::EffectEnhance => settings.effect_enhance = value,
+        SettingsBoolField::SceneShadows => settings.scene_shadows = value,
         SettingsBoolField::DynamicShadows => settings.dynamic_shadows = value,
+        SettingsBoolField::AntiAliasing => settings.anti_aliasing = value,
         SettingsBoolField::SceneNormalMaps => settings.scene_normal_maps = value,
         SettingsBoolField::HdScene => settings.hd_scene = value,
-        SettingsBoolField::WaterEnhance => settings.water_enhance = value,
-        SettingsBoolField::WaterLiveReflections => settings.water_live_reflections = value,
         SettingsBoolField::EnvironmentLighting => settings.environment_lighting = value,
         SettingsBoolField::Dlss5NeuralRendering => settings.dlss5_neural_rendering = value,
         SettingsBoolField::MusicEnabled => settings.music_enabled = value,
@@ -2182,6 +1994,7 @@ fn write_bool(settings: &mut Settings, field: SettingsBoolField, value: bool) {
         SettingsBoolField::ShowNames => settings.show_names = value,
         SettingsBoolField::ReverseMouse => settings.reverse_mouse = value,
         SettingsBoolField::DragMouse => settings.drag_mouse = value,
+        SettingsBoolField::VariablePhysics => settings.variable_physics = value,
     }
 }
 
@@ -2205,6 +2018,9 @@ fn select_options(field: SettingsSelectField) -> Vec<(f32, String)> {
         }
         SettingsSelectField::RenderScale => &[(0.65, "流畅"), (0.8, "平衡"), (1.0, "清晰")],
         SettingsSelectField::TextureQuality => &[(2.0, "低"), (1.0, "中"), (0.0, "好")],
+        SettingsSelectField::ShadowQuality => {
+            &[(0.0, "默认"), (1.0, "低"), (2.0, "中"), (3.0, "高")]
+        }
         SettingsSelectField::TargetFps => &[
             (0.0, "不限"),
             (30.0, "30 FPS"),
@@ -2234,6 +2050,7 @@ fn read_select(settings: &Settings, field: SettingsSelectField) -> f32 {
         }
         SettingsSelectField::RenderScale => settings.render_scale,
         SettingsSelectField::TextureQuality => settings.texture_quality as f32,
+        SettingsSelectField::ShadowQuality => settings.shadow_quality as f32,
         SettingsSelectField::TargetFps => settings.target_fps as f32,
         SettingsSelectField::UiScale => settings.ui_scale,
         SettingsSelectField::TouchControls => settings.touch_controls as f32,
@@ -2315,7 +2132,8 @@ pub(crate) fn spawn_settings_select_dialogs(
         ),
         (SettingsSelectField::RenderScale, "画面解析"),
         (SettingsSelectField::TextureQuality, "贴图品质"),
-        (SettingsSelectField::TargetFps, "帧率上限"),
+        (SettingsSelectField::ShadowQuality, "阴影等级"),
+        (SettingsSelectField::TargetFps, "渲染上限"),
         (SettingsSelectField::UiScale, "界面缩放"),
         (SettingsSelectField::TouchControls, "触屏控件"),
     ] {
@@ -2402,6 +2220,10 @@ fn select_label(settings: &Settings, field: SettingsSelectField) -> String {
         SettingsSelectField::TextureQuality => {
             texture_quality_label(settings.texture_quality).into()
         }
+        SettingsSelectField::ShadowQuality => select_options(field)
+            .into_iter()
+            .find(|(value, _)| *value == settings.shadow_quality as f32)
+            .map_or_else(|| "默认".into(), |(_, label)| label),
         SettingsSelectField::TargetFps => target_fps_label(settings.target_fps).into(),
         SettingsSelectField::UiScale => ui_scale_label(settings.ui_scale).into(),
         SettingsSelectField::TouchControls => touch_controls_label(settings.touch_controls).into(),
@@ -2588,16 +2410,16 @@ mod tests {
         let (other, disabled) = option_status(
             &settings,
             SettingsSelectField::TargetFps,
-            60.0,
-            "60 FPS",
+            30.0,
+            "30 FPS",
             None,
         );
-        assert_eq!(other, "60 FPS\n可选");
+        assert_eq!(other, "30 FPS\n可选");
         assert!(!disabled);
     }
 
     #[test]
-    fn settings_form_has_eight_real_sliders_visible_signs_and_cancelable_selection() {
+    fn settings_form_has_real_sliders_visible_signs_and_cancelable_selection() {
         use crate::plugins::ui_components::slider::UiSlider;
         use crate::plugins::ui_components::{UiComponentsPlugin, UiSelectMenu, UiSelectToggle};
         use bevy::ecs::system::RunSystemOnce;
@@ -2630,7 +2452,6 @@ mod tests {
                             &Handle::default(),
                             &Settings::default(),
                             &Keymap::default(),
-                            false,
                         );
                         spawn_settings_select_dialogs(
                             root,
@@ -2645,8 +2466,32 @@ mod tests {
                 .query::<&UiSlider>()
                 .iter(app.world())
                 .count(),
-            8
+            9
         );
+        let physics_slider = app
+            .world_mut()
+            .query::<(&SettingsRangeField, &UiSlider)>()
+            .iter(app.world())
+            .find(|(field, _)| **field == SettingsRangeField::PhysicsHz)
+            .unwrap()
+            .1;
+        assert_eq!(
+            (
+                physics_slider.min,
+                physics_slider.max,
+                physics_slider.step,
+                physics_slider.value
+            ),
+            (30.0, 200.0, 1.0, 120.0)
+        );
+        {
+            let mut settings = app.world_mut().resource_mut::<Settings>();
+            write_bool(&mut settings, SettingsBoolField::VariablePhysics, true);
+            write_range(&mut settings, SettingsRangeField::PhysicsHz, 173.0);
+            assert!(!settings.variable_physics);
+            write_bool(&mut settings, SettingsBoolField::VariablePhysics, true);
+            assert_eq!(settings.physics_hz, 173);
+        }
         let fov_slider = app
             .world_mut()
             .query::<(&SettingsRangeField, &UiSlider)>()
@@ -2673,6 +2518,14 @@ mod tests {
             .unwrap()
             .1;
         assert_eq!(fov_text.0, "85°");
+        let physics_text = app
+            .world_mut()
+            .query::<(&SettingsRangeValue, &Text)>()
+            .iter(app.world())
+            .find(|(field, _)| field.0 == SettingsRangeField::PhysicsHz)
+            .unwrap()
+            .1;
+        assert_eq!(physics_text.0, "173 Hz");
         for (up, down, children, node) in app
             .world_mut()
             .query::<(
@@ -2759,25 +2612,6 @@ mod tests {
             assert!(app.world().get::<HitEffectsOptions>(parent).is_none());
             assert!(!app.world().resource::<Settings>().hit_effects);
         }
-        for enabled in [false, true] {
-            write_bool(
-                &mut app.world_mut().resource_mut::<Settings>(),
-                SettingsBoolField::NewCharacterModels,
-                enabled,
-            );
-            app.update();
-            assert_eq!(
-                bool_row(&mut app, SettingsBoolField::NewCharacterModels).1,
-                bool_label(enabled)
-            );
-            assert_eq!(
-                read_bool(
-                    app.world().resource::<Settings>(),
-                    SettingsBoolField::NewCharacterModels
-                ),
-                enabled
-            );
-        }
         for (category, _) in SettingsCategory::ALL {
             if !category.available() {
                 continue;
@@ -2850,34 +2684,6 @@ mod tests {
             .world()
             .resource::<ButtonInput<KeyCode>>()
             .just_pressed(KeyCode::Escape));
-    }
-
-    #[test]
-    fn restart_only_reflection_control_is_absent_from_in_game_settings() {
-        use bevy::ecs::system::RunSystemOnce;
-        let mut app = App::new();
-        for in_game in [true, false] {
-            app.world_mut()
-                .run_system_once(move |mut commands: Commands| {
-                    commands.spawn(Node::default()).with_children(|root| {
-                        spawn_web_settings_form(
-                            root,
-                            &Handle::default(),
-                            &Settings::default(),
-                            &Keymap::default(),
-                            in_game,
-                        );
-                    });
-                })
-                .unwrap();
-            let count = app
-                .world_mut()
-                .query::<&SettingsBoolField>()
-                .iter(app.world())
-                .filter(|field| **field == SettingsBoolField::WaterLiveReflections)
-                .count();
-            assert_eq!(count, if in_game { 0 } else { 1 });
-        }
     }
 
     #[test]
@@ -3009,7 +2815,6 @@ mod tests {
                         &Handle::default(),
                         &settings,
                         &Keymap::default(),
-                        false,
                     );
                     spawn_settings_footer(root, &Handle::default(), |_| {});
                 });
@@ -3033,7 +2838,10 @@ mod tests {
 
     #[test]
     fn select_arrows_cycle_both_ways_and_wrap() {
-        let mut app = form_app(Settings::default());
+        let mut app = form_app(Settings {
+            target_fps: 0,
+            ..Settings::default()
+        });
         app.update();
         assert_eq!(app.world().resource::<Settings>().target_fps, 0);
         let fps = |cycle: &SettingsCycle, step| {
@@ -3106,77 +2914,6 @@ mod tests {
     }
 
     #[test]
-    fn graphics_pack_rows_save_choices_and_flag_a_restart() {
-        use crate::plugins::graphics_pack::CatalogEntry;
-        let catalog = crate::plugins::graphics_pack::GraphicsPackCatalog {
-            index_enabled: false,
-            master_active: false,
-            index_authoritative: false,
-            entries: vec![CatalogEntry {
-                id: "combat-fx-sample".into(),
-                name: "刀光与打击特效".into(),
-                description: "说明".into(),
-                stages: vec!["*".into()],
-                active: false,
-                error: None,
-            }],
-        };
-        let mut app = form_app(Settings::default());
-        app.insert_resource(catalog.clone())
-            .insert_resource(crate::app_state::StartupSettings(Settings::default()))
-            .insert_resource(crate::plugins::launcher_ui::UiFont(Handle::default()));
-        app.update();
-        app.update();
-        let values = |app: &mut App| -> Vec<(PackToggle, String)> {
-            app.world_mut()
-                .query::<(&SettingsPackValue, &Text)>()
-                .iter(app.world())
-                .map(|(value, text)| (value.0.clone(), text.0.clone()))
-                .collect()
-        };
-        assert_eq!(
-            values(&mut app),
-            vec![
-                (PackToggle::Master, "关闭".into()),
-                (PackToggle::Pack("combat-fx-sample".into()), "开启".into()),
-            ]
-        );
-        let notice = |app: &mut App| {
-            app.world_mut()
-                .query_filtered::<&Node, With<SettingsRestartNotice>>()
-                .single(app.world())
-                .unwrap()
-                .display
-        };
-        assert_eq!(notice(&mut app), Display::None);
-
-        press::<PackToggle>(&mut app, |t| *t == PackToggle::Master);
-        assert_eq!(
-            app.world().resource::<Settings>().graphics_packs,
-            Some(true)
-        );
-        assert_eq!(values(&mut app)[0].1, "开启");
-        assert_eq!(
-            notice(&mut app),
-            Display::Flex,
-            "master change needs a restart"
-        );
-
-        press::<PackToggle>(&mut app, |t| matches!(t, PackToggle::Pack(_)));
-        assert_eq!(
-            app.world()
-                .resource::<Settings>()
-                .graphics_pack_choices
-                .get("combat-fx-sample"),
-            Some(&false)
-        );
-        assert_eq!(values(&mut app)[1].1, "关闭");
-
-        press::<PackToggle>(&mut app, |t| *t == PackToggle::Master);
-        assert_eq!(notice(&mut app), Display::None);
-    }
-
-    #[test]
     fn every_settings_string_has_a_glyph_in_the_bundled_font() {
         use bevy::ecs::system::RunSystemOnce;
         let Some(path) = std::env::var_os("METEOR_TEST_UI_FONT") else {
@@ -3205,16 +2942,8 @@ mod tests {
                 .iter(app.world())
                 .map(|row| row.hint.clone()),
         );
-        texts.extend([
-            DEFAULT_HINT.into(),
-            "适用全部关卡".into(),
-            "适用：".into(),
-            "当前由 METEOR_GRAPHICS_CONFIG 指定的配置控制，此处修改不生效。".into(),
-            "启用图形增强包".into(),
-            "总开关。关闭后使用原版画面，下面的单项设置保留。".into(),
-            "未找到图形增强包。".into(),
-            "配置文件有误，已跳过。".into(),
-        ]);
+        texts.push(DEFAULT_HINT.into());
+        texts.push(crate::plugins::graphics_pack::FAILURE_NOTICE.into());
         let missing: std::collections::BTreeSet<char> = texts
             .iter()
             .flat_map(|text| text.chars())

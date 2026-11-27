@@ -62,10 +62,15 @@ bitflags::bitflags! {
         const SRC_ALPHA_ONE = 1 << 3;
         const SRC_ALPHA_BLEND = 1 << 4;
         const WATER_SKY = 1 << 5;
+        const WATER_DEPTH_HIERARCHY = 1 << 6;
+        const CHARACTER = 1 << 7;
+        const ALPHA_TEST = 1 << 8;
+        const MULTIPLY_SHADOW = 1 << 9;
+        const CAMERA_FADE = 1 << 10;
     }
 }
 
-#[derive(ShaderType, Clone)]
+#[derive(ShaderType, Clone, PartialEq)]
 pub struct GmdlMaterialParams {
     pub opacity: f32,
 
@@ -87,7 +92,7 @@ pub struct CameraOcclusionParams {
     pub self_eye: Vec4,
 }
 
-#[derive(Asset, TypePath, Clone)]
+#[derive(Asset, TypePath, Clone, PartialEq)]
 pub struct GmdlMaterial {
     pub params: GmdlMaterialParams,
     pub texture: Option<Handle<Image>>,
@@ -128,6 +133,7 @@ pub struct GmdlMaterial {
 
     pub water_live_reflection: bool,
     pub(crate) water_screen_refraction: bool,
+    pub(crate) water_depth_hierarchy: Option<Handle<Image>>,
     pub(crate) water_sky_reflection: bool,
     pub(crate) water_sky_style: Vec4,
     pub(crate) water_sky_ranges: Vec4,
@@ -142,8 +148,10 @@ pub struct GmdlMaterial {
 
     pub weapon_refraction_source: bool,
 
+    pub(crate) character_surface: bool,
     pub two_side: bool,
 
+    pub(super) stage_render_flags: u32,
     pub mode: GmdlMode,
 }
 
@@ -184,6 +192,7 @@ impl GmdlMaterial {
             water_dynamics_bounds: Vec4::ZERO,
             water_live_reflection: false,
             water_screen_refraction: false,
+            water_depth_hierarchy: None,
             water_sky_reflection: false,
             water_sky_style: Vec4::ZERO,
             water_sky_ranges: Vec4::ZERO,
@@ -192,7 +201,9 @@ impl GmdlMaterial {
             first_person_clip: Vec4::ZERO,
             camera_occlusion_enabled: false,
             weapon_refraction_source: false,
+            character_surface: false,
             two_side,
+            stage_render_flags: 0,
             mode,
         }
     }
@@ -210,10 +221,36 @@ impl GmdlMaterial {
         }
     }
 
+    pub(crate) fn new_character(
+        params: GmdlMaterialParams,
+        texture: Option<Handle<Image>>,
+        two_side: bool,
+        mode: GmdlMode,
+    ) -> Self {
+        Self {
+            character_surface: true,
+            ..Self::new(params, texture, two_side, mode)
+        }
+    }
     fn key(&self) -> GmdlMaterialKey {
         let mut key = GmdlMaterialKey::empty();
+        if self.character_surface {
+            key |= GmdlMaterialKey::CHARACTER;
+        }
+        if self.params.alpha_cutoff > 0.0 {
+            key |= GmdlMaterialKey::ALPHA_TEST;
+        }
+        if self.mode == GmdlMode::MultiplyShadow {
+            key |= GmdlMaterialKey::MULTIPLY_SHADOW;
+        }
+        if self.camera_occlusion_enabled && !self.character_surface && self.water.x != 1.0 {
+            key |= GmdlMaterialKey::CAMERA_FADE;
+        }
         if self.water_sky_reflection && !cfg!(any(target_arch = "wasm32", target_os = "android")) {
             key |= GmdlMaterialKey::WATER_SKY;
+        }
+        if self.water_depth_hierarchy.is_some() {
+            key |= GmdlMaterialKey::WATER_DEPTH_HIERARCHY;
         }
         if self.two_side {
             key |= GmdlMaterialKey::TWO_SIDE;
@@ -264,7 +301,7 @@ const GMDL_SHADER_HANDLE: Handle<Shader> =
 const GMDL_PREPASS_SHADER_HANDLE: Handle<Shader> =
     bevy::asset::uuid_handle!("c12c7fa4-5bdf-4c0b-9c44-41f1eac54d27");
 
-#[derive(ShaderType, Clone, Copy, Default)]
+#[derive(ShaderType, Clone, Copy, Default, PartialEq)]
 pub(crate) struct WaterOptics {
     pub absorption_ior: Vec4,
     pub scattering_g: Vec4,
@@ -324,6 +361,27 @@ impl Material for GmdlMaterial {
             return Ok(());
         }
         if let Some(fragment) = &mut descriptor.fragment {
+            if key.bind_group_data.contains(GmdlMaterialKey::CHARACTER) {
+                fragment.shader_defs.push("GMDL_CHARACTER".into());
+            }
+            if key.bind_group_data.contains(GmdlMaterialKey::ALPHA_TEST) {
+                fragment.shader_defs.push("GMDL_ALPHA_TEST".into());
+            }
+            if key
+                .bind_group_data
+                .contains(GmdlMaterialKey::MULTIPLY_SHADOW)
+            {
+                fragment.shader_defs.push("GMDL_MULTIPLY_SHADOW".into());
+            }
+            if key.bind_group_data.contains(GmdlMaterialKey::CAMERA_FADE) {
+                fragment.shader_defs.push("GMDL_CAMERA_FADE".into());
+            }
+            if key
+                .bind_group_data
+                .contains(GmdlMaterialKey::WATER_DEPTH_HIERARCHY)
+            {
+                fragment.shader_defs.push("WATER_DEPTH_HIERARCHY".into());
+            }
             if fragment.targets.iter().flatten().any(|target| {
                 target.format == bevy::render::render_resource::TextureFormat::Rgba16Float
             }) {
@@ -363,11 +421,15 @@ pub struct GmdlMaterialPlugin;
 
 impl Plugin for GmdlMaterialPlugin {
     fn build(&self, app: &mut App) {
+        app.add_systems(PreStartup, super::pak_textures::update_texture_device_limit)
+            .add_systems(First, super::pak_textures::update_texture_device_limit);
         super::graphics_pack::sky::register_panorama_shader(app);
         water::install(app);
         dynamic_uniforms::install(app);
         water::interaction::install(app);
         water::screen_reflection::install(app);
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        water::depth_hierarchy::install(app);
         app.add_systems(Update, scene_normals::sync_normal_setting);
         app.add_plugins(MaterialPlugin::<GmdlMaterial>::default())
             .add_systems(
@@ -467,24 +529,40 @@ pub(crate) fn install_camera_uniforms_for_test(app: &mut App) {
 }
 
 #[cfg(test)]
-pub(super) fn standalone_shader_source(colors: bool) -> String {
-    standalone_shader_variant(colors, true)
+pub(super) fn standalone_shader_source(colors: bool, water_depth_hierarchy: bool) -> String {
+    standalone_shader_variant(colors, true, water_depth_hierarchy)
 }
 
 #[cfg(test)]
-fn standalone_shader_variant(colors: bool, tangents: bool) -> String {
+fn standalone_shader_variant(colors: bool, tangents: bool, water_depth_hierarchy: bool) -> String {
     let mut active = vec![true];
-    let mut source = String::from("struct VertexOutput { @builtin(position) position: vec4<f32>, @location(0) world_position: vec4<f32>, @location(1) world_normal: vec3<f32>, @location(2) uv: vec2<f32>, @location(4) world_tangent: vec4<f32>, @location(5) color: vec4<f32>, };\nstruct TestView { world_position: vec3<f32>, }; @group(0) @binding(0) var<uniform> view: TestView;\n");
+    let defined = |flag| match flag {
+        "VERTEX_COLORS" => colors,
+        "VERTEX_TANGENTS" => tangents,
+        "WATER_DEPTH_HIERARCHY" => water_depth_hierarchy,
+        "NO_ARRAY_TEXTURES_SUPPORT" => true,
+        _ => false,
+    };
+    let mut source = String::from(
+        "struct VertexOutput {
+            @builtin(position) position: vec4<f32>,
+            @location(0) world_position: vec4<f32>,
+            @location(1) world_normal: vec3<f32>,
+            @location(2) uv: vec2<f32>,
+            @location(4) world_tangent: vec4<f32>,
+            @location(5) color: vec4<f32>,
+        };
+        struct TestView { world_position: vec3<f32>, view_from_world: mat4x4<f32>, };
+        @group(0) @binding(0) var<uniform> view: TestView;\n",
+    );
     for line in include_str!("gmdl_material.wgsl").lines() {
         if line.starts_with("#import") {
             continue;
         }
         if let Some(flag) = line.strip_prefix("#ifdef ") {
-            active.push(
-                *active.last().unwrap()
-                    && ((flag == "VERTEX_COLORS" && colors)
-                        || (flag == "VERTEX_TANGENTS" && tangents)),
-            );
+            active.push(*active.last().unwrap() && defined(flag));
+        } else if let Some(flag) = line.strip_prefix("#ifndef ") {
+            active.push(*active.last().unwrap() && !defined(flag));
         } else if line.starts_with("#else") {
             let last = active.pop().unwrap();
             active.push(*active.last().unwrap() && !last);
@@ -580,7 +658,7 @@ mod tests {
     #[test]
     fn camera_fade_shader_validates_with_and_without_vertex_colors() {
         for (colors, tangents) in [(false, false), (true, false), (false, true), (true, true)] {
-            let source = standalone_shader_variant(colors, tangents);
+            let source = standalone_shader_variant(colors, tangents, false);
             let module = naga::front::wgsl::parse_str(&source).expect("GMDL WGSL parses");
             naga::valid::Validator::new(
                 naga::valid::ValidationFlags::all(),
